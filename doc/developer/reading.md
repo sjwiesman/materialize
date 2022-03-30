@@ -15,3 +15,7 @@ Required reading for employed engineers.
 
 * How to do distributed locking
   [[web](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html)]
+
+* Designing Data-Intensive Applications [marketing website](https://dataintensive.net)
+
+  There is a copy of this book in the office that you can borrow.
