@@ -6,7 +6,7 @@
 
 click==8.1.2
 colored==1.4.3
-humanize==4.0.0
+humanize==4.2.3
 junit-xml==1.9
 pg8000==1.24.1
 prettytable==3.2.0
