@@ -17,6 +17,7 @@ use mz_expr::func::cast_timestamp_tz_to_string;
 use mz_ore::now::{to_datetime, NowFn};
 use mz_repr::{Datum, RelationDesc, Row, ScalarType};
 
+use crate::source::generator::constants::{AUCTIONS, CELEBRETIES};
 use crate::types::sources::encoding::DataEncodingInner;
 use crate::types::sources::{GeneratedBatch, Generator};
 
@@ -55,6 +56,18 @@ impl Generator for Auction {
                     .with_column("amount", ScalarType::Int32.nullable(false))
                     .with_column("bid_time", ScalarType::TimestampTz.nullable(false)),
             ),
+            (
+                "customers",
+                RelationDesc::empty()
+                    .with_column("id", ScalarType::Int64.nullable(false))
+                    .with_column("name", ScalarType::String.nullable(false)),
+            ),
+            (
+                "customer_bids",
+                RelationDesc::empty()
+                    .with_column("customer_id", ScalarType::Int64.nullable(false))
+                    .with_column("bid_id", ScalarType::Int64.nullable(false)),
+            ),
         ]
     }
 
@@ -62,7 +75,22 @@ impl Generator for Auction {
         let mut pending = VecDeque::new();
         let mut rng = SmallRng::seed_from_u64(seed.unwrap_or_default());
         let mut counter = 0;
-        Box::new(iter::from_fn(move || {
+
+        let customer_batch = GeneratedBatch::new();
+        for (idx, name) in CELEBRETIES.iter().enumerate() {
+            let mut customer = Row::with_capacity(2);
+            let mut packer = customer.packer();
+            packer.push(Datum::String("customers"));
+            packer.push_list(&[
+                Datum::Int64(idx as i64), // customer id
+                Datum::String(name),      // name
+            ]);
+
+            let mut batch = GeneratedBatch::new();
+            batch.push(customer);
+        }
+
+        let auctions = iter::from_fn(move || {
             {
                 if pending.is_empty() {
                     counter += 1;
@@ -83,33 +111,36 @@ impl Generator for Auction {
                     pending.push_back(batch);
                     const MAX_BIDS: i64 = 10;
                     for i in 0..rng.gen_range(2..MAX_BIDS) {
+                        let bid_id = &(counter * MAX_BIDS + i).to_string();
                         let mut bid = Row::with_capacity(2);
                         let mut packer = bid.packer();
                         packer.push(Datum::String("bids"));
                         packer.push_list(&[
-                            Datum::String(&(counter * MAX_BIDS + i).to_string()), // bid id
-                            Datum::String(&counter.to_string()),                  // auction id
-                            Datum::String(&rng.gen_range(1..100).to_string()),    // amount
+                            Datum::String(bid_id),                             // bid id
+                            Datum::String(&counter.to_string()),               // auction id
+                            Datum::String(&rng.gen_range(1..100).to_string()), // amount
                             Datum::String(&cast_timestamp_tz_to_string(
                                 now + chrono::Duration::seconds(i),
                             )), // bid time
                         ]);
 
+                        let mut customer_bid = Row::with_capacity(2);
+                        let mut packer = customer_bid.packer();
+                        packer.push(Datum::String("customer_bids"));
+                        packer.push_list(&[
+                            Datum::String(&rng.gen_range(0..CELEBRETIES.len()).to_string()), // customer id
+                            Datum::String(bid_id),
+                        ]);
                         let mut batch = GeneratedBatch::new();
                         batch.push(bid);
+                        batch.push(customer_bid);
                         pending.push_back(batch);
                     }
                 }
                 pending.pop_front()
             }
-        }))
+        });
+
+        Box::new(iter::once(customer_batch).chain(auctions))
     }
 }
-
-const AUCTIONS: &[&str] = &[
-    "Signed Memorabilia",
-    "City Bar Crawl",
-    "Best Pizza in Town",
-    "Gift Basket",
-    "Custom Art",
-];

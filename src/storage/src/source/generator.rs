@@ -22,6 +22,7 @@ use crate::types::sources::{encoding::SourceDataEncoding, MzOffset, SourceConnec
 use crate::types::sources::{GeneratedBatch, Generator, LoadGenerator};
 
 mod auction;
+mod constants;
 mod counter;
 
 pub use auction::Auction;
