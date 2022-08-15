@@ -13,7 +13,7 @@ use mz_ore::now::NowFn;
 use mz_repr::{Datum, RelationDesc, Row, ScalarType};
 
 use crate::types::sources::encoding::DataEncodingInner;
-use crate::types::sources::Generator;
+use crate::types::sources::{GeneratedBatch, Generator};
 
 pub struct Counter {}
 
@@ -28,11 +28,14 @@ impl Generator for Counter {
         Vec::new()
     }
 
-    fn by_seed(&self, _now: NowFn, _seed: Option<u64>) -> Box<dyn Iterator<Item = Row>> {
+    fn by_seed(&self, _now: NowFn, _seed: Option<u64>) -> Box<dyn Iterator<Item = GeneratedBatch>> {
         let mut counter = 0;
         Box::new(iter::repeat_with(move || {
             counter += 1;
-            Row::pack_slice(&[Datum::Int64(counter)])
+            let row = Row::pack_slice(&[Datum::Int64(counter)]);
+            let mut batch = GeneratedBatch::new();
+            batch.push(row);
+            batch
         }))
     }
 }

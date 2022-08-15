@@ -19,7 +19,7 @@ use super::{SourceMessage, SourceMessageType};
 use crate::source::{NextMessage, SourceReader, SourceReaderError};
 use crate::types::connections::ConnectionContext;
 use crate::types::sources::{encoding::SourceDataEncoding, MzOffset, SourceConnection};
-use crate::types::sources::{Generator, LoadGenerator};
+use crate::types::sources::{GeneratedBatch, Generator, LoadGenerator};
 
 mod auction;
 mod counter;
@@ -35,7 +35,8 @@ pub fn as_generator(g: &LoadGenerator) -> Box<dyn Generator> {
 }
 
 pub struct LoadGeneratorSourceReader {
-    rows: Box<dyn Iterator<Item = Row>>,
+    batches: Box<dyn Iterator<Item = GeneratedBatch>>,
+    rows: BatchIter,
     last: Instant,
     tick: Duration,
     offset: MzOffset,
@@ -77,16 +78,17 @@ impl SourceReader for LoadGeneratorSourceReader {
             })
             .unwrap_or_default();
 
-        let mut rows = as_generator(&connection.load_generator)
+        let mut batches = as_generator(&connection.load_generator)
             .by_seed(mz_ore::now::SYSTEM_TIME.clone(), None);
 
         // Skip forward to the requested offset.
         for _ in 0..offset.offset {
-            rows.next();
+            batches.next();
         }
 
         Ok(Self {
-            rows,
+            batches,
+            rows: BatchIter::empty(),
             last: Instant::now(),
             tick: Duration::from_micros(connection.tick_micros.unwrap_or(1_000_000)),
             offset,
@@ -96,24 +98,78 @@ impl SourceReader for LoadGeneratorSourceReader {
     fn get_next_message(
         &mut self,
     ) -> Result<NextMessage<Self::Key, Self::Value, Self::Diff>, SourceReaderError> {
+        match self.rows.next() {
+            Some(value) => return Ok(NextMessage::Ready(value)),
+            None => self.rows = BatchIter::empty(),
+        }
+
         if self.last.elapsed() < self.tick {
             return Ok(NextMessage::Pending);
         }
         self.last += self.tick;
         self.offset += 1;
-        match self.rows.next() {
-            Some(value) => Ok(NextMessage::Ready(SourceMessageType::Finalized(
-                SourceMessage {
+
+        match self.batches.next() {
+            Some(batch) => {
+                let mut rows = BatchIter::new(batch, self.offset);
+                match rows.next() {
+                    Some(row) => {
+                        self.rows = rows;
+                        Ok(NextMessage::Ready(row))
+                    }
+                    None => Ok(NextMessage::Finished),
+                }
+            }
+            None => Ok(NextMessage::Finished),
+        }
+    }
+}
+
+struct BatchIter {
+    offset: MzOffset,
+    inner: GeneratedBatch,
+}
+
+impl BatchIter {
+    pub fn empty() -> Self {
+        BatchIter {
+            offset: 0.into(),
+            inner: GeneratedBatch::new(),
+        }
+    }
+
+    pub fn new(inner: GeneratedBatch, offset: MzOffset) -> Self {
+        BatchIter { offset, inner }
+    }
+}
+
+impl Iterator for BatchIter {
+    type Item = SourceMessageType<(), Row, i64>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let offset = self.offset;
+        if let Some(row) = self.inner.elements.pop_front() {
+            Some(SourceMessageType::InProgress(SourceMessage {
+                partition: PartitionId::None,
+                offset,
+                upstream_time_millis: None,
+                key: (),
+                value: row,
+                headers: None,
+                specific_diff: 1,
+            }))
+        } else {
+            self.inner.last.take().map(|row| {
+                SourceMessageType::Finalized(SourceMessage {
                     partition: PartitionId::None,
-                    offset: self.offset,
+                    offset,
                     upstream_time_millis: None,
                     key: (),
-                    value,
+                    value: row,
                     headers: None,
                     specific_diff: 1,
-                },
-            ))),
-            None => Ok(NextMessage::Finished),
+                })
+            })
         }
     }
 }

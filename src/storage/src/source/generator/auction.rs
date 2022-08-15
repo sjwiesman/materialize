@@ -18,7 +18,7 @@ use mz_ore::now::{to_datetime, NowFn};
 use mz_repr::{Datum, RelationDesc, Row, ScalarType};
 
 use crate::types::sources::encoding::DataEncodingInner;
-use crate::types::sources::Generator;
+use crate::types::sources::{GeneratedBatch, Generator};
 
 pub struct Auction {}
 
@@ -58,7 +58,7 @@ impl Generator for Auction {
         ]
     }
 
-    fn by_seed(&self, now: NowFn, seed: Option<u64>) -> Box<dyn Iterator<Item = Row>> {
+    fn by_seed(&self, now: NowFn, seed: Option<u64>) -> Box<dyn Iterator<Item = GeneratedBatch>> {
         let mut pending = VecDeque::new();
         let mut rng = SmallRng::seed_from_u64(seed.unwrap_or_default());
         let mut counter = 0;
@@ -77,7 +77,10 @@ impl Generator for Auction {
                             now + chrono::Duration::seconds(10),
                         )), // end time
                     ]);
-                    pending.push_back(auction);
+
+                    let mut batch = GeneratedBatch::new();
+                    batch.push(auction);
+                    pending.push_back(batch);
                     const MAX_BIDS: i64 = 10;
                     for i in 0..rng.gen_range(2..MAX_BIDS) {
                         let mut bid = Row::with_capacity(2);
@@ -91,7 +94,10 @@ impl Generator for Auction {
                                 now + chrono::Duration::seconds(i),
                             )), // bid time
                         ]);
-                        pending.push_back(bid);
+
+                        let mut batch = GeneratedBatch::new();
+                        batch.push(bid);
+                        pending.push_back(batch);
                     }
                 }
                 pending.pop_front()

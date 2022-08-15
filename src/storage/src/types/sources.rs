@@ -9,7 +9,7 @@
 
 //! Types and traits related to the introduction of changing collections into `dataflow`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::TryFromIntError;
 use std::ops::{Add, AddAssign, Deref, DerefMut};
 use std::str::FromStr;
@@ -1536,6 +1536,27 @@ pub enum LoadGenerator {
     Counter,
 }
 
+pub struct GeneratedBatch {
+    pub(crate) elements: VecDeque<Row>,
+    pub(crate) last: Option<Row>,
+}
+
+impl GeneratedBatch {
+    pub fn new() -> GeneratedBatch {
+        Self {
+            elements: VecDeque::new(),
+            last: None,
+        }
+    }
+
+    pub fn push(&mut self, row: Row) {
+        if let Some(last) = self.last.take() {
+            self.elements.push_back(last);
+        }
+        self.last = Some(row);
+    }
+}
+
 pub trait Generator {
     fn data_encoding_inner(&self) -> DataEncodingInner;
     fn data_encoding(&self) -> SourceDataEncoding {
@@ -1544,7 +1565,10 @@ pub trait Generator {
     /// Returns the list of table names and their column types for use with `CREATE
     /// VIEWS`. Returns empty if `CREATE VIEWS` should error.
     fn views(&self) -> Vec<(&str, RelationDesc)>;
-    fn by_seed(&self, now: NowFn, seed: Option<u64>) -> Box<dyn Iterator<Item = Row>>;
+
+    /// Returns a batch of messages to be generated. All rows within a batch
+    /// are relocked to the same logical offset.
+    fn by_seed(&self, now: NowFn, seed: Option<u64>) -> Box<dyn Iterator<Item = GeneratedBatch>>;
 }
 
 impl RustType<ProtoLoadGeneratorSourceConnection> for LoadGeneratorSourceConnection {
