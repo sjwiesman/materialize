@@ -53,8 +53,8 @@ struct Cli {
     #[clap(subcommand)]
     command: Commands,
     /// Identify using a particular profile
-    #[clap(short, long, env = "MZ_PROFILE", default_value = "default")]
-    profile: String,
+    #[clap(short, long, env = "MZ_PROFILE")]
+    profile: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -74,11 +74,25 @@ enum Commands {
         #[clap(subcommand)]
         command: RegionCommand,
     },
+    /// Set a variable
+    Set {
+        #[clap(subcommand)]
+        value: Settable,
+    },
     /// Connect to a region using a SQL shell
     Shell {
         #[clap(possible_values = CloudProviderRegion::variants())]
-        cloud_provider_region: String,
+        cloud_provider_region: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum Settable {
+    /// Set the default profile for this configuration
+    Profile { profile: String },
+
+    /// Set the default region to connect to for the current profile
+    Region { region: String },
 }
 
 #[derive(Debug, Args)]
@@ -172,11 +186,11 @@ const WEB_DOCS_URL: &str = "https://www.materialize.com/docs";
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
-    let profile_name = args.profile;
+    let profile = args.profile;
     let mut config = Configuration::load()?;
     match args.command {
         Commands::AppPassword(password_cmd) => {
-            let profile = config.get_profile(Some(profile_name))?;
+            let profile = config.get_profile(profile)?;
 
             let client = Client::new();
             let valid_profile = profile
@@ -220,6 +234,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Login { interactive } => {
+            let profile_name = config.current_profile(profile);
             if interactive {
                 login_with_console(&profile_name, &mut config).await?
             } else {
@@ -236,7 +251,7 @@ async fn main() -> Result<()> {
                 } => {
                     let cloud_provider_region =
                         CloudProviderRegion::from_str(&cloud_provider_region)?;
-                    let profile = config.get_profile(Some(profile_name))?;
+                    let profile = config.get_profile(profile)?;
 
                     let valid_profile = profile
                         .validate(&client)
@@ -271,7 +286,7 @@ async fn main() -> Result<()> {
                 }
 
                 RegionCommand::List => {
-                    let profile = config.get_profile(Some(profile_name))?;
+                    let profile = config.get_profile(profile)?;
 
                     let valid_profile = profile
                         .validate(&client)
@@ -298,7 +313,7 @@ async fn main() -> Result<()> {
                     let cloud_provider_region =
                         CloudProviderRegion::from_str(&cloud_provider_region)?;
 
-                    let profile = config.get_profile(Some(profile_name))?;
+                    let profile = config.get_profile(profile)?;
 
                     let valid_profile = profile
                         .validate(&client)
@@ -319,11 +334,26 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::Set { value } => match value {
+            Settable::Profile { profile } => config.update_default_profile(profile),
+            Settable::Region { region } => {
+                let region = CloudProviderRegion::from_str(&region)?;
+                let mut profile = config.get_profile(profile)?;
+                profile.set_default_region(region)
+            }
+        },
+
         Commands::Shell {
             cloud_provider_region,
         } => {
-            let cloud_provider_region = CloudProviderRegion::from_str(&cloud_provider_region)?;
-            let profile = config.get_profile(Some(profile_name))?;
+            let profile = config.get_profile(profile)?;
+
+            let cloud_provider_region = match cloud_provider_region {
+                Some(region) => CloudProviderRegion::from_str(&region)?,
+                None => profile
+                    .get_default_region()
+                    .context("no default region set for profile")?,
+            };
 
             let client = Client::new();
             let valid_profile = profile
@@ -333,7 +363,7 @@ async fn main() -> Result<()> {
 
             shell(client, valid_profile, cloud_provider_region)
                 .await
-                .with_context(|| "Running shell")?;
+                .with_context(|| "running shell")?;
         }
     }
 

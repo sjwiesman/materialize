@@ -14,14 +14,13 @@ use std::{
     path::PathBuf,
 };
 
+use crate::region::CloudProviderRegion;
 use anyhow::{bail, Context, Ok, Result};
 use dirs::home_dir;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, USER_AGENT};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-use crate::region::CloudProviderRegion;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Profile0 {
