@@ -13,8 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
+
 use anyhow::{Context, Result};
+use aws_sdk_secretsmanager::model::Tag;
 use clap::Parser;
+use mz_ore::option::OptionExt;
 use serde::{de::Visitor, Deserialize, Serialize};
 
 use crate::configuration::FronteggAPIToken;
@@ -23,6 +30,8 @@ const INLINE_PREFIX: &str = "mzp_";
 
 #[cfg(target_os = "macos")]
 const APPLE_KEYCHAIN: &str = "apple_keychain";
+
+const SECRET_MANAGER_PREFIX: &str = "arn:aws:secretsmanager:";
 
 /// A vault stores sensitive information and provides
 /// back a token than can be used for latter retrieval.
@@ -36,6 +45,12 @@ pub struct Vault {
     #[cfg(target_os = "macos")]
     #[clap(long, short, group = "vault")]
     apple: bool,
+
+    /// Store the app password in an AWS
+    /// Secret Manager using the default
+    /// provider chain.
+    #[clap(long, short, group = "vault")]
+    secret_manager: bool,
 }
 
 impl Vault {
@@ -46,6 +61,50 @@ impl Vault {
         api_token: FronteggAPIToken,
     ) -> Result<Token> {
         let password = api_token.to_string();
+
+        if self.secret_manager {
+            let shared_config = aws_config::load_from_env().await;
+            let client = aws_sdk_secretsmanager::Client::new(&shared_config);
+
+            let name = {
+                let mut hasher = DefaultHasher::new();
+                email.hash(&mut hasher);
+                format!("mz_{profile}_{}", hasher.finish())
+            };
+
+            let result = client
+                .create_secret()
+                .name(&name)
+                .secret_string(&password)
+                .description("App password for accessing Materialize")
+                .tags(Tag::builder().key("user").value(email).build())
+                .send()
+                .await;
+
+            let arn = match result {
+                Ok(output) => output.arn().owned(),
+                Err(e) => {
+                    let service_error = e.into_service_error();
+                    if service_error.is_resource_exists_exception() {
+                        client
+                            .update_secret()
+                            .secret_id(&name)
+                            .secret_string(&password)
+                            .send()
+                            .await
+                            .context("failed to store password in secret manager")?
+                            .arn()
+                            .owned()
+                    } else {
+                        Err(service_error).context("failed to store password in secret manager")?
+                    }
+                }
+            };
+
+            let arn = arn.context("failed to extract arn from secret manager")?;
+
+            return Ok(Token::SecretManager(arn));
+        }
 
         #[cfg(target_os = "macos")]
         if self.apple {
@@ -66,6 +125,7 @@ pub enum Token {
     #[cfg(target_os = "macos")]
     AppleKeyChain,
     Inline(String),
+    SecretManager(String),
 }
 
 impl Token {
@@ -85,6 +145,24 @@ impl Token {
                 Ok(app_password)
             }
             Token::Inline(app_password) => Ok(app_password.to_string()),
+            Token::SecretManager(arn) => {
+                let shared_config = aws_config::load_from_env().await;
+                let client = aws_sdk_secretsmanager::Client::new(&shared_config);
+
+                let result = client
+                    .get_secret_value()
+                    .secret_id(arn)
+                    .send()
+                    .await
+                    .context("failed to retrieve password from secret manager")?;
+
+                let app_password = result
+                    .secret_string()
+                    .owned()
+                    .context("failed to retrieve password from secret manager")?;
+
+                Ok(app_password)
+            }
         }
     }
 }
@@ -101,6 +179,7 @@ impl std::fmt::Debug for Token {
             #[cfg(target_os = "macos")]
             Self::AppleKeyChain => write!(f, "AppleKeyChain"),
             Self::Inline(_) => write!(f, "Inline(_)"),
+            Self::SecretManager(_) => write!(f, "SecretManager(_)"),
         }
     }
 }
@@ -114,6 +193,7 @@ impl Serialize for Token {
             #[cfg(target_os = "macos")]
             Token::AppleKeyChain => serializer.serialize_str(APPLE_KEYCHAIN),
             Token::Inline(app_password) => serializer.serialize_str(app_password),
+            Token::SecretManager(arn) => serializer.serialize_str(arn),
         }
     }
 }
@@ -130,6 +210,10 @@ impl<'de> Visitor<'de> for TokenVisitor {
         #[cfg(target_os = "macos")]
         if v == APPLE_KEYCHAIN {
             return Ok(Token::AppleKeyChain);
+        }
+
+        if v.starts_with(SECRET_MANAGER_PREFIX) {
+            return Ok(Token::SecretManager(v.to_string()));
         }
 
         if v.starts_with(INLINE_PREFIX) {
