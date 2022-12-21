@@ -21,6 +21,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::region::CloudProviderRegion;
+use crate::vault::Token;
 
 pub const WEB_DOCS_URL: &str = "https://www.materialize.com/docs";
 
@@ -28,7 +29,7 @@ pub static DEFAULT_ENDPOINT: Lazy<Endpoint> =
     Lazy::new(|| "https://cloud.materialize.com".parse().unwrap());
 
 /// A Materialize Cloud API endpoint.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct Endpoint {
     url: Url,
@@ -115,7 +116,7 @@ impl fmt::Display for Endpoint {
 struct Profile0 {
     email: String,
     #[serde(rename(serialize = "app-password", deserialize = "app-password"))]
-    app_password: String,
+    app_password: Token,
     region: Option<CloudProviderRegion>,
     #[serde(default, skip_serializing_if = "Endpoint::is_default")]
     endpoint: Endpoint,
@@ -142,7 +143,7 @@ pub(crate) struct FronteggAuth {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FronteggAPIToken {
+pub struct FronteggAPIToken {
     pub(crate) client_id: String,
     pub(crate) secret: String,
 }
@@ -150,6 +151,7 @@ pub(crate) struct FronteggAPIToken {
 pub(crate) struct ValidProfile<'a> {
     pub(crate) profile: &'a Profile<'a>,
     pub(crate) frontegg_auth: FronteggAuth,
+    pub(crate) app_password: String,
 }
 
 #[allow(dead_code)]
@@ -234,14 +236,14 @@ impl Configuration {
         endpoint: Endpoint,
         name: String,
         email: String,
-        api_token: FronteggAPIToken,
+        token: Token,
     ) {
         self.modified = true;
         self.profiles.insert(
             name,
             Profile0 {
                 email,
-                app_password: api_token.to_string(),
+                app_password: token,
                 region: None,
                 endpoint,
             },
@@ -291,10 +293,6 @@ impl Profile<'_> {
         &self.profile.email
     }
 
-    pub(crate) fn get_app_password(&self) -> &str {
-        &self.profile.app_password
-    }
-
     pub(crate) fn get_default_region(&self) -> Option<CloudProviderRegion> {
         self.profile.region
     }
@@ -306,9 +304,16 @@ impl Profile<'_> {
 
     pub(crate) async fn validate(
         &self,
+        name: &str,
         client: &Client,
     ) -> Result<ValidProfile<'_>, anyhow::Error> {
-        let api_token: FronteggAPIToken = self.profile.app_password.as_str().try_into()?;
+        let api_token: FronteggAPIToken = self
+            .profile
+            .app_password
+            .retrieve(name, &self.profile.email)
+            .await?
+            .as_str()
+            .try_into()?;
 
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static("reqwest"));
@@ -334,6 +339,7 @@ impl Profile<'_> {
         Ok(ValidProfile {
             profile: self,
             frontegg_auth: auth,
+            app_password: api_token.to_string(),
         })
     }
 }

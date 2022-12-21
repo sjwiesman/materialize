@@ -20,6 +20,7 @@ use clap::{Args, Parser, Subcommand};
 use reqwest::Client;
 use secrets::SecretCommand;
 use serde::Deserialize;
+use vault::Vault;
 
 use crate::configuration::{Configuration, Endpoint, WEB_DOCS_URL};
 use crate::login::{generate_api_token, login_with_browser, login_with_console};
@@ -39,6 +40,7 @@ mod region;
 mod secrets;
 mod shell;
 mod utils;
+mod vault;
 
 /// Command-line interface for Materialize.
 #[derive(Debug, Parser)]
@@ -71,6 +73,9 @@ enum Commands {
         /// Override the default API endpoint.
         #[clap(long, hide = true, default_value_t)]
         endpoint: Endpoint,
+
+        #[clap(flatten)]
+        vault: Vault,
     },
     /// Show commands to interact with regions
     Region {
@@ -183,13 +188,15 @@ struct CloudProviderAndRegion {
 async fn main() -> Result<()> {
     let args = Cli::parse();
     let mut config = Configuration::load(args.profile.as_deref())?;
+    let profile_name = config.current_profile();
 
     match args.command {
         Commands::AppPassword(password_cmd) => {
             let profile = config.get_profile()?;
 
             let client = Client::new();
-            let valid_profile = profile.validate(&client).await?;
+
+            let valid_profile = profile.validate(&profile_name, &client).await?;
 
             match password_cmd.command {
                 AppPasswordSubommand::Create { name } => {
@@ -235,15 +242,19 @@ async fn main() -> Result<()> {
             interactive,
             force,
             endpoint,
+            vault,
         } => {
             let profile = args.profile.unwrap_or_else(|| "default".into());
             config.update_current_profile(profile.clone());
             if config.get_profile().is_err() || force {
-                if interactive {
-                    login_with_console(endpoint, &profile, &mut config).await?
+                let (email, api_token) = if interactive {
+                    login_with_console(&endpoint).await?
                 } else {
-                    login_with_browser(endpoint, &profile, &mut config).await?
-                }
+                    login_with_browser(&endpoint, &profile).await?
+                };
+
+                let token = vault.store(&profile, &email, api_token).await?;
+                config.create_or_update_profile(endpoint, profile, email, token)
             }
         }
 
@@ -260,7 +271,7 @@ async fn main() -> Result<()> {
                         CloudProviderRegion::from_str(&cloud_provider_region)?;
                     let mut profile = config.get_profile()?;
 
-                    let valid_profile = profile.validate(&client).await?;
+                    let valid_profile = profile.validate(&profile_name, &client).await?;
 
                     let loading_spinner = run_loading_spinner("Enabling region...".to_string());
                     let cloud_provider = get_provider_by_region_name(
@@ -302,7 +313,7 @@ async fn main() -> Result<()> {
                         CloudProviderRegion::from_str(&cloud_provider_region)?;
                     let profile = config.get_profile()?;
 
-                    let valid_profile = profile.validate(&client).await?;
+                    let valid_profile = profile.validate(&profile_name, &client).await?;
 
                     let loading_spinner = run_loading_spinner("Disabling region...".to_string());
                     let cloud_provider = get_provider_by_region_name(
@@ -324,7 +335,7 @@ async fn main() -> Result<()> {
                 RegionCommand::List => {
                     let profile = config.get_profile()?;
 
-                    let valid_profile = profile.validate(&client).await?;
+                    let valid_profile = profile.validate(&profile_name, &client).await?;
 
                     let cloud_providers = list_cloud_providers(&client, &valid_profile)
                         .await
@@ -348,7 +359,7 @@ async fn main() -> Result<()> {
 
                     let profile = config.get_profile()?;
 
-                    let valid_profile = profile.validate(&client).await?;
+                    let valid_profile = profile.validate(&profile_name, &client).await?;
 
                     let environment = get_provider_region_environment(
                         &client,
@@ -380,7 +391,7 @@ async fn main() -> Result<()> {
             };
 
             let client = Client::new();
-            let valid_profile = profile.validate(&client).await?;
+            let valid_profile = profile.validate(&profile_name, &client).await?;
 
             command
                 .execute(valid_profile, cloud_provider_region, client)
@@ -402,7 +413,7 @@ async fn main() -> Result<()> {
             };
 
             let client = Client::new();
-            let valid_profile = profile.validate(&client).await?;
+            let valid_profile = profile.validate(&profile_name, &client).await?;
 
             shell(client, valid_profile, cloud_provider_region)
                 .await
