@@ -94,8 +94,8 @@ use crate::login::{generate_api_token, login_with_browser, login_with_console};
 use crate::password::list_passwords;
 use crate::region::{
     disable_region_environment, enable_region_environment, get_provider_by_region_name,
-    get_provider_region_environment, get_region_environment, list_cloud_providers, list_regions,
-    print_environment_status, print_region_enabled, CloudProviderRegion,
+    get_provider_region_environment, get_region_environment, list_regions,
+    print_environment_status, CloudProviderRegion,
 };
 use crate::shell::{check_environment_health, shell};
 use crate::utils::run_loading_spinner;
@@ -246,11 +246,6 @@ struct BrowserAPIToken {
     secret: String,
 }
 
-struct CloudProviderAndRegion {
-    cloud_provider: CloudProvider,
-    region: Option<Region>,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
@@ -393,21 +388,11 @@ async fn main() -> Result<()> {
 
             RegionCommand::List => {
                 let profile = config.get_profile()?;
-
                 let valid_profile = profile.validate(&profile_name, &client).await?;
 
-                let cloud_providers = list_cloud_providers(&client, &valid_profile)
-                    .await
-                    .with_context(|| "Retrieving cloud providers.")?;
-                let cloud_providers_regions =
-                    list_regions(&cloud_providers, &client, &valid_profile)
-                        .await
-                        .with_context(|| "Listing regions.")?;
-                cloud_providers_regions
-                    .iter()
-                    .for_each(|cloud_provider_region| {
-                        print_region_enabled(cloud_provider_region);
-                    });
+                for region in list_regions(&client, &valid_profile).await? {
+                    println!("{region}");
+                }
             }
 
             RegionCommand::Status {

@@ -3305,6 +3305,7 @@ dependencies = [
  "axum",
  "clap",
  "dirs",
+ "futures",
  "indicatif",
  "mz-ore",
  "once_cell",

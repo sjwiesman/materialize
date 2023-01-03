@@ -11,13 +11,14 @@ use std::fmt::Display;
 use std::str::FromStr;
 
 use anyhow::{bail, ensure, Context, Result};
+use futures::future::TryJoinAll;
 use reqwest::{Client, Error};
 use serde::de::{Unexpected, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::configuration::ValidProfile;
 use crate::utils::RequestBuilderExt;
-use crate::{CloudProvider, CloudProviderAndRegion, Environment, Region};
+use crate::{CloudProvider, Environment, Region};
 
 /// Cloud providers and regions available.
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +60,16 @@ impl FromStr for CloudProviderRegion {
             "aws/eu-west-1" => Ok(CloudProviderRegion::AwsEuWest1),
             _ => bail!("Unknown region {}", s),
         }
+    }
+}
+
+impl TryFrom<&CloudProvider> for CloudProviderRegion {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &CloudProvider) -> Result<Self, Self::Error> {
+        format!("{}/{}", value.provider, value.region)
+            .as_str()
+            .parse()
     }
 }
 
@@ -191,6 +202,7 @@ pub(crate) async fn region_environment_details(
     let mut region_api_url = region.environment_controller_url
         [0..region.environment_controller_url.len() - 4]
         .to_string();
+
     region_api_url.push_str("/api/environment");
 
     let response = client
@@ -210,39 +222,64 @@ pub(crate) async fn region_environment_details(
     }
 }
 
+pub struct CloudProviderAndRegion {
+    cloud_provider: CloudProviderRegion,
+    region: Option<Region>,
+}
+
+impl CloudProviderAndRegion {
+    pub fn is_enabled(&self) -> bool {
+        self.region.is_some()
+    }
+}
+
+impl Display for CloudProviderAndRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let enabled = if self.is_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        write!(f, "{} {}", self.cloud_provider, enabled)
+    }
+}
+
 /// List all the available regions for a list of cloud providers.
 pub(crate) async fn list_regions(
-    cloud_providers: &Vec<CloudProvider>,
     client: &Client,
     valid_profile: &ValidProfile<'_>,
 ) -> Result<Vec<CloudProviderAndRegion>> {
-    // TODO: Run requests in parallel
-    let mut cloud_providers_and_regions: Vec<CloudProviderAndRegion> = Vec::new();
+    list_cloud_providers(client, valid_profile)
+        .await
+        .context("failed to list cloud providers")?
+        .iter()
+        .map(|cloud_provider| async {
+            get_region_status(client, valid_profile, cloud_provider).await
+        })
+        .collect::<TryJoinAll<_>>()
+        .await
+}
 
-    for cloud_provider in cloud_providers {
-        let cloud_provider_region_details =
-            get_cloud_provider_region_details(client, cloud_provider, valid_profile)
-                .await
-                .with_context(|| "Retrieving region details.")?;
-        match cloud_provider_region_details.get(0) {
-            Some(region) => cloud_providers_and_regions.push(CloudProviderAndRegion {
-                cloud_provider: cloud_provider.clone(),
-                region: Some(region.to_owned()),
-            }),
-            None => cloud_providers_and_regions.push(CloudProviderAndRegion {
-                cloud_provider: cloud_provider.clone(),
-                region: None,
-            }),
-        }
-    }
+async fn get_region_status(
+    client: &Client,
+    valid_profile: &ValidProfile<'_>,
+    cloud_provider: &CloudProvider,
+) -> Result<CloudProviderAndRegion> {
+    let region = get_cloud_provider_region_details(client, cloud_provider, valid_profile)
+        .await
+        .context("failed to retrieve environment details")?
+        .pop();
 
-    Ok(cloud_providers_and_regions)
+    Ok(CloudProviderAndRegion {
+        cloud_provider: cloud_provider.try_into()?,
+        region,
+    })
 }
 
 /// List all the available cloud providers.
 ///
 /// E.g.: [us-east-1, eu-west-1]
-pub(crate) async fn list_cloud_providers(
+async fn list_cloud_providers(
     client: &Client,
     valid_profile: &ValidProfile<'_>,
 ) -> Result<Vec<CloudProvider>, Error> {
@@ -253,25 +290,6 @@ pub(crate) async fn list_cloud_providers(
         .await?
         .json::<Vec<CloudProvider>>()
         .await
-}
-
-/// Prints if a region is enabled or not
-///
-/// E.g.: AWS/us-east-1  enabled
-pub(crate) fn print_region_enabled(cloud_provider_and_region: &CloudProviderAndRegion) {
-    let region = &cloud_provider_and_region.region;
-    let cloud_provider = &cloud_provider_and_region.cloud_provider;
-
-    match region {
-        Some(_) => println!(
-            "{:}/{:}  enabled",
-            cloud_provider.provider, cloud_provider.region
-        ),
-        None => println!(
-            "{:}/{:}  disabled",
-            cloud_provider.provider, cloud_provider.region
-        ),
-    };
 }
 
 ///
