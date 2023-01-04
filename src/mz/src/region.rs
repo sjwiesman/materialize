@@ -22,7 +22,7 @@ use crate::{CloudProvider, Environment, Region};
 
 /// Cloud providers and regions available.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum CloudProviderRegion {
+pub enum CloudProviderRegion {
     AwsUsEast1,
     AwsEuWest1,
 }
@@ -223,8 +223,8 @@ pub(crate) async fn region_environment_details(
 }
 
 pub struct CloudProviderAndRegion {
-    cloud_provider: CloudProviderRegion,
-    region: Option<Region>,
+    pub cloud_provider: CloudProviderRegion,
+    pub region: Option<Region>,
 }
 
 impl CloudProviderAndRegion {
@@ -322,9 +322,7 @@ pub(crate) async fn get_provider_by_region_name(
     valid_profile: &ValidProfile<'_>,
     cloud_provider_region: &CloudProviderRegion,
 ) -> Result<CloudProvider> {
-    let cloud_providers = list_cloud_providers(client, valid_profile)
-        .await
-        .with_context(|| "Retrieving cloud providers.")?;
+    let cloud_providers = list_cloud_providers(client, valid_profile).await?;
 
     // Create a vec with only one region
     let cloud_provider: CloudProvider = cloud_providers
@@ -339,21 +337,14 @@ pub(crate) async fn get_provider_region(
     client: &Client,
     valid_profile: &ValidProfile<'_>,
     cloud_provider_region: &CloudProviderRegion,
-) -> Result<Region> {
-    let cloud_provider = get_provider_by_region_name(client, valid_profile, cloud_provider_region)
+) -> Result<Option<Region>> {
+    let cloud_provider =
+        get_provider_by_region_name(client, valid_profile, cloud_provider_region).await?;
+
+    get_cloud_provider_region_details(client, &cloud_provider, valid_profile)
         .await
-        .with_context(|| "Retrieving cloud provider.")?;
-
-    let cloud_provider_region_details =
-        get_cloud_provider_region_details(client, &cloud_provider, valid_profile)
-            .await
-            .with_context(|| "Retrieving region details.")?;
-
-    let region = cloud_provider_region_details
-        .get(0)
-        .with_context(|| "Region unavailable")?;
-
-    Ok(region.to_owned())
+        .map(|mut details| details.pop())
+        .context("failed to retrieve region details.")
 }
 
 pub(crate) async fn get_region_environment(
@@ -379,7 +370,8 @@ pub(crate) async fn get_provider_region_environment(
 ) -> Result<Environment> {
     let region = get_provider_region(client, valid_profile, cloud_provider_region)
         .await
-        .with_context(|| "Retrieving region data.")?;
+        .with_context(|| "Retrieving region data.")?
+        .with_context(|| format!("Region {cloud_provider_region} is not enabled"))?;
 
     let environment = get_region_environment(client, valid_profile, &region)
         .await

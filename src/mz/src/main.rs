@@ -80,21 +80,25 @@
 #![warn(clippy::from_over_into)]
 // END LINT CONFIG
 
+use std::collections::HashMap;
 use std::str::FromStr;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
+use reqwest::Client;
+use menu::prompt_user;
 use secrets::SecretCommand;
 use serde::Deserialize;
 use utils::new_client;
 use vault::Vault;
 
-use crate::configuration::{Configuration, Endpoint, WEB_DOCS_URL};
+use crate::configuration::{Configuration, Endpoint, ValidProfile, WEB_DOCS_URL};
 use crate::login::{generate_api_token, login_with_browser, login_with_console};
+use crate::menu::AskError;
 use crate::password::list_passwords;
 use crate::region::{
     disable_region_environment, enable_region_environment, get_provider_by_region_name,
-    get_provider_region_environment, get_region_environment, list_regions,
+    get_provider_region, get_provider_region_environment, get_region_environment, list_regions,
     print_environment_status, CloudProviderRegion,
 };
 use crate::shell::{check_environment_health, shell};
@@ -102,6 +106,7 @@ use crate::utils::run_loading_spinner;
 
 mod configuration;
 mod login;
+mod menu;
 mod password;
 mod region;
 mod secrets;
@@ -212,7 +217,7 @@ enum RegionCommand {
 /// Internal types, struct and enums
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct Region {
+pub struct Region {
     environment_controller_url: String,
 }
 
@@ -443,23 +448,67 @@ async fn main() -> Result<()> {
             cloud_provider_region,
         } => {
             let profile = config.get_profile()?;
-
-            let cloud_provider_region = match cloud_provider_region {
-                Some(ref cloud_provider_region) => {
-                    CloudProviderRegion::from_str(cloud_provider_region)?
-                }
-                None => profile
-                    .get_default_region()
-                    .context("no region specified and no default region set")?,
-            };
-
             let valid_profile = profile.validate(&profile_name, &client).await?;
 
-            shell(client, valid_profile, cloud_provider_region)
-                .await
-                .with_context(|| "Running shell")?;
+            if let Some((name, region)) = select_region(&client, cloud_provider_region, &valid_profile).await? {
+                println!("Connecting to Materialize region {name}");
+                shell(client, valid_profile, region).await?
+            }
         }
     }
 
     config.close()
+}
+
+/// Selects the region for the shell to connect.
+///
+/// - Check if cloud_provider_region is some
+/// - Check if the profile has a default region set
+/// - Otherwise, find all enabled regions
+///   - If no regions are enabled, return an error
+///   - If only one region is enabled, return it directly
+///   - If multiple regions are enabled, prompt the user to make a selection
+async fn select_region(client: &Client, cloud_provider_region: Option<String>, valid_profile: &ValidProfile<'_>) -> Result<Option<(String, Region)>> {
+    let preset_region = match cloud_provider_region {
+        Some(ref cloud_provider_region) => {
+            Some(CloudProviderRegion::from_str(cloud_provider_region)?)
+        }
+        None => valid_profile.profile.get_default_region(),
+    };
+
+    match preset_region {
+        Some(ref cloud_provider_region) => {
+            let region = get_provider_region(client, valid_profile, cloud_provider_region)
+                .await?
+                .map(|region| (cloud_provider_region.to_string(), region));
+
+            Ok(region)
+        }
+        None => {
+            let active_regions_by_name: HashMap<_, _> =
+                list_regions(client, valid_profile)
+                    .await?
+                    .into_iter()
+                    .filter_map(|status| {
+                        let provider = status.cloud_provider.to_string();
+                        status.region.map(|region| (provider, region))
+                    })
+                    .collect();
+
+            match prompt_user(
+                "Active Regions",
+                active_regions_by_name.keys().cloned().collect(),
+            ) {
+                Ok(Some(name)) => {
+                    let region = active_regions_by_name
+                        .get(&name)
+                        .map(|region| (name, region.clone()));
+
+                    Ok(region)
+                },
+                Ok(None) => Ok(None),
+                Err(AskError::EmptyChoices) => bail!("No active regions. Enable a new region using mz region enable"),
+            }
+        }
+    }
 }

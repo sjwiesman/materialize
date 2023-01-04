@@ -8,8 +8,8 @@
 // by the Apache License, Version 2.0.
 
 use crate::configuration::ValidProfile;
-use crate::region::{get_provider_region_environment, CloudProviderRegion};
-use crate::Environment;
+use crate::region::get_region_environment;
+use crate::{Environment, Region};
 use anyhow::{Context, Ok, Result};
 use reqwest::Client;
 use std::os::unix::process::CommandExt;
@@ -78,12 +78,11 @@ pub(crate) fn check_environment_health(
 pub(crate) async fn shell(
     client: Client,
     valid_profile: ValidProfile<'_>,
-    cloud_provider_region: CloudProviderRegion,
+    region: Region,
 ) -> Result<()> {
-    let environment =
-        get_provider_region_environment(&client, &valid_profile, &cloud_provider_region)
-            .await
-            .context("Retrieving cloud provider region.")?;
+    let environment = get_region_environment(&client, &valid_profile, &region)
+        .await
+        .context("failed to retrieve environment data")?;
 
     run_psql_shell(valid_profile, &environment)
 }
