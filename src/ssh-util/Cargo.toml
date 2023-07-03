@@ -7,7 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-anyhow = { version = "1.0.66" }
+anyhow = { version = "1.0.71" }
 mz-ore = { path = "../ore" }
 openssh = { version = "0.9.8", default-features = false, features = ["native-mux"] }
 openssh-mux-client = "0.15.5"
