@@ -10,7 +10,7 @@ publish = false
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.66"
+anyhow = "1.0.72"
 async-trait = "0.1.68"
 aws-config = { version = "0.55", default-features = false, features = ["native-tls"] }
 aws-credential-types = { version = "0.55", features = ["hardcoded-credentials"] }
