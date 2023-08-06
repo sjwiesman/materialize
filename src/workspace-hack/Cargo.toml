@@ -20,7 +20,7 @@ aws-credential-types = { version = "0.55.1", default-features = false, features 
 aws-sdk-sts = { version = "0.26.0", default-features = false, features = ["native-tls", "rt-tokio"] }
 aws-sig-auth = { version = "0.55.1", default-features = false, features = ["sign-eventstream"] }
 aws-sigv4 = { version = "0.55.1", features = ["sign-eventstream"] }
-aws-smithy-http = { version = "0.55.2", default-features = false, features = ["event-stream", "rt-tokio"] }
+aws-smithy-http = { version = "0.56.0", default-features = false, features = ["event-stream", "rt-tokio"] }
 axum = { version = "0.6.7", features = ["headers", "ws"] }
 base64 = { version = "0.13.1", features = ["alloc"] }
 bstr = { version = "0.2.14" }
@@ -120,7 +120,7 @@ aws-credential-types = { version = "0.55.1", default-features = false, features 
 aws-sdk-sts = { version = "0.26.0", default-features = false, features = ["native-tls", "rt-tokio"] }
 aws-sig-auth = { version = "0.55.1", default-features = false, features = ["sign-eventstream"] }
 aws-sigv4 = { version = "0.55.1", features = ["sign-eventstream"] }
-aws-smithy-http = { version = "0.55.2", default-features = false, features = ["event-stream", "rt-tokio"] }
+aws-smithy-http = { version = "0.56.0", default-features = false, features = ["event-stream", "rt-tokio"] }
 axum = { version = "0.6.7", features = ["headers", "ws"] }
 base64 = { version = "0.13.1", features = ["alloc"] }
 bstr = { version = "0.2.14" }
