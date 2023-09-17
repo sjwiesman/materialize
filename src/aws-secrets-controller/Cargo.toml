@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 anyhow = "1.0.66"
-async-trait = "0.1.68"
+async-trait = "0.1.73"
 aws-config = { version = "0.55", default-features = false, features = ["native-tls"] }
 aws-credential-types = { version = "0.55", features = ["hardcoded-credentials"] }
 aws-sdk-secretsmanager = { version = "0.26", default-features = false, features = ["native-tls", "rt-tokio"] }
