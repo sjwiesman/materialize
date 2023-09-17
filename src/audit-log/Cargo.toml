@@ -7,7 +7,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-anyhow = "1.0.66"
+anyhow = "1.0.75"
 mz-ore = { path = "../ore" }
 mz-proto = { path = "../proto" }
 mz-stash = { path = "../stash" }
