@@ -3890,7 +3890,19 @@ version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b1fb8864823fad91877e6caea0baca82e49e8db50f8e5c9f9a453e27d3330fc"
 dependencies = [
- "jsonptr",
+ "jsonptr 0.4.7",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "json-patch"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "159294d661a039f7644cea7e4d844e6b25aaf71c1ffe9d73a96d768c24b0faf4"
+dependencies = [
+ "jsonptr 0.7.1",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -3918,6 +3930,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c6e529149475ca0b2820835d3dce8fcc41c6b943ca608d32f35b449255e4627"
 dependencies = [
  "fluent-uri",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jsonptr"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5a3cc660ba5d72bce0b3bb295bf20847ccbb40fd423f3f05b61273672e561fe"
+dependencies = [
  "serde",
  "serde_json",
 ]
@@ -3979,6 +4001,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "k8s-openapi"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c75b990324f09bef15e791606b7b7a296d02fc88a344f6eba9390970a870ad5"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "serde",
+ "serde-value",
+ "serde_json",
+]
+
+[[package]]
 name = "keyed_priority_queue"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3993,9 +4028,9 @@ version = "0.92.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "231c5a5392d9e2a9b0d923199760d3f1dd73b95288f2871d16c7c90ba4954506"
 dependencies = [
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "kube-client",
- "kube-core",
+ "kube-core 0.92.1",
  "kube-derive",
  "kube-runtime",
 ]
@@ -4020,8 +4055,8 @@ dependencies = [
  "hyper-timeout 0.5.1",
  "hyper-util",
  "jsonpath-rust",
- "k8s-openapi",
- "kube-core",
+ "k8s-openapi 0.22.0",
+ "kube-core 0.92.1",
  "openssl",
  "pem",
  "rand 0.8.5",
@@ -4047,12 +4082,30 @@ dependencies = [
  "chrono",
  "form_urlencoded",
  "http 1.2.0",
- "json-patch",
- "k8s-openapi",
+ "json-patch 2.0.0",
+ "k8s-openapi 0.22.0",
  "schemars",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "kube-core"
+version = "0.99.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff0d0793db58e70ca6d689489183816cb3aa481673e7433dc618cf7e8007c675"
+dependencies = [
+ "chrono",
+ "form_urlencoded",
+ "http 1.2.0",
+ "json-patch 4.0.0",
+ "k8s-openapi 0.24.0",
+ "schemars",
+ "serde",
+ "serde-value",
+ "serde_json",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
@@ -4082,9 +4135,9 @@ dependencies = [
  "derivative",
  "futures",
  "hashbrown 0.14.5",
- "json-patch",
- "jsonptr",
- "k8s-openapi",
+ "json-patch 2.0.0",
+ "jsonptr 0.4.7",
+ "k8s-openapi 0.22.0",
  "kube-client",
  "parking_lot",
  "pin-project",
@@ -5152,7 +5205,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "kube",
  "mz-ore",
  "mz-repr",
@@ -5415,7 +5468,7 @@ dependencies = [
  "clap",
  "csv-async",
  "futures",
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "kube",
  "mz-build-info",
  "mz-cloud-resources",
@@ -6138,7 +6191,7 @@ dependencies = [
  "clap",
  "fail",
  "futures",
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "kube",
  "maplit",
  "mz-cloud-resources",
@@ -6220,7 +6273,7 @@ dependencies = [
  "futures",
  "http 1.2.0",
  "k8s-controller",
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "kube",
  "maplit",
  "mz-alloc",
@@ -8940,7 +8993,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -8960,7 +9013,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.98",
@@ -12261,10 +12314,10 @@ dependencies = [
  "hyper-util",
  "insta",
  "itertools 0.12.1",
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "kube",
  "kube-client",
- "kube-core",
+ "kube-core 0.99.0",
  "libc",
  "libz-sys",
  "linux-raw-sys 0.4.14",
