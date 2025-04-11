@@ -3972,6 +3972,19 @@ checksum = "19501afb943ae5806548bc3ebd7f3374153ca057a38f480ef30adfde5ef09755"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "serde",
+ "serde-value",
+ "serde_json",
+]
+
+[[package]]
+name = "k8s-openapi"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c75b990324f09bef15e791606b7b7a296d02fc88a344f6eba9390970a870ad5"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
  "schemars",
  "serde",
  "serde-value",
@@ -3993,7 +4006,7 @@ version = "0.92.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "231c5a5392d9e2a9b0d923199760d3f1dd73b95288f2871d16c7c90ba4954506"
 dependencies = [
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "kube-client",
  "kube-core",
  "kube-derive",
@@ -4020,7 +4033,7 @@ dependencies = [
  "hyper-timeout 0.5.1",
  "hyper-util",
  "jsonpath-rust",
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "kube-core",
  "openssl",
  "pem",
@@ -4048,7 +4061,7 @@ dependencies = [
  "form_urlencoded",
  "http 1.2.0",
  "json-patch",
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "schemars",
  "serde",
  "serde_json",
@@ -4084,7 +4097,7 @@ dependencies = [
  "hashbrown 0.14.5",
  "json-patch",
  "jsonptr",
- "k8s-openapi",
+ "k8s-openapi 0.22.0",
  "kube-client",
  "parking_lot",
  "pin-project",
@@ -5152,7 +5165,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "k8s-openapi",
+ "k8s-openapi 0.24.0",
  "kube",
  "mz-ore",
  "mz-repr",
@@ -5415,7 +5428,7 @@ dependencies = [
  "clap",
  "csv-async",
  "futures",
- "k8s-openapi",
+ "k8s-openapi 0.24.0",
  "kube",
  "mz-build-info",
  "mz-cloud-resources",
@@ -6138,7 +6151,7 @@ dependencies = [
  "clap",
  "fail",
  "futures",
- "k8s-openapi",
+ "k8s-openapi 0.24.0",
  "kube",
  "maplit",
  "mz-cloud-resources",
@@ -6220,7 +6233,7 @@ dependencies = [
  "futures",
  "http 1.2.0",
  "k8s-controller",
- "k8s-openapi",
+ "k8s-openapi 0.24.0",
  "kube",
  "maplit",
  "mz-alloc",
@@ -8940,7 +8953,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -8960,7 +8973,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.98",
@@ -12261,7 +12274,7 @@ dependencies = [
  "hyper-util",
  "insta",
  "itertools 0.12.1",
- "k8s-openapi",
+ "k8s-openapi 0.24.0",
  "kube",
  "kube-client",
  "kube-core",
