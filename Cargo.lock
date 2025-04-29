@@ -4765,7 +4765,7 @@ dependencies = [
  "time",
  "tokio",
  "toml",
- "toml_edit 0.22.24",
+ "toml_edit 0.22.26",
  "url",
  "uuid",
  "workspace-hack",
@@ -11221,7 +11221,7 @@ dependencies = [
  "serde",
  "serde_spanned",
  "toml_datetime",
- "toml_edit 0.22.24",
+ "toml_edit 0.22.26",
 ]
 
 [[package]]
@@ -11246,16 +11246,23 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.22.24"
+version = "0.22.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17b4795ff5edd201c7cd6dca065ae59972ce77d1b80fa0a84d94950ece7d1474"
+checksum = "310068873db2c5b3e7659d2cc35d21855dbafa50d1ce336397c666e3cb08137e"
 dependencies = [
  "indexmap 2.9.0",
  "serde",
  "serde_spanned",
  "toml_datetime",
+ "toml_write",
  "winnow 0.7.6",
 ]
+
+[[package]]
+name = "toml_write"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bfb942dfe1d8e29a7ee7fcbde5bd2b9a25fb89aa70caea2eba3bee836ff41076"
 
 [[package]]
 name = "tonic"
@@ -12621,7 +12628,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "toml_datetime",
- "toml_edit 0.22.24",
+ "toml_edit 0.22.26",
  "tonic",
  "tower 0.4.13",
  "tower 0.5.2",
