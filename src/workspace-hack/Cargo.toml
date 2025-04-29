@@ -310,7 +310,7 @@ miniz_oxide = { version = "0.8.8", default-features = false, features = ["with-a
 native-tls = { version = "0.2.14", default-features = false, features = ["vendored"] }
 pathdiff = { version = "0.2.3", default-features = false, features = ["camino"] }
 ring = { version = "0.17.14", features = ["std"] }
-rustix = { version = "0.38.44", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
+rustix = { version = "1.0.1", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
 tower-d8f496e17d97b5cb = { package = "tower", version = "0.5.2", default-features = false, features = ["timeout"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
@@ -322,7 +322,7 @@ miniz_oxide = { version = "0.8.8", default-features = false, features = ["with-a
 native-tls = { version = "0.2.14", default-features = false, features = ["vendored"] }
 pathdiff = { version = "0.2.3", default-features = false, features = ["camino"] }
 ring = { version = "0.17.14", features = ["std"] }
-rustix = { version = "0.38.44", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
+rustix = { version = "1.0.1", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
 tower-d8f496e17d97b5cb = { package = "tower", version = "0.5.2", default-features = false, features = ["timeout"] }
 
 [target.x86_64-apple-darwin.dependencies]
@@ -333,7 +333,7 @@ miniz_oxide = { version = "0.8.8", default-features = false, features = ["with-a
 native-tls = { version = "0.2.14", default-features = false, features = ["vendored"] }
 pathdiff = { version = "0.2.3", default-features = false, features = ["camino"] }
 ring = { version = "0.17.14", features = ["std"] }
-rustix = { version = "0.38.44", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
+rustix = { version = "1.0.1", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
 security-framework = { version = "2.10.0", features = ["alpn"] }
 tower-d8f496e17d97b5cb = { package = "tower", version = "0.5.2", default-features = false, features = ["timeout"] }
 
@@ -345,7 +345,7 @@ miniz_oxide = { version = "0.8.8", default-features = false, features = ["with-a
 native-tls = { version = "0.2.14", default-features = false, features = ["vendored"] }
 pathdiff = { version = "0.2.3", default-features = false, features = ["camino"] }
 ring = { version = "0.17.14", features = ["std"] }
-rustix = { version = "0.38.44", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
+rustix = { version = "1.0.1", features = ["event", "fs", "net", "pipe", "process", "termios", "time"] }
 security-framework = { version = "2.10.0", features = ["alpn"] }
 tower-d8f496e17d97b5cb = { package = "tower", version = "0.5.2", default-features = false, features = ["timeout"] }
 
