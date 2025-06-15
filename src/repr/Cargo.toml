@@ -68,7 +68,7 @@ static_assertions = "1.1"
 strsim = "0.11.1"
 timely = "0.20.0"
 tokio-postgres = { version = "0.7.8" }
-tracing-core = "0.1.30"
+tracing-core = "0.1.34"
 url = { version = "2.3.1", features = ["serde"] }
 uuid = { version = "1.16.0", features = ["serde"] }
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
