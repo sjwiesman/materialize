@@ -39,13 +39,9 @@
 --
 WITH tools AS (
     SELECT
-        op.database || '_' || op.schema || '_' || i.name AS name,
-        op.database,
-        op.schema,
-        op.name AS object_name,
+        '"' || op.database || '"."' || op.schema || '"."' || op.name || '"' AS object_name,
         c.name AS cluster,
         cts.comment AS description,
-        op.database || '::' || op.schema || '::' || op.name || '(' || string_agg(distinct ccol.name, ',') FILTER (WHERE ccol.position = ic.on_position) || ')' AS title,
         jsonb_build_object(
             'type', 'object',
             'required', jsonb_agg(distinct ccol.name) FILTER (WHERE ccol.position = ic.on_position),
@@ -99,73 +95,8 @@ WITH tools AS (
                         'description', cts_col.comment
                     )
                 END
-            ) FILTER (WHERE ccol.position = ic.on_position))
-        ) AS input_schema,
-        jsonb_build_object(
-            'type', 'object',
-            'required', jsonb_build_array('rows'),
-            'properties', jsonb_build_object(
-                'rows', jsonb_build_object(
-                    'type', 'array',
-                    'items', jsonb_build_object(
-                        'type', 'object',
-                        'required', jsonb_agg(distinct ccol.name) FILTER (WHERE ccol.position <> ic.on_position),
-                        'properties', jsonb_strip_nulls(jsonb_object_agg(
-                            ccol.name,
-                            CASE
-                                WHEN ccol.type IN (
-                                    'uint2', 'uint4','uint8', 'int', 'integer', 'smallint',
-                                    'double', 'double precision', 'bigint', 'float',
-                                    'numeric', 'real'
-                                ) THEN jsonb_build_object(
-                                    'type', 'number',
-                                    'description', cts_col.comment
-                                )
-                                WHEN ccol.type = 'boolean' THEN jsonb_build_object(
-                                    'type', 'boolean',
-                                    'description', cts_col.comment
-                                )
-                                WHEN ccol.type = 'bytea' THEN jsonb_build_object(
-                                    'type', 'string',
-                                    'description', cts_col.comment,
-                                    'contentEncoding', 'base64',
-                                    'contentMediaType', 'application/octet-stream'
-                                )
-                                WHEN ccol.type = 'date' THEN jsonb_build_object(
-                                    'type', 'string',
-                                    'format', 'date',
-                                    'description', cts_col.comment
-                                )
-                                WHEN ccol.type = 'time' THEN jsonb_build_object(
-                                    'type', 'string',
-                                    'format', 'time',
-                                    'description', cts_col.comment
-                                )
-                                WHEN ccol.type ilike 'timestamp%%' THEN jsonb_build_object(
-                                    'type', 'string',
-                                    'format', 'date-time',
-                                    'description', cts_col.comment
-                                )
-                                WHEN ccol.type = 'jsonb' THEN jsonb_build_object(
-                                    'type', 'object',
-                                    'description', cts_col.comment
-                                )
-                                WHEN ccol.type = 'uuid' THEN jsonb_build_object(
-                                    'type', 'string',
-                                    'format', 'uuid',
-                                    'description', cts_col.comment
-                                )
-                                ELSE jsonb_build_object(
-                                    'type', 'string',
-                                    'description', cts_col.comment
-                                )
-                            END
-                        ) FILTER (WHERE ccol.position <> ic.on_position))
-                    )
-                )
-            )
-        ) AS output_schema,
-        array_agg(distinct ccol.name) FILTER (WHERE ccol.position <> ic.on_position) AS output_columns
+            ))
+        ) AS schema
     FROM mz_internal.mz_show_my_object_privileges op
     JOIN mz_objects o ON op.name = o.name AND op.object_type = o.type
     JOIN mz_schemas s ON s.name = op.schema AND s.id = o.schema_id
@@ -179,6 +110,6 @@ WITH tools AS (
     LEFT JOIN mz_internal.mz_comments cts_col ON cts_col.id = o.id AND cts_col.object_sub_id = ccol.position
     WHERE op.privilege_type = 'SELECT'
       AND cp.privilege_type = 'USAGE'
-    GROUP BY 1,2,3,4,5,6
+    GROUP BY 1,2,3
 )
 SELECT * FROM tools

@@ -88,7 +88,9 @@ def load_config() -> Config:
         port=(
             int(args.port)
             if args.port is not None
-            else 3001 if args.transport == "sse" else 8001
+            else 3001
+            if args.transport == "sse"
+            else 8001
         ),
         pool_min_size=args.pool_min_size,
         pool_max_size=args.pool_max_size,

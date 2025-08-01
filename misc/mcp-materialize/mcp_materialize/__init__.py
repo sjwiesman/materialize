@@ -12,45 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Materialize MCP Server
-
-A  server that exposes Materialize indexes as "tools" over the Model Context
-Protocol (MCP).  Each Materialize index that the connected role is allowed to
-`SELECT` from (and whose cluster it can `USAGE`) is surfaced as a tool whose
-inputs correspond to the indexed columns and whose output is the remaining
-columns of the underlying view.
-
-The server supports two transports:
-
-* stdio – lines of JSON over stdin/stdout (handy for local CLIs)
-* sse   – server‑sent events suitable for web browsers
-
----------------
-
-1.  ``list_tools`` executes a catalog query to derive the list of exposable
-    indexes; the result is translated into MCP ``Tool`` objects.
-2.  ``call_tool`` validates the requested tool, switches the session to the
-    appropriate cluster, executes a parameterised ``SELECT`` against the
-    indexed view, and returns the first matching row (minus any columns whose
-    values were supplied as inputs).
-"""
 
 import asyncio
+import base64
+import decimal
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.resources import files
 from typing import Any
+from uuid import UUID
 
-from mcp.server import NotificationOptions, Server
-from mcp.types import Tool
+from mcp.server import FastMCP
+from mcp.types import ToolAnnotations
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
-
-from mcp_materialize.transports import http_transport, sse_transport, stdio_transport
+from pydantic import BaseModel, Field
 
 from .config import Config, load_config
-from .mz_client import MzClient
 
 logger = logging.getLogger("mz_mcp_server")
 logging.basicConfig(
@@ -60,7 +41,7 @@ logging.basicConfig(
 
 
 @asynccontextmanager
-async def create_client(cfg: Config) -> AsyncIterator[MzClient]:
+async def create_client(cfg: Config) -> AsyncIterator[AsyncConnectionPool]:
     logger.info(
         "Initializing connection pool with min_size=%s, max_size=%s",
         cfg.pool_min_size,
@@ -96,8 +77,7 @@ async def create_client(cfg: Config) -> AsyncIterator[MzClient]:
                             meta["role"],
                         )
                 logger.debug("Connection pool initialized successfully")
-                async with MzClient(pool=pool) as client:
-                    yield client
+                yield pool
             except Exception as e:
                 logger.error(f"Failed to initialize connection pool: {str(e)}")
                 raise
@@ -109,51 +89,142 @@ async def create_client(cfg: Config) -> AsyncIterator[MzClient]:
         raise
 
 
+TOOL_QUERY = (files("mcp_materialize.sql") / "tools.sql").read_text()
+
+
+class DataProduct(BaseModel):
+    name: str = Field(
+        description='Fully qualified name of the data product with double quotes (e.g. \'"database"."schema"."view_name"\'). Use this exact name when querying - it\'s ready for SQL.'
+    )
+    cluster: str = Field(
+        description="Materialize compute cluster that hosts this data product. Required when executing queries - always use this exact cluster name."
+    )
+    description: str = Field(
+        description="Human-readable explanation of what business data this product contains and when to use it (e.g. 'Customer order history with shipping status for support queries')."
+    )
+
+
+class FullDataProduct(BaseModel):
+    name: str = Field(
+        description='Fully qualified name with double quotes (e.g. \'"database"."schema"."view_name"\'). Use this exact name in queries.'
+    )
+    cluster: str = Field(
+        description="Materialize compute cluster hosting this data. Always specify this cluster when querying this data product."
+    )
+    description: str = Field(
+        description="Detailed explanation of the business purpose and use cases for this data product."
+    )
+    schema: dict[str, Any] = Field(
+        description="Complete JSON schema showing all available fields, their data types, and descriptions. Use this to understand what data you can SELECT and what WHERE conditions you can use."
+    )
+
+
 async def run():
     cfg = load_config()
     async with create_client(cfg) as mz:
+        server = FastMCP("mcp_materialize")
 
-        @asynccontextmanager
-        async def lifespan(_server):
-            yield mz
-
-        server = Server("mcp_materialize", lifespan=lifespan)
-
-        @server.list_tools()
-        async def list_tools() -> list[Tool]:
-            logger.debug("Listing available tools...")
-            tools = await server.request_context.lifespan_context.list_tools()
-            return tools
-
-        @server.call_tool()
-        async def call_tool(name: str, arguments: dict[str, Any]):
-            logger.debug(f"Calling tool '{name}' with arguments: {arguments}")
-            try:
-                result = await server.request_context.lifespan_context.call_tool(
-                    name, arguments
-                )
-                logger.debug(f"Tool '{name}' executed successfully")
-                return result
-            except Exception as e:
-                logger.error(f"Error executing tool '{name}': {str(e)}")
-                await server.request_context.session.send_tool_list_changed()
-                raise
-
-        options = server.create_initialization_options(
-            notification_options=NotificationOptions(tools_changed=True)
+        @server.tool(
+            description="Discover all available real-time data views (data products) that represent business entities like customers, orders, products, etc. Each data product provides fresh, queryable data with defined schemas. Use this first to see what data is available before querying specific information.",
+            annotations=ToolAnnotations(readOnlyHint=True),
         )
+        async def get_data_products() -> list[DataProduct]:
+            async with mz.connection() as conn:
+                conn.set_autocommit(True)
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(TOOL_QUERY)
+                    data_products = []
+                    async for row in cur:
+                        data_products.append(
+                            DataProduct(
+                                name=row["object_name"],
+                                cluster=row["cluster"],
+                                description=row["description"],
+                            )
+                        )
+                    return data_products
+
+        @server.tool(
+            description="Get the complete schema and structure of a specific data product. This shows you exactly what fields are available, their types, and what data you can query. Use this after finding a data product from get_data_products() to understand how to query it.",
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        async def get_data_product_details(
+            name: str = Field(
+                description="Exact name of the data product from get_data_products() list"
+            ),
+        ) -> FullDataProduct:
+            async with mz.connection() as conn:
+                conn.set_autocommit(True)
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    await cur.execute(TOOL_QUERY + " WHERE object_name = %s", [name])
+                    async for row in cur:
+                        return FullDataProduct(
+                            name=row["object_name"],
+                            description=row["description"],
+                            cluster=row["cluster"],
+                            schema=row["schema"],
+                        )
+                raise ValueError("Unknown data product name")
+
+        @server.tool(
+            description="Execute SQL queries against real-time data products to retrieve current business information. Use standard PostgreSQL syntax. You can JOIN multiple data products together, but ONLY if they are all hosted on the same cluster. Always specify the cluster parameter from the data product details. This provides fresh, up-to-date results from materialized views.",
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+        async def query(
+            cluster: str = Field(
+                description="Exact cluster name from the data product details - required for query execution"
+            ),
+            sql_query: str = Field(
+                description="PostgreSQL-compatible SELECT statement to retrieve data. Use the fully qualified data product name exactly as provided (with double quotes). You can JOIN multiple data products, but only those on the same cluster."
+            ),
+        ):
+            async with mz.connection() as conn:
+                conn.set_autocommit(True)
+                async with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute("START TRANSACTION READ ONLY;")
+                    await cur.execute("SET cluster TO {};".format(cluster))
+                    await cur.execute(sql_query)
+
+                    rows = await cur.fetchall()
+                    return serialize(rows)
+
         match cfg.transport:
             case "stdio":
                 logger.info("Starting server in stdio mode...")
-                await stdio_transport(server, options)
+                await server.run_stdio_async()
             case "http":
                 logger.info("Starting server in HTTP mode...")
-                await http_transport(server, cfg)
-            case "sse":
-                logger.info(f"Starting SSE server on {cfg.host}:{cfg.port}...")
-                await sse_transport(server, options, cfg)
+                await server.run_streamable_http_async()
             case t:
                 raise ValueError(f"Unknown transport: {t}")
+
+
+def serialize(obj):
+    """Serialize any Decimal/date/bytes/UUID into JSON-safe primitives."""
+    # json.dumps will call json_serial for any non-standard type,
+    # then json.loads turns it back into a Python dict/list of primitives.
+    # Structured output types require the tool returns dict[str, Any]
+    # but the json encoder used by the mcp library does not support all
+    # standard postgres types
+    return json.loads(json.dumps(obj, default=json_serial))
+
+
+def json_serial(obj):
+    """JSON serializer for objects not serializable by default json code"""
+    from datetime import date, datetime, time, timedelta
+
+    if isinstance(obj, datetime | date | time):
+        return obj.isoformat()
+    elif isinstance(obj, timedelta):
+        return obj.total_seconds()
+    elif isinstance(obj, bytes):
+        return base64.b64encode(obj).decode("ascii")
+    elif isinstance(obj, decimal.Decimal):
+        return float(obj)
+    elif isinstance(obj, UUID):
+        return str(obj)
+    else:
+        raise TypeError(f"Type {type(obj)} not serializable. This is a bug.")
 
 
 def main():
