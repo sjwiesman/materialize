@@ -13,7 +13,7 @@ workspace = true
 anyhow = "1.0.98"
 async-trait = { version = "0.1.88" }
 clap = { version = "4.5.23", features = ["derive", "env"] }
-openssl = { version = "0.10.71", features = ["vendored"] }
+openssl = { version = "0.10.73", features = ["vendored"] }
 scopeguard = "1.2.0"
 socket2 = "0.5.8"
 tokio-stream = "0.1.17"
