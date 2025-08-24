@@ -41,7 +41,7 @@ mz-ore-proc = { path = "../ore-proc", default-features = false }
 num = "0.4.3"
 num-traits = { version = "0.2", optional = true }
 # The vendored feature is transitively depended upon by tokio-openssl.
-openssl = { version = "0.10.71", features = ["vendored"], optional = true }
+openssl = { version = "0.10.73", features = ["vendored"], optional = true }
 parquet = { version = "53.3.0", optional = true, default-features = false }
 paste = "1.0.11"
 pin-project = "1.1.10"
@@ -64,7 +64,7 @@ tokio = { version = "1.44.1", features = [
     "time",
 ], optional = true }
 tokio-openssl = { version = "0.6.5", optional = true }
-thiserror = "2.0.12"
+thiserror = "2.0.16"
 tracing-capture = { version = "0.1.0", optional = true }
 # TODO(guswynn): determine, when, if ever, we can remove `tracing-log`
 # The `tracing-log` feature here is load-bearing: While our busiest-logging dependency (`rdkafka`) is now hooked-up
@@ -107,7 +107,7 @@ criterion = { version = "0.5.1", features = ["async_tokio"] }
 mz-ore = { path = "../ore", features = ["id_gen", "chrono"] }
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 scopeguard = "1.2.0"
-serde_json = "1.0.127"
+serde_json = "1.0.143"
 tokio = { version = "1.44.1", features = ["macros", "rt-multi-thread"] }
 tokio-test = "0.4.4"
 tracing-subscriber = "0.3.19"
