@@ -93,18 +93,18 @@ num = { version = "0.4.3" }
 num-bigint = { version = "0.4.6" }
 num-integer = { version = "0.1.46", features = ["i128"] }
 num-traits = { version = "0.2.19", features = ["i128", "libm"] }
-openssl = { version = "0.10.72", features = ["vendored"] }
+openssl = { version = "0.10.73", features = ["vendored"] }
 openssl-sys = { version = "0.9.107", default-features = false, features = ["vendored"] }
-parking_lot = { version = "0.12.3", features = ["send_guard"] }
+parking_lot = { version = "0.12.4", features = ["send_guard"] }
 parquet = { version = "53.3.0", default-features = false, features = ["arrow", "async", "brotli", "flate2", "lz4", "snap", "zstd"] }
-percent-encoding = { version = "2.3.1" }
+percent-encoding = { version = "2.3.2" }
 phf = { version = "0.11.3", features = ["uncased"] }
 phf_shared = { version = "0.11.3", features = ["uncased"] }
-portable-atomic = { version = "1.11.0", features = ["require-cas"] }
+portable-atomic = { version = "1.11.1", features = ["require-cas"] }
 postgres = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, features = ["with-chrono-0_4"] }
 postgres-types = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 predicates = { version = "3.1.3" }
-proc-macro2 = { version = "1.0.95", features = ["span-locations"] }
+proc-macro2 = { version = "1.0.101", features = ["span-locations"] }
 proptest = { version = "1.6.0" }
 prost = { version = "0.13.5", features = ["no-recursion-limit", "prost-derive"] }
 prost-reflect = { version = "0.15.2", default-features = false, features = ["serde"] }
@@ -114,17 +114,17 @@ rand = { version = "0.8.5", features = ["small_rng"] }
 rand_chacha = { version = "0.3.0" }
 rand_core = { version = "0.6.2", default-features = false, features = ["std"] }
 rdkafka-sys = { git = "https://github.com/MaterializeInc/rust-rdkafka.git", features = ["cmake-build", "libz-static", "ssl-vendored", "zstd"] }
-regex = { version = "1.11.1" }
-regex-automata = { version = "0.4.9", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "unicode"] }
-regex-syntax = { version = "0.8.5" }
+regex = { version = "1.11.2" }
+regex-automata = { version = "0.4.10", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "unicode"] }
+regex-syntax = { version = "0.8.6" }
 reqwest-5ef9efb8ec2df382 = { package = "reqwest", version = "0.12.15", default-features = false, features = ["blocking", "charset", "http2", "json", "native-tls-vendored", "stream"] }
 reqwest-a6292c17cd707f01 = { package = "reqwest", version = "0.11.24", features = ["blocking", "json", "multipart", "native-tls-vendored", "stream"] }
 schemars = { version = "0.8.22", features = ["uuid1"] }
 scopeguard = { version = "1.2.0" }
-semver = { version = "1.0.26", features = ["serde"] }
-serde = { version = "1.0.219", features = ["alloc", "derive", "rc"] }
-serde_json = { version = "1.0.140", features = ["alloc", "arbitrary_precision", "float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
-sha2 = { version = "0.10.8", features = ["asm"] }
+semver = { version = "1.0.27", features = ["serde"] }
+serde = { version = "1.0.223", features = ["alloc", "derive", "rc"] }
+serde_json = { version = "1.0.145", features = ["alloc", "arbitrary_precision", "float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
+sha2 = { version = "0.10.9", features = ["asm"] }
 similar = { version = "2.7.0", features = ["inline", "unicode"] }
 smallvec = { version = "1.14.0", default-features = false, features = ["const_new", "serde", "union"] }
 socket2 = { version = "0.5.9", default-features = false, features = ["all"] }
@@ -137,16 +137,16 @@ timely = { version = "0.20.0" }
 tokio = { version = "1.44.2", features = ["full", "test-util", "tracing"] }
 tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", features = ["serde", "with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 tokio-stream = { version = "0.1.17", features = ["net", "sync"] }
-tokio-util = { version = "0.7.15", features = ["codec", "compat", "io", "time"] }
+tokio-util = { version = "0.7.16", features = ["codec", "compat", "io", "time"] }
 toml_datetime = { version = "0.6.9", default-features = false, features = ["serde"] }
 toml_edit = { version = "0.22.24", features = ["serde"] }
 tonic = { version = "0.12.3", features = ["gzip"] }
 tower-9fbad63c4bcf4a8f = { package = "tower", version = "0.4.13", features = ["balance", "buffer", "filter", "limit", "load-shed", "retry", "timeout", "util"] }
 tower-d8f496e17d97b5cb = { package = "tower", version = "0.5.2", default-features = false, features = ["buffer", "filter", "log", "make", "util"] }
-tower-http = { version = "0.6.2", features = ["auth", "cors", "map-response-body", "trace", "util"] }
+tower-http = { version = "0.6.6", features = ["auth", "cors", "map-response-body", "trace", "util"] }
 tracing = { version = "0.1.41", features = ["log"] }
-tracing-core = { version = "0.1.33" }
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+tracing-core = { version = "0.1.34" }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 uncased = { version = "0.9.10" }
 unicode-bidi = { version = "0.3.18" }
 unicode-normalization = { version = "0.1.24" }
@@ -235,18 +235,18 @@ num = { version = "0.4.3" }
 num-bigint = { version = "0.4.6" }
 num-integer = { version = "0.1.46", features = ["i128"] }
 num-traits = { version = "0.2.19", features = ["i128", "libm"] }
-openssl = { version = "0.10.72", features = ["vendored"] }
+openssl = { version = "0.10.73", features = ["vendored"] }
 openssl-sys = { version = "0.9.107", default-features = false, features = ["vendored"] }
-parking_lot = { version = "0.12.3", features = ["send_guard"] }
+parking_lot = { version = "0.12.4", features = ["send_guard"] }
 parquet = { version = "53.3.0", default-features = false, features = ["arrow", "async", "brotli", "flate2", "lz4", "snap", "zstd"] }
-percent-encoding = { version = "2.3.1" }
+percent-encoding = { version = "2.3.2" }
 phf = { version = "0.11.3", features = ["uncased"] }
 phf_shared = { version = "0.11.3", features = ["uncased"] }
-portable-atomic = { version = "1.11.0", features = ["require-cas"] }
+portable-atomic = { version = "1.11.1", features = ["require-cas"] }
 postgres = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, features = ["with-chrono-0_4"] }
 postgres-types = { git = "https://github.com/MaterializeInc/rust-postgres", default-features = false, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 predicates = { version = "3.1.3" }
-proc-macro2 = { version = "1.0.95", features = ["span-locations"] }
+proc-macro2 = { version = "1.0.101", features = ["span-locations"] }
 proptest = { version = "1.6.0" }
 proptest-derive = { version = "0.5.1", default-features = false, features = ["boxed_union"] }
 prost = { version = "0.13.5", features = ["no-recursion-limit", "prost-derive"] }
@@ -257,17 +257,17 @@ rand = { version = "0.8.5", features = ["small_rng"] }
 rand_chacha = { version = "0.3.0" }
 rand_core = { version = "0.6.2", default-features = false, features = ["std"] }
 rdkafka-sys = { git = "https://github.com/MaterializeInc/rust-rdkafka.git", features = ["cmake-build", "libz-static", "ssl-vendored", "zstd"] }
-regex = { version = "1.11.1" }
-regex-automata = { version = "0.4.9", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "unicode"] }
-regex-syntax = { version = "0.8.5" }
+regex = { version = "1.11.2" }
+regex-automata = { version = "0.4.10", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "unicode"] }
+regex-syntax = { version = "0.8.6" }
 reqwest-5ef9efb8ec2df382 = { package = "reqwest", version = "0.12.15", default-features = false, features = ["blocking", "charset", "http2", "json", "native-tls-vendored", "stream"] }
 reqwest-a6292c17cd707f01 = { package = "reqwest", version = "0.11.24", features = ["blocking", "json", "multipart", "native-tls-vendored", "stream"] }
 schemars = { version = "0.8.22", features = ["uuid1"] }
 scopeguard = { version = "1.2.0" }
-semver = { version = "1.0.26", features = ["serde"] }
-serde = { version = "1.0.219", features = ["alloc", "derive", "rc"] }
-serde_json = { version = "1.0.140", features = ["alloc", "arbitrary_precision", "float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
-sha2 = { version = "0.10.8", features = ["asm"] }
+semver = { version = "1.0.27", features = ["serde"] }
+serde = { version = "1.0.223", features = ["alloc", "derive", "rc"] }
+serde_json = { version = "1.0.145", features = ["alloc", "arbitrary_precision", "float_roundtrip", "preserve_order", "raw_value", "unbounded_depth"] }
+sha2 = { version = "0.10.9", features = ["asm"] }
 similar = { version = "2.7.0", features = ["inline", "unicode"] }
 smallvec = { version = "1.14.0", default-features = false, features = ["const_new", "serde", "union"] }
 socket2 = { version = "0.5.9", default-features = false, features = ["all"] }
@@ -281,16 +281,16 @@ timely = { version = "0.20.0" }
 tokio = { version = "1.44.2", features = ["full", "test-util", "tracing"] }
 tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", features = ["serde", "with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 tokio-stream = { version = "0.1.17", features = ["net", "sync"] }
-tokio-util = { version = "0.7.15", features = ["codec", "compat", "io", "time"] }
+tokio-util = { version = "0.7.16", features = ["codec", "compat", "io", "time"] }
 toml_datetime = { version = "0.6.9", default-features = false, features = ["serde"] }
 toml_edit = { version = "0.22.24", features = ["serde"] }
 tonic = { version = "0.12.3", features = ["gzip"] }
 tower-9fbad63c4bcf4a8f = { package = "tower", version = "0.4.13", features = ["balance", "buffer", "filter", "limit", "load-shed", "retry", "timeout", "util"] }
 tower-d8f496e17d97b5cb = { package = "tower", version = "0.5.2", default-features = false, features = ["buffer", "filter", "log", "make", "util"] }
-tower-http = { version = "0.6.2", features = ["auth", "cors", "map-response-body", "trace", "util"] }
+tower-http = { version = "0.6.6", features = ["auth", "cors", "map-response-body", "trace", "util"] }
 tracing = { version = "0.1.41", features = ["log"] }
-tracing-core = { version = "0.1.33" }
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+tracing-core = { version = "0.1.34" }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 uncased = { version = "0.9.10" }
 unicode-bidi = { version = "0.3.18" }
 unicode-normalization = { version = "0.1.24" }
