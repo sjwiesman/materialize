@@ -55,14 +55,14 @@ mz-pgtz = { path = "../pgtz", default-features = false }
 mz-proto = { path = "../proto", features = ["chrono"], default-features = false }
 mz-sql-parser = { path = "../sql-parser", default-features = false }
 num-traits = "0.2.15"
-num_enum = "0.7.3"
+num_enum = "0.7.5"
 ordered-float = { version = "5.0.0", features = ["serde"] }
 postgres-protocol = { version = "0.6.5" }
 prost = { version = "0.13.5", features = ["no-recursion-limit"] }
 regex = "1.11.1"
 ryu = "1.0.20"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = { version = "1.0.127", features = ["arbitrary_precision", "preserve_order"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.145", features = ["arbitrary_precision", "preserve_order"] }
 smallvec = { version = "1.14.0", features = ["serde", "union"] }
 static_assertions = "1.1"
 strsim = "0.11.1"
@@ -73,11 +73,11 @@ url = { version = "2.3.1", features = ["serde"] }
 uuid = { version = "1.16.0", features = ["serde"] }
 proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 proptest-derive = { version = "0.5.1", features = ["boxed_union"] }
-thiserror = "2.0.12"
-tracing = { version = "0.1.37" }
+thiserror = "2.0.17"
+tracing = { version = "0.1.43" }
 
 # for the tracing feature
-tracing-subscriber = { version = "0.3.19", default-features = false, optional = true }
+tracing-subscriber = { version = "0.3.22", default-features = false, optional = true }
 workspace-hack = { version = "0.0.0", path = "../workspace-hack", optional = true }
 
 [dev-dependencies]

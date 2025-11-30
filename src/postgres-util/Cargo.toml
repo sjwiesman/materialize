@@ -17,7 +17,7 @@ mz-proto = { path = "../proto", optional = true }
 mz-repr = { path = "../repr", optional = true }
 mz-ssh-util = { path = "../ssh-util", optional = true }
 mz-tls-util = { path = "../tls-util", default-features = false }
-openssl = { version = "0.10.71", features = ["vendored"] }
+openssl = { version = "0.10.75", features = ["vendored"] }
 openssh = { version = "0.11.5", default-features = false, features = [
     "native-mux",
 ], optional = true }
@@ -30,11 +30,11 @@ proptest-derive = { version = "0.5.1", features = ["boxed_union"]}
 prost = { version = "0.13.5", features = [
     "no-recursion-limit",
 ], optional = true }
-serde = { version = "1.0.219", features = ["derive"], optional = true }
-thiserror = "2.0.12"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+thiserror = "2.0.17"
 tokio = { version = "1.44.1", features = ["fs", "rt", "sync"] }
 tokio-postgres = { version = "0.7.8" }
-tracing = "0.1.37"
+tracing = "0.1.43"
 workspace-hack = { version = "0.0.0", path = "../workspace-hack", optional = true }
 
 [features]
