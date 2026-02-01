@@ -4,4 +4,4 @@
 # add to this list without consulting with @testing!
 
 pip==25.1
-setuptools==80.0.0
+setuptools==80.10.2
