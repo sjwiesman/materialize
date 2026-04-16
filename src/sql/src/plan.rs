@@ -329,6 +329,7 @@ impl Plan {
             StatementKind::ValidateConnection => &[PlanKind::ValidateConnection],
             StatementKind::AlterRetainHistory => &[PlanKind::AlterRetainHistory],
             StatementKind::ExecuteUnitTest => &[],
+            StatementKind::CreateConstraint => &[],
         }
     }
 
