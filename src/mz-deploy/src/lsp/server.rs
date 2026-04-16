@@ -46,7 +46,8 @@ use crate::types;
 use ropey::Rope;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -168,21 +169,21 @@ impl Backend {
     ///
     /// Silently defaults when `project.toml` is missing (no config is valid).
     /// Called during `initialized` and at the start of each `rebuild_project`.
-    fn load_settings(&self) {
-        let root = self.root.read().unwrap().clone();
+    async fn load_settings(&self) {
+        let root = self.root.read().await.clone();
         match ProjectSettings::load(&root) {
             Ok(ps) => {
                 let name = ps.profile.clone();
                 let config = ps.config_for_profile(&name);
-                *self.variables.write().unwrap() = config.variables.clone();
-                *self.profile_name.write().unwrap() = name;
-                *self.settings.write().unwrap() = Some(ps);
+                *self.variables.write().await = config.variables.clone();
+                *self.profile_name.write().await = name;
+                *self.settings.write().await = Some(ps);
             }
             Err(_) => {
                 // No project.toml or parse error — use defaults.
-                *self.settings.write().unwrap() = None;
-                *self.variables.write().unwrap() = BTreeMap::new();
-                *self.profile_name.write().unwrap() = "default".to_string();
+                *self.settings.write().await = None;
+                *self.variables.write().await = BTreeMap::new();
+                *self.profile_name.write().await = "default".to_string();
             }
         }
     }
@@ -190,14 +191,14 @@ impl Backend {
     /// Publish parse diagnostics for a single document.
     async fn publish_diagnostics(&self, uri: Url, text: &str) {
         let rope = Rope::from_str(text);
-        let variables = self.variables.read().unwrap().clone();
-        let profile = self.profile_name.read().unwrap().clone();
+        let variables = self.variables.read().await.clone();
+        let profile = self.profile_name.read().await.clone();
         let diags = diagnostics::diagnose(text, &rope, &variables, &profile);
 
         // Store the rope for later offset conversions (go-to-definition).
-        if let Ok(mut docs) = self.documents.lock() {
-            docs.insert(uri.clone(), rope);
-        }
+        let mut docs = self.documents.lock().await;
+        docs.insert(uri.clone(), rope);
+        drop(docs); // release before .await on client
 
         self.client.publish_diagnostics(uri, diags, None).await;
     }
@@ -207,13 +208,13 @@ impl Backend {
     /// Acquires the documents lock once and returns the full document text,
     /// char offset, and optional dot-qualified identifier parts at the cursor.
     /// Returns `None` if the document is not open.
-    fn snapshot_at_position(
+    async fn snapshot_at_position(
         &self,
         uri: &Url,
         position: Position,
     ) -> Option<(String, usize, Option<Vec<String>>)> {
         let (byte_offset, text) = {
-            let docs = self.documents.lock().unwrap();
+            let docs = self.documents.lock().await;
             let rope = docs.get(uri)?;
             let line_start = rope
                 .try_line_to_char(usize::try_from(position.line).unwrap_or(0))
@@ -232,8 +233,8 @@ impl Backend {
     /// has been successfully built yet.
     #[allow(clippy::unused_async)] // async required by tower-lsp custom_method
     pub async fn dag(&self) -> Result<serde_json::Value> {
-        let root = self.root.read().unwrap().clone();
-        let cache_guard = self.project_cache.lock().unwrap();
+        let root = self.root.read().await.clone();
+        let cache_guard = self.project_cache.lock().await;
         match cache_guard.as_ref() {
             Some(cache) => Ok(serde_json::to_value(dag::build_dag_response(cache, &root))
                 .unwrap_or(serde_json::Value::Null)),
@@ -261,8 +262,8 @@ impl Backend {
     /// has been successfully built yet.
     #[allow(clippy::unused_async)] // async required by tower-lsp custom_method
     pub async fn catalog(&self) -> tower_lsp::jsonrpc::Result<serde_json::Value> {
-        let root = self.root.read().unwrap().clone();
-        let cache_guard = self.project_cache.lock().unwrap();
+        let root = self.root.read().await.clone();
+        let cache_guard = self.project_cache.lock().await;
         match cache_guard.as_ref() {
             Some(cache) => {
                 let types_lock = types::load_types_lock(&root).unwrap_or_default();
@@ -276,7 +277,7 @@ impl Backend {
                 )
             }
             None => {
-                let error = self.last_build_error.read().unwrap().clone();
+                let error = self.last_build_error.read().await.clone();
                 Ok(
                     serde_json::to_value(catalog::build_error_response(error.as_deref()))
                         .unwrap_or(serde_json::Value::Null),
@@ -295,10 +296,10 @@ impl Backend {
     /// The project is not stored on `self` — it is only needed transiently
     /// for typecheck planning.
     async fn rebuild_project(&self) -> Option<Arc<graph::Project>> {
-        self.load_settings();
-        let root = self.root.read().unwrap().clone();
+        self.load_settings().await;
+        let root = self.root.read().await.clone();
         let (profile, profile_suffix, variables) = {
-            let settings_guard = self.settings.read().unwrap();
+            let settings_guard = self.settings.read().await;
             match settings_guard.as_ref() {
                 Some(ps) => {
                     let profile = ps.profile.clone();
@@ -325,20 +326,20 @@ impl Backend {
         };
 
         // Compute diagnostic actions (pure).
-        let old_uris = self.project_diagnostic_uris.lock().unwrap().clone();
+        let old_uris = self.project_diagnostic_uris.lock().await.clone();
         let actions = compute_diagnostic_actions(new_diagnostics, &old_uris);
 
         // Return the project on success, log and record error on failure.
         let project = match build_result {
             Ok(p) => {
-                *self.last_build_error.write().unwrap() = None;
+                *self.last_build_error.write().await = None;
                 Some(Arc::new(p))
             }
             Err(ref e) => {
                 self.client
                     .log_message(MessageType::ERROR, format!("Project build failed: {e}"))
                     .await;
-                *self.last_build_error.write().unwrap() = Some(format!("{e}"));
+                *self.last_build_error.write().await = Some(format!("{e}"));
                 None
             }
         };
@@ -352,11 +353,11 @@ impl Backend {
         for (uri, diags) in actions.diagnostics_to_publish {
             self.client.publish_diagnostics(uri, diags, None).await;
         }
-        *self.project_diagnostic_uris.lock().unwrap() = actions.new_tracked_uris;
+        *self.project_diagnostic_uris.lock().await = actions.new_tracked_uris;
 
         // Open the long-lived ProjectCache SQLite connection on first successful build.
         if project.is_some() {
-            let mut guard = self.project_cache.lock().unwrap();
+            let mut guard = self.project_cache.lock().await;
             if guard.is_none() {
                 *guard =
                     try_open_project_cache(&root, &profile, profile_suffix.as_deref(), &variables);
@@ -381,10 +382,10 @@ impl Backend {
     /// Silently returns on any failure — the  catalog simply won't have updated
     /// column data until the next successful typecheck.
     async fn run_typecheck(&self, project: Arc<graph::Project>) {
-        let root = self.root.read().unwrap().clone();
+        let root = self.root.read().await.clone();
 
         let (profile, profile_suffix, variables) = {
-            let settings_guard = self.settings.read().unwrap();
+            let settings_guard = self.settings.read().await;
             match settings_guard.as_ref() {
                 Some(ps) => {
                     let profile = ps.profile.clone();
@@ -419,7 +420,7 @@ impl Backend {
         let docker_image = self
             .settings
             .read()
-            .unwrap()
+            .await
             .as_ref()
             .map(|s| s.docker_image())
             .unwrap_or_else(|| DEFAULT_DOCKER_IMAGE.to_string());
@@ -446,9 +447,8 @@ impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         if let Some(root_uri) = params.root_uri {
             if let Ok(path) = root_uri.to_file_path() {
-                if let Ok(mut root) = self.root.write() {
-                    *root = path;
-                }
+                let mut root = self.root.write().await;
+                *root = path;
             }
         }
 
@@ -480,7 +480,7 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.load_settings();
+        self.load_settings().await;
         let project = self.rebuild_project().await;
         if let Some(project) = project {
             self.run_typecheck(project).await;
@@ -524,7 +524,7 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let (_, _, parts) = match self.snapshot_at_position(&uri, position) {
+        let (_, _, parts) = match self.snapshot_at_position(&uri, position).await {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -533,8 +533,8 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let root = self.root.read().unwrap().clone();
-        let cache_guard = self.project_cache.lock().unwrap();
+        let root = self.root.read().await.clone();
+        let cache_guard = self.project_cache.lock().await;
         let cache = match cache_guard.as_ref() {
             Some(c) => c,
             None => return Ok(None),
@@ -548,7 +548,7 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
 
-        let (_, _, parts) = match self.snapshot_at_position(&uri, position) {
+        let (_, _, parts) = match self.snapshot_at_position(&uri, position).await {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -557,8 +557,8 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let root = self.root.read().unwrap().clone();
-        let cache_guard = self.project_cache.lock().unwrap();
+        let root = self.root.read().await.clone();
+        let cache_guard = self.project_cache.lock().await;
         let cache = match cache_guard.as_ref() {
             Some(c) => c,
             None => return Ok(None),
@@ -583,9 +583,9 @@ impl LanguageServer for Backend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let file_uri = params.text_document.uri;
-        let root = self.root.read().unwrap().clone();
+        let root = self.root.read().await.clone();
 
-        let cache_guard = self.project_cache.lock().unwrap();
+        let cache_guard = self.project_cache.lock().await;
         let cache = match cache_guard.as_ref() {
             Some(c) => c,
             None => return Ok(None),
@@ -603,8 +603,8 @@ impl LanguageServer for Backend {
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
-        let root = self.root.read().unwrap().clone();
-        let cache_guard = self.project_cache.lock().unwrap();
+        let root = self.root.read().await.clone();
+        let cache_guard = self.project_cache.lock().await;
         let cache = match cache_guard.as_ref() {
             Some(c) => c,
             None => return Ok(None),
@@ -622,14 +622,14 @@ impl LanguageServer for Backend {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let (text, byte_offset, parts) = match self.snapshot_at_position(&uri, position) {
+        let (text, byte_offset, parts) = match self.snapshot_at_position(&uri, position).await {
             Some(s) => s,
             None => return Ok(None),
         };
 
         // Try variable hover first (pure).
-        let variables = self.variables.read().unwrap();
-        let profile = self.profile_name.read().unwrap();
+        let variables = self.variables.read().await;
+        let profile = self.profile_name.read().await;
         if let Some(h) = hover::resolve_variable_hover(&text, byte_offset, &variables, &profile) {
             return Ok(Some(h));
         }
@@ -642,8 +642,8 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let root = self.root.read().unwrap().clone();
-        let cache_guard = self.project_cache.lock().unwrap();
+        let root = self.root.read().await.clone();
+        let cache_guard = self.project_cache.lock().await;
         let cache = match cache_guard.as_ref() {
             Some(c) => c,
             None => return Ok(None),
@@ -663,16 +663,16 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let file_uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
-        let root = self.root.read().unwrap().clone();
+        let root = self.root.read().await.clone();
 
         let doc_text = {
-            let docs = self.documents.lock().unwrap();
+            let docs = self.documents.lock().await;
             docs.get(&file_uri).map(|rope| rope.to_string())
         };
         let text = doc_text.as_deref().unwrap_or("");
         let prefix = completion::prefix_context(text, position);
 
-        let cache_guard = self.project_cache.lock().unwrap();
+        let cache_guard = self.project_cache.lock().await;
         let types_lock = types::load_types_lock(&root).unwrap_or_default();
         let items =
             completion::complete(cache_guard.as_ref(), &types_lock, &file_uri, &root, &prefix);
@@ -682,10 +682,10 @@ impl LanguageServer for Backend {
 
     async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
         let file_uri = params.text_document.uri;
-        let root = self.root.read().unwrap().clone();
+        let root = self.root.read().await.clone();
 
         let doc_text = {
-            let docs = self.documents.lock().unwrap();
+            let docs = self.documents.lock().await;
             docs.get(&file_uri).map(|rope| rope.to_string())
         };
         let text = match doc_text.as_deref() {
@@ -693,7 +693,7 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        let cache_guard = self.project_cache.lock().unwrap();
+        let cache_guard = self.project_cache.lock().await;
         let lenses = code_lens::code_lenses(&file_uri, text, &root, cache_guard.as_ref());
         Ok(Some(lenses))
     }
@@ -764,5 +764,62 @@ mod tests {
             &BTreeMap::new(),
         );
         assert!(result.is_none());
+    }
+
+    /// Regression test for the tokio::sync lock conversion.
+    ///
+    /// `publish_diagnostics` acquires `documents.lock()` and then holds the
+    /// lock across an `.await` on `client.publish_diagnostics(...)`. With the
+    /// previous `std::sync::Mutex` a second concurrent call from another task
+    /// would deadlock, because the std guard is not `Send` and blocks the
+    /// worker thread. With `tokio::sync::Mutex` the second task yields
+    /// correctly and both calls complete.
+    ///
+    /// The multi-thread runtime with 2 workers is required so the two spawned
+    /// tasks can actually make progress concurrently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_publish_diagnostics_do_not_deadlock() {
+        use std::sync::Mutex as StdMutex;
+
+        // `LspService::new` hands the init closure a `Client`, but only
+        // `inner()` (which returns `&Backend`) is publicly accessible on the
+        // service. Capture a clone of the client out of the closure so we can
+        // build an independent `Arc<Backend>` that outlives the service
+        // reference.
+        let captured_client: Arc<StdMutex<Option<Client>>> = Arc::new(StdMutex::new(None));
+        let captured_client_clone = Arc::clone(&captured_client);
+        let (_service, _socket) = tower_lsp::LspService::new(move |client| {
+            *captured_client_clone.lock().unwrap() = Some(client.clone());
+            Backend::new_with_root(client, std::env::temp_dir())
+        });
+        let client = captured_client
+            .lock()
+            .unwrap()
+            .take()
+            .expect("init closure ran and captured a Client");
+
+        let backend = Arc::new(Backend::new_with_root(client, std::env::temp_dir()));
+
+        let b1 = Arc::clone(&backend);
+        let b2 = Arc::clone(&backend);
+        let t1 = mz_ore::task::spawn(|| "lsp-test-publish-a", async move {
+            b1.publish_diagnostics(
+                Url::from_file_path(std::env::temp_dir().join("a.sql")).unwrap(),
+                "SELECT 1;",
+            )
+            .await;
+        });
+        let t2 = mz_ore::task::spawn(|| "lsp-test-publish-b", async move {
+            b2.publish_diagnostics(
+                Url::from_file_path(std::env::temp_dir().join("b.sql")).unwrap(),
+                "SELECT 2;",
+            )
+            .await;
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let _ = tokio::join!(t1, t2);
+        })
+        .await;
+        assert!(result.is_ok(), "concurrent publish_diagnostics timed out");
     }
 }
