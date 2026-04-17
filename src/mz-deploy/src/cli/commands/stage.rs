@@ -342,6 +342,7 @@ pub async fn run(
         mode,
     };
     log::output(&result);
+    log::print_deploy_id(&stage_name);
     Ok(())
 }
 

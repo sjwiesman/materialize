@@ -161,6 +161,29 @@ pub fn output_json(value: &impl serde::Serialize) {
     println!("{}", serde_json::to_string(value).unwrap());
 }
 
+/// Print a successful deployment's ID to stdout.
+///
+/// This is the one intentional stdout write in human mode. `output()` sends
+/// the pretty summary to stderr so terminals still show it, while the deploy
+/// ID — the machine-useful handoff to `wait`/`promote` — goes to stdout on
+/// its own line. That split is what lets callers compose:
+///
+/// ```text
+/// DEPLOY_ID=$(mz-deploy stage)
+/// mz-deploy stage | xargs mz-deploy wait
+/// ```
+///
+/// In JSON mode we skip this, because the structured result already carries
+/// `deploy_id` on stdout and a bare ID would corrupt the JSON stream. The
+/// `print_stdout` allow is intentional for exactly this reason.
+#[allow(clippy::print_stdout)]
+pub fn print_deploy_id(deploy_id: &str) {
+    if json_output_enabled() {
+        return;
+    }
+    println!("{deploy_id}");
+}
+
 /// Print an informational message to stderr without a trailing newline. Silenced by `--quiet`.
 #[macro_export]
 macro_rules! info_nonl {
