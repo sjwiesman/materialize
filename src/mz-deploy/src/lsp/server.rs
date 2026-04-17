@@ -33,7 +33,7 @@
 //!   changed. The VS Code extension uses this to refresh the catalog sidebar
 //!   and DAG panel with fresh data.
 
-use crate::config::{DEFAULT_DOCKER_IMAGE, ProjectSettings};
+use crate::config::{ProjectSettings, default_docker_image};
 use crate::lsp::{
     catalog, code_lens, completion, dag, diagnostics, document_symbol, goto_definition, hover,
     references, workspace_symbol,
@@ -423,7 +423,7 @@ impl Backend {
             .await
             .as_ref()
             .map(|s| s.docker_image())
-            .unwrap_or_else(|| DEFAULT_DOCKER_IMAGE.to_string());
+            .unwrap_or_else(default_docker_image);
 
         let _ = project::compiler::typecheck::execute(
             &project,

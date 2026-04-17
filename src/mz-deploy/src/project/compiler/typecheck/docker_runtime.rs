@@ -7,7 +7,7 @@
 
 use super::TypeCheckError;
 use crate::client::{Client, Profile};
-use crate::config::DEFAULT_DOCKER_IMAGE;
+use crate::config::default_docker_image;
 use crate::{timing, verbose};
 use tokio::process::Command;
 use tokio::time::{Duration, sleep};
@@ -48,7 +48,7 @@ impl DockerRuntime {
 
     pub fn new() -> Self {
         Self {
-            image: DEFAULT_DOCKER_IMAGE.to_string(),
+            image: default_docker_image(),
         }
     }
 
