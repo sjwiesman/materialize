@@ -206,8 +206,6 @@ mod tests {
         assert!(symbols.is_empty());
     }
 
-    // ── Test helpers ──────────────────────────────────────────────
-
     fn build_test_cache(foo_sql: &str) -> (tempfile::TempDir, ProjectCache) {
         let root = tempfile::tempdir().unwrap();
         let models = root.path().join("models/mydb/public");

@@ -129,8 +129,6 @@ impl TypecheckBackend {
     }
 }
 
-// ── Error types ─────────────────────────────────────────────────────────
-
 /// Errors that can occur during runtime typechecking.
 #[derive(Debug, Error)]
 pub enum TypeCheckError {
@@ -251,8 +249,6 @@ impl fmt::Display for TypeCheckErrors {
 
 impl std::error::Error for TypeCheckErrors {}
 
-// ── Plan types ──────────────────────────────────────────────────────────
-
 /// The compiler's incremental typecheck plan for the current invocation.
 ///
 /// When `state` is `None` the plan is up-to-date: all objects matched their
@@ -301,8 +297,6 @@ struct TypecheckedObjectArtifact {
     /// The kind of object (view, materialized view, etc.).
     object_kind: ObjectKind,
 }
-
-// ── Planning ────────────────────────────────────────────────────────────
 
 /// Build an incremental typecheck plan by comparing current semantic
 /// fingerprints against cached artifacts in the build artifact database.
@@ -502,8 +496,6 @@ fn write_typecheck_outputs(
     Ok(())
 }
 
-// ── Shared incremental state ────────────────────────────────────────────
-
 /// Result of a backend execution pass: merged types and updated artifacts
 /// ready to be persisted by [`write_typecheck_outputs()`].
 struct CompletedState {
@@ -621,8 +613,6 @@ impl DirtyPropagator {
         updated
     }
 }
-
-// ── Shared dependency planning ──────────────────────────────────────────
 
 /// Read-only context for dependency planning during typecheck execution.
 struct DepContext<'a> {
@@ -744,8 +734,6 @@ fn plan_deps_dfs(
         _ => {}
     }
 }
-
-// ── Shared helpers ──────────────────────────────────────────────────────
 
 fn build_object_paths(project: &Project, project_root: &Path) -> BTreeMap<ObjectId, PathBuf> {
     let mut paths = BTreeMap::new();

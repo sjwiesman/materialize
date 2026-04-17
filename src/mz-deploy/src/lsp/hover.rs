@@ -262,8 +262,6 @@ mod tests {
     use crate::types::ColumnType;
     use std::collections::BTreeMap;
 
-    // ── Variable hover tests ─────────────────────────────────────────
-
     fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
             .iter()
@@ -293,8 +291,6 @@ mod tests {
         let sql = "SELECT 1 FROM t";
         assert!(resolve_variable_hover(sql, 5, &BTreeMap::new(), "default").is_none());
     }
-
-    // ── Object hover tests ──────────────────────────────────────────
 
     #[test]
     fn hover_with_cached_columns() {
@@ -599,8 +595,6 @@ mod tests {
         // name has no comment — empty description cell
         assert!(text.contains("| name | text |  |"));
     }
-
-    // ── Helpers ──────────────────────────────────────────────────────
 
     fn extract_markdown(hover: &Hover) -> &str {
         match &hover.contents {
