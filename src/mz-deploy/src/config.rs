@@ -10,6 +10,10 @@
 //!   Materialize version / Docker image override, and an optional `dependencies`
 //!   array of fully qualified `database.schema.object` names that this project
 //!   reads from but does not own.
+//!
+//! Passwords can be pulled from the environment via an inline `${VAR}` in the
+//! password field, or via `MZ_PROFILE_<NAME>_PASSWORD` (see
+//! [`ProfilesConfig::expand_env_vars`] for details).
 
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,7 +23,13 @@ use thiserror::Error;
 
 use crate::project::ir::object_id::ObjectId;
 
-pub const DEFAULT_DOCKER_IMAGE: &str = "materialize/materialized:latest";
+/// Repository path for the Materialize Docker image, without a tag.
+const DOCKER_IMAGE_BASE: &str = "materialize/materialized";
+
+/// The Docker image used when no `mz_version` is configured.
+pub fn default_docker_image() -> String {
+    format!("{DOCKER_IMAGE_BASE}:latest")
+}
 
 /// Security-related settings for a profile (e.g., AWS credentials for secret resolution).
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -110,8 +120,8 @@ impl ProjectSettings {
 
     pub fn docker_image(&self) -> String {
         match self.mz_version.as_deref() {
-            None | Some("cloud") => DEFAULT_DOCKER_IMAGE.to_string(),
-            Some(tag) => format!("materialize/materialized:{}", tag),
+            None | Some("cloud") => default_docker_image(),
+            Some(tag) => format!("{DOCKER_IMAGE_BASE}:{tag}"),
         }
     }
 
@@ -150,16 +160,18 @@ pub enum ConfigError {
         "profiles configuration file not found at {path}\n\nSee mz-deploy help profiles for more information"
     )]
     ProfilesNotFound { path: String },
-    #[error("failed to read profiles configuration from {path}: {source}")]
+    #[error("failed to read {path}: {source}")]
     ReadError {
         path: String,
         source: std::io::Error,
     },
-    #[error("failed to parse profiles configuration from {path}: {source}")]
+    #[error("failed to parse {path}: {source}")]
     ParseError {
         path: String,
         source: toml::de::Error,
     },
+    #[error("could not determine home directory; set $HOME or pass --profiles-dir")]
+    HomeDirNotFound,
     #[error("project.toml not found at {path}")]
     ProjectSettingsNotFound { path: String },
     #[error("profile '{name}' not found in configuration")]
@@ -201,6 +213,21 @@ fn default_port() -> u16 {
     6875
 }
 
+/// Uppercase a profile name and replace any non-alphanumeric character with
+/// `_` so it can be embedded in a shell-legal env var identifier like
+/// `MZ_PROFILE_MY_PROD_PASSWORD`.
+fn sanitize_profile_for_env(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// All connection profiles loaded from a `profiles.toml` file.
 ///
 /// Provides lookup by profile name and environment variable expansion
@@ -221,8 +248,8 @@ impl ProfilesConfig {
         let dir = match profiles_dir {
             Some(d) => d.to_path_buf(),
             None => dirs::home_dir()
-                .map(|home| home.join(".mz"))
-                .unwrap_or_else(|| PathBuf::from("~/.mz")),
+                .ok_or(ConfigError::HomeDirNotFound)?
+                .join(".mz"),
         };
 
         let path = dir.join("profiles.toml");
@@ -279,8 +306,19 @@ impl ProfilesConfig {
             })
     }
 
-    /// Expand environment variables in a profile's password field
-    /// Supports ${VAR_NAME} syntax
+    /// Resolve a profile's password, applying environment variable overrides.
+    ///
+    /// Two override mechanisms, applied in order:
+    ///
+    /// 1. **Inline `${VAR_NAME}`** in `profiles.toml` — when the `password` field
+    ///    is exactly `"${SOMETHING}"` (no surrounding text), the referenced env
+    ///    var is read and substituted. Missing vars produce an error.
+    /// 2. **`MZ_PROFILE_<NAME>_PASSWORD`** — always checked; if set, overrides
+    ///    whatever the file (or step 1) produced. The profile name is
+    ///    uppercased and non-alphanumeric characters are replaced with `_` to
+    ///    form a valid shell identifier (so `my-prod` → `MY_PROD`). Profile
+    ///    names that differ only in such characters will collide on the same
+    ///    env var.
     pub fn expand_env_vars(&self, mut profile: Profile) -> Result<Profile, ConfigError> {
         if let Some(password) = &profile.password
             && password.starts_with("${")
@@ -294,9 +332,10 @@ impl ProfilesConfig {
             profile.password = Some(env_value);
         }
 
-        // Also check for environment variable override
-        // Format: MZ_PROFILE_{PROFILE_NAME}_PASSWORD
-        let env_var_name = format!("MZ_PROFILE_{}_PASSWORD", profile.name.to_uppercase());
+        let env_var_name = format!(
+            "MZ_PROFILE_{}_PASSWORD",
+            sanitize_profile_for_env(&profile.name)
+        );
         if let Ok(password) = std::env::var(&env_var_name) {
             profile.password = Some(password);
         }
@@ -308,7 +347,7 @@ impl ProfilesConfig {
         self.profiles.keys().map(|s| s.as_str()).collect()
     }
 
-    pub fn source_path(&self) -> &PathBuf {
+    pub fn source_path(&self) -> &Path {
         &self.source_path
     }
 
