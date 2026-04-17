@@ -149,8 +149,6 @@ mod tests {
         assert_eq!(locations[0].uri, expected);
     }
 
-    // ── Test helpers ──────────────────────────────────────────────
-
     /// Compile a project and open a ProjectCache from its SQLite DB.
     fn build_test_project_cache() -> (tempfile::TempDir, ProjectCache) {
         let root = tempfile::tempdir().unwrap();

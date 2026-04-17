@@ -112,7 +112,6 @@ impl From<compiled::Project> for Project {
     /// 3. **Reassemble** — Merge results into the dependency graph and
     ///    hierarchical `Project` structure.
     fn from(compiled_project: compiled::Project) -> Self {
-        // ── Step 1: Collect ─────────────────────────────────────────────
         // Flatten all compiled objects and collect defined object IDs.
         let collect_start = std::time::Instant::now();
 
@@ -171,7 +170,6 @@ impl From<compiled::Project> for Project {
 
         crate::timing!("  graph: collect", collect_start.elapsed());
 
-        // ── Step 2: Process ─────────────────────────────────────────────
         // Extract dependencies and clusters from each object.
         let process_start = std::time::Instant::now();
 
@@ -227,7 +225,6 @@ impl From<compiled::Project> for Project {
 
         crate::timing!("  graph: process", process_start.elapsed());
 
-        // ── Step 3: Reassemble ──────────────────────────────────────────
         // Merge results into dependency graph and hierarchical structure.
         let reassemble_start = std::time::Instant::now();
 

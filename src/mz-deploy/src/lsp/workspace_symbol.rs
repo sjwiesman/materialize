@@ -109,8 +109,6 @@ mod tests {
         assert_eq!(symbols[0].container_name.as_deref(), Some("mydb.public"));
     }
 
-    // ── Test helpers ──────────────────────────────────────────────
-
     fn build_test_project_cache() -> (tempfile::TempDir, ProjectCache) {
         let root = tempfile::tempdir().unwrap();
         let models = root.path().join("models/mydb/public");

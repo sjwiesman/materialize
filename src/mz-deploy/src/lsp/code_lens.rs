@@ -167,8 +167,6 @@ mod tests {
             .expect("cache DB should exist")
     }
 
-    // ── find_test_line tests ─────────────────────────────────────────
-
     #[test]
     fn test_find_test_line_basic() {
         let text = "CREATE VIEW foo AS SELECT 1;\n\nEXECUTE UNIT TEST my_test\nAS SELECT 1;\n";
@@ -186,8 +184,6 @@ mod tests {
         let text = "CREATE VIEW foo AS SELECT 1;\n";
         assert_eq!(find_test_line(text, "nonexistent"), None);
     }
-
-    // ── code_lenses integration tests ────────────────────────────────
 
     #[test]
     fn test_single_test() {

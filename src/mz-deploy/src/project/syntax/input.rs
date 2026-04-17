@@ -262,7 +262,6 @@ pub fn load_project<P: AsRef<Path>>(
         return Err(LoadError::ModelsNotFound { path: models_dir }.into());
     }
 
-    // ── Step 1: Collect ─────────────────────────────────────────────────
     // Walk directories, collect ParseTasks with file paths + metadata.
     // Mod statements are parsed inline since they are few.
     let collect_start = std::time::Instant::now();
@@ -415,7 +414,6 @@ pub fn load_project<P: AsRef<Path>>(
 
     crate::timing!("  input: collect", collect_start.elapsed());
 
-    // ── Step 2: Process ─────────────────────────────────────────────────
     // Read and parse each object file in parallel. Collect all errors.
     let process_start = std::time::Instant::now();
 
@@ -468,7 +466,6 @@ pub fn load_project<P: AsRef<Path>>(
 
     crate::timing!("  input: process", process_start.elapsed());
 
-    // ── Step 3: Reassemble ──────────────────────────────────────────────
     // Group parsed objects back into the hierarchical Project structure.
     let reassemble_start = std::time::Instant::now();
 

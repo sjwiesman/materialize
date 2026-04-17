@@ -195,8 +195,6 @@ pub fn resolve_reference(
 mod tests {
     use super::*;
 
-    // ── Phase A tests ─────────────────────────────────────────────
-
     #[test]
     fn unqualified_identifier() {
         let text = "SELECT * FROM foo";
@@ -274,8 +272,6 @@ mod tests {
         assert_eq!(parts, vec!["My Table"]);
     }
 
-    // ── Phase B tests ─────────────────────────────────────────────
-
     #[test]
     fn resolve_one_part_name() {
         let (root, cache) = build_test_project_cache();
@@ -344,8 +340,6 @@ mod tests {
         let expected_path = root.path().join("models/mydb/public/foo.sql");
         assert_eq!(location.uri, Url::from_file_path(expected_path).unwrap());
     }
-
-    // ── Test helpers ──────────────────────────────────────────────
 
     fn build_test_project_cache() -> (tempfile::TempDir, ProjectCache) {
         let root = tempfile::tempdir().unwrap();
