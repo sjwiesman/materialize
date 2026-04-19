@@ -44,7 +44,8 @@ pub struct FunctionInfo {
     pub name: String,
     /// One entry per overload, e.g. `abs(int2) -> int2`.
     pub signatures: Vec<String>,
-    /// Whether this is a scalar, aggregate, window, or table function.
+    /// Whether this is a scalar, aggregate, window, or table function. When a
+    /// name appears in multiple registries, the first-seen kind wins.
     pub kind: FunctionKind,
 }
 
@@ -178,6 +179,7 @@ mod tests {
         );
         let mut sorted = names.clone();
         sorted.sort();
+        assert_eq!(names, sorted, "prefix results not sorted: {:?}", names);
         sorted.dedup();
         assert_eq!(names.len(), sorted.len(), "duplicate names: {:?}", names);
     }
