@@ -22,8 +22,9 @@
 //!
 //! ### Functions ([`gather_functions`])
 //!
-//! Static list from [`super::functions::FUNCTIONS`]. Only offered when
-//! `dots == 0`. Label is the function name, detail is the full signature.
+//! Sourced from [`super::functions::FUNCTIONS`] (built from `mz_sql::func`
+//! registries). Only offered when `dots == 0`. Label is the function name,
+//! detail is the first overload's signature.
 //! Kind: `FUNCTION`. Sort: `4_`.
 //!
 //! ### Keywords ([`gather_keywords`])
@@ -455,7 +456,7 @@ fn format_candidate(candidate: &CompletionCandidate<'_>) -> CompletionItem {
         CompletionCandidate::Function { info } => CompletionItem {
             label: info.name.to_string(),
             kind: Some(CompletionItemKind::FUNCTION),
-            detail: Some(info.signature.to_string()),
+            detail: info.signatures.first().cloned(),
             sort_text: Some(format!("4_{}", info.name)),
             ..Default::default()
         },
