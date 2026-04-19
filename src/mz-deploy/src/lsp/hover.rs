@@ -16,9 +16,9 @@
 //! ## Function Hover
 //!
 //! If the identifier is not a project object, [`resolve_hover`] falls back to
-//! the static function registry ([`functions::lookup`]). Single unqualified
-//! names that match a built-in function show the function kind, signature, and
-//! description.
+//! the function registry ([`functions::lookup`]), which is derived from
+//! `mz_sql::func`. Single unqualified names that match a built-in show the
+//! function kind and one line per overload signature.
 //!
 //! ### Resolution
 //!
@@ -224,9 +224,9 @@ fn format_constraints(constraints: &[CachedConstraint]) -> Option<String> {
 
 /// Resolve hover for a SQL function name.
 ///
-/// Matches single unqualified names against the static function registry.
-/// Returns a Markdown tooltip showing the function kind, signature, and
-/// description.
+/// Matches single unqualified names against the function registry. Returns a
+/// Markdown tooltip showing the function kind and every overload signature,
+/// one per line in a code block.
 fn resolve_function_hover(parts: &[String]) -> Option<Hover> {
     if parts.len() != 1 {
         return None;
@@ -240,11 +240,8 @@ fn resolve_function_hover(parts: &[String]) -> Option<Hover> {
         functions::FunctionKind::Table => "table function",
     };
 
-    let markdown = format!(
-        "**{kind}** `{sig}`\n\n{desc}",
-        sig = func.signature,
-        desc = func.description,
-    );
+    let sigs = func.signatures.join("\n");
+    let markdown = format!("**{kind}**\n\n```\n{sigs}\n```");
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
