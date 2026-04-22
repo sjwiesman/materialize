@@ -80,10 +80,6 @@ pub struct ProvisioningClient<'a> {
 const APPLICATION_NAME: &str = "mz-deploy";
 
 impl Client {
-    // =========================================================================
-    // Connection Methods
-    // =========================================================================
-
     /// Connect to the database using a Profile directly.
     ///
     /// Tries TLS connection first (required for Materialize Cloud), then falls back
@@ -236,10 +232,6 @@ impl Client {
     pub fn provisioning(&self) -> ProvisioningClient<'_> {
         ProvisioningClient { client: self }
     }
-
-    // =========================================================================
-    // Basic Query Methods
-    // =========================================================================
 
     /// Execute a SQL statement that doesn't return rows.
     pub async fn execute<T>(
