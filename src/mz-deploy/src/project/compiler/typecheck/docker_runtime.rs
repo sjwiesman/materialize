@@ -101,6 +101,7 @@ impl DockerRuntime {
             port: CONTAINER_PORT,
             username: "materialize".to_string(),
             password: None,
+            options: Default::default(),
         }
     }
 
