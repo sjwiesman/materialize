@@ -195,10 +195,6 @@ pub enum ConfigError {
 }
 
 /// TLS mode selection for a profile, matching libpq's `sslmode` vocabulary
-/// except that `allow` is omitted.
-///
-/// See `src/mz-deploy/docs/superpowers/specs/2026-04-22-profile-tls-design.md`
-/// for the full behavior table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SslMode {
@@ -212,8 +208,6 @@ pub enum SslMode {
 /// Resolved connection details for a Materialize region.
 ///
 /// Constructed from a `profiles.toml` entry after environment variable expansion.
-/// The `options` map is taken verbatim; no `${VAR}` substitution is performed on
-/// option values.
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub name: String,

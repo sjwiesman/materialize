@@ -404,8 +404,7 @@ async fn run_tests(
         )
         .await?;
 
-        let elapsed =
-            Duration::try_from(start_time.elapsed()).unwrap_or(Duration::ZERO);
+        let elapsed = Duration::try_from(start_time.elapsed()).unwrap_or(Duration::ZERO);
 
         match &outcome {
             TestOutcome::Passed => passed_tests += 1,
@@ -413,7 +412,9 @@ async fn run_tests(
             TestOutcome::ValidationFailed(_) => validation_failed += 1,
         }
 
-        test_entries.push(TestResultEntry::new(&test.name, object_id, elapsed, outcome));
+        test_entries.push(TestResultEntry::new(
+            &test.name, object_id, elapsed, outcome,
+        ));
     }
 
     let total_run = passed_tests + failed_tests + validation_failed;
