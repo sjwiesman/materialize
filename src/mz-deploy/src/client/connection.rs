@@ -24,6 +24,7 @@
 //! - **Cloud** connections (all other hosts) → TLS with peer verification,
 //!   using system CA certificates from platform-specific paths
 
+use std::collections::BTreeMap;
 use crate::client::errors::ConnectionError;
 use crate::config::Profile;
 use crate::info;
@@ -322,7 +323,7 @@ fn escape_options_value(value: &str) -> String {
 /// Produces a space-separated string of `-c key=value` tokens in sorted-key
 /// order, with each value inner-escaped per [`escape_options_value`].
 /// Returns `None` when the map is empty so the caller can omit the fragment.
-fn build_options_string(options: &std::collections::BTreeMap<String, String>) -> Option<String> {
+fn build_options_string(options: &BTreeMap<String, String>) -> Option<String> {
     if options.is_empty() {
         return None;
     }
@@ -346,7 +347,6 @@ fn escape_conn_string_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     #[test]
     fn test_escape_options_value_plain() {
@@ -408,14 +408,25 @@ mod tests {
     }
 
     #[test]
-    fn test_build_options_string_composed_with_outer_escape() {
-        // Full round-trip: the inner build plus the outer libpq-string escape
-        // that `connect_with_profile` applies before wrapping in quotes.
+    fn test_build_options_string_escapes_value_backslash() {
         let mut options = BTreeMap::new();
-        options.insert("cluster".to_string(), "prod cluster".to_string());
+        options.insert("cluster".to_string(), r"a\b".to_string());
+        assert_eq!(
+            build_options_string(&options),
+            Some(r"-c cluster=a\\b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_options_string_composed_with_outer_escape() {
+        // Full round-trip over a mixed space+backslash value: the inner build
+        // plus the outer libpq-string escape that `connect_with_profile`
+        // applies before wrapping in quotes.
+        let mut options = BTreeMap::new();
+        options.insert("cluster".to_string(), r"a \b".to_string());
         let inner = build_options_string(&options).unwrap();
         let outer = escape_conn_string_value(&inner);
-        // Inner space becomes `\ `; outer escape doubles each backslash.
-        assert_eq!(outer, r"-c cluster=prod\\ cluster");
+        // Inner: space → `\ `, `\` → `\\`. Outer: each `\` doubled.
+        assert_eq!(outer, r"-c cluster=a\\ \\\\b");
     }
 }
