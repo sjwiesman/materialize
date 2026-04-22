@@ -223,6 +223,12 @@ pub struct Profile {
     pub password: Option<String>,
     /// Session variables to set via libpq's `options` parameter (`-c key=value` flags).
     pub options: BTreeMap<String, String>,
+    /// TLS mode override. `None` means "pick a default based on host":
+    /// `Prefer` for loopback, `Require` otherwise.
+    pub sslmode: Option<SslMode>,
+    /// Explicit CA bundle path for `verify-ca` / `verify-full`. `None` falls
+    /// through to the platform CA hunt.
+    pub sslrootcert: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -234,6 +240,10 @@ struct ProfileData {
     pub password: Option<String>,
     #[serde(default)]
     pub options: BTreeMap<String, String>,
+    #[serde(default)]
+    pub sslmode: Option<SslMode>,
+    #[serde(default)]
+    pub sslrootcert: Option<PathBuf>,
 }
 
 fn default_port() -> u16 {
@@ -337,6 +347,8 @@ impl ProfilesConfig {
                     username: data.username,
                     password: data.password,
                     options: data.options,
+                    sslmode: data.sslmode,
+                    sslrootcert: data.sslrootcert,
                 },
             );
         }

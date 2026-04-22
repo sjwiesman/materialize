@@ -102,6 +102,8 @@ impl DockerRuntime {
             username: "materialize".to_string(),
             password: None,
             options: Default::default(),
+            sslmode: None,
+            sslrootcert: None,
         }
     }
 
