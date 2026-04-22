@@ -24,12 +24,12 @@
 //! - **Cloud** connections (all other hosts) → TLS with peer verification,
 //!   using system CA certificates from platform-specific paths
 
-use std::collections::BTreeMap;
 use crate::client::errors::ConnectionError;
-use crate::config::Profile;
+use crate::config::{Profile, SslMode};
 use crate::info;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
+use std::collections::BTreeMap;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{
     Client as PgClient, NoTls, Row, SimpleQueryMessage, ToStatement, Transaction,
@@ -86,34 +86,16 @@ impl Client {
     /// Tries TLS connection first (required for Materialize Cloud), then falls back
     /// to NoTls for local connections (e.g., localhost, Docker).
     pub async fn connect_with_profile(profile: Profile) -> Result<Self, ConnectionError> {
-        // Build connection string
-        // Values with special characters need to be quoted with single quotes,
-        // and single quotes/backslashes within values need to be escaped
-        let mut conn_str = format!("host={} port={}", profile.host, profile.port);
-
-        conn_str.push_str(&format!(
-            " user='{}'",
-            escape_conn_string_value(&profile.username)
-        ));
-
-        if let Some(ref password) = profile.password {
-            conn_str.push_str(&format!(
-                " password='{}'",
-                escape_conn_string_value(password)
-            ));
+        let mut config = tokio_postgres::Config::new();
+        config.host(&profile.host);
+        config.port(profile.port);
+        config.user(&profile.username);
+        if let Some(password) = &profile.password {
+            config.password(password.as_str());
         }
-        conn_str.push_str(&format!(
-            " application_name='{}'",
-            escape_conn_string_value(APPLICATION_NAME)
-        ));
-
-        // build_options_string applies the inner libpq-options escape;
-        // escape_conn_string_value then applies the outer conn-string quoting.
+        config.application_name(APPLICATION_NAME);
         if let Some(inner) = build_options_string(&profile.options) {
-            conn_str.push_str(&format!(
-                " options='{}'",
-                escape_conn_string_value(&inner)
-            ));
+            config.options(&inner);
         }
 
         // Determine if this is likely a cloud connection (not localhost)
@@ -126,7 +108,8 @@ impl Client {
         let client = if is_local {
             // Local connection - use NoTls
             let (client, connection) =
-                tokio_postgres::connect(&conn_str, NoTls)
+                config
+                    .connect(NoTls)
                     .await
                     .map_err(|source| ConnectionError::Connect {
                         host: profile.host.clone(),
@@ -180,13 +163,15 @@ impl Client {
 
             let connector = MakeTlsConnector::new(builder.build());
 
-            let (client, connection) = tokio_postgres::connect(&conn_str, connector)
-                .await
-                .map_err(|source| ConnectionError::Connect {
-                    host: profile.host.clone(),
-                    port: profile.port,
-                    source,
-                })?;
+            let (client, connection) =
+                config
+                    .connect(connector)
+                    .await
+                    .map_err(|source| ConnectionError::Connect {
+                        host: profile.host.clone(),
+                        port: profile.port,
+                        source,
+                    })?;
 
             mz_ore::task::spawn(|| "mz-deploy-connection", async move {
                 if let Err(e) = connection.await {
@@ -308,6 +293,215 @@ impl Client {
     }
 }
 
+/// Platform CA bundle candidates, walked in order by `build_connector` when
+/// `sslmode` resolves to `verify-ca` / `verify-full` and the profile does not
+/// set `sslrootcert`. Kept in sync with libpq-like installations on our
+/// supported platforms.
+#[allow(dead_code)]
+const DEFAULT_CA_PATHS: &[&str] = &[
+    "/etc/ssl/cert.pem",                    // macOS system
+    "/opt/homebrew/etc/openssl@3/cert.pem", // macOS Homebrew ARM
+    "/usr/local/etc/openssl@3/cert.pem",    // macOS Homebrew Intel
+    "/opt/homebrew/etc/openssl/cert.pem",   // macOS Homebrew ARM (older)
+    "/usr/local/etc/openssl/cert.pem",      // macOS Homebrew Intel (older)
+    "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",     // RHEL/CentOS
+    "/etc/ssl/ca-bundle.pem",               // OpenSUSE
+];
+
+/// The default `SslMode` applied when a profile does not set `sslmode`.
+///
+/// Loopback hosts get `Prefer` so local Mz (which does not offer TLS) works
+/// without explicit config. Everything else gets `Require` — TLS is required
+/// but certificate verification is not. Users who want verification set
+/// `sslmode = "verify-ca"` or `sslmode = "verify-full"` explicitly.
+#[allow(dead_code)]
+fn default_sslmode(host: &str) -> SslMode {
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        SslMode::Prefer
+    } else {
+        SslMode::Require
+    }
+}
+
+/// How `verify-full` should match the cert's SAN entries.
+#[derive(Debug)]
+#[allow(dead_code)]
+enum HostCheck {
+    /// Match a DNS name. Host parsed as a non-IP string.
+    Dns(String),
+    /// Match an IPv4 or IPv6 literal. Host parsed as `IpAddr`.
+    Ip(std::net::IpAddr),
+}
+
+/// Pure-data representation of the TLS setup for a connection, derived from
+/// a profile's effective `SslMode` and `sslrootcert`.
+#[derive(Debug)]
+#[allow(dead_code)]
+enum ConnectorSpec {
+    NoTls,
+    Tls {
+        verify: openssl::ssl::SslVerifyMode,
+        host_check: Option<HostCheck>,
+        ca_source: CaSource,
+    },
+}
+
+/// Where the CA bundle comes from for verifying the server cert, or the
+/// absence thereof for non-verifying modes.
+#[derive(Debug)]
+#[allow(dead_code)]
+enum CaSource {
+    /// `disable` / `prefer` / `require` — no CA is loaded.
+    None,
+    /// Explicit path from the profile's `sslrootcert` field.
+    Explicit(std::path::PathBuf),
+    /// Path discovered by walking `DEFAULT_CA_PATHS`.
+    Hunted(std::path::PathBuf),
+    /// Fallback to OpenSSL's compiled-in default verify paths
+    /// (`set_default_verify_paths`). Used only when the hunt finds nothing
+    /// and no explicit path is set.
+    DefaultVerifyPaths,
+}
+
+/// Runtime-ready connector variant handed to `tokio_postgres::Config::connect`.
+#[allow(dead_code)]
+enum Connector {
+    NoTls,
+    Tls(postgres_openssl::MakeTlsConnector),
+}
+
+impl std::fmt::Debug for Connector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Connector::NoTls => write!(f, "Connector::NoTls"),
+            Connector::Tls(_) => write!(f, "Connector::Tls(...)"),
+        }
+    }
+}
+
+/// Plan the TLS setup for a connection from the resolved (mode, CA) inputs.
+///
+/// Pure: does no network I/O and — aside from the injected `ca_exists`
+/// predicate — does no filesystem I/O. Returns a [`ConnectorSpec`] that
+/// [`build_connector`] then materializes into an OpenSSL context.
+///
+/// `hunt_candidates` is the ordered list of default CA paths to probe when
+/// `sslrootcert` is not set. In production this is [`DEFAULT_CA_PATHS`];
+/// tests pass their own list plus a stubbed `ca_exists` predicate.
+#[allow(dead_code)]
+fn plan_connector(
+    mode: SslMode,
+    sslrootcert: Option<&std::path::Path>,
+    host: &str,
+    hunt_candidates: &[&std::path::Path],
+    ca_exists: impl Fn(&std::path::Path) -> bool,
+) -> Result<ConnectorSpec, ConnectionError> {
+    use openssl::ssl::SslVerifyMode;
+
+    match mode {
+        SslMode::Disable => Ok(ConnectorSpec::NoTls),
+        SslMode::Prefer | SslMode::Require => Ok(ConnectorSpec::Tls {
+            verify: SslVerifyMode::NONE,
+            host_check: None,
+            ca_source: CaSource::None,
+        }),
+        SslMode::VerifyCa | SslMode::VerifyFull => {
+            let ca_source = resolve_ca_source(sslrootcert, hunt_candidates, ca_exists)?;
+            let host_check = if matches!(mode, SslMode::VerifyFull) {
+                Some(match host.parse::<std::net::IpAddr>() {
+                    Ok(ip) => HostCheck::Ip(ip),
+                    Err(_) => HostCheck::Dns(host.to_string()),
+                })
+            } else {
+                None
+            };
+            Ok(ConnectorSpec::Tls {
+                verify: SslVerifyMode::PEER,
+                host_check,
+                ca_source,
+            })
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn resolve_ca_source(
+    explicit: Option<&std::path::Path>,
+    hunt_candidates: &[&std::path::Path],
+    ca_exists: impl Fn(&std::path::Path) -> bool,
+) -> Result<CaSource, ConnectionError> {
+    if let Some(path) = explicit {
+        if ca_exists(path) {
+            return Ok(CaSource::Explicit(path.to_path_buf()));
+        } else {
+            return Err(ConnectionError::TlsCaNotFound);
+        }
+    }
+    for candidate in hunt_candidates {
+        if ca_exists(candidate) {
+            return Ok(CaSource::Hunted(candidate.to_path_buf()));
+        }
+    }
+    Ok(CaSource::DefaultVerifyPaths)
+}
+
+/// Convert a [`ConnectorSpec`] into a runtime [`Connector`] by wiring up the
+/// OpenSSL context. All filesystem I/O for CAs happens here.
+#[allow(dead_code)]
+fn build_connector(spec: ConnectorSpec) -> Result<Connector, ConnectionError> {
+    use openssl::ssl::{SslConnector, SslMethod};
+
+    match spec {
+        ConnectorSpec::NoTls => Ok(Connector::NoTls),
+        ConnectorSpec::Tls {
+            verify,
+            host_check,
+            ca_source,
+        } => {
+            let mut builder = SslConnector::builder(SslMethod::tls()).map_err(|e| {
+                ConnectionError::Message(format!("Failed to create TLS builder: {}", e))
+            })?;
+
+            match ca_source {
+                CaSource::None => {}
+                CaSource::Explicit(path) | CaSource::Hunted(path) => {
+                    builder
+                        .set_ca_file(&path)
+                        .map_err(|_| ConnectionError::TlsCaNotFound)?;
+                }
+                CaSource::DefaultVerifyPaths => {
+                    builder
+                        .set_default_verify_paths()
+                        .map_err(|_| ConnectionError::TlsCaNotFound)?;
+                }
+            }
+
+            builder.set_verify(verify);
+
+            if let Some(check) = host_check {
+                let param = builder.verify_param_mut();
+                match check {
+                    HostCheck::Dns(name) => {
+                        param
+                            .set_host(&name)
+                            .map_err(|e| ConnectionError::Message(format!("{}", e)))?;
+                    }
+                    HostCheck::Ip(ip) => {
+                        param
+                            .set_ip(ip)
+                            .map_err(|e| ConnectionError::Message(format!("{}", e)))?;
+                    }
+                }
+            }
+
+            Ok(Connector::Tls(postgres_openssl::MakeTlsConnector::new(
+                builder.build(),
+            )))
+        }
+    }
+}
+
 /// Escape a value for embedding inside the libpq `options` connection
 /// parameter.
 ///
@@ -342,15 +536,6 @@ fn build_options_string(options: &BTreeMap<String, String>) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ");
     Some(joined)
-}
-
-/// Escape a value for use in a libpq connection string.
-///
-/// In connection strings, values containing special characters must be quoted
-/// with single quotes, and any single quotes or backslashes within the value
-/// must be escaped with a backslash.
-fn escape_conn_string_value(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 #[cfg(test)]
@@ -426,16 +611,180 @@ mod tests {
         );
     }
 
+    use std::path::Path;
+
     #[test]
-    fn test_build_options_string_composed_with_outer_escape() {
-        // Full round-trip over a mixed space+backslash value: the inner build
-        // plus the outer libpq-string escape that `connect_with_profile`
-        // applies before wrapping in quotes.
-        let mut options = BTreeMap::new();
-        options.insert("cluster".to_string(), r"a \b".to_string());
-        let inner = build_options_string(&options).unwrap();
-        let outer = escape_conn_string_value(&inner);
-        // Inner: space → `\ `, `\` → `\\`. Outer: each `\` doubled.
-        assert_eq!(outer, r"-c cluster=a\\ \\\\b");
+    fn plan_disable_produces_notls() {
+        let spec = plan_connector(
+            SslMode::Disable,
+            None,
+            "example.com",
+            &[],
+            |_| false,
+        )
+        .unwrap();
+        assert!(matches!(spec, ConnectorSpec::NoTls));
+    }
+
+    #[test]
+    fn plan_prefer_and_require_have_verify_none_and_no_ca() {
+        for mode in [SslMode::Prefer, SslMode::Require] {
+            let spec = plan_connector(mode, None, "example.com", &[], |_| true).unwrap();
+            match spec {
+                ConnectorSpec::Tls {
+                    verify,
+                    host_check,
+                    ca_source,
+                } => {
+                    assert_eq!(verify, openssl::ssl::SslVerifyMode::NONE);
+                    assert!(host_check.is_none());
+                    assert!(matches!(ca_source, CaSource::None));
+                }
+                other => panic!("expected Tls for {:?}, got {:?}", mode, other),
+            }
+        }
+    }
+
+    #[test]
+    fn plan_verify_ca_has_peer_verify_no_host_check() {
+        let spec = plan_connector(
+            SslMode::VerifyCa,
+            None,
+            "example.com",
+            &[Path::new("/does/not/exist"), Path::new("/tmp/fake-ca.pem")],
+            |p| p == Path::new("/tmp/fake-ca.pem"),
+        )
+        .unwrap();
+        match spec {
+            ConnectorSpec::Tls {
+                verify,
+                host_check,
+                ca_source,
+            } => {
+                assert_eq!(verify, openssl::ssl::SslVerifyMode::PEER);
+                assert!(host_check.is_none());
+                assert!(matches!(ca_source, CaSource::Hunted(p) if p == Path::new("/tmp/fake-ca.pem")));
+            }
+            other => panic!("expected Tls, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn plan_verify_full_dns_host_check() {
+        let spec = plan_connector(
+            SslMode::VerifyFull,
+            None,
+            "example.com",
+            &[Path::new("/tmp/fake-ca.pem")],
+            |_| true,
+        )
+        .unwrap();
+        match spec {
+            ConnectorSpec::Tls {
+                host_check: Some(HostCheck::Dns(ref name)),
+                ..
+            } => assert_eq!(name, "example.com"),
+            other => panic!("expected Tls with Dns host check, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn plan_verify_full_ip_host_check() {
+        let spec = plan_connector(
+            SslMode::VerifyFull,
+            None,
+            "10.0.0.5",
+            &[Path::new("/tmp/fake-ca.pem")],
+            |_| true,
+        )
+        .unwrap();
+        match spec {
+            ConnectorSpec::Tls {
+                host_check: Some(HostCheck::Ip(ip)),
+                ..
+            } => assert_eq!(ip, "10.0.0.5".parse::<std::net::IpAddr>().unwrap()),
+            other => panic!("expected Tls with Ip host check, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn plan_explicit_sslrootcert_wins_over_hunt() {
+        let explicit = std::path::PathBuf::from("/my/ca.pem");
+        let spec = plan_connector(
+            SslMode::VerifyCa,
+            Some(&explicit),
+            "example.com",
+            &[Path::new("/tmp/should-be-ignored.pem")],
+            |p| p == explicit.as_path(),
+        )
+        .unwrap();
+        match spec {
+            ConnectorSpec::Tls {
+                ca_source: CaSource::Explicit(p),
+                ..
+            } => assert_eq!(p, explicit),
+            other => panic!("expected Tls/Explicit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn plan_explicit_sslrootcert_missing_is_ca_not_found() {
+        let explicit = std::path::PathBuf::from("/no/such/file.pem");
+        let err = plan_connector(
+            SslMode::VerifyCa,
+            Some(&explicit),
+            "example.com",
+            &[Path::new("/tmp/fake-ca.pem")],
+            |_| false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConnectionError::TlsCaNotFound));
+    }
+
+    #[test]
+    fn plan_no_ca_sources_at_all_falls_back_to_default_verify_paths() {
+        let spec = plan_connector(
+            SslMode::VerifyFull,
+            None,
+            "example.com",
+            &[Path::new("/nope1"), Path::new("/nope2")],
+            |_| false,
+        )
+        .unwrap();
+        match spec {
+            ConnectorSpec::Tls {
+                ca_source: CaSource::DefaultVerifyPaths,
+                ..
+            } => {}
+            other => panic!("expected Tls/DefaultVerifyPaths, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_disable_returns_notls() {
+        let connector = build_connector(ConnectorSpec::NoTls).unwrap();
+        assert!(matches!(connector, Connector::NoTls));
+    }
+
+    #[test]
+    fn build_prefer_returns_tls_no_ca_work() {
+        let connector = build_connector(ConnectorSpec::Tls {
+            verify: openssl::ssl::SslVerifyMode::NONE,
+            host_check: None,
+            ca_source: CaSource::None,
+        })
+        .unwrap();
+        assert!(matches!(connector, Connector::Tls(_)));
+    }
+
+    #[test]
+    fn build_explicit_missing_ca_returns_ca_not_found() {
+        let err = build_connector(ConnectorSpec::Tls {
+            verify: openssl::ssl::SslVerifyMode::PEER,
+            host_check: None,
+            ca_source: CaSource::Explicit(std::path::PathBuf::from("/absolutely/not/a/real/file")),
+        })
+        .unwrap_err();
+        assert!(matches!(err, ConnectionError::TlsCaNotFound));
     }
 }
