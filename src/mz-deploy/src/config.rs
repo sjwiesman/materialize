@@ -179,6 +179,12 @@ pub enum ConfigError {
     #[error("environment variable '{var}' not found for profile '{profile}'")]
     EnvVarNotFound { var: String, profile: String },
     #[error(
+        "invalid option key '{key}' in profile '{profile}': option keys must be \
+         valid identifiers (alphanumeric and underscore, starting with a letter \
+         or underscore)"
+    )]
+    InvalidOptionKey { profile: String, key: String },
+    #[error(
         "invalid dependency '{entry}': expected a fully qualified 'database.schema.object' name"
     )]
     InvalidDependency { entry: String },
@@ -234,6 +240,21 @@ fn sanitize_profile_for_env(name: &str) -> String {
         .collect()
 }
 
+/// Check whether `key` is a valid identifier for a profile `[options]` entry.
+///
+/// Keys must start with an ASCII letter or underscore, followed by any number
+/// of ASCII letters, digits, or underscores. Empty keys are rejected.
+fn is_valid_option_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        None => false,
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        _ => false,
+    }
+}
+
 /// All connection profiles loaded from a `profiles.toml` file.
 ///
 /// Provides lookup by profile name and environment variable expansion
@@ -284,6 +305,14 @@ impl ProfilesConfig {
         // Convert ProfileData to Profile by adding the name field
         let mut profiles = BTreeMap::new();
         for (name, data) in profiles_data {
+            for key in data.options.keys() {
+                if !is_valid_option_key(key) {
+                    return Err(ConfigError::InvalidOptionKey {
+                        profile: name.clone(),
+                        key: key.clone(),
+                    });
+                }
+            }
             profiles.insert(
                 name.clone(),
                 Profile {
@@ -669,5 +698,50 @@ mod tests {
         "#;
         let data: BTreeMap<String, ProfileData> = toml::from_str(toml).unwrap();
         assert!(data.get("prod").unwrap().options.is_empty());
+    }
+
+    #[test]
+    fn test_is_valid_option_key_accepts_identifiers() {
+        assert!(is_valid_option_key("cluster"));
+        assert!(is_valid_option_key("search_path"));
+        assert!(is_valid_option_key("_mz_internal"));
+        assert!(is_valid_option_key("a1"));
+        assert!(is_valid_option_key("A"));
+    }
+
+    #[test]
+    fn test_is_valid_option_key_rejects_invalid() {
+        assert!(!is_valid_option_key(""));
+        assert!(!is_valid_option_key("search path"));
+        assert!(!is_valid_option_key("1cluster"));
+        assert!(!is_valid_option_key("cluster-name"));
+        assert!(!is_valid_option_key("cluster.name"));
+        assert!(!is_valid_option_key("'"));
+    }
+
+    #[test]
+    fn test_profiles_config_rejects_invalid_option_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.toml");
+        std::fs::write(
+            &path,
+            r#"
+                [staging]
+                host = "staging.example.com"
+                username = "deploy_bot"
+
+                [staging.options]
+                "search path" = "public"
+            "#,
+        )
+        .unwrap();
+        let err = ProfilesConfig::load(Some(dir.path())).unwrap_err();
+        match err {
+            ConfigError::InvalidOptionKey { profile, key } => {
+                assert_eq!(profile, "staging");
+                assert_eq!(key, "search path");
+            }
+            other => panic!("expected InvalidOptionKey, got {other:?}"),
+        }
     }
 }
