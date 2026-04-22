@@ -198,6 +198,7 @@ pub struct Profile {
     pub port: u16,
     pub username: String,
     pub password: Option<String>,
+    pub options: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -207,6 +208,8 @@ struct ProfileData {
     pub port: u16,
     pub username: String,
     pub password: Option<String>,
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
 }
 
 fn default_port() -> u16 {
@@ -286,6 +289,7 @@ impl ProfilesConfig {
                     port: data.port,
                     username: data.username,
                     password: data.password,
+                    options: data.options,
                 },
             );
         }
@@ -628,5 +632,39 @@ mod tests {
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
         let err = settings.validate_dependencies().unwrap_err();
         assert!(matches!(err, ConfigError::DuplicateDependency { .. }));
+    }
+
+    #[test]
+    fn test_profile_deserializes_options() {
+        let toml = r#"
+            [staging]
+            host = "staging.example.com"
+            username = "deploy_bot"
+
+            [staging.options]
+            cluster = "staging_cluster"
+            search_path = "public,reporting"
+        "#;
+        let data: BTreeMap<String, ProfileData> = toml::from_str(toml).unwrap();
+        let staging = data.get("staging").unwrap();
+        assert_eq!(
+            staging.options.get("cluster").map(String::as_str),
+            Some("staging_cluster")
+        );
+        assert_eq!(
+            staging.options.get("search_path").map(String::as_str),
+            Some("public,reporting")
+        );
+    }
+
+    #[test]
+    fn test_profile_options_default_empty() {
+        let toml = r#"
+            [prod]
+            host = "prod.example.com"
+            username = "deploy_bot"
+        "#;
+        let data: BTreeMap<String, ProfileData> = toml::from_str(toml).unwrap();
+        assert!(data.get("prod").unwrap().options.is_empty());
     }
 }
