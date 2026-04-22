@@ -29,19 +29,18 @@ use std::time::{Duration, Instant};
 /// - Exits when all clusters are ready or timeout is reached
 ///
 /// # Arguments
-/// * `profile` - Database profile containing connection information
+/// * `settings` - Resolved CLI settings (profile, project directory, etc.)
 /// * `deploy_id` - Staging deployment ID
 /// * `once` - If true, check once and exit; if false, track continuously
 /// * `timeout` - Optional timeout in seconds
 /// * `allowed_lag_secs` - Maximum allowed lag in seconds before marking as "lagging"
 ///
 /// # Returns
-/// Ok(()) if deployment becomes ready
+/// `Ok(())` once the deployment is ready.
 ///
 /// # Errors
-/// Returns `CliError::StagingEnvironmentNotFound` if deployment doesn't exist
-/// Returns `CliError::StagingAlreadyPromoted` if already promoted
-/// Returns `CliError::ReadyTimeout` if timeout is reached
+/// Surfaces connection errors (including unknown or already-promoted
+/// deployments) and `CliError::ReadyTimeout` when the timeout is reached.
 pub async fn run(
     settings: &Settings,
     deploy_id: &str,

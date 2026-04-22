@@ -1,7 +1,7 @@
 //! Test command — run unit tests against the database.
 //!
-//! Executes `.mztest` files from the project's `test/` directory against a
-//! live Materialize instance. The pipeline:
+//! Executes `EXECUTE UNIT TEST` statements attached to project objects
+//! against a Materialize instance spun up in Docker. The pipeline:
 //!
 //! 1. **Load** — Compile the project and optionally load/generate type metadata.
 //! 2. **Filter** — Select tests matching the user's filter pattern (supports
@@ -10,8 +10,8 @@
 //! 4. **Execute** — For each test: locate the target view, desugar the test
 //!    into SQL, execute setup statements, run the assertion query, and classify
 //!    the result.
-//! 5. **Report** — Print pass/fail output, write `test-results.json`, and
-//!    optionally produce JUnit XML.
+//! 5. **Report** — Print pass/fail output and, when requested, produce a
+//!    JUnit XML report.
 //!
 //! ## Outcome Classification
 //!
@@ -27,6 +27,7 @@ use crate::cli::progress;
 use crate::client::Client;
 use crate::config::Settings;
 use crate::project::compiler::typecheck::{DockerRuntime, TypeCheckError};
+use crate::project::ir::object_id::ObjectId;
 use crate::project::{self, ir::compiled};
 use crate::project_cache::ProjectCache;
 use crate::types::{self, Types};
@@ -39,44 +40,7 @@ use std::fmt::Write;
 use std::fs::File;
 use std::path::Path;
 use std::time::Instant;
-
-/// Top-level structure for the `test-results.json` file written after every test run.
-#[derive(Serialize)]
-struct TestResultsFile {
-    results: Vec<TestResultEntry>,
-    summary: TestSummary,
-}
-
-/// A single test result entry in the structured JSON output.
-#[derive(Serialize)]
-struct TestResultEntry {
-    name: String,
-    object_id: String,
-    file_path: String,
-    status: String,
-    elapsed_ms: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failure: Option<TestFailureJson>,
-}
-
-/// Structured failure detail, tagged by failure type.
-#[derive(Serialize)]
-#[serde(tag = "type")]
-enum TestFailureJson {
-    /// Assertion mismatch with missing/unexpected rows.
-    #[serde(rename = "assertion")]
-    Assertion {
-        columns: Vec<String>,
-        missing: Vec<BTreeMap<String, String>>,
-        unexpected: Vec<BTreeMap<String, String>>,
-    },
-    /// Test definition validation failure.
-    #[serde(rename = "validation")]
-    Validation { message: String },
-    /// Runtime or setup error.
-    #[serde(rename = "error")]
-    Error { message: String },
-}
+use time::Duration;
 
 /// Aggregate pass/fail counts for the test run.
 #[derive(Serialize)]
@@ -159,11 +123,7 @@ impl TestFilter {
         }
     }
 
-    fn matches(
-        &self,
-        object_id: &project::ir::object_id::ObjectId,
-        test: &unit_test::UnitTest,
-    ) -> bool {
+    fn matches(&self, object_id: &ObjectId, test: &unit_test::UnitTest) -> bool {
         if let Some(ref db) = self.database {
             if db != &object_id.database {
                 return false;
@@ -192,6 +152,7 @@ impl TestFilter {
 ///
 /// `ValidationFailed` is tracked separately from execution failures so summary output
 /// can distinguish broken test definitions from assertion/runtime failures.
+#[derive(Serialize)]
 enum TestOutcome {
     Passed,
     Failed(ExecutionFailure),
@@ -199,164 +160,211 @@ enum TestOutcome {
 }
 
 /// Pre-execution validation failure in a test definition.
+#[derive(Serialize)]
 enum ValidationFailure {
     UnitTest(unit_test::TestValidationError),
     AtTime(unit_test::InvalidAtTimeError),
 }
 
+#[derive(Serialize)]
 enum ExecutionFailure {
     /// Setup or query execution error.
     Error(String),
-    /// Test assertion mismatch with pre-formatted display, structured JUnit output,
-    /// and raw row data for JSON reporting.
+    /// Test assertion mismatch with raw row data for structured reporting.
+    /// Display output is formatted on demand from these fields.
     AssertionFailed {
-        display: String,
-        junit: String,
         columns: Vec<String>,
         missing: Vec<BTreeMap<String, String>>,
         unexpected: Vec<BTreeMap<String, String>>,
     },
 }
 
-impl TestOutcome {
-    /// Convert this outcome into a JUnit `TestCase` for XML reporting.
-    fn to_test_case(
-        &self,
-        name: &str,
-        object_id: &project::ir::object_id::ObjectId,
-        elapsed: time::Duration,
-    ) -> junit_report::TestCase {
-        let mut test_case = match self {
-            TestOutcome::Passed => junit_report::TestCase::success(name, elapsed),
-            TestOutcome::Failed(failure) => {
-                let msg = match failure {
-                    ExecutionFailure::Error(msg) => msg.replace('\n', "&#10;"),
-                    ExecutionFailure::AssertionFailed { junit, .. } => junit.clone(),
-                };
-                junit_report::TestCase::failure(name, elapsed, "assertion", &msg)
-            }
-            TestOutcome::ValidationFailed(failure) => {
-                let msg = match failure {
-                    ValidationFailure::UnitTest(e) => e.to_string().replace('\n', "&#10;"),
-                    ValidationFailure::AtTime(e) => e.to_string().replace('\n', "&#10;"),
-                };
-                junit_report::TestCase::failure(name, elapsed, "validation", &msg)
-            }
-        };
-        test_case.set_classname(&format!(
-            "{}.{}.{}",
-            object_id.database, object_id.schema, object_id.object
-        ));
-        test_case.set_filepath(&format!(
-            "models/{}/{}/{}.sql",
-            object_id.database, object_id.schema, object_id.object
-        ));
-        test_case
-    }
+/// Per-test result captured during execution and used to build the JUnit
+/// report. Serializable so the full result set can be emitted structurally
+/// (e.g. for future machine-readable reporting).
+#[derive(Serialize)]
+struct TestResultEntry {
+    name: String,
+    object_id: ObjectId,
+    status: TestOutcome,
+    elapsed_ms: u64,
+}
 
-    /// Build a structured JSON entry for this test outcome.
-    fn to_json_entry(
-        &self,
+impl TestResultEntry {
+    fn new(
         name: &str,
-        object_id: &project::ir::object_id::ObjectId,
-        elapsed: time::Duration,
+        object_id: &ObjectId,
+        elapsed: Duration,
+        status: TestOutcome,
     ) -> TestResultEntry {
         let elapsed_ms = u64::try_from(elapsed.whole_milliseconds().max(0)).unwrap_or(0);
-        let (status, failure) = match self {
-            TestOutcome::Passed => ("passed".to_string(), None),
-            TestOutcome::Failed(f) => match f {
-                ExecutionFailure::AssertionFailed {
-                    columns,
-                    missing,
-                    unexpected,
-                    ..
-                } => (
-                    "failed".to_string(),
-                    Some(TestFailureJson::Assertion {
-                        columns: columns.clone(),
-                        missing: missing.clone(),
-                        unexpected: unexpected.clone(),
-                    }),
-                ),
-                ExecutionFailure::Error(msg) => (
-                    "failed".to_string(),
-                    Some(TestFailureJson::Error {
-                        message: msg.clone(),
-                    }),
-                ),
-            },
-            TestOutcome::ValidationFailed(f) => {
-                let message = match f {
+        Self {
+            name: name.to_string(),
+            object_id: object_id.clone(),
+            status,
+            elapsed_ms,
+        }
+    }
+
+    /// Render this entry as a JUnit `TestCase`. The failure message for
+    /// assertion mismatches is regenerated from the structured row data.
+    fn to_junit_test_case(&self) -> junit_report::TestCase {
+        let elapsed = Duration::milliseconds(i64::try_from(self.elapsed_ms).unwrap_or(i64::MAX));
+        let mut test_case = match &self.status {
+            TestOutcome::Passed => junit_report::TestCase::success(&self.name, elapsed),
+            TestOutcome::Failed(ExecutionFailure::AssertionFailed {
+                columns,
+                missing,
+                unexpected,
+            }) => {
+                let msg = format_assertion_rows_for_junit(columns, missing, unexpected);
+                junit_report::TestCase::failure(&self.name, elapsed, "assertion", &msg)
+            }
+            TestOutcome::Failed(ExecutionFailure::Error(message)) => {
+                junit_report::TestCase::failure(
+                    &self.name,
+                    elapsed,
+                    "assertion",
+                    &message.replace('\n', "&#10;"),
+                )
+            }
+            TestOutcome::ValidationFailed(failure) => {
+                let message = match failure {
                     ValidationFailure::UnitTest(e) => e.to_string(),
                     ValidationFailure::AtTime(e) => e.to_string(),
                 };
-                (
-                    "validation_failed".to_string(),
-                    Some(TestFailureJson::Validation { message }),
+                junit_report::TestCase::failure(
+                    &self.name,
+                    elapsed,
+                    "validation",
+                    &message.replace('\n', "&#10;"),
                 )
             }
         };
-        TestResultEntry {
-            name: name.to_string(),
-            object_id: object_id.to_string(),
-            file_path: format!(
-                "models/{}/{}/{}.sql",
-                object_id.database, object_id.schema, object_id.object
-            ),
-            status,
-            elapsed_ms,
-            failure,
+        test_case.set_classname(&self.object_id.to_string());
+        test_case.set_filepath(&format!(
+            "models/{}/{}/{}.sql",
+            self.object_id.database, self.object_id.schema, self.object_id.object
+        ));
+        test_case
+    }
+}
+
+/// Aggregated results of a test run. Acts as the canonical intermediate form
+/// from which the JUnit XML report is derived, and is kept serializable so the
+/// same shape can back a structured JSON report in the future.
+#[derive(Serialize)]
+struct TestResults {
+    results: Vec<TestResultEntry>,
+    summary: TestSummary,
+}
+
+impl TestResults {
+    /// Build a JUnit XML report by grouping entries into one `TestSuite` per
+    /// target `object_id`.
+    fn to_junit_report(&self) -> junit_report::Report {
+        let mut suites: BTreeMap<String, junit_report::TestSuite> = BTreeMap::new();
+        for entry in &self.results {
+            suites
+                .entry(entry.object_id.to_string())
+                .or_insert_with(|| junit_report::TestSuite::new(&entry.object_id.to_string()))
+                .add_testcase(entry.to_junit_test_case());
         }
+        junit_report::ReportBuilder::new()
+            .add_testsuites(suites.into_values())
+            .build()
     }
 }
 
 /// Run unit tests against the database.
 ///
-/// This command:
-/// - Loads the project from the filesystem
-/// - Connects to the database
-/// - Finds all test files in the `test/` directory
-/// - Parses test files (`.mztest` format)
-/// - For each test:
-///   - Locates the target view in the project
-///   - Desugars the test into SQL statements
-///   - Executes setup statements (CREATE TEMP TABLE, etc.)
-///   - Runs the test query (a query that returns rows only on failure)
-///   - Reports pass/fail with detailed output
-/// - Cleans up after each test with DISCARD ALL
+/// Delegates test execution to [`run_tests`], then owns all presentation:
+/// printing per-test outcomes, printing the summary line, and optionally
+/// writing a JUnit XML report.
 ///
-/// # Test file format
+/// # Test statement syntax
 ///
-/// Tests use a custom format:
-/// ```text
-/// # test_name
-/// target_view
+/// Tests are authored as SQL statements attached to the object under test:
 ///
-/// field1 field2 field3
-/// ------
-/// value1 value2 value3
-/// value4 value5 value6
+/// ```sql
+/// EXECUTE UNIT TEST <name>
+///   FOR <target>
+///   [AT TIME <expr>]
+///   [MOCK <mock_view>(<columns>) AS <query>]*
+///   EXPECTED <expected_result>
 /// ```
 ///
-/// The test passes if the query returns no rows. Rows are returned when:
+/// A test passes when the derived assertion query returns no rows. Rows are
+/// returned when:
 /// - Expected rows are MISSING from the actual results
-/// - Unexpected rows appear in actual results
+/// - Unexpected rows appear in the actual results
 ///
 /// # Arguments
-/// * `directory` - Project root directory
+/// * `settings` - Resolved CLI settings (project directory, profile, Docker
+///   image, etc.)
+/// * `filter` - Optional `database.schema.object#test_name` pattern; `*`
+///   and omitted trailing segments act as wildcards
+/// * `junit_xml` - Optional path to write a JUnit XML report to
 ///
 /// # Returns
-/// Ok(()) if all tests pass
+/// `Ok(())` if all executed tests pass (including when there were no tests
+/// to run and no filter was supplied).
 ///
 /// # Errors
-/// Returns `CliError::Project` if project loading fails
-/// Returns `CliError::Connection` if database connection fails
-/// Returns error if tests fail (exits with code 1)
+/// - [`CliError::TestsFailed`] if any test failed or failed validation
+/// - [`CliError::TestsFilterMissed`] if `filter` matched no tests
+/// - Project planning, type-check, or JUnit I/O errors are propagated as
+///   [`CliError::Message`] or the corresponding variant
 pub async fn run(
     settings: &Settings,
     filter: Option<&str>,
     junit_xml: Option<&Path>,
 ) -> Result<(), CliError> {
+    let directory = &settings.directory;
+    info!(
+        "{}",
+        format!("Running tests from {}:", directory.display()).bold()
+    );
+    let results = run_tests(settings, filter).await?;
+    let test_results = match results {
+        Some(results) => results,
+        None => {
+            progress::info(&format!("No tests found in {}", directory.display()));
+            return Ok(());
+        }
+    };
+
+    for entry in &test_results.results {
+        print_test_outcome(&entry.name, &entry.status);
+    }
+
+    print_summary(&test_results.summary);
+
+    if let Some(path) = junit_xml {
+        let report = test_results.to_junit_report();
+        let mut file = File::create(path)
+            .map_err(|e| CliError::Message(format!("failed to create JUnit XML file: {}", e)))?;
+        report
+            .write_xml(&mut file)
+            .map_err(|e| CliError::Message(format!("failed to write JUnit XML report: {}", e)))?;
+    }
+
+    let summary = &test_results.summary;
+    let total_failed = summary.failed + summary.validation_failed;
+    if total_failed > 0 {
+        return Err(CliError::TestsFailed {
+            failed: total_failed,
+            passed: summary.passed,
+        });
+    }
+
+    Ok(())
+}
+
+async fn run_tests(
+    settings: &Settings,
+    filter: Option<&str>,
+) -> Result<Option<TestResults>, CliError> {
     let directory = &settings.directory;
     let planned_project = project::plan(
         directory.clone(),
@@ -370,21 +378,13 @@ pub async fn run(
     let test_filter = filter.map(TestFilter::parse);
 
     if planned_project.tests.is_empty() {
-        progress::info(&format!("No tests found in {}", directory.display()));
-        return Ok(());
+        return Ok(None);
     }
 
     let types_lock = types::load_types_lock(directory).unwrap_or_default();
     let types_cache = load_or_generate_types_cache(settings, &planned_project).await?;
 
-    info!(
-        "{}\n",
-        format!("Running tests from {}:", directory.display()).bold()
-    );
-
-    let mut junit_suites: BTreeMap<project::ir::object_id::ObjectId, junit_report::TestSuite> =
-        BTreeMap::new();
-    let mut json_results: Vec<TestResultEntry> = Vec::new();
+    let mut test_entries: Vec<TestResultEntry> = Vec::new();
     let (mut passed_tests, mut failed_tests, mut validation_failed) = (0, 0, 0);
     for (object_id, test) in &planned_project.tests {
         if let Some(ref f) = test_filter {
@@ -405,20 +405,15 @@ pub async fn run(
         .await?;
 
         let elapsed =
-            time::Duration::try_from(start_time.elapsed()).unwrap_or(time::Duration::ZERO);
-
-        print_test_outcome(&test.name, &outcome);
-        junit_suites
-            .entry(object_id.clone())
-            .or_insert_with(|| junit_report::TestSuite::new(&object_id.to_string()))
-            .add_testcase(outcome.to_test_case(&test.name, object_id, elapsed));
-        json_results.push(outcome.to_json_entry(&test.name, object_id, elapsed));
+            Duration::try_from(start_time.elapsed()).unwrap_or(Duration::ZERO);
 
         match &outcome {
             TestOutcome::Passed => passed_tests += 1,
             TestOutcome::Failed(_) => failed_tests += 1,
             TestOutcome::ValidationFailed(_) => validation_failed += 1,
         }
+
+        test_entries.push(TestResultEntry::new(&test.name, object_id, elapsed, outcome));
     }
 
     let total_run = passed_tests + failed_tests + validation_failed;
@@ -426,47 +421,17 @@ pub async fn run(
         if let Some(f) = filter {
             return Err(CliError::TestsFilterMissed { filter: f.into() });
         }
-        return Ok(());
+        return Ok(None);
     }
 
-    // Write structured JSON results unconditionally.
-    let results_file = TestResultsFile {
-        results: json_results,
+    Ok(Some(TestResults {
+        results: test_entries,
         summary: TestSummary {
             passed: passed_tests,
             failed: failed_tests,
             validation_failed,
         },
-    };
-    let target_dir = directory.join(crate::types::BUILD_DIR);
-    let _ = std::fs::create_dir_all(&target_dir);
-    let json_path = target_dir.join("test-results.json");
-    if let Ok(file) = File::create(&json_path) {
-        let _ = serde_json::to_writer_pretty(file, &results_file);
-    }
-
-    if let Some(path) = junit_xml {
-        let report = junit_report::ReportBuilder::new()
-            .add_testsuites(junit_suites.into_values())
-            .build();
-        let mut file = File::create(path)
-            .map_err(|e| CliError::Message(format!("failed to create JUnit XML file: {}", e)))?;
-        report
-            .write_xml(&mut file)
-            .map_err(|e| CliError::Message(format!("failed to write JUnit XML report: {}", e)))?;
-    }
-
-    print_summary(passed_tests, failed_tests, validation_failed);
-
-    let total_failed = failed_tests + validation_failed;
-    if total_failed > 0 {
-        return Err(CliError::TestsFailed {
-            failed: total_failed,
-            passed: passed_tests,
-        });
-    }
-
-    Ok(())
+    }))
 }
 
 /// Executes one test case through validation, setup SQL, assertion query, and cleanup.
@@ -475,7 +440,7 @@ pub async fn run(
 /// can own all presentation (printing, JUnit building, counting).
 async fn run_single_test(
     planned_project: &project::ir::graph::Project,
-    object_id: &project::ir::object_id::ObjectId,
+    object_id: &ObjectId,
     test: &unit_test::UnitTest,
     types_cache: &Option<ProjectCache>,
     types_lock: &Types,
@@ -552,8 +517,6 @@ async fn run_single_test(
             } else {
                 let (columns, missing, unexpected) = extract_assertion_data(&rows);
                 TestOutcome::Failed(ExecutionFailure::AssertionFailed {
-                    display: format_assertion_rows(&rows),
-                    junit: format_assertion_rows_for_junit(&rows),
                     columns,
                     missing,
                     unexpected,
@@ -573,27 +536,27 @@ async fn run_single_test(
 }
 
 /// Prints the test summary line showing pass/fail counts.
-fn print_summary(passed: usize, failed: usize, validation_failed: usize) {
-    let total_failed = failed + validation_failed;
+fn print_summary(summary: &TestSummary) {
+    let total_failed = summary.failed + summary.validation_failed;
     info_nonl!("\n{}: ", "test result".bold());
     if total_failed == 0 {
         info_nonl!("{}. ", "ok".green().bold());
     } else {
         info_nonl!("{}. ", "FAILED".red().bold());
     }
-    info_nonl!("{}; ", format!("{} passed", passed).green());
-    if failed > 0 {
-        info_nonl!("{}; ", format!("{} failed", failed).red());
+    info_nonl!("{}; ", format!("{} passed", summary.passed).green());
+    if summary.failed > 0 {
+        info_nonl!("{}; ", format!("{} failed", summary.failed).red());
     } else {
-        info_nonl!("{} failed; ", failed);
+        info_nonl!("{} failed; ", summary.failed);
     }
-    if validation_failed > 0 {
+    if summary.validation_failed > 0 {
         info!(
             "{}",
-            format!("{} validation errors", validation_failed).red()
+            format!("{} validation errors", summary.validation_failed).red()
         );
     } else {
-        info!("{} validation errors", validation_failed);
+        info!("{} validation errors", summary.validation_failed);
     }
 }
 
@@ -630,8 +593,12 @@ fn print_test_outcome(name: &str, outcome: &TestOutcome) {
                 "FAILED".red().bold()
             );
             match failure {
-                ExecutionFailure::AssertionFailed { display, .. } => {
-                    info_nonl!("{}", display)
+                ExecutionFailure::AssertionFailed {
+                    columns,
+                    missing,
+                    unexpected,
+                } => {
+                    info_nonl!("{}", format_assertion_rows(columns, missing, unexpected))
                 }
                 ExecutionFailure::Error(msg) => {
                     info!("  {}: {}", "error".red().bold(), msg)
@@ -685,8 +652,8 @@ async fn runtime_client(runtime: &DockerRuntime, _empty_types: &Types) -> Result
 
 /// Pre-validates optional `AT TIME` test expressions against `mz_timestamp` casting.
 ///
-/// Returns `Ok(Ok(()))` when valid, `Ok(Err(message))` on validation failure,
-/// and `Err(CliError)` on connection errors.
+/// Returns `Ok(Ok(()))` when valid, `Ok(Err(InvalidAtTimeError))` on
+/// validation failure, and `Err(CliError)` on connection errors.
 async fn validate_at_time(
     client: &Client,
     test: &unit_test::UnitTest,
@@ -706,100 +673,88 @@ async fn validate_at_time(
 }
 
 /// Converts planned object identity into the AST form expected by unit test desugaring.
-fn typed_fqn_from_object_id(
-    object_id: &project::ir::object_id::ObjectId,
-) -> compiled::FullyQualifiedName {
+fn typed_fqn_from_object_id(object_id: &ObjectId) -> compiled::FullyQualifiedName {
     compiled::FullyQualifiedName::from_object_id(object_id.clone())
 }
 
-/// Formats failing assertion rows into a readable table-like string.
+/// Formats failing assertion rows into a readable, ANSI-colored table for
+/// terminal output.
 ///
-/// This is intentionally display-only and does not affect pass/fail decisions.
-fn format_assertion_rows(rows: &[tokio_postgres::SimpleQueryRow]) -> String {
+/// Display-only; does not affect pass/fail decisions.
+fn format_assertion_rows(
+    columns: &[String],
+    missing: &[BTreeMap<String, String>],
+    unexpected: &[BTreeMap<String, String>],
+) -> String {
     let mut out = String::new();
     writeln!(out, "  {}:", "Test assertion failed".yellow().bold()).unwrap();
-    if let Some(first_row) = rows.first() {
-        let columns: Vec<String> = first_row
-            .columns()
-            .iter()
-            .map(|col| col.name().to_string())
-            .collect();
-        let header = columns.join(" | ");
-        writeln!(out, "  {}", header.bold().cyan()).unwrap();
-        writeln!(out, "  {}", "-".repeat(header.len()).cyan()).unwrap();
+    if missing.is_empty() && unexpected.is_empty() {
+        return out;
     }
+    let header = std::iter::once("status".to_string())
+        .chain(columns.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    writeln!(out, "  {}", header.bold().cyan()).unwrap();
+    writeln!(out, "  {}", "-".repeat(header.len()).cyan()).unwrap();
 
-    for row in rows {
-        let mut values = Vec::new();
-        for i in 0..row.columns().len() {
-            let value_str = row.get(i).unwrap_or("<null>").to_string();
-
-            if i == 0 {
-                let colored = match value_str.as_str() {
-                    "MISSING" => value_str.red().bold().to_string(),
-                    "UNEXPECTED" => value_str.yellow().bold().to_string(),
-                    _ => value_str,
-                };
-                values.push(colored);
-            } else {
-                values.push(value_str);
+    let groups: [(&str, &[BTreeMap<String, String>]); 2] =
+        [("MISSING", missing), ("UNEXPECTED", unexpected)];
+    for (status, rows) in groups {
+        let status_colored = match status {
+            "MISSING" => status.red().bold().to_string(),
+            "UNEXPECTED" => status.yellow().bold().to_string(),
+            _ => status.to_string(),
+        };
+        for row in rows {
+            let mut values = vec![status_colored.clone()];
+            for col_name in columns {
+                values.push(
+                    row.get(col_name)
+                        .cloned()
+                        .unwrap_or_else(|| "<null>".to_string()),
+                );
             }
+            writeln!(out, "  {}", values.join(" | ")).unwrap();
         }
-        writeln!(out, "  {}", values.join(" | ")).unwrap();
     }
     out
 }
 
-/// Formats failing assertion rows into structured plain-text for JUnit XML output.
+/// Formats structured assertion data into plain-text for JUnit XML output.
 ///
-/// Groups rows by status (MISSING / UNEXPECTED) and renders each row as
-/// `column_name=value` pairs, making failures easy to diagnose from CI reports.
-fn format_assertion_rows_for_junit(rows: &[tokio_postgres::SimpleQueryRow]) -> String {
-    if rows.is_empty() {
-        return String::new();
-    }
-
-    // Column names from the first row, skipping column 0 (status).
-    let columns: Vec<String> = rows[0]
-        .columns()
-        .iter()
-        .skip(1)
-        .map(|col| col.name().to_string())
-        .collect();
-
-    // Group rows by their status value (column 0).
-    let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for row in rows {
-        let status = row.get(0).unwrap_or("UNKNOWN").to_string();
-        let pairs: Vec<String> = columns
-            .iter()
-            .enumerate()
-            .map(|(i, col_name)| {
-                let value = row.get(i + 1).unwrap_or("<null>");
-                format!("{}={}", col_name, value)
-            })
-            .collect();
-        groups
-            .entry(status)
-            .or_default()
-            .push(format!("  {}", pairs.join(", ")));
-    }
+/// Renders each row as `column_name=value` pairs, grouped by status
+/// (MISSING / UNEXPECTED), making failures easy to diagnose from CI reports.
+fn format_assertion_rows_for_junit(
+    columns: &[String],
+    missing: &[BTreeMap<String, String>],
+    unexpected: &[BTreeMap<String, String>],
+) -> String {
+    let groups: [(&str, &str, &[BTreeMap<String, String>]); 2] = [
+        ("MISSING", "expected but not produced", missing),
+        ("UNEXPECTED", "produced but not expected", unexpected),
+    ];
 
     let mut out = String::new();
     let mut first = true;
-    for (status, row_lines) in &groups {
+    for (status, description, rows) in groups {
+        if rows.is_empty() {
+            continue;
+        }
         if !first {
             writeln!(out).unwrap();
         }
         first = false;
-        let description = match status.as_str() {
-            "MISSING" => "expected but not produced",
-            "UNEXPECTED" => "produced but not expected",
-            _ => "unknown status",
-        };
         writeln!(out, "{} rows ({}):", status, description).unwrap();
-        for line in row_lines {
-            writeln!(out, "{}", line).unwrap();
+        for row in rows {
+            let pairs: Vec<String> = columns
+                .iter()
+                .map(|col_name| {
+                    let value = row.get(col_name).map(String::as_str).unwrap_or("<null>");
+                    format!("{}={}", col_name, value)
+                })
+                .collect();
+            writeln!(out, "  {}", pairs.join(", ")).unwrap();
         }
     }
     out

@@ -50,37 +50,8 @@ struct PartitionedObjects<'a> {
     table_count: usize,
 }
 
-/// Deploy project to staging environment with renamed schemas and clusters.
-///
-/// This command implements blue/green deployment by creating staging versions of all
-/// schemas and clusters with a suffix (e.g., `public_dev` for staging env "dev").
-/// Objects are deployed to these staging resources, allowing testing without
-/// affecting production. Later, `apply --staging-env` can atomically swap staging
-/// and production using ALTER SWAP.
-///
-/// This command:
-/// - Compiles the project (using `compile::run`)
-/// - Determines staging environment name (from --name or git SHA)
-/// - Creates staging schemas (schema_<env>) for all schemas in the project
-/// - Creates staging clusters (cluster_<env>) by cloning production cluster configs
-/// - Deploys all objects to staging environment with transformed names
-/// - Records deployment metadata for conflict detection
-///
-/// # Arguments
-/// * `profile` - Database profile containing connection information
-/// * `stage_name` - Optional staging environment name (defaults to git SHA prefix, or random 7-char hex)
-/// * `directory` - Project root directory
-/// * `allow_dirty` - Allow deploying with uncommitted changes
-/// * `no_rollback` - Skip automatic rollback on failure (for debugging)
-/// * `dry_run` - If true, print SQL instead of executing
-///
-/// # Returns
-/// Ok(()) if staging deployment succeeds
-///
-/// # Errors
-/// Returns `CliError::GitDirty` if repository has uncommitted changes and allow_dirty is false
-/// Returns `CliError::Connection` for database errors
-/// Returns `CliError::Project` for project compilation errors
+/// Summary returned after a successful stage run, used for terminal output
+/// and `--json`.
 #[derive(serde::Serialize)]
 struct StageResult {
     deploy_id: String,
@@ -195,6 +166,28 @@ impl fmt::Display for StagePlan {
     }
 }
 
+/// Deploy the project to a staging or preview environment.
+///
+/// Creates renamed schemas and clusters alongside production, deploys the
+/// project onto them, and records metadata so a later `apply` can atomically
+/// swap staging into production. `DeploymentMode::Preview` runs the same
+/// pipeline for a throwaway, non-promotable environment.
+///
+/// # Arguments
+/// * `settings` - Resolved CLI settings (project directory, profile, etc.)
+/// * `stage_name` - Optional environment name; defaults to a git-derived or
+///   random identifier
+/// * `allow_dirty` - Allow deploying with uncommitted changes
+/// * `no_rollback` - Skip automatic rollback on failure (for debugging)
+/// * `dry_run` - Print SQL instead of executing it
+/// * `mode` - Stage vs. Preview deployment mode
+///
+/// # Returns
+/// `Ok(())` if the deployment succeeds.
+///
+/// # Errors
+/// Surfaces `CliError` variants from git checks, project compilation, and
+/// database execution.
 pub async fn run(
     settings: &Settings,
     stage_name: Option<&str>,

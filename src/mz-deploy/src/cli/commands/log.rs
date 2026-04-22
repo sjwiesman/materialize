@@ -65,7 +65,7 @@ impl fmt::Display for HistoryOutput {
 /// each deployment showing the "commit message" (schemas changed).
 ///
 /// # Arguments
-/// * `profile` - Database profile containing connection information
+/// * `settings` - Resolved CLI settings (profile, project directory, etc.)
 /// * `limit` - Optional limit on number of deployments to show
 ///
 /// # Returns

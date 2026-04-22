@@ -9,9 +9,9 @@
 //! the SQL AST during type checking and do not need server queries.
 //!
 //! - **`lock`** uses [`query_types_for_objects`](TypeInfoClient::query_types_for_objects)
-//!   to generate `types.lock` for declared dependencies and source tables. This
-//!   method issues a single catalog query per object joining `mz_columns`,
-//!   `mz_objects`, and `mz_comments` to retrieve columns, kind, and comments.
+//!   to generate `types.lock` for declared dependencies and source tables,
+//!   retrieving column types, object kind, and comments from the catalog in a
+//!   single query per object.
 //! - **`query_external_types`** delegates to `query_types_for_objects`, extracting
 //!   object lists from the compiled project graph.
 //! - **Incremental type checking** uses [`query_object_columns`](TypeInfoClient::query_object_columns)

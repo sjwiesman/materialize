@@ -39,9 +39,7 @@
 //! - **Object names** — Dynamic completions from the project model and external
 //!   dependencies, computed per-request. Qualification level adapts to the
 //!   dot-qualified prefix the user has already typed (0 dots = minimum, 1 dot =
-//!   schema.object, 2+ dots = db.schema.object). Each item carries a
-//!   `text_edit` that replaces the entire typed prefix, so the editor
-//!   substitutes rather than appends.
+//!   schema.object, 2+ dots = db.schema.object).
 //!
 //! ## Document Symbols
 //!
