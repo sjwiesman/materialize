@@ -191,6 +191,8 @@ pub enum ConfigError {
 /// Resolved connection details for a Materialize region.
 ///
 /// Constructed from a `profiles.toml` entry after environment variable expansion.
+/// The `options` map is taken verbatim; no `${VAR}` substitution is performed on
+/// option values.
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub name: String,
@@ -198,6 +200,7 @@ pub struct Profile {
     pub port: u16,
     pub username: String,
     pub password: Option<String>,
+    /// Session variables to set via libpq's `options` parameter (`-c key=value` flags).
     pub options: BTreeMap<String, String>,
 }
 
