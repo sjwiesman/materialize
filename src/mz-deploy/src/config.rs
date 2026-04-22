@@ -194,6 +194,21 @@ pub enum ConfigError {
     DuplicateDependency { entry: String },
 }
 
+/// TLS mode selection for a profile, matching libpq's `sslmode` vocabulary
+/// except that `allow` is omitted.
+///
+/// See `src/mz-deploy/docs/superpowers/specs/2026-04-22-profile-tls-design.md`
+/// for the full behavior table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SslMode {
+    Disable,
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
+}
+
 /// Resolved connection details for a Materialize region.
 ///
 /// Constructed from a `profiles.toml` entry after environment variable expansion.
