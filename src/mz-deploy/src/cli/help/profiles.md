@@ -18,6 +18,8 @@ Each profile contains:
 - **port** — Port number (default: 6875).
 - **username** — Database user.
 - **password** — Database password (optional, supports variable substitution).
+- **options** — Optional map of session variables applied to every connection
+  (see *Per-profile connection options* below).
 
 ## Where profiles are stored
 
@@ -91,6 +93,34 @@ The profile name is uppercased:
 
 This takes precedence over the password in `profiles.toml`, including
 `${VAR}` substitution.
+
+## Per-profile connection options
+
+Each profile may define an optional `[options]` table whose key–value pairs
+are sent to the server as session variables via libpq's `options` connection
+parameter. This is the cleanest way to pin a default cluster or search path
+for every command that uses a given profile.
+
+````toml
+[staging]
+host = "staging.example.com"
+username = "deploy_bot"
+password = "${STAGING_PASSWORD}"
+
+[staging.options]
+cluster = "staging_cluster"
+search_path = "public,reporting"
+````
+
+Rules:
+
+- **Keys must be valid identifiers** — start with a letter or underscore, then
+  letters, digits, or underscores. Invalid keys produce a config-load error.
+- **Values are verbatim** — no `${VAR}` expansion. Use the `password` field
+  for secrets.
+- **Applies to every connection** — the options string is built into the
+  connection string, so every mz-deploy command using this profile starts
+  with these session variables set.
 
 ## Per-profile suffix
 
