@@ -101,7 +101,7 @@ are sent to the server as session variables via libpq's `options` connection
 parameter. This is the cleanest way to pin a default cluster or search path
 for every command that uses a given profile.
 
-````toml
+```toml
 [staging]
 host = "staging.example.com"
 username = "deploy_bot"
@@ -110,7 +110,7 @@ password = "${STAGING_PASSWORD}"
 [staging.options]
 cluster = "staging_cluster"
 search_path = "public,reporting"
-````
+```
 
 Rules:
 
