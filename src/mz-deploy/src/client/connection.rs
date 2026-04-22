@@ -107,6 +107,8 @@ impl Client {
             escape_conn_string_value(APPLICATION_NAME)
         ));
 
+        // build_options_string applies the inner libpq-options escape;
+        // escape_conn_string_value then applies the outer conn-string quoting.
         if let Some(inner) = build_options_string(&profile.options) {
             conn_str.push_str(&format!(
                 " options='{}'",
