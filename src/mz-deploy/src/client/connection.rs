@@ -107,6 +107,13 @@ impl Client {
             escape_conn_string_value(APPLICATION_NAME)
         ));
 
+        if let Some(inner) = build_options_string(&profile.options) {
+            conn_str.push_str(&format!(
+                " options='{}'",
+                escape_conn_string_value(&inner)
+            ));
+        }
+
         // Determine if this is likely a cloud connection (not localhost)
         let is_local = profile.host == "localhost"
             || profile.host == "127.0.0.1"
