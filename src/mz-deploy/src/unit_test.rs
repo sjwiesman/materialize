@@ -45,6 +45,7 @@ use crate::types::ColumnType;
 use crate::types::Types;
 use mz_sql_parser::ast::{CreateViewStatement, IfExistsBehavior, ViewDefinition};
 use owo_colors::OwoColorize;
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use thiserror::Error;
@@ -151,12 +152,8 @@ pub struct ExpectedResult {
     pub query: String,
 }
 
-// =============================================================================
-// Test Validation
-// =============================================================================
-
 /// Errors that can occur during unit test validation.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Serialize)]
 pub enum TestValidationError {
     /// A required dependency is not mocked
     #[error("unmocked dependency")]
@@ -180,7 +177,7 @@ pub enum TestValidationError {
 }
 
 /// Error: A dependency of the target view is not mocked.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct UnmockedDependencyError {
     /// Test name
     pub test_name: String,
@@ -226,7 +223,7 @@ impl fmt::Display for UnmockedDependencyError {
 impl std::error::Error for UnmockedDependencyError {}
 
 /// Error: A mock's columns don't match the actual schema.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct MockSchemaMismatchError {
     /// Test name
     pub test_name: String,
@@ -326,7 +323,7 @@ impl fmt::Display for MockSchemaMismatchError {
 impl std::error::Error for MockSchemaMismatchError {}
 
 /// Error: Expected output columns don't match the target view schema.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ExpectedSchemaMismatchError {
     /// Test name
     pub test_name: String,
@@ -425,7 +422,7 @@ impl fmt::Display for ExpectedSchemaMismatchError {
 impl std::error::Error for ExpectedSchemaMismatchError {}
 
 /// Error: The AT TIME value is not a valid timestamp.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct InvalidAtTimeError {
     /// Test name
     pub test_name: String,

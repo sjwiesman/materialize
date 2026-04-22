@@ -70,11 +70,13 @@ fn build_functions() -> Vec<FunctionInfo> {
     for registry in registries {
         for (name, func) in registry.iter() {
             let kind = FunctionKind::from_func(func);
-            let entry = by_name.entry((*name).to_string()).or_insert_with(|| FunctionInfo {
-                name: (*name).to_string(),
-                signatures: Vec::new(),
-                kind,
-            });
+            let entry = by_name
+                .entry((*name).to_string())
+                .or_insert_with(|| FunctionInfo {
+                    name: (*name).to_string(),
+                    signatures: Vec::new(),
+                    kind,
+                });
             for details in func.func_impls() {
                 entry.signatures.push(format_signature(name, &details));
             }
@@ -123,7 +125,10 @@ mod tests {
         let f = lookup("abs").expect("abs should exist");
         assert_eq!(f.name, "abs");
         assert_eq!(f.kind, FunctionKind::Scalar);
-        assert!(!f.signatures.is_empty(), "abs should have at least one overload");
+        assert!(
+            !f.signatures.is_empty(),
+            "abs should have at least one overload"
+        );
         assert!(
             f.signatures.iter().all(|s| s.starts_with("abs(")),
             "every signature should start with the function name, got {:?}",

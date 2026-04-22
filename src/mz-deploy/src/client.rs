@@ -17,8 +17,6 @@
 //!
 //! ## Supporting Submodules
 //!
-//! - **`config`** — Profile and project settings loading (`profiles.toml`,
-//!   `project.toml`).
 //! - **`models`** — Data structures shared across sub-clients (deployment
 //!   records, cluster configs, conflict records, etc.).
 //! - **`errors`** — Error types: `ConnectionError` for transport/query

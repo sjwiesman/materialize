@@ -106,7 +106,7 @@ impl fmt::Display for DescribeOutput {
 /// command to drill into a specific deployment's details.
 ///
 /// # Arguments
-/// * `profile` - Database profile containing connection information
+/// * `settings` - Resolved CLI settings (profile, project directory, etc.)
 /// * `deploy_id` - The deployment ID to describe
 ///
 /// # Returns

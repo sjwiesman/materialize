@@ -129,7 +129,7 @@ impl fmt::Display for ListOutput {
 /// Similar to `git branch` - shows active development branches.
 ///
 /// # Arguments
-/// * `profile` - Database profile containing connection information
+/// * `settings` - Resolved CLI settings (profile, project directory, etc.)
 /// * `allowed_lag_secs` - Maximum allowed lag in seconds before marking as "lagging"
 ///
 /// # Returns

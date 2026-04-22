@@ -10,10 +10,9 @@
 //! - **[`compile`]** — Parse and validate the project, optionally type-checking
 //!   against a Docker container.
 //! - **[`explain`]** — Show the EXPLAIN plan for a materialized view or index.
-//! - **[`stage`]** — Deploy the project to a staging environment using
-//!   blue/green schemas.
-//! - **`preview`** — Deploy the project to a preview environment (developer
-//!   role, not promotable). Reuses the stage pipeline with [`DeploymentMode::Preview`].
+//! - **[`stage`]** — Deploy the project to a staging or preview environment.
+//!   Preview deployments are a non-promotable variant exposed by this same
+//!   command.
 //! - **[`wait`]** — Check hydration status of a staged deployment.
 //! - **[`promote`]** — Promote a staged deployment to production.
 //! - **[`apply_all`]** — Orchestrate all infrastructure apply steps.

@@ -146,7 +146,7 @@ struct ObjectDescriptor {
 ///
 /// - `path` — absolute path to the `.sql` file on disk.
 /// - `profile` — `None` for the default variant (`object.sql`), `Some("prod")`
-///   for a profile override (`object.prod.sql`). Used during active-variant
+///   for a profile override (`object__prod.sql`). Used during active-variant
 ///   resolution to select which file to compile for the current profile.
 #[derive(Debug, Clone)]
 struct VariantDescriptor {
@@ -248,19 +248,13 @@ enum ObjectPlanResult {
 
 /// Compile a project directory into a dependency-aware [`graph::Project`].
 ///
-/// This is the canonical synchronous compiler entrypoint. It opens (or
-/// creates) the SQLite build artifact database for the active profile namespace,
-/// then runs a two-phase compile:
+/// This is the canonical synchronous compiler entrypoint. It parses and
+/// validates every object for the active profile, reusing cached artifacts
+/// when fingerprints still match, and returns a fully-linked project graph
+/// with dependency and cross-object validation applied.
 ///
-/// 1. **Plan** — fingerprint every discovered object against cached artifacts.
-///    Objects whose fingerprint matches a stored row are cache hits; the rest
-///    are collected as misses.
-/// 2. **Compile** — parse, validate, and normalize each cache miss from source,
-///    then persist the new artifacts.
-///
-/// Both phases run with object-level parallelism via rayon. After all objects
-/// are available, the compiler assembles the full project, runs cross-object
-/// validation, extracts dependencies, and produces the final graph.
+/// See [`compile_sync_with_stats`] for the detailed pipeline and cache
+/// behavior.
 pub fn compile_sync<P: AsRef<Path>>(
     root: P,
     profile: &str,
@@ -478,7 +472,7 @@ fn build_cluster_name_map(
 ///     <schema>/               ← directory name = schema name
 ///       <schema>.sql          ← optional schema-level mod file
 ///       <object>.sql          ← one file per database object
-///       <object>.<profile>.sql ← optional profile variant override
+///       <object>__<profile>.sql ← optional profile variant override
 /// ```
 ///
 /// For each database directory:

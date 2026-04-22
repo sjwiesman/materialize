@@ -167,7 +167,6 @@ impl Client {
             }
 
             if !ca_loaded {
-                // Fall back to default paths as last resort
                 let _ = builder.set_default_verify_paths();
             }
 
@@ -183,7 +182,6 @@ impl Client {
                     source,
                 })?;
 
-            // Spawn the connection handler
             mz_ore::task::spawn(|| "mz-deploy-connection", async move {
                 if let Err(e) = connection.await {
                     info!("connection error: {}", e);

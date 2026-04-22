@@ -74,7 +74,6 @@ pub fn default_constraint_name(
 ///
 /// * `constraint` - The constraint to lower
 /// * `parent_object_name` - The simple name of the parent object (e.g., `"foo"`)
-/// * `parent_on_name` - The fully-qualified `on_name` from the constraint statement
 /// * `database` - The database containing the parent object
 /// * `schema` - The schema containing the parent object
 ///
