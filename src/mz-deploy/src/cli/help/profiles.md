@@ -20,6 +20,11 @@ Each profile contains:
 - **password** — Database password (optional, supports variable substitution).
 - **options** — Optional map of session variables applied to every connection
   (see *Per-profile connection options* below).
+- **sslmode** — Optional TLS mode (`disable`, `prefer`, `require`, `verify-ca`,
+  or `verify-full`). Defaults to `prefer` for loopback hosts and `require`
+  otherwise. See *TLS configuration* below.
+- **sslrootcert** — Optional path to a CA bundle PEM file, used only when
+  `sslmode` is `verify-ca` or `verify-full`. See *TLS configuration* below.
 
 ## Where profiles are stored
 
@@ -121,6 +126,61 @@ Rules:
 - **Applies to every connection** — the options string is built into the
   connection string, so every mz-deploy command using this profile starts
   with these session variables set.
+
+## TLS configuration
+
+Two optional fields control TLS: `sslmode` and `sslrootcert`.
+
+`sslmode` follows libpq's vocabulary (minus `allow`):
+
+| Value | Encrypt | Verify chain | Verify hostname |
+|-------|---------|--------------|-----------------|
+| `disable` | no | n/a | n/a |
+| `prefer` | if offered | no | no |
+| `require` | yes | no | no |
+| `verify-ca` | yes | yes | no |
+| `verify-full` | yes | yes | yes |
+
+When unset, the default is `prefer` for loopback hosts (`localhost`,
+`127.0.0.1`, `::1`) and `require` for everything else.
+
+`sslrootcert` is an optional absolute path to a CA bundle in PEM format,
+used only by `verify-ca` and `verify-full`. When unset, mz-deploy walks a
+short list of platform CA paths (macOS system, Homebrew, Debian/Ubuntu,
+RHEL, OpenSUSE) and falls back to OpenSSL's compiled-in defaults.
+
+### Recommended for Materialize Cloud
+
+```toml
+[prod]
+host = "foo.materialize.cloud"
+username = "seth@materialize.com"
+password = "${MZ_PROFILE_PROD_PASSWORD}"
+sslmode = "verify-full"
+```
+
+### Self-hosted with private CA
+
+```toml
+[staging]
+host = "mz.internal.example.com"
+username = "deploy_bot"
+password = "${MZ_PROFILE_STAGING_PASSWORD}"
+sslmode = "verify-full"
+sslrootcert = "/etc/ssl/internal-ca.pem"
+```
+
+### Private-network plaintext Materialize
+
+Set `sslmode = "disable"` explicitly. With no `sslmode`, the default
+`require` will fail with an error pointing you at this setting.
+
+```toml
+[internal]
+host = "10.0.1.42"
+username = "deploy_bot"
+sslmode = "disable"
+```
 
 ## Per-profile suffix
 
