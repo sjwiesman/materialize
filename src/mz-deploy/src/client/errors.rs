@@ -29,6 +29,44 @@ pub enum ConnectionError {
         source: tokio_postgres::Error,
     },
 
+    #[error(
+        "TLS required by profile but server at {host}:{port} does not support TLS\n\
+         \n\
+         help: The server did not offer TLS. To connect without encryption, set\n\
+         \x20     sslmode = \"disable\" on the profile. To use TLS if available\n\
+         \x20     but fall back to plaintext otherwise, set sslmode = \"prefer\"."
+    )]
+    TlsRequiredNotSupported {
+        host: String,
+        port: u16,
+        source: tokio_postgres::Error,
+    },
+
+    #[error(
+        "TLS certificate verification failed for {host}:{port}: {source}\n\
+         \n\
+         help: The server's certificate could not be verified against the trusted\n\
+         \x20     CA bundle{hostname_suffix}. To skip verification, set\n\
+         \x20     sslmode = \"require\" or sslmode = \"prefer\". To use a custom\n\
+         \x20     CA bundle, set sslrootcert = \"/path/to/ca.pem\" on the profile."
+    )]
+    TlsVerification {
+        host: String,
+        port: u16,
+        hostname_suffix: &'static str,
+        source: tokio_postgres::Error,
+    },
+
+    #[error(
+        "no CA bundle found for TLS verification\n\
+         \n\
+         help: Set sslrootcert = \"/path/to/ca.pem\" on the profile to point at\n\
+         \x20     a specific CA bundle, or install the system CA bundle at one\n\
+         \x20     of: /etc/ssl/cert.pem, /etc/ssl/certs/ca-certificates.crt, or\n\
+         \x20     the platform-appropriate equivalent."
+    )]
+    TlsCaNotFound,
+
     #[error("{}", format_query_error(.0))]
     Query(tokio_postgres::Error),
 
