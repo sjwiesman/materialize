@@ -103,10 +103,8 @@ impl Client {
         let mode = profile
             .sslmode
             .unwrap_or_else(|| default_sslmode(&profile.host));
-        let hunt: Vec<&std::path::Path> = DEFAULT_CA_PATHS
-            .iter()
-            .map(std::path::Path::new)
-            .collect();
+        let hunt: Vec<&std::path::Path> =
+            DEFAULT_CA_PATHS.iter().map(std::path::Path::new).collect();
         let spec = plan_connector(
             mode,
             profile.sslrootcert.as_deref(),
@@ -466,16 +464,91 @@ fn build_connector(spec: ConnectorSpec) -> Result<Connector, ConnectionError> {
     }
 }
 
+/// Classify a `tokio_postgres::Error` surfaced from `Config::connect(...)`
+/// into the most specific `ConnectionError` variant.
+///
+/// Rules:
+/// - OpenSSL error found in the source chain + `mode` is `verify-*` →
+///   [`ConnectionError::TlsVerification`] (with `hostname_suffix` if the
+///   OpenSSL message names a hostname / IP mismatch).
+/// - `mode` is `require` / `verify-*` and the error message indicates the
+///   server refused TLS → [`ConnectionError::TlsRequiredNotSupported`].
+/// - Otherwise → [`ConnectionError::Connect`].
 fn classify_connect_error(
     source: tokio_postgres::Error,
     profile: &Profile,
-    _mode: SslMode,
+    mode: SslMode,
 ) -> ConnectionError {
+    if matches!(mode, SslMode::VerifyCa | SslMode::VerifyFull) {
+        if let Some(ssl_msg) = ssl_error_in_chain(&source) {
+            let hostname_suffix = if ssl_msg.contains("hostname mismatch")
+                || ssl_msg.contains("Hostname mismatch")
+                || ssl_msg.contains("IP address mismatch")
+            {
+                " (hostname mismatch)"
+            } else {
+                ""
+            };
+            return ConnectionError::TlsVerification {
+                host: profile.host.clone(),
+                port: profile.port,
+                hostname_suffix,
+                source,
+            };
+        }
+    }
+
+    if matches!(
+        mode,
+        SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull
+    ) && message_indicates_tls_refused(&source)
+    {
+        return ConnectionError::TlsRequiredNotSupported {
+            host: profile.host.clone(),
+            port: profile.port,
+            source,
+        };
+    }
+
     ConnectionError::Connect {
         host: profile.host.clone(),
         port: profile.port,
         source,
     }
+}
+
+/// Walk the source chain of a `tokio_postgres::Error` and return the string
+/// form of the first `openssl::error::ErrorStack` found.
+fn ssl_error_in_chain(err: &tokio_postgres::Error) -> Option<String> {
+    let mut cur: &(dyn std::error::Error + 'static) = err;
+    while let Some(source) = std::error::Error::source(cur) {
+        if source.is::<openssl::error::ErrorStack>() {
+            return Some(source.to_string());
+        }
+        cur = source;
+    }
+    None
+}
+
+/// Heuristic: does the error look like "server said no to our TLS request"?
+///
+/// `tokio_postgres` surfaces this as an io error or a "server does not
+/// support TLS" message depending on version. We string-match the Display
+/// form because the typed variants are not all public.
+fn message_indicates_tls_refused(err: &tokio_postgres::Error) -> bool {
+    matches_tls_refused_message(&err.to_string())
+}
+
+/// Pure string check for the substrings `tokio_postgres` produces when the
+/// server refuses the TLS startup request (responds `'N'` to the SSL byte).
+///
+/// Extracted from `message_indicates_tls_refused` so we can unit-test the
+/// substring list — the caller takes `&tokio_postgres::Error`, which has no
+/// public constructor.
+fn matches_tls_refused_message(msg: &str) -> bool {
+    msg.contains("TLS was required")
+        || msg.contains("server does not support TLS")
+        || msg.contains("server does not support SSL")
 }
 
 /// Escape a value for embedding inside the libpq `options` connection
@@ -757,5 +830,33 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, ConnectionError::TlsCaNotFound));
+    }
+
+    #[test]
+    fn matches_tls_refused_tls_was_required() {
+        assert!(matches_tls_refused_message(
+            "some prefix: TLS was required but not provided"
+        ));
+    }
+
+    #[test]
+    fn matches_tls_refused_does_not_support_tls() {
+        assert!(matches_tls_refused_message(
+            "error: server does not support TLS"
+        ));
+    }
+
+    #[test]
+    fn matches_tls_refused_does_not_support_ssl() {
+        assert!(matches_tls_refused_message(
+            "error: server does not support SSL"
+        ));
+    }
+
+    #[test]
+    fn matches_tls_refused_unrelated_message() {
+        assert!(!matches_tls_refused_message("connection refused"));
+        assert!(!matches_tls_refused_message("database does not exist"));
+        assert!(!matches_tls_refused_message(""));
     }
 }
