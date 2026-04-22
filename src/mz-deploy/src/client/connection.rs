@@ -298,6 +298,42 @@ impl Client {
     }
 }
 
+/// Escape a value for embedding inside the libpq `options` connection
+/// parameter.
+///
+/// Within the `options` string, spaces separate `-c key=value` tokens unless
+/// escaped, and backslash is the escape character. Only spaces and backslashes
+/// are special; all other characters are literal.
+fn escape_options_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            ' ' => out.push_str(r"\ "),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Build the inner value of the libpq `options` connection parameter from a
+/// profile's options map.
+///
+/// Produces a space-separated string of `-c key=value` tokens in sorted-key
+/// order, with each value inner-escaped per [`escape_options_value`].
+/// Returns `None` when the map is empty so the caller can omit the fragment.
+fn build_options_string(options: &std::collections::BTreeMap<String, String>) -> Option<String> {
+    if options.is_empty() {
+        return None;
+    }
+    let joined = options
+        .iter()
+        .map(|(k, v)| format!("-c {k}={}", escape_options_value(v)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(joined)
+}
+
 /// Escape a value for use in a libpq connection string.
 ///
 /// In connection strings, values containing special characters must be quoted
@@ -305,4 +341,81 @@ impl Client {
 /// must be escaped with a backslash.
 fn escape_conn_string_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_escape_options_value_plain() {
+        assert_eq!(escape_options_value("prod"), "prod");
+    }
+
+    #[test]
+    fn test_escape_options_value_space() {
+        assert_eq!(escape_options_value("prod cluster"), r"prod\ cluster");
+    }
+
+    #[test]
+    fn test_escape_options_value_backslash() {
+        assert_eq!(escape_options_value(r"a\b"), r"a\\b");
+    }
+
+    #[test]
+    fn test_escape_options_value_mixed() {
+        // Space then backslash
+        assert_eq!(escape_options_value(r"a \b"), r"a\ \\b");
+    }
+
+    #[test]
+    fn test_build_options_string_empty() {
+        let options: BTreeMap<String, String> = BTreeMap::new();
+        assert_eq!(build_options_string(&options), None);
+    }
+
+    #[test]
+    fn test_build_options_string_single() {
+        let mut options = BTreeMap::new();
+        options.insert("cluster".to_string(), "prod".to_string());
+        assert_eq!(
+            build_options_string(&options),
+            Some("-c cluster=prod".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_options_string_multiple_sorted() {
+        let mut options = BTreeMap::new();
+        // Insert in reverse order to verify BTreeMap iteration sorts keys.
+        options.insert("search_path".to_string(), "public".to_string());
+        options.insert("cluster".to_string(), "prod".to_string());
+        assert_eq!(
+            build_options_string(&options),
+            Some("-c cluster=prod -c search_path=public".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_options_string_escapes_value_space() {
+        let mut options = BTreeMap::new();
+        options.insert("cluster".to_string(), "prod cluster".to_string());
+        assert_eq!(
+            build_options_string(&options),
+            Some(r"-c cluster=prod\ cluster".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_options_string_composed_with_outer_escape() {
+        // Full round-trip: the inner build plus the outer libpq-string escape
+        // that `connect_with_profile` applies before wrapping in quotes.
+        let mut options = BTreeMap::new();
+        options.insert("cluster".to_string(), "prod cluster".to_string());
+        let inner = build_options_string(&options).unwrap();
+        let outer = escape_conn_string_value(&inner);
+        // Inner space becomes `\ `; outer escape doubles each backslash.
+        assert_eq!(outer, r"-c cluster=prod\\ cluster");
+    }
 }
