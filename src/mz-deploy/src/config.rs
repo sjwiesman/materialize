@@ -183,7 +183,7 @@ pub enum ConfigError {
          valid identifiers (alphanumeric and underscore, starting with a letter \
          or underscore)"
     )]
-    InvalidOptionKey { profile: String, key: String },
+    InvalidOptionKey { key: String, profile: String },
     #[error(
         "invalid dependency '{entry}': expected a fully qualified 'database.schema.object' name"
     )]
@@ -717,6 +717,7 @@ mod tests {
         assert!(!is_valid_option_key("cluster-name"));
         assert!(!is_valid_option_key("cluster.name"));
         assert!(!is_valid_option_key("'"));
+        assert!(!is_valid_option_key("café"));
     }
 
     #[test]
