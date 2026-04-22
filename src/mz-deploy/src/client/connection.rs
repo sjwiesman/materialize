@@ -20,15 +20,15 @@
 //!
 //! ## TLS Policy
 //!
-//! - **Local** connections (localhost, 127.0.0.1, private IP ranges) → `NoTls`
-//! - **Cloud** connections (all other hosts) → TLS with peer verification,
-//!   using system CA certificates from platform-specific paths
+//! Per-profile `sslmode` with libpq semantics (`disable`, `prefer`, `require`,
+//! `verify-ca`, `verify-full`). When unset, loopback hosts default to
+//! `prefer` and everything else defaults to `require`. See the design at
+//! `docs/superpowers/specs/2026-04-22-profile-tls-design.md` for the behavior
+//! table and migration notes.
 
 use crate::client::errors::ConnectionError;
 use crate::config::{Profile, SslMode};
 use crate::info;
-use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
-use postgres_openssl::MakeTlsConnector;
 use std::collections::BTreeMap;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{
@@ -83,8 +83,10 @@ const APPLICATION_NAME: &str = "mz-deploy";
 impl Client {
     /// Connect to the database using a Profile directly.
     ///
-    /// Tries TLS connection first (required for Materialize Cloud), then falls back
-    /// to NoTls for local connections (e.g., localhost, Docker).
+    /// TLS behavior is driven by `profile.sslmode`; when unset, loopback hosts
+    /// default to `prefer` and everything else defaults to `require`. Verification
+    /// (`verify-ca` / `verify-full`) sources CAs from `profile.sslrootcert`, then
+    /// the platform CA hunt, then OpenSSL's compiled-in defaults.
     pub async fn connect_with_profile(profile: Profile) -> Result<Self, ConnectionError> {
         let mut config = tokio_postgres::Config::new();
         config.host(&profile.host);
@@ -98,89 +100,51 @@ impl Client {
             config.options(&inner);
         }
 
-        // Determine if this is likely a cloud connection (not localhost)
-        let is_local = profile.host == "localhost"
-            || profile.host == "127.0.0.1"
-            || profile.host.starts_with("192.168.")
-            || profile.host.starts_with("10.")
-            || profile.host.starts_with("172.");
+        let mode = profile
+            .sslmode
+            .unwrap_or_else(|| default_sslmode(&profile.host));
+        let hunt: Vec<&std::path::Path> = DEFAULT_CA_PATHS
+            .iter()
+            .map(std::path::Path::new)
+            .collect();
+        let spec = plan_connector(
+            mode,
+            profile.sslrootcert.as_deref(),
+            &profile.host,
+            &hunt,
+            |p| p.exists(),
+        )?;
+        let connector = build_connector(spec)?;
 
-        let client = if is_local {
-            // Local connection - use NoTls
-            let (client, connection) =
-                config
+        config.ssl_mode(tokio_ssl_mode(mode));
+
+        // `config.connect(NoTls)` and `config.connect(tls)` return `Connection`s
+        // parameterized over different TLS stream types that can't unify. We box
+        // both to a common `dyn Future` so there's a single spawn site below.
+        type BoxConnection =
+            Box<dyn std::future::Future<Output = Result<(), tokio_postgres::Error>> + Send + Unpin>;
+        let (client, connection): (PgClient, BoxConnection) = match connector {
+            Connector::NoTls => {
+                let (client, connection) = config
                     .connect(NoTls)
                     .await
-                    .map_err(|source| ConnectionError::Connect {
-                        host: profile.host.clone(),
-                        port: profile.port,
-                        source,
-                    })?;
-
-            // Spawn the connection handler
-            mz_ore::task::spawn(|| "mz-deploy-connection", async move {
-                if let Err(e) = connection.await {
-                    info!("connection error: {}", e);
-                }
-            });
-
-            client
-        } else {
-            // Cloud connection - use TLS
-            let mut builder = SslConnector::builder(SslMethod::tls()).map_err(|e| {
-                ConnectionError::Message(format!("Failed to create TLS builder: {}", e))
-            })?;
-
-            // Load CA certificates - try platform-specific paths
-            // macOS: Homebrew OpenSSL or system certificates
-            // Linux: Standard system paths
-            let ca_paths = [
-                "/etc/ssl/cert.pem",                    // macOS system
-                "/opt/homebrew/etc/openssl@3/cert.pem", // macOS Homebrew ARM
-                "/usr/local/etc/openssl@3/cert.pem",    // macOS Homebrew Intel
-                "/opt/homebrew/etc/openssl/cert.pem",   // macOS Homebrew ARM (older)
-                "/usr/local/etc/openssl/cert.pem",      // macOS Homebrew Intel (older)
-                "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
-                "/etc/pki/tls/certs/ca-bundle.crt",     // RHEL/CentOS
-                "/etc/ssl/ca-bundle.pem",               // OpenSUSE
-            ];
-
-            let mut ca_loaded = false;
-            for path in &ca_paths {
-                if std::path::Path::new(path).exists() {
-                    if builder.set_ca_file(path).is_ok() {
-                        ca_loaded = true;
-                        break;
-                    }
-                }
+                    .map_err(|source| classify_connect_error(source, &profile, mode))?;
+                (client, Box::new(connection))
             }
-
-            if !ca_loaded {
-                let _ = builder.set_default_verify_paths();
-            }
-
-            builder.set_verify(SslVerifyMode::PEER);
-
-            let connector = MakeTlsConnector::new(builder.build());
-
-            let (client, connection) =
-                config
-                    .connect(connector)
+            Connector::Tls(tls) => {
+                let (client, connection) = config
+                    .connect(tls)
                     .await
-                    .map_err(|source| ConnectionError::Connect {
-                        host: profile.host.clone(),
-                        port: profile.port,
-                        source,
-                    })?;
-
-            mz_ore::task::spawn(|| "mz-deploy-connection", async move {
-                if let Err(e) = connection.await {
-                    info!("connection error: {}", e);
-                }
-            });
-
-            client
+                    .map_err(|source| classify_connect_error(source, &profile, mode))?;
+                (client, Box::new(connection))
+            }
         };
+
+        mz_ore::task::spawn(|| "mz-deploy-connection", async move {
+            if let Err(e) = connection.await {
+                info!("connection error: {}", e);
+            }
+        });
 
         Ok(Client { client, profile })
     }
@@ -297,7 +261,6 @@ impl Client {
 /// `sslmode` resolves to `verify-ca` / `verify-full` and the profile does not
 /// set `sslrootcert`. Kept in sync with libpq-like installations on our
 /// supported platforms.
-#[allow(dead_code)]
 const DEFAULT_CA_PATHS: &[&str] = &[
     "/etc/ssl/cert.pem",                    // macOS system
     "/opt/homebrew/etc/openssl@3/cert.pem", // macOS Homebrew ARM
@@ -315,7 +278,6 @@ const DEFAULT_CA_PATHS: &[&str] = &[
 /// without explicit config. Everything else gets `Require` — TLS is required
 /// but certificate verification is not. Users who want verification set
 /// `sslmode = "verify-ca"` or `sslmode = "verify-full"` explicitly.
-#[allow(dead_code)]
 fn default_sslmode(host: &str) -> SslMode {
     if host == "localhost" || host == "127.0.0.1" || host == "::1" {
         SslMode::Prefer
@@ -324,9 +286,17 @@ fn default_sslmode(host: &str) -> SslMode {
     }
 }
 
+fn tokio_ssl_mode(mode: SslMode) -> tokio_postgres::config::SslMode {
+    use tokio_postgres::config::SslMode as TokioMode;
+    match mode {
+        SslMode::Disable => TokioMode::Disable,
+        SslMode::Prefer => TokioMode::Prefer,
+        SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => TokioMode::Require,
+    }
+}
+
 /// How `verify-full` should match the cert's SAN entries.
 #[derive(Debug)]
-#[allow(dead_code)]
 enum HostCheck {
     /// Match a DNS name. Host parsed as a non-IP string.
     Dns(String),
@@ -337,7 +307,6 @@ enum HostCheck {
 /// Pure-data representation of the TLS setup for a connection, derived from
 /// a profile's effective `SslMode` and `sslrootcert`.
 #[derive(Debug)]
-#[allow(dead_code)]
 enum ConnectorSpec {
     NoTls,
     Tls {
@@ -350,7 +319,6 @@ enum ConnectorSpec {
 /// Where the CA bundle comes from for verifying the server cert, or the
 /// absence thereof for non-verifying modes.
 #[derive(Debug)]
-#[allow(dead_code)]
 enum CaSource {
     /// `disable` / `prefer` / `require` — no CA is loaded.
     None,
@@ -365,7 +333,6 @@ enum CaSource {
 }
 
 /// Runtime-ready connector variant handed to `tokio_postgres::Config::connect`.
-#[allow(dead_code)]
 enum Connector {
     NoTls,
     Tls(postgres_openssl::MakeTlsConnector),
@@ -389,7 +356,6 @@ impl std::fmt::Debug for Connector {
 /// `hunt_candidates` is the ordered list of default CA paths to probe when
 /// `sslrootcert` is not set. In production this is [`DEFAULT_CA_PATHS`];
 /// tests pass their own list plus a stubbed `ca_exists` predicate.
-#[allow(dead_code)]
 fn plan_connector(
     mode: SslMode,
     sslrootcert: Option<&std::path::Path>,
@@ -425,7 +391,6 @@ fn plan_connector(
     }
 }
 
-#[allow(dead_code)]
 fn resolve_ca_source(
     explicit: Option<&std::path::Path>,
     hunt_candidates: &[&std::path::Path],
@@ -448,7 +413,6 @@ fn resolve_ca_source(
 
 /// Convert a [`ConnectorSpec`] into a runtime [`Connector`] by wiring up the
 /// OpenSSL context. All filesystem I/O for CAs happens here.
-#[allow(dead_code)]
 fn build_connector(spec: ConnectorSpec) -> Result<Connector, ConnectionError> {
     use openssl::ssl::{SslConnector, SslMethod};
 
@@ -499,6 +463,18 @@ fn build_connector(spec: ConnectorSpec) -> Result<Connector, ConnectionError> {
                 builder.build(),
             )))
         }
+    }
+}
+
+fn classify_connect_error(
+    source: tokio_postgres::Error,
+    profile: &Profile,
+    _mode: SslMode,
+) -> ConnectionError {
+    ConnectionError::Connect {
+        host: profile.host.clone(),
+        port: profile.port,
+        source,
     }
 }
 
@@ -615,14 +591,7 @@ mod tests {
 
     #[test]
     fn plan_disable_produces_notls() {
-        let spec = plan_connector(
-            SslMode::Disable,
-            None,
-            "example.com",
-            &[],
-            |_| false,
-        )
-        .unwrap();
+        let spec = plan_connector(SslMode::Disable, None, "example.com", &[], |_| false).unwrap();
         assert!(matches!(spec, ConnectorSpec::NoTls));
     }
 
@@ -663,7 +632,9 @@ mod tests {
             } => {
                 assert_eq!(verify, openssl::ssl::SslVerifyMode::PEER);
                 assert!(host_check.is_none());
-                assert!(matches!(ca_source, CaSource::Hunted(p) if p == Path::new("/tmp/fake-ca.pem")));
+                assert!(
+                    matches!(ca_source, CaSource::Hunted(p) if p == Path::new("/tmp/fake-ca.pem"))
+                );
             }
             other => panic!("expected Tls, got {:?}", other),
         }
