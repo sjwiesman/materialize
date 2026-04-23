@@ -161,7 +161,7 @@ pub(super) async fn insert_schema_deployments(
     }
 
     let insert_sql = r#"
-        INSERT INTO _mz_deploy.public.deployments
+        INSERT INTO _mz_deploy.tables.deployments
             (deploy_id, database, schema, deployed_at, deployed_by, promoted_at, commit, kind, mode)
         VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -201,7 +201,7 @@ pub(super) async fn append_deployment_objects(
     }
 
     let insert_sql = r#"
-        INSERT INTO _mz_deploy.public.objects
+        INSERT INTO _mz_deploy.tables.objects
             (deploy_id, database, schema, object, hash)
         VALUES
             ($1, $2, $3, $4, $5)
@@ -272,9 +272,9 @@ pub(super) async fn insert_deployment_clusters(
         });
     }
 
-    // Step 2: Insert the cluster IDs into _mz_deploy.public.clusters
+    // Step 2: Insert the cluster IDs into _mz_deploy.tables.clusters
     let insert_sql = r#"
-        INSERT INTO _mz_deploy.public.clusters (deploy_id, cluster_id)
+        INSERT INTO _mz_deploy.tables.clusters (deploy_id, cluster_id)
         VALUES ($1, $2)
     "#;
 
@@ -353,7 +353,7 @@ pub(super) async fn delete_deployment_clusters(
 ) -> Result<(), ConnectionError> {
     client
         .execute(
-            "DELETE FROM _mz_deploy.public.clusters WHERE deploy_id = $1",
+            "DELETE FROM _mz_deploy.tables.clusters WHERE deploy_id = $1",
             &[&deploy_id],
         )
         .await?;
@@ -363,7 +363,7 @@ pub(super) async fn delete_deployment_clusters(
 /// Update promoted_at timestamp for a staging deployment.
 pub(super) async fn update_promoted_at(client: &Client, deploy_id: &str) -> Result<(), ConnectionError> {
     let update_sql = r#"
-        UPDATE _mz_deploy.public.deployments
+        UPDATE _mz_deploy.tables.deployments
         SET promoted_at = NOW()
         WHERE deploy_id = $1
     "#;
@@ -376,13 +376,13 @@ pub(super) async fn update_promoted_at(client: &Client, deploy_id: &str) -> Resu
 pub(super) async fn delete_deployment(client: &Client, deploy_id: &str) -> Result<(), ConnectionError> {
     client
         .execute(
-            "DELETE FROM _mz_deploy.public.deployments WHERE deploy_id = $1",
+            "DELETE FROM _mz_deploy.tables.deployments WHERE deploy_id = $1",
             &[&deploy_id],
         )
         .await?;
     client
         .execute(
-            "DELETE FROM _mz_deploy.public.objects WHERE deploy_id = $1",
+            "DELETE FROM _mz_deploy.tables.objects WHERE deploy_id = $1",
             &[&deploy_id],
         )
         .await?;
@@ -1120,7 +1120,7 @@ pub(super) async fn insert_pending_statements(
     }
 
     let insert_sql = r#"
-        INSERT INTO _mz_deploy.public.pending_statements
+        INSERT INTO _mz_deploy.tables.pending_statements
             (deploy_id, sequence_num, database, schema, object, object_hash, statement_sql, statement_kind, executed_at)
         VALUES
             ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -1188,7 +1188,7 @@ pub(super) async fn mark_statement_executed(
     sequence_num: i32,
 ) -> Result<(), ConnectionError> {
     let update_sql = r#"
-        UPDATE _mz_deploy.public.pending_statements
+        UPDATE _mz_deploy.tables.pending_statements
         SET executed_at = NOW()
         WHERE deploy_id = $1 AND sequence_num = $2
     "#;
@@ -1207,7 +1207,7 @@ pub(super) async fn delete_pending_statements(
 ) -> Result<(), ConnectionError> {
     client
         .execute(
-            "DELETE FROM _mz_deploy.public.pending_statements WHERE deploy_id = $1",
+            "DELETE FROM _mz_deploy.tables.pending_statements WHERE deploy_id = $1",
             &[&deploy_id],
         )
         .await?;
@@ -1223,7 +1223,7 @@ pub(super) async fn insert_replacement_mvs(
     for record in records {
         client
             .execute(
-                r#"INSERT INTO _mz_deploy.public.replacement_mvs
+                r#"INSERT INTO _mz_deploy.tables.replacement_mvs
                    (deploy_id, target_database, target_schema, target_name,
                     replacement_schema)
                    VALUES ($1, $2, $3, $4, $5)"#,
@@ -1548,7 +1548,7 @@ pub(super) async fn delete_replacement_mvs(
 ) -> Result<(), ConnectionError> {
     client
         .execute(
-            "DELETE FROM _mz_deploy.public.replacement_mvs WHERE deploy_id = $1",
+            "DELETE FROM _mz_deploy.tables.replacement_mvs WHERE deploy_id = $1",
             &[&deploy_id],
         )
         .await?;
