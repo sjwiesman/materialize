@@ -20,7 +20,7 @@ use tower_lsp::lsp_types::SymbolKind;
 /// | Sink              | MODULE     | Data export target                 |
 /// | Secret            | CONSTANT   | Opaque stored value                |
 /// | Connection        | NAMESPACE  | Named config grouping              |
-pub fn object_kind_to_symbol_kind(kind: ObjectKind) -> SymbolKind {
+pub(super) fn object_kind_to_symbol_kind(kind: ObjectKind) -> SymbolKind {
     match kind {
         ObjectKind::Table => SymbolKind::STRUCT,
         ObjectKind::View => SymbolKind::FUNCTION,

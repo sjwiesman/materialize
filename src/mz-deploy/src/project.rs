@@ -35,19 +35,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-pub mod analysis;
-pub mod ast;
-pub mod clusters;
-pub mod compiler;
-pub mod error;
-pub mod ir;
-pub mod network_policies;
-pub mod resolve;
-pub mod roles;
-pub mod syntax;
+pub(crate) mod analysis;
+pub(crate) mod ast;
+pub(crate) mod clusters;
+pub(crate) mod compiler;
+pub(crate) mod error;
+pub(crate) mod ir;
+pub(crate) mod network_policies;
+pub(crate) mod resolve;
+pub(crate) mod roles;
+pub(crate) mod syntax;
 
 // Re-export commonly used types
-pub use ir::graph::ModStatement;
+pub(crate) use ir::graph::ModStatement;
 
 /// A `(database_name, schema_name)` pair identifying a schema within a project.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
@@ -71,7 +71,7 @@ impl SchemaQualifier {
 
 /// Async wrapper around [`plan_sync`] that runs the CPU-bound compiler on a
 /// blocking thread pool.
-pub async fn plan(
+pub(crate) async fn plan(
     root: PathBuf,
     profile: String,
     profile_suffix: Option<String>,
@@ -96,7 +96,7 @@ pub async fn plan(
 /// The returned plan is defined by the project sources, the active profile
 /// configuration, and the compile-time variable bindings. Cached artifacts may
 /// accelerate evaluation, but they do not change the result.
-pub fn plan_sync<P: AsRef<Path>>(
+pub(crate) fn plan_sync<P: AsRef<Path>>(
     root: P,
     profile: &str,
     profile_suffix: Option<&str>,

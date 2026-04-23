@@ -23,7 +23,7 @@ use super::symbol_kind::object_kind_to_symbol_kind;
 /// Returns a [`SymbolInformation`] for each matching object. Constraint MVs
 /// and external dependencies are excluded.
 #[allow(deprecated)] // SymbolInformation::deprecated field is deprecated but required
-pub fn workspace_symbols(
+pub(super) fn workspace_symbols(
     query: &str,
     project_cache: &ProjectCache,
     root: &Path,

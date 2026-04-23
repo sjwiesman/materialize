@@ -17,14 +17,12 @@ use mz_sql_parser::ast::{
     ObjectType, Raw, RawClusterName, Statement, UnresolvedObjectName, WithOptionValue,
 };
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// A parsed cluster definition from a `.sql` file in the `clusters/` directory.
-pub struct ClusterDefinition {
+pub(crate) struct ClusterDefinition {
     /// Cluster name (derived from filename and validated against CREATE statement).
     pub name: String,
-    /// Path to the source `.sql` file.
-    pub path: PathBuf,
     /// The CREATE CLUSTER statement.
     pub create_stmt: CreateClusterStatement<Raw>,
     /// Optional GRANT statements targeting this cluster.
@@ -38,7 +36,7 @@ pub struct ClusterDefinition {
 /// Returns an empty vec if `clusters/` doesn't exist (the directory is optional).
 /// If `profile_suffix` is provided, each cluster definition is rewritten with the
 /// suffix appended to all cluster name references (CREATE, GRANT, COMMENT).
-pub fn load_clusters(
+pub(crate) fn load_clusters(
     root: &Path,
     profile: &str,
     profile_suffix: Option<&str>,
@@ -266,7 +264,6 @@ fn classify_cluster_statements(
 
     Ok(ClusterDefinition {
         name: expected_name.to_string(),
-        path: path.to_path_buf(),
         create_stmt,
         grants,
         comments,
@@ -313,7 +310,7 @@ fn suffixed_ident(ident: &Ident, suffix: &str) -> Ident {
 }
 
 /// Extract the desired SIZE from a CreateClusterStatement's options.
-pub fn extract_size(create_stmt: &CreateClusterStatement<Raw>) -> Option<String> {
+pub(crate) fn extract_size(create_stmt: &CreateClusterStatement<Raw>) -> Option<String> {
     for opt in &create_stmt.options {
         if opt.name == ClusterOptionName::Size {
             if let Some(WithOptionValue::Value(ref v)) = opt.value {
@@ -325,7 +322,7 @@ pub fn extract_size(create_stmt: &CreateClusterStatement<Raw>) -> Option<String>
 }
 
 /// Extract the desired REPLICATION FACTOR from a CreateClusterStatement's options.
-pub fn extract_replication_factor(create_stmt: &CreateClusterStatement<Raw>) -> Option<u32> {
+pub(crate) fn extract_replication_factor(create_stmt: &CreateClusterStatement<Raw>) -> Option<u32> {
     for opt in &create_stmt.options {
         if opt.name == ClusterOptionName::ReplicationFactor {
             if let Some(WithOptionValue::Value(ref v)) = opt.value {

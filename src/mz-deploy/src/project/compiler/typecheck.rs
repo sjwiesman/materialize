@@ -80,16 +80,16 @@ use thiserror::Error;
 
 mod catalog;
 mod docker;
-pub mod docker_runtime;
-pub use docker_runtime::{DockerRuntime, DockerStatus};
+pub(crate) mod docker_runtime;
+pub(crate) use docker_runtime::{DockerRuntime, DockerStatus};
 
-pub const TYPECHECK_BACKEND_ENV: &str = "MZ_DEPLOY_TYPECHECK_BACKEND";
+pub(crate) const TYPECHECK_BACKEND_ENV: &str = "MZ_DEPLOY_TYPECHECK_BACKEND";
 
 /// Which execution backend to use for runtime validation.
 ///
 /// Defaults to [`Catalog`](Self::Catalog) when the environment variable is unset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TypecheckBackend {
+pub(crate) enum TypecheckBackend {
     Docker,
     Catalog,
 }
@@ -97,7 +97,7 @@ pub enum TypecheckBackend {
 /// Error returned when [`TYPECHECK_BACKEND_ENV`] contains an unrecognized value.
 #[derive(Debug, Error)]
 #[error("invalid value for {env_var}: '{value}' (expected one of: docker, catalog)")]
-pub struct TypecheckBackendParseError {
+pub(crate) struct TypecheckBackendParseError {
     env_var: &'static str,
     value: String,
 }
@@ -106,7 +106,7 @@ impl TypecheckBackend {
     /// Read the backend selection from [`TYPECHECK_BACKEND_ENV`].
     ///
     /// Returns [`Catalog`](Self::Catalog) when the variable is unset.
-    pub fn from_env() -> Result<Self, TypecheckBackendParseError> {
+    pub(crate) fn from_env() -> Result<Self, TypecheckBackendParseError> {
         match std::env::var(TYPECHECK_BACKEND_ENV) {
             Ok(value) => Self::parse(&value),
             Err(std::env::VarError::NotPresent) => Ok(Self::Catalog),
@@ -255,7 +255,7 @@ impl std::error::Error for TypeCheckErrors {}
 /// cached artifacts and no runtime validation is needed. When `state` is
 /// `Some`, the contained [`IncrementalState`] carries the dirty set and
 /// previous artifacts needed by the execution backend.
-pub struct TypecheckPlan {
+pub(crate) struct TypecheckPlan {
     state: Option<IncrementalState>,
     cached_types: Types,
     external_types: Types,
@@ -264,13 +264,8 @@ pub struct TypecheckPlan {
 
 impl TypecheckPlan {
     /// Returns true if no runtime validation is needed.
-    pub fn is_up_to_date(&self) -> bool {
+    pub(crate) fn is_up_to_date(&self) -> bool {
         self.state.is_none()
-    }
-
-    /// Consume the plan and return the cached internal types.
-    pub fn into_cached_types(self) -> Types {
-        self.cached_types
     }
 }
 
@@ -310,7 +305,7 @@ struct TypecheckedObjectArtifact {
 ///
 /// Returns a [`TypecheckPlan`] with `state: None` when nothing is dirty,
 /// or `state: Some(...)` carrying the dirty set and previous artifacts.
-pub fn plan(
+pub(crate) fn plan(
     directory: &Path,
     profile: &str,
     profile_suffix: Option<&str>,
@@ -406,7 +401,7 @@ pub fn plan(
 ///
 /// If no objects are dirty (`plan.state` is `None`), returns immediately
 /// without starting any backend.
-pub async fn execute(
+pub(crate) async fn execute(
     project: &Project,
     project_root: &Path,
     profile: &str,

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 /// Resolves secrets from environment variables.
 ///
 /// Usage in SQL: `CREATE SECRET x AS env_var('MY_ENV_VAR')`
-pub struct EnvVarProvider;
+pub(super) struct EnvVarProvider;
 
 #[async_trait]
 impl SecretProvider for EnvVarProvider {

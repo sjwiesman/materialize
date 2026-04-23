@@ -5,7 +5,7 @@
 //! dependency-aware graph structures whose meaning is independent of a specific
 //! compiler subsystem.
 
-pub mod compiled;
-pub mod graph;
-pub mod infrastructure;
-pub mod object_id;
+pub(crate) mod compiled;
+pub(crate) mod graph;
+pub(crate) mod infrastructure;
+pub(crate) mod object_id;

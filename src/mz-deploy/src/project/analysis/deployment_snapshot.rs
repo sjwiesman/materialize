@@ -146,7 +146,7 @@ impl Default for DeploymentSnapshot {
 /// - All indexes
 ///
 /// Uses SHA256 for stable, deterministic hashing across platforms and Rust versions.
-pub fn compute_typed_hash(db_obj: &compiled::DatabaseObject) -> String {
+pub(crate) fn compute_typed_hash(db_obj: &compiled::DatabaseObject) -> String {
     let mut hasher = Sha256Hasher::new();
 
     // Hash the main statement directly using its Hash implementation
@@ -226,7 +226,7 @@ pub fn compute_typed_hash(db_obj: &compiled::DatabaseObject) -> String {
 ///
 /// This iterates through all objects in the project and computes their
 /// content hashes based on the normalized compiled representation.
-pub fn build_snapshot_from_planned(
+pub(crate) fn build_snapshot_from_planned(
     planned_project: &graph::Project,
 ) -> Result<DeploymentSnapshot, DeploymentSnapshotError> {
     let mut objects = BTreeMap::new();
@@ -277,7 +277,7 @@ pub fn build_snapshot_from_planned(
 ///
 /// # Returns
 /// DeploymentSnapshot with current deployment state, or empty snapshot if no deployments exist
-pub async fn load_from_database(
+pub(crate) async fn load_from_database(
     client: &Client,
     environment: Option<&str>,
 ) -> Result<DeploymentSnapshot, DeploymentSnapshotError> {
@@ -303,7 +303,7 @@ pub async fn load_from_database(
 /// * `metadata` - Deployment metadata (user, git commit, etc.)
 /// * `promoted_at` - Optional promoted_at timestamp (Some(now) for direct apply, None for stage)
 /// * `mode` - Whether this is a stage or preview deployment
-pub async fn write_to_database(
+pub(crate) async fn write_to_database(
     client: &Client,
     snapshot: &DeploymentSnapshot,
     deploy_id: &str,

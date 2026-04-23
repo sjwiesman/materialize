@@ -48,13 +48,13 @@ use mz_sql_parser::ast::{CteBlock, Raw};
 /// Each level in the stack corresponds to one `WITH` clause. Names from all
 /// levels are visible (inner scopes shadow outer ones, though in practice
 /// CTE names don't conflict with each other — they conflict with table names).
-pub struct CteScope {
+pub(crate) struct CteScope {
     stack: Vec<BTreeSet<String>>,
 }
 
 impl CteScope {
     /// Create an empty scope with no CTE names.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { stack: Vec::new() }
     }
 
@@ -62,14 +62,14 @@ impl CteScope {
     ///
     /// Call this when entering a `WITH` clause. The names remain visible
     /// until [`pop`](Self::pop) is called.
-    pub fn push(&mut self, names: BTreeSet<String>) {
+    pub(crate) fn push(&mut self, names: BTreeSet<String>) {
         self.stack.push(names);
     }
 
     /// Pop the most recent CTE scope.
     ///
     /// Call this when leaving a `WITH` clause.
-    pub fn pop(&mut self) {
+    pub(crate) fn pop(&mut self) {
         self.stack.pop();
     }
 
@@ -79,7 +79,7 @@ impl CteScope {
     /// Only unqualified single-identifier references should be checked —
     /// multi-part names (e.g., `schema.name`) are always database object
     /// references.
-    pub fn is_cte(&self, name: &str) -> bool {
+    pub(crate) fn is_cte(&self, name: &str) -> bool {
         self.stack.iter().any(|scope| scope.contains(name))
     }
 
@@ -88,7 +88,7 @@ impl CteScope {
     /// For both `Simple` and `MutuallyRecursive` blocks, collects all CTE
     /// names into a single set. See the module docs for why pushing all names
     /// at once is correct for both block types.
-    pub fn collect_cte_names(ctes: &CteBlock<Raw>) -> BTreeSet<String> {
+    pub(crate) fn collect_cte_names(ctes: &CteBlock<Raw>) -> BTreeSet<String> {
         match ctes {
             CteBlock::Simple(ctes) => ctes.iter().map(|cte| cte.alias.name.to_string()).collect(),
             CteBlock::MutuallyRecursive(block) => {

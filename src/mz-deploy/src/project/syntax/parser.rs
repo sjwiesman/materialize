@@ -24,7 +24,7 @@ use std::path::PathBuf;
 ///
 /// This function is only used in tests for simple parsing without file context.
 #[cfg(test)]
-pub fn parse_statements<I, S>(raw: I) -> Result<Vec<Statement<Raw>>, ParseError>
+pub(crate) fn parse_statements<I, S>(raw: I) -> Result<Vec<Statement<Raw>>, ParseError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -50,18 +50,6 @@ where
     Ok(statements)
 }
 
-/// Parses SQL and returns [`LocatedStatement`]s with zero byte offsets.
-///
-/// Test-only helper for constructing [`crate::project::syntax::input::ObjectVariant`] values.
-#[cfg(test)]
-pub fn parse_statements_located<I, S>(raw: I) -> Result<Vec<LocatedStatement>, ParseError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    parse_statements(raw).map(|stmts| stmts.into_iter().map(LocatedStatement::at_zero).collect())
-}
-
 /// A parsed SQL statement paired with its byte offset within the source file.
 #[derive(Debug, Clone)]
 pub struct LocatedStatement {
@@ -71,25 +59,12 @@ pub struct LocatedStatement {
     pub byte_offset: usize,
 }
 
-impl LocatedStatement {
-    /// Wrap a bare statement with a zero byte offset.
-    ///
-    /// Useful in tests where the exact source position is irrelevant.
-    #[cfg(test)]
-    pub fn at_zero(ast: Statement<Raw>) -> Self {
-        Self {
-            ast,
-            byte_offset: 0,
-        }
-    }
-}
-
 /// Parse SQL statements and add file context to any errors.
 ///
 /// Resolves psql-style variables (`:foo`, `:'foo'`, `:"foo"`) before parsing.
 /// Returns each statement together with its byte offset within the resolved SQL
 /// so that downstream validation errors can point to the exact location.
-pub fn parse_statements_with_context(
+pub(crate) fn parse_statements_with_context(
     sql: &str,
     path: PathBuf,
     variables: &BTreeMap<String, String>,
@@ -168,7 +143,7 @@ pub fn parse_statements_with_context(
 ///
 /// Used by resource definition modules (clusters, roles) to produce clear
 /// error messages when an unsupported statement type is encountered.
-pub fn statement_type_name(stmt: &Statement<Raw>) -> &'static str {
+pub(crate) fn statement_type_name(stmt: &Statement<Raw>) -> &'static str {
     match stmt {
         Statement::CreateTable(_) => "CREATE TABLE",
         Statement::CreateView(_) => "CREATE VIEW",

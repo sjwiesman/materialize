@@ -35,10 +35,9 @@
 use super::super::ast::Statement;
 use super::validation::{
     validate_comment_references, validate_constraint_clusters, validate_constraint_enforcement,
-    validate_constraint_references, validate_database_mod_statements, validate_fqn_identifiers,
+    validate_constraint_references, validate_fqn_identifiers,
     validate_grant_references, validate_ident, validate_index_clusters, validate_index_references,
-    validate_mv_cluster, validate_no_storage_and_computation_in_schema,
-    validate_schema_mod_statements, validate_sink_cluster, validate_source_cluster,
+    validate_mv_cluster, validate_no_storage_and_computation_in_schema, validate_sink_cluster, validate_source_cluster,
 };
 use crate::project::SchemaQualifier;
 use crate::project::error::{ValidationError, ValidationErrorKind, ValidationErrors};
@@ -542,82 +541,6 @@ impl DatabaseObject {
     }
 }
 
-impl Schema {
-    /// Validate a source-owned schema, converting each object using the given profile.
-    pub fn validate(value: input::Schema, profile: &str) -> Result<Self, ValidationErrors> {
-        let mut all_errors = Vec::new();
-        let mut objects = Vec::new();
-
-        for obj in value.objects {
-            match DatabaseObject::validate(obj, profile) {
-                Ok(Some(db_obj)) => objects.push(db_obj),
-                Ok(None) => {
-                    // Object belongs to a different profile — skip it
-                }
-                Err(errs) => {
-                    all_errors.extend(errs.errors);
-                }
-            }
-        }
-
-        validate_no_storage_and_computation_in_schema(&value.name, &objects, &mut all_errors);
-
-        if !all_errors.is_empty() {
-            return Err(ValidationErrors::new(all_errors));
-        }
-
-        Ok(Self {
-            name: value.name.clone(),
-            objects,
-            mod_statements: value.mod_statements,
-        })
-    }
-}
-
-impl Database {
-    /// Validate a source-owned database, converting each schema using the given profile.
-    pub fn validate(value: input::Database, profile: &str) -> Result<Self, ValidationErrors> {
-        let mut all_errors = Vec::new();
-        let mut schemas = Vec::new();
-
-        // Validate database mod statements if they exist
-        if let Some(ref mod_stmts) = value.mod_statements {
-            let db_mod_path = PathBuf::from(format!("{}.sql", value.name));
-            validate_database_mod_statements(&value.name, &db_mod_path, mod_stmts, &mut all_errors);
-        }
-
-        for (schema_name, mut schema) in value.schemas {
-            // Validate schema mod statements if they exist (need database context)
-            if let Some(ref mut mod_stmts) = schema.mod_statements {
-                let schema_mod_path = PathBuf::from(format!("{}/{}.sql", value.name, schema_name));
-                validate_schema_mod_statements(
-                    &value.name,
-                    &schema_name,
-                    &schema_mod_path,
-                    mod_stmts,
-                    &mut all_errors,
-                );
-            }
-
-            match Schema::validate(schema, profile) {
-                Ok(s) => schemas.push(s),
-                Err(errs) => {
-                    all_errors.extend(errs.errors);
-                }
-            }
-        }
-
-        if !all_errors.is_empty() {
-            return Err(ValidationErrors::new(all_errors));
-        }
-
-        Ok(Self {
-            name: value.name.clone(),
-            schemas,
-            mod_statements: value.mod_statements,
-        })
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct SchemaBuildMeta {

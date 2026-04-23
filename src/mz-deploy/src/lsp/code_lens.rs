@@ -19,7 +19,7 @@ use tower_lsp::lsp_types::*;
 ///
 /// Returns an empty vec if the file is not under `models/<db>/<schema>/` or
 /// the object is not found in the project cache.
-pub fn code_lenses(
+pub(super) fn code_lenses(
     file_uri: &Url,
     file_text: &str,
     root: &Path,

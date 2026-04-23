@@ -16,14 +16,12 @@ use mz_sql_parser::ast::{
     GrantRoleStatement, Raw, Statement,
 };
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// A parsed role definition from a `.sql` file in the `roles/` directory.
-pub struct RoleDefinition {
+pub(crate) struct RoleDefinition {
     /// Role name (derived from filename and validated against CREATE statement).
     pub name: String,
-    /// Path to the source `.sql` file.
-    pub path: PathBuf,
     /// The CREATE ROLE statement.
     pub create_stmt: CreateRoleStatement,
     /// Optional ALTER ROLE statements for this role.
@@ -37,7 +35,7 @@ pub struct RoleDefinition {
 /// Load all role definitions from `<root>/roles/`.
 ///
 /// Returns an empty vec if `roles/` doesn't exist (the directory is optional).
-pub fn load_roles(
+pub(crate) fn load_roles(
     root: &Path,
     profile: &str,
     variables: &BTreeMap<String, String>,
@@ -256,7 +254,6 @@ fn classify_role_statements(
 
     Ok(RoleDefinition {
         name: expected_name.to_string(),
-        path: path.to_path_buf(),
         create_stmt,
         alter_stmts,
         grants,

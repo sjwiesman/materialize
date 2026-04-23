@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tokio::time::{Duration, sleep};
 
 /// Possible states of Docker availability on the host system.
-pub enum DockerStatus {
+pub(crate) enum DockerStatus {
     Running,
     NotRunning,
     NotInstalled,
@@ -26,12 +26,12 @@ const CONTAINER_NAME: &str = "mz-deploy-typecheck";
 const CONTAINER_PORT: u16 = 16875;
 
 /// Manages the Materialize container used for runtime validation.
-pub struct DockerRuntime {
+pub(crate) struct DockerRuntime {
     image: String,
 }
 
 impl DockerRuntime {
-    pub async fn check_availability() -> DockerStatus {
+    pub(crate) async fn check_availability() -> DockerStatus {
         let result = Command::new("docker")
             .arg("info")
             .stdout(std::process::Stdio::null())
@@ -46,18 +46,18 @@ impl DockerRuntime {
         }
     }
 
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             image: default_docker_image(),
         }
     }
 
-    pub fn with_image(mut self, image: impl Into<String>) -> Self {
+    pub(crate) fn with_image(mut self, image: impl Into<String>) -> Self {
         self.image = image.into();
         self
     }
 
-    pub async fn get_client(&self) -> Result<Client, TypeCheckError> {
+    pub(crate) async fn get_client(&self) -> Result<Client, TypeCheckError> {
         let start = std::time::Instant::now();
 
         let profile = Self::make_profile();

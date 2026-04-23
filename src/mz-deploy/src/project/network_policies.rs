@@ -17,14 +17,12 @@ use mz_sql_parser::ast::{
     Statement,
 };
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// A parsed network policy definition from a `.sql` file in the `network-policies/` directory.
-pub struct NetworkPolicyDefinition {
+pub(crate) struct NetworkPolicyDefinition {
     /// Network policy name (derived from filename and validated against CREATE statement).
     pub name: String,
-    /// Path to the source `.sql` file.
-    pub path: PathBuf,
     /// The CREATE NETWORK POLICY statement.
     pub create_stmt: CreateNetworkPolicyStatement<Raw>,
     /// Optional GRANT statements targeting this network policy.
@@ -36,7 +34,7 @@ pub struct NetworkPolicyDefinition {
 /// Load all network policy definitions from `<root>/network-policies/`.
 ///
 /// Returns an empty vec if `network-policies/` doesn't exist (the directory is optional).
-pub fn load_network_policies(
+pub(crate) fn load_network_policies(
     root: &Path,
     profile: &str,
     variables: &BTreeMap<String, String>,
@@ -258,7 +256,6 @@ fn classify_network_policy_statements(
 
     Ok(NetworkPolicyDefinition {
         name: expected_name.to_string(),
-        path: path.to_path_buf(),
         create_stmt,
         grants,
         comments,

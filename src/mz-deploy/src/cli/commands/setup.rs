@@ -60,7 +60,6 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
 /// Called by both the explicit `setup` command and by other commands that
 /// need the infrastructure to be present (`stage`, `promote`, `list`, etc.).
 pub async fn ensure(client: &Client) -> Result<(), CliError> {
-    // Phase 1: cluster.
     if client
         .introspection()
         .get_cluster(SERVER_CLUSTER_NAME)
@@ -75,8 +74,6 @@ pub async fn ensure(client: &Client) -> Result<(), CliError> {
         client.execute(&sql, &[]).await?;
     }
 
-    // Phase 2: database + objects. The SQL file is the single source of
-    // truth for the _mz_deploy schema; it runs exactly once per DB lifetime.
     let db_exists: bool = client
         .query_one(
             "SELECT EXISTS(SELECT 1 FROM mz_databases WHERE name = '_mz_deploy') AS exists",
@@ -100,7 +97,6 @@ pub async fn ensure(client: &Client) -> Result<(), CliError> {
                 .await?;
         }
 
-        // Common: navigation + read through the public view layer.
         for sql in [
             format!(
                 "GRANT USAGE ON CLUSTER {} TO {}",
@@ -118,7 +114,6 @@ pub async fn ensure(client: &Client) -> Result<(), CliError> {
             client.execute(&sql, &[]).await?;
         }
 
-        // Deployer-only: writes on physical tables.
         if *role == MzDeployRole::Deployer {
             client
                 .execute(

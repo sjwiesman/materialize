@@ -26,10 +26,10 @@ mod load;
 mod parse;
 mod validation;
 
-pub use dependency::DependencyError;
-pub use load::LoadError;
-pub use parse::ParseError;
-pub use validation::{ErrorContext, ValidationError, ValidationErrorKind, ValidationErrors};
+pub(crate) use dependency::DependencyError;
+pub(crate) use load::LoadError;
+pub(crate) use parse::ParseError;
+pub(crate) use validation::{ValidationError, ValidationErrorKind, ValidationErrors};
 
 use thiserror::Error;
 

@@ -50,7 +50,7 @@ use mz_sql_parser::ast::*;
 /// - `PRIMARY KEY ON foo (id)` → `foo_id_pk`
 /// - `UNIQUE CONSTRAINT ON bar (a, b)` → `bar_a_b_unique`
 /// - `FOREIGN KEY ON orders (customer_id) REFERENCES customers (id)` → `orders_customer_id_fk`
-pub fn default_constraint_name(
+pub(crate) fn default_constraint_name(
     object_name: &str,
     columns: &[Ident],
     kind: &ConstraintKind,
@@ -104,7 +104,7 @@ pub fn default_constraint_name(
 /// If the constraint has an explicit name, that becomes the MV name.
 /// Otherwise a deterministic name is generated: `<object>_<cols>_<kind>`
 /// (e.g., `foo_id_pk`, `orders_customer_id_fk`).
-pub fn lower_to_materialized_view(
+pub(crate) fn lower_to_materialized_view(
     constraint: &CreateConstraintStatement<Raw>,
     parent_object_name: &str,
     database: &str,

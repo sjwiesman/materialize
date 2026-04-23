@@ -1,23 +1,6 @@
 -- Schema for the _mz_deploy tracking database.
---
--- Structure:
--- - _mz_deploy.tables   — base tables. Written only by materialize_deployer.
--- - _mz_deploy.public   — views. Every SELECT in mz-deploy reads from here.
---
--- Why split them: views in _mz_deploy.public form a stable API over the
--- physical schema. We can rename columns, add indexes, or restructure tables
--- in _mz_deploy.tables without breaking older/newer mz-deploy clients that
--- still talk to the same _mz_deploy database — as long as the public views
--- keep their shape. Passthrough views (SELECT column-list FROM ...) make
--- this explicit even where the view is just a facade today.
---
--- Executed once by `mz-deploy setup` via batch_execute the first time the
--- _mz_deploy database is created. Indexes live on the _mz_deploy_server
--- cluster, which setup creates beforehand.
 
 CREATE SCHEMA _mz_deploy.tables;
-
--- Base tables ---------------------------------------------------------------
 
 CREATE TABLE _mz_deploy.tables.deployments (
     deploy_id   TEXT NOT NULL,
@@ -98,8 +81,6 @@ CREATE INDEX version_idx
     IN CLUSTER _mz_deploy_server
     ON _mz_deploy.tables.version (version);
 
--- Purpose-built views -------------------------------------------------------
-
 CREATE VIEW _mz_deploy.public.production AS
 WITH candidates AS (
     SELECT DISTINCT ON (database, schema)
@@ -145,10 +126,6 @@ WHERE d.promoted_at IS NULL AND c.id IS NULL;
 CREATE INDEX missing_clusters_deploy_id_idx
     IN CLUSTER _mz_deploy_server
     ON _mz_deploy.public.missing_clusters (deploy_id);
-
--- Passthrough views ---------------------------------------------------------
--- Column lists are explicit so schema drift in _mz_deploy.tables doesn't
--- silently leak through the public API.
 
 CREATE VIEW _mz_deploy.public.deployments AS
 SELECT deploy_id, deployed_at, promoted_at, database, schema, deployed_by,

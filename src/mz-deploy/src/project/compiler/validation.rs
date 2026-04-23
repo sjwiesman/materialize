@@ -32,7 +32,7 @@ pub(super) use clusters::{
     validate_sink_cluster, validate_source_cluster,
 };
 pub(super) use constraints::validate_constraint_enforcement;
-pub use constraints::{validate_constraint_columns, validate_constraint_fk_targets};
+pub(crate) use constraints::{validate_constraint_columns, validate_constraint_fk_targets};
 pub(super) use identifiers::{validate_fqn_identifiers, validate_ident};
 pub(crate) use mod_statements::{validate_database_mod_statements, validate_schema_mod_statements};
 pub(super) use references::{

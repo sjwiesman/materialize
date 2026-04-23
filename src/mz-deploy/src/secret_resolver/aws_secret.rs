@@ -18,13 +18,13 @@ const PROVIDER_NAME: &str = "aws_secret";
 /// The AWS SDK config (including credential resolution) is loaded lazily
 /// on the first `resolve()` call, so projects that set `aws_profile` but
 /// never use `aws_secret()` pay no startup cost.
-pub struct AwsSecretProvider {
+pub(super) struct AwsSecretProvider {
     profile: String,
     client: OnceCell<Client>,
 }
 
 impl AwsSecretProvider {
-    pub fn new(profile: &str) -> Self {
+    pub(super) fn new(profile: &str) -> Self {
         Self {
             profile: profile.to_string(),
             client: OnceCell::new(),
@@ -83,7 +83,7 @@ impl SecretProvider for AwsSecretProvider {
 /// Placeholder provider registered when `aws_profile` is not set in `project.toml`.
 ///
 /// Always returns an error directing the user to configure `aws_profile`.
-pub struct UnconfiguredAwsProvider;
+pub(super) struct UnconfiguredAwsProvider;
 
 #[async_trait]
 impl SecretProvider for UnconfiguredAwsProvider {

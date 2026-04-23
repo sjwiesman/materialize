@@ -26,14 +26,15 @@
 //!   against cached type information.
 #![deny(clippy::print_stdout)]
 #![deny(clippy::print_stderr)]
+#![warn(unreachable_pub)]
 
 pub mod cli;
 pub mod client;
 pub mod config;
 pub mod log;
 pub mod lsp;
-pub mod project;
-pub mod project_cache;
-pub mod secret_resolver;
-pub mod types;
-pub mod unit_test;
+pub(crate) mod project;
+pub(crate) mod project_cache;
+pub(crate) mod secret_resolver;
+pub(crate) mod types;
+pub(crate) mod unit_test;

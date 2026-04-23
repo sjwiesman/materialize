@@ -27,7 +27,7 @@ use std::fmt::{Display, Formatter};
 ///
 /// Used to determine which objects need redeployment based on snapshot comparison.
 #[derive(Debug, Clone)]
-pub struct ChangeSet {
+pub(crate) struct ChangeSet {
     /// Objects that exist in changed files
     pub changed_objects: BTreeSet<ObjectId>,
 
@@ -51,12 +51,12 @@ pub struct ChangeSet {
 
 impl ChangeSet {
     /// Check if any changes were detected.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.objects_to_deploy.is_empty()
     }
 
     /// Get the number of objects that need deployment.
-    pub fn deployment_count(&self) -> usize {
+    pub(crate) fn deployment_count(&self) -> usize {
         self.objects_to_deploy.len()
     }
 }

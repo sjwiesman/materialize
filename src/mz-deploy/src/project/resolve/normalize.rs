@@ -32,12 +32,12 @@ mod transformers;
 mod visitor;
 
 // Re-export all public types and functions
-pub use mod_rewriter::{rewrite_database_names, rewrite_schema_names};
-pub use transformers::{
-    ClusterTransformer, ExplainTransformer, FlatteningTransformer, FullyQualifyingTransformer,
-    NameTransformer, StagingTransformer,
+pub(crate) use mod_rewriter::{rewrite_database_names, rewrite_schema_names};
+pub(crate) use transformers::{
+    ClusterTransformer,
+    NameTransformer,
 };
-pub use visitor::NormalizingVisitor;
+pub(crate) use visitor::NormalizingVisitor;
 
 use mz_sql_parser::ast::{CreateIndexStatement, Ident, Raw, RawClusterName};
 
@@ -57,7 +57,7 @@ use mz_sql_parser::ast::{CreateIndexStatement, Ident, Raw, RawClusterName};
 /// transform_cluster_names_for_staging(&mut indexes, "_staging");
 /// // Transforms: IN CLUSTER quickstart -> IN CLUSTER quickstart_staging
 /// ```
-pub fn transform_cluster_names_for_staging(
+pub(crate) fn transform_cluster_names_for_staging(
     indexes: &mut [CreateIndexStatement<Raw>],
     staging_suffix: &str,
 ) {
