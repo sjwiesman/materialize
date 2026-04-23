@@ -126,6 +126,9 @@ Rules:
 - **Applies to every connection** — the options string is built into the
   connection string, so every mz-deploy command using this profile starts
   with these session variables set.
+- **`cluster` is reserved** — mz-deploy pins every connection to its own
+  `_mz_deploy_server` cluster via libpq options. Any `cluster` value you
+  set here is silently overridden.
 
 ## TLS configuration
 

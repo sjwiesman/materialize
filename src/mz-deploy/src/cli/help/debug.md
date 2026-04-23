@@ -21,9 +21,9 @@ connectivity and configuration before running deployments.
    - Profile name
    - Host and port
    - Environment ID
-   - Current cluster
    - Materialize version
    - Current role
+   - `_mz_deploy_server` health: `healthy`, `not ready` (reason), or `missing`
 4. Checks Docker availability and displays:
    - Whether Docker is installed
    - Whether the Docker daemon is running
