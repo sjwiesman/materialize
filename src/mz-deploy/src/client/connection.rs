@@ -78,6 +78,11 @@ pub struct ProvisioningClient<'a> {
     pub(crate) client: &'a Client,
 }
 
+/// Domain sub-client for developer overlay manifest operations.
+pub struct DevOverlaysClient<'a> {
+    pub(crate) client: &'a Client,
+}
+
 const APPLICATION_NAME: &str = "mz-deploy";
 
 impl Client {
@@ -198,6 +203,11 @@ impl Client {
     /// Access provisioning operations for databases, schemas, and clusters.
     pub fn provisioning(&self) -> ProvisioningClient<'_> {
         ProvisioningClient { client: self }
+    }
+
+    /// Access developer overlay manifest operations.
+    pub fn dev_overlays(&self) -> DevOverlaysClient<'_> {
+        DevOverlaysClient { client: self }
     }
 
     /// Execute a SQL statement that doesn't return rows.

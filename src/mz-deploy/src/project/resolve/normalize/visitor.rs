@@ -32,6 +32,7 @@
 //! table name is attached. This ensures that column references like
 //! `sales.column` continue to resolve correctly after transformation.
 
+use super::overlay_transformer::OverlayTransformer;
 use super::transformers::{
     ClusterTransformer, ExplainTransformer, FlatteningTransformer, FullyQualifyingTransformer,
     NameTransformer, StagingTransformer,
@@ -418,6 +419,46 @@ impl<'a> NormalizingVisitor<ExplainTransformer<'a>> {
     }
 }
 
+impl<'a> NormalizingVisitor<OverlayTransformer<'a>> {
+    /// Create a visitor that rewrites references for `mz-deploy dev` overlay
+    /// compilation.
+    ///
+    /// Applies the three-step schema-level resolution rule:
+    /// - External databases (not in `in_project_databases`) → emit verbatim.
+    /// - In-project databases → apply `profile_suffix` (if set).
+    /// - Dirty `(base_db, schema)` pairs → rewrite database component to
+    ///   `<base_db>__<profile_name>`.
+    ///
+    /// # Arguments
+    /// * `fqn` - Context used to resolve 1- and 2-part names to fully
+    ///   qualified form.
+    /// * `profile_name` - Developer profile name; becomes the `__<name>`
+    ///   suffix on overlay databases.
+    /// * `profile_suffix` - Optional profile suffix that composes with the
+    ///   overlay (e.g., `Some("_staging")` → `db_staging__seth`).
+    /// * `in_project_databases` - Set of databases declared in the project's
+    ///   `project.toml` (or equivalent ownership declaration). References
+    ///   to databases outside this set are treated as external and emitted
+    ///   verbatim.
+    /// * `dirty_schemas` - Dirty `(database, schema)` pairs keyed by the
+    ///   post-`profile_suffix` database name.
+    pub fn overlay(
+        fqn: &'a FullyQualifiedName,
+        profile_name: &'a str,
+        profile_suffix: Option<&'a str>,
+        in_project_databases: &'a std::collections::BTreeSet<String>,
+        dirty_schemas: &'a std::collections::BTreeSet<crate::project::SchemaQualifier>,
+    ) -> Self {
+        Self::new(OverlayTransformer {
+            fqn,
+            profile_name,
+            profile_suffix,
+            in_project_databases,
+            dirty_schemas,
+        })
+    }
+}
+
 impl<'a> NormalizingVisitor<StagingTransformer<'a>> {
     /// Create a visitor that transforms names for staging environments.
     ///
@@ -451,5 +492,41 @@ impl<'a> NormalizingVisitor<StagingTransformer<'a>> {
             objects_to_deploy,
             replacement_objects,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::SchemaQualifier;
+    use crate::project::ir::object_id::ObjectId;
+    use mz_sql_parser::ast::Ident;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn overlay_factory_produces_working_visitor() {
+        let fqn = FullyQualifiedName::from_object_id(ObjectId::new(
+            "app".to_string(),
+            "public".to_string(),
+            "my_view".to_string(),
+        ));
+        let in_project: BTreeSet<String> = ["app".to_string()].into_iter().collect();
+        let dirty: BTreeSet<SchemaQualifier> =
+            [SchemaQualifier::new("app".to_string(), "public".to_string())]
+                .into_iter()
+                .collect();
+
+        let visitor = NormalizingVisitor::overlay(&fqn, "alice", None, &in_project, &dirty);
+
+        let mut name = UnresolvedItemName(vec![
+            Ident::new("app").unwrap(),
+            Ident::new("public").unwrap(),
+            Ident::new("orders").unwrap(),
+        ]);
+        visitor.normalize_unresolved_item_name(&mut name);
+
+        assert_eq!(name.0[0].as_str(), "app__alice");
+        assert_eq!(name.0[1].as_str(), "public");
+        assert_eq!(name.0[2].as_str(), "orders");
     }
 }

@@ -28,6 +28,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("init", include_str!("help/init.md")),
     ("debug", include_str!("help/debug.md")),
     ("delete", include_str!("help/delete.md")),
+    ("dev", include_str!("help/dev.md")),
     ("promote", include_str!("help/promote.md")),
     ("describe", include_str!("help/describe.md")),
     ("list", include_str!("help/list.md")),

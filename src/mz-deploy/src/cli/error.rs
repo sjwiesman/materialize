@@ -174,6 +174,17 @@ pub enum CliError {
         required_role: String,
     },
 
+    /// Current role lacks CREATEDB privilege required to create overlay databases
+    #[error(
+        "user {role} lacks CREATEDB privilege, required to create overlay \
+         database {overlay_db}.\n\n\
+         Ask an administrator to run:\n    GRANT CREATEDB ON SYSTEM TO {role};"
+    )]
+    MissingCreatedb {
+        role: String,
+        overlay_db: String,
+    },
+
     /// Project references external objects not declared in project.toml
     #[error("undeclared external dependencies")]
     UndeclaredDependencies { undeclared: Vec<ObjectId> },
@@ -447,6 +458,7 @@ impl CliError {
                 // These errors provide their own context via transparent wrapping
                 None
             }
+            Self::MissingCreatedb { .. } => None,
             Self::Io(_) | Self::Message(_) | Self::TestsFilterMissed { .. } => None,
         }
     }

@@ -27,6 +27,7 @@
 
 mod connection;
 mod deployment_ops;
+mod dev_overlays;
 mod errors;
 mod introspection;
 mod models;
@@ -42,7 +43,7 @@ pub const SERVER_CLUSTER_NAME: &str = "_mz_deploy_server";
 pub const SERVER_CLUSTER_SIZE: &str = "25cc";
 
 pub use crate::config::Profile;
-pub use connection::Client;
+pub use connection::{Client, DevOverlaysClient};
 
 /// Double-quote a SQL identifier, escaping any embedded double quotes.
 pub fn quote_identifier(name: &str) -> String {
