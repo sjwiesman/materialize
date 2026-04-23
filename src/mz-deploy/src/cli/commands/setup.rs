@@ -7,7 +7,7 @@
 //! - **`run()`** — The `setup` CLI command entry point.
 
 use crate::cli::CliError;
-use crate::client::Client;
+use crate::client::{Client, SERVER_CLUSTER_NAME, SERVER_CLUSTER_SIZE, quote_identifier};
 use crate::config::Settings;
 use crate::info;
 
@@ -49,6 +49,39 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
     (MzDeployRole::Monitor, "materialize_monitor"),
 ];
 
+/// Create the `_mz_deploy_server` cluster if missing and grant `USAGE` on it
+/// to the three `materialize_*` roles. Idempotent.
+///
+/// If the cluster already exists at a different size, leave it alone — operators
+/// may have intentionally resized. GRANTs are safe to re-run.
+async fn ensure_server_cluster(client: &Client) -> Result<(), CliError> {
+    let exists = client
+        .introspection()
+        .get_cluster(SERVER_CLUSTER_NAME)
+        .await?
+        .is_some();
+
+    if !exists {
+        let sql = format!(
+            "CREATE CLUSTER {} (SIZE = '{}')",
+            quote_identifier(SERVER_CLUSTER_NAME),
+            SERVER_CLUSTER_SIZE,
+        );
+        client.execute(&sql, &[]).await?;
+    }
+
+    for (_, role_name) in ALL_ROLES {
+        let sql = format!(
+            "GRANT USAGE ON CLUSTER {} TO {}",
+            quote_identifier(SERVER_CLUSTER_NAME),
+            role_name,
+        );
+        client.execute(&sql, &[]).await?;
+    }
+
+    Ok(())
+}
+
 /// Ensure the deployment tracking infrastructure exists.
 ///
 /// This is the shared entry point used by both the explicit `setup` command
@@ -56,6 +89,7 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
 /// that need the `_mz_deploy` database to be present.
 pub async fn ensure(client: &Client) -> Result<(), CliError> {
     client.deployments().create_deployments().await?;
+    ensure_server_cluster(client).await?;
     Ok(())
 }
 
