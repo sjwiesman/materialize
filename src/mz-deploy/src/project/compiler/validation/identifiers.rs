@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 /// The type of identifier being validated (for error messages).
 #[derive(Debug, Clone, Copy)]
-pub enum IdentifierKind {
+pub(super) enum IdentifierKind {
     Database,
     Schema,
     Object,
@@ -60,7 +60,7 @@ impl std::fmt::Display for IdentifierKind {
 ///   my-table (contains hyphen)
 ///   MY_TABLE (uppercase)
 /// ```
-pub fn validate_identifier_format(name: &str, kind: IdentifierKind) -> Result<(), String> {
+pub(super) fn validate_identifier_format(name: &str, kind: IdentifierKind) -> Result<(), String> {
     if name.is_empty() {
         return Err(format!("{} name cannot be empty", kind));
     }
@@ -129,7 +129,7 @@ pub fn validate_identifier_format(name: &str, kind: IdentifierKind) -> Result<()
 /// * `fqn` - The fully qualified name to validate
 /// * `main_offset` - Byte offset of the CREATE statement being validated
 /// * `errors` - Vector to collect validation errors
-pub fn validate_fqn_identifiers(
+pub(crate) fn validate_fqn_identifiers(
     fqn: &FullyQualifiedName,
     main_offset: usize,
     errors: &mut Vec<ValidationError>,
@@ -182,7 +182,7 @@ pub fn validate_fqn_identifiers(
 ///
 /// * `Ok(())` if valid
 /// * `Err(ValidationError)` if invalid
-pub fn validate_cluster_name(
+pub(super) fn validate_cluster_name(
     cluster_name: &str,
     path: &PathBuf,
     byte_offset: usize,

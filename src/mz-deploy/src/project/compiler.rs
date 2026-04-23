@@ -73,9 +73,9 @@
 pub(crate) mod build_artifact;
 mod cache_io;
 mod object_validation;
-pub mod typecheck;
+pub(crate) mod typecheck;
 mod validation;
-pub use validation::{validate_constraint_columns, validate_constraint_fk_targets};
+pub(crate) use validation::{validate_constraint_columns, validate_constraint_fk_targets};
 
 use super::error::{LoadError, ProjectError, ValidationError, ValidationErrors};
 use crate::project::ir::{compiled, graph};
@@ -255,7 +255,7 @@ enum ObjectPlanResult {
 ///
 /// See [`compile_sync_with_stats`] for the detailed pipeline and cache
 /// behavior.
-pub fn compile_sync<P: AsRef<Path>>(
+pub(crate) fn compile_sync<P: AsRef<Path>>(
     root: P,
     profile: &str,
     profile_suffix: Option<&str>,

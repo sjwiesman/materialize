@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 ///
 /// Returns the text of the first comment where `comment_type != "column"`
 /// and `target_column` is `None`.
-pub fn extract_cached_description(comments: &[CachedComment]) -> Option<String> {
+pub(super) fn extract_cached_description(comments: &[CachedComment]) -> Option<String> {
     comments
         .iter()
         .find(|c| c.target_column.is_none())
@@ -18,7 +18,7 @@ pub fn extract_cached_description(comments: &[CachedComment]) -> Option<String> 
 ///
 /// Filters to comments where `target_column` is `Some`, returning a map
 /// from column name to description text.
-pub fn extract_cached_column_comments(comments: &[CachedComment]) -> BTreeMap<String, String> {
+pub(super) fn extract_cached_column_comments(comments: &[CachedComment]) -> BTreeMap<String, String> {
     comments
         .iter()
         .filter_map(|c| {

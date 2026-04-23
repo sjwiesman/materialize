@@ -8,8 +8,8 @@
 //! - dependency extraction and topological traversal
 //! - graph-wide deployment validations
 
-pub mod changeset;
-pub mod deployment_snapshot;
-pub mod deps;
-pub mod graph_validation;
-pub mod topology;
+pub(crate) mod changeset;
+pub(crate) mod deployment_snapshot;
+pub(crate) mod deps;
+pub(crate) mod graph_validation;
+pub(crate) mod topology;

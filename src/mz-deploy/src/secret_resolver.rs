@@ -47,7 +47,7 @@ pub enum SecretResolveError {
 
 /// A provider that can resolve secret values from an external source.
 #[async_trait]
-pub trait SecretProvider: Send + Sync {
+pub(crate) trait SecretProvider: Send + Sync {
     /// The function name this provider handles (e.g. `"env_var"`).
     fn name(&self) -> &str;
     /// The number of arguments this provider expects.
@@ -60,7 +60,7 @@ pub trait SecretProvider: Send + Sync {
 ///
 /// Known providers (like `env_var`) are resolved to string literals.
 /// Unknown functions and other expressions pass through unchanged to Materialize.
-pub struct SecretResolver {
+pub(crate) struct SecretResolver {
     providers: BTreeMap<String, Box<dyn SecretProvider>>,
 }
 
@@ -70,7 +70,7 @@ impl SecretResolver {
     /// Always registers `env_var`. If `aws_profile` is `Some`, registers the
     /// real AWS Secrets Manager provider (credentials are loaded lazily on
     /// first use); otherwise registers a placeholder that gives a clear error.
-    pub fn new(config: &SecurityConfig) -> Self {
+    pub(crate) fn new(config: &SecurityConfig) -> Self {
         let mut resolver = Self {
             providers: BTreeMap::new(),
         };
@@ -93,7 +93,7 @@ impl SecretResolver {
     ///
     /// - `Expr::Function` matching a registered provider: validate and resolve to `Expr::Value(Value::String(...))`
     /// - Everything else: pass through unchanged
-    pub async fn resolve_expr(&self, expr: Expr<Raw>) -> Result<Expr<Raw>, SecretResolveError> {
+    pub(crate) async fn resolve_expr(&self, expr: Expr<Raw>) -> Result<Expr<Raw>, SecretResolveError> {
         match &expr {
             Expr::Function(func) => {
                 let func_name = match &func.name {
@@ -153,7 +153,7 @@ impl SecretResolver {
     /// Resolves client-side provider functions in a `CREATE SECRET` statement.
     ///
     /// Returns a new statement with the value field resolved.
-    pub async fn resolve_create_secret(
+    pub(crate) async fn resolve_create_secret(
         &self,
         stmt: &CreateSecretStatement<Raw>,
     ) -> Result<CreateSecretStatement<Raw>, SecretResolveError> {
@@ -163,7 +163,7 @@ impl SecretResolver {
     }
 
     /// Resolves a `CREATE SECRET` statement and maps errors to [`CliError`].
-    pub async fn resolve_secret_for_cli(
+    pub(crate) async fn resolve_secret_for_cli(
         &self,
         stmt: &CreateSecretStatement<Raw>,
     ) -> Result<CreateSecretStatement<Raw>, CliError> {
@@ -179,7 +179,7 @@ impl SecretResolver {
     ///
     /// Secret statements have their provider functions resolved;
     /// all other statements are returned unchanged.
-    pub async fn resolve_statement_for_cli(&self, stmt: &Statement) -> Result<Statement, CliError> {
+    pub(crate) async fn resolve_statement_for_cli(&self, stmt: &Statement) -> Result<Statement, CliError> {
         match stmt {
             Statement::CreateSecret(create_stmt) => {
                 let resolved = self.resolve_secret_for_cli(create_stmt).await?;

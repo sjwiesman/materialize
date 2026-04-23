@@ -66,7 +66,7 @@ pub(super) struct FactIndexes {
 }
 
 impl FactIndexes {
-    pub fn from_base_facts(facts: &BaseFacts) -> Self {
+    pub(super) fn from_base_facts(facts: &BaseFacts) -> Self {
         // stmt_to_clusters: group by object
         let mut stmt_to_clusters: BTreeMap<ObjectId, Vec<Cluster>> = BTreeMap::new();
         for (obj, cluster) in &facts.stmt_uses_cluster {
@@ -139,7 +139,7 @@ pub(super) struct DirtyState {
 
 impl DirtyState {
     /// Seeds dirty state from objects whose hashes changed between snapshots.
-    pub fn new(changed_stmts: &BTreeSet<ObjectId>) -> Self {
+    pub(super) fn new(changed_stmts: &BTreeSet<ObjectId>) -> Self {
         Self {
             dirty_stmts: changed_stmts.clone(),
             dirty_clusters: BTreeSet::new(),
@@ -147,7 +147,7 @@ impl DirtyState {
         }
     }
 
-    pub fn sizes(&self) -> (usize, usize, usize) {
+    pub(super) fn sizes(&self) -> (usize, usize, usize) {
         (
             self.dirty_stmts.len(),
             self.dirty_clusters.len(),

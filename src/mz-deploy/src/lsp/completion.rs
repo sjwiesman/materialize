@@ -79,7 +79,7 @@ use std::path::Path;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, Url};
 
 /// Describes the dot-qualified prefix at the cursor position.
-pub struct PrefixContext<'a> {
+pub(super) struct PrefixContext<'a> {
     /// Number of dots in the typed prefix (0, 1, or 2+).
     pub dots: usize,
     /// The raw prefix text the user has typed (e.g., `"public.f"`).
@@ -148,7 +148,7 @@ fn resolve_context<'a>(
 ///
 /// Scans backward from `position` through identifier characters (alphanumeric,
 /// underscore) and dots to determine what the user has typed so far.
-pub fn prefix_context(text: &str, position: Position) -> PrefixContext<'_> {
+pub(super) fn prefix_context(text: &str, position: Position) -> PrefixContext<'_> {
     let pos_line = usize::try_from(position.line).unwrap_or(0);
     let pos_char = usize::try_from(position.character).unwrap_or(0);
     let mut byte_offset = 0;
@@ -474,7 +474,7 @@ fn format_candidate(candidate: &CompletionCandidate<'_>) -> CompletionItem {
 /// When `project_cache` is `None` (no successful build yet), only keyword
 /// completions are returned. Keywords are included only when `dots == 0`
 /// (the module decides this, not the caller).
-pub fn complete(
+pub(super) fn complete(
     project_cache: Option<&ProjectCache>,
     types_lock: &Types,
     file_uri: &Url,

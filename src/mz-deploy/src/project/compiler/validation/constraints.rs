@@ -74,7 +74,7 @@ pub(in super::super) fn validate_constraint_enforcement(
 /// The `get_kind` closure resolves the object kind for external references
 /// (objects not defined in the project). Callers compose this from a two-tier
 /// lookup: `TypesCache` first, then `types_lock`.
-pub fn validate_constraint_fk_targets(
+pub(crate) fn validate_constraint_fk_targets(
     project: &graph::Project,
     get_kind: impl Fn(&str) -> ObjectKind,
 ) -> Vec<ValidationError> {
@@ -147,7 +147,7 @@ pub fn validate_constraint_fk_targets(
 ///
 /// Objects not present in the column map are silently skipped (their columns
 /// are not yet known, e.g. views before type checking).
-pub fn validate_constraint_columns(
+pub(crate) fn validate_constraint_columns(
     project: &graph::Project,
     column_map: &BTreeMap<String, BTreeSet<String>>,
 ) -> Vec<ValidationError> {

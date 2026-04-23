@@ -7,6 +7,6 @@
 //! - identifier qualification and normalization
 //! - lowering declarative constraints into deployable objects
 
-pub mod constraint;
-pub mod cte_scope;
-pub mod normalize;
+pub(crate) mod constraint;
+pub(crate) mod cte_scope;
+pub(crate) mod normalize;

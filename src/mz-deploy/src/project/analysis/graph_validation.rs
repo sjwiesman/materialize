@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// # Returns
 /// * `Ok(())` if no conflicts found
 /// * `Err((cluster_name, compute_objects, storage_objects))` if conflicts detected
-pub fn validate_cluster_isolation(
+pub(crate) fn validate_cluster_isolation(
     project: &Project,
     sources_by_cluster: &BTreeMap<String, Vec<String>>,
 ) -> Result<(), (String, Vec<String>, Vec<String>)> {

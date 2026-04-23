@@ -56,7 +56,7 @@ pub struct UnresolvedVariable {
 
 /// A resolved variable substitution, for mapping offsets between original and resolved text.
 #[derive(Debug, Clone)]
-pub struct Substitution {
+pub(crate) struct Substitution {
     /// Byte offset of the `:` in the original SQL.
     pub original_start: usize,
     /// Byte length of the variable reference in the original SQL.
@@ -74,7 +74,7 @@ pub struct VariableError {
 
 /// Result of resolving psql-style variables in SQL text.
 #[derive(Debug)]
-pub struct ResolvedSql<'a> {
+pub(crate) struct ResolvedSql<'a> {
     /// The SQL text with resolved variables (unresolved ones left as-is).
     pub sql: Cow<'a, str>,
     /// Variable references that had no definition, with their positions.
@@ -92,7 +92,7 @@ pub struct ResolvedSql<'a> {
 /// space, applies the running delta. If inside a substitution's resolved span, clamps
 /// to that substitution's original start. Otherwise continues accumulating delta.
 #[allow(clippy::as_conversions)]
-pub fn resolved_to_original(offset: usize, substitutions: &[Substitution]) -> usize {
+pub(crate) fn resolved_to_original(offset: usize, substitutions: &[Substitution]) -> usize {
     let mut delta: isize = 0; // original - resolved cumulative shift
 
     for sub in substitutions {
@@ -337,7 +337,7 @@ fn consume_dollar_quoted(bytes: &[u8], mut i: usize, len: usize, tag: &[u8]) -> 
 /// `(name, byte_offset_of_colon, byte_len)` if the offset is inside a
 /// `:name`, `:'name'`, or `:"name"` reference outside of strings/comments.
 /// `None` otherwise.
-pub fn find_variable_at_position(sql: &str, offset: usize) -> Option<(String, usize, usize)> {
+pub(crate) fn find_variable_at_position(sql: &str, offset: usize) -> Option<(String, usize, usize)> {
     let bytes = sql.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -383,7 +383,7 @@ pub fn find_variable_at_position(sql: &str, offset: usize) -> Option<(String, us
 /// Always returns `ResolvedSql` with the SQL text (unresolved variables left as-is),
 /// a list of unresolved variable names, and whether the pragma was detected.
 /// The caller decides whether unresolved variables are errors or warnings.
-pub fn resolve_variables<'a>(sql: &'a str, vars: &BTreeMap<String, String>) -> ResolvedSql<'a> {
+pub(crate) fn resolve_variables<'a>(sql: &'a str, vars: &BTreeMap<String, String>) -> ResolvedSql<'a> {
     let bytes = sql.as_bytes();
     let len = bytes.len();
 

@@ -59,7 +59,7 @@ use std::path::Path;
 
 /// Complete catalog response returned by the `mz-deploy/catalog` endpoint.
 #[derive(Debug, Serialize)]
-pub struct CatalogResponse {
+pub(super) struct CatalogResponse {
     /// Database → schema tree for sidebar navigation.
     pub databases: Vec<CatalogDatabase>,
     /// All objects with full metadata for the detail panel.
@@ -72,14 +72,14 @@ pub struct CatalogResponse {
 
 /// A project build error surfaced in the catalog sidebar.
 #[derive(Debug, Serialize)]
-pub struct CatalogError {
+pub(super) struct CatalogError {
     /// Error message describing the build failure.
     pub message: String,
 }
 
 /// A database in the catalog sidebar tree.
 #[derive(Debug, Serialize)]
-pub struct CatalogDatabase {
+pub(super) struct CatalogDatabase {
     /// Database name.
     pub name: String,
     /// Schemas within this database.
@@ -88,7 +88,7 @@ pub struct CatalogDatabase {
 
 /// A schema in the catalog sidebar tree.
 #[derive(Debug, Serialize)]
-pub struct CatalogSchema {
+pub(super) struct CatalogSchema {
     /// Schema name.
     pub name: String,
     /// Fully-qualified IDs of objects in this schema (ordering matches project).
@@ -97,7 +97,7 @@ pub struct CatalogSchema {
 
 /// A single object in the catalog with full metadata.
 #[derive(Debug, Serialize)]
-pub struct CatalogObject {
+pub(super) struct CatalogObject {
     /// Fully-qualified object ID (e.g., `"db.schema.name"`).
     pub id: String,
     /// Database name.
@@ -135,7 +135,7 @@ pub struct CatalogObject {
 
 /// A column in an object's schema.
 #[derive(Debug, Serialize)]
-pub struct CatalogColumn {
+pub(super) struct CatalogColumn {
     /// Column name.
     pub name: String,
     /// SQL type name.
@@ -148,7 +148,7 @@ pub struct CatalogColumn {
 
 /// An index on an object.
 #[derive(Debug, Serialize)]
-pub struct CatalogIndex {
+pub(super) struct CatalogIndex {
     /// Index name.
     pub name: String,
     /// Cluster the index is on, if specified.
@@ -159,7 +159,7 @@ pub struct CatalogIndex {
 
 /// A constraint on an object.
 #[derive(Debug, Serialize)]
-pub struct CatalogConstraint {
+pub(super) struct CatalogConstraint {
     /// Constraint kind (e.g., `"PRIMARY KEY"`, `"UNIQUE"`, `"FOREIGN KEY"`).
     pub kind: String,
     /// Constraint name.
@@ -176,7 +176,7 @@ pub struct CatalogConstraint {
 
 /// A grant on an object.
 #[derive(Debug, Serialize)]
-pub struct CatalogGrant {
+pub(super) struct CatalogGrant {
     /// Privilege name (e.g., `"SELECT"`, `"INSERT"`, `"ALL"`).
     pub privilege: String,
     /// Role the privilege is granted to.
@@ -190,7 +190,7 @@ pub struct CatalogGrant {
 /// webview uses to render dedicated detail layouts.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
-pub enum CatalogInfrastructure {
+pub(super) enum CatalogInfrastructure {
     /// Connection properties (HOST, PORT, USER, PASSWORD, etc.)
     #[serde(rename = "connection")]
     Connection {
@@ -223,7 +223,7 @@ pub enum CatalogInfrastructure {
 
 /// A key-value property extracted from an infrastructure object's AST.
 #[derive(Debug, Serialize)]
-pub struct CatalogProperty {
+pub(super) struct CatalogProperty {
     /// Property name (e.g., "HOST", "DATABASE", "PUBLICATION").
     pub key: String,
     /// Display value. For secrets: the secret's fully-qualified name.
@@ -451,7 +451,7 @@ fn build_external_object(
 /// metadata via [`build_catalog_object`]. External dependencies are included as
 /// stub objects via [`build_external_object`]. Constraint MVs are excluded from
 /// both the tree and the dependents lists.
-pub fn build_catalog_response(
+pub(super) fn build_catalog_response(
     project_cache: &ProjectCache,
     types_lock: &Types,
     root: &Path,
@@ -527,7 +527,7 @@ pub fn build_catalog_response(
 ///
 /// Returns an empty catalog with the build error message so the sidebar
 /// can show what went wrong instead of spinning on "Waiting for project data..."
-pub fn build_error_response(error: Option<&str>) -> CatalogResponse {
+pub(super) fn build_error_response(error: Option<&str>) -> CatalogResponse {
     let errors = match error {
         Some(msg) => vec![CatalogError {
             message: msg.to_string(),

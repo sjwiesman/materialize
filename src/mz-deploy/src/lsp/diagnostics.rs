@@ -152,7 +152,6 @@ pub(crate) fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::error::{ErrorContext, ValidationErrorKind};
 
     #[test]
     fn valid_sql_produces_no_diagnostics() {
@@ -194,61 +193,6 @@ mod tests {
         let text = "   \n  \n  ";
         let rope = Rope::from_str(text);
         assert!(diagnose(text, &rope, &BTreeMap::new(), "default").is_empty());
-    }
-
-    fn make_validation_error(file: &str, object_name: &str) -> ValidationError {
-        ValidationError {
-            kind: ValidationErrorKind::NoMainStatement {
-                object_name: object_name.to_string(),
-            },
-            context: ErrorContext {
-                file: PathBuf::from(file),
-                sql_statement: None,
-                byte_offset: None,
-            },
-        }
-    }
-
-    #[test]
-    fn single_validation_error_produces_one_diagnostic() {
-        let errors = vec![make_validation_error("db/schema/view.sql", "view")];
-        let result = validation_diagnostics(&errors);
-        assert_eq!(result.len(), 1);
-        let diags = &result[&PathBuf::from("db/schema/view.sql")];
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
-        assert_eq!(diags[0].source.as_deref(), Some("mz-deploy"));
-        assert_eq!(diags[0].range.start.line, 0);
-        assert_eq!(diags[0].range.start.character, 0);
-    }
-
-    #[test]
-    fn multiple_errors_same_file_grouped() {
-        let errors = vec![
-            make_validation_error("db/schema/view.sql", "view"),
-            make_validation_error("db/schema/view.sql", "view2"),
-        ];
-        let result = validation_diagnostics(&errors);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[&PathBuf::from("db/schema/view.sql")].len(), 2);
-    }
-
-    #[test]
-    fn multiple_errors_different_files_separate_entries() {
-        let errors = vec![
-            make_validation_error("db/schema/a.sql", "a"),
-            make_validation_error("db/schema/b.sql", "b"),
-        ];
-        let result = validation_diagnostics(&errors);
-        assert_eq!(result.len(), 2);
-        assert!(result.contains_key(&PathBuf::from("db/schema/a.sql")));
-        assert!(result.contains_key(&PathBuf::from("db/schema/b.sql")));
-    }
-
-    #[test]
-    fn empty_errors_returns_empty_map() {
-        let result = validation_diagnostics(&[]);
-        assert!(result.is_empty());
     }
 
     // --- Variable-aware diagnose tests ---

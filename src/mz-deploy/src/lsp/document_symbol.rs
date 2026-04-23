@@ -36,7 +36,7 @@ use super::symbol_kind::object_kind_to_symbol_kind;
 /// each supporting statement, or an empty vec if the file doesn't correspond
 /// to a known project object.
 #[allow(deprecated)] // DocumentSymbol::deprecated field is deprecated but required
-pub fn document_symbols(
+pub(super) fn document_symbols(
     file_uri: &Url,
     root: &Path,
     project_cache: &ProjectCache,

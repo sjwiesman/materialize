@@ -33,7 +33,7 @@ use super::goto_definition;
 ///
 /// Returns an empty vec if the identifier cannot be resolved or has no
 /// dependents.
-pub fn find_references(
+pub(super) fn find_references(
     parts: &[String],
     file_uri: &Url,
     root: &Path,

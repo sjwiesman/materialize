@@ -32,7 +32,7 @@ pub struct DependentSink {
 }
 
 /// Check if a schema exists in the specified database.
-pub async fn schema_exists(
+pub(super) async fn schema_exists(
     client: &Client,
     database: &str,
     schema: &str,
@@ -52,7 +52,7 @@ pub async fn schema_exists(
 }
 
 /// Check if a cluster exists.
-pub async fn cluster_exists(client: &Client, name: &str) -> Result<bool, ConnectionError> {
+pub(super) async fn cluster_exists(client: &Client, name: &str) -> Result<bool, ConnectionError> {
     let query = r#"
         SELECT EXISTS(
             SELECT 1 FROM mz_catalog.mz_clusters WHERE name = $1
@@ -65,7 +65,7 @@ pub async fn cluster_exists(client: &Client, name: &str) -> Result<bool, Connect
 }
 
 /// Get a cluster by name.
-pub async fn get_cluster(client: &Client, name: &str) -> Result<Option<Cluster>, ConnectionError> {
+pub(super) async fn get_cluster(client: &Client, name: &str) -> Result<Option<Cluster>, ConnectionError> {
     let query = r#"
         SELECT
             id,
@@ -92,7 +92,7 @@ pub async fn get_cluster(client: &Client, name: &str) -> Result<Option<Cluster>,
 }
 
 /// List all clusters.
-pub async fn list_clusters(client: &Client) -> Result<Vec<Cluster>, ConnectionError> {
+pub(super) async fn list_clusters(client: &Client) -> Result<Vec<Cluster>, ConnectionError> {
     let query = r#"
         SELECT
             id,
@@ -122,7 +122,7 @@ pub async fn list_clusters(client: &Client) -> Result<Vec<Cluster>, ConnectionEr
 /// - For managed clusters: size and replication factor
 /// - For unmanaged clusters: replica configurations
 /// - For both: privilege grants
-pub async fn get_cluster_config(
+pub(super) async fn get_cluster_config(
     client: &Client,
     name: &str,
 ) -> Result<Option<ClusterConfig>, ConnectionError> {
@@ -220,7 +220,7 @@ pub async fn get_cluster_config(
 }
 
 /// Check if a network policy exists.
-pub async fn network_policy_exists(client: &Client, name: &str) -> Result<bool, ConnectionError> {
+pub(super) async fn network_policy_exists(client: &Client, name: &str) -> Result<bool, ConnectionError> {
     let query = r#"
         SELECT EXISTS(
             SELECT 1 FROM mz_catalog.mz_network_policies WHERE name = $1
@@ -233,7 +233,7 @@ pub async fn network_policy_exists(client: &Client, name: &str) -> Result<bool, 
 }
 
 /// Check if a role exists.
-pub async fn role_exists(client: &Client, name: &str) -> Result<bool, ConnectionError> {
+pub(super) async fn role_exists(client: &Client, name: &str) -> Result<bool, ConnectionError> {
     let query = r#"
         SELECT EXISTS(
             SELECT 1 FROM mz_catalog.mz_roles WHERE name = $1
@@ -246,7 +246,7 @@ pub async fn role_exists(client: &Client, name: &str) -> Result<bool, Connection
 }
 
 /// Get the members granted to a role.
-pub async fn get_role_members(
+pub(super) async fn get_role_members(
     client: &Client,
     role_name: &str,
 ) -> Result<Vec<String>, ConnectionError> {
@@ -265,7 +265,7 @@ pub async fn get_role_members(
 }
 
 /// Get session default parameter names for a role.
-pub async fn get_role_parameters(
+pub(super) async fn get_role_parameters(
     client: &Client,
     role_name: &str,
 ) -> Result<Vec<String>, ConnectionError> {
@@ -283,7 +283,7 @@ pub async fn get_role_parameters(
 }
 
 /// Get the current Materialize user/role.
-pub async fn get_current_user(client: &Client) -> Result<String, ConnectionError> {
+pub(super) async fn get_current_user(client: &Client) -> Result<String, ConnectionError> {
     let row = client.query_one("SELECT current_user()", &[]).await?;
 
     Ok(row.get(0))
@@ -292,7 +292,7 @@ pub async fn get_current_user(client: &Client) -> Result<String, ConnectionError
 /// Check which schemas from a set of (database, schema) pairs exist.
 ///
 /// Returns a BTreeSet of (database, schema) tuples that exist.
-pub async fn check_schemas_exist(
+pub(super) async fn check_schemas_exist(
     client: &Client,
     schemas: &[(String, String)],
 ) -> Result<BTreeSet<(String, String)>, ConnectionError> {
@@ -346,7 +346,7 @@ pub async fn check_schemas_exist(
 /// Check which clusters from a set of names exist.
 ///
 /// Returns a BTreeSet of cluster names that exist.
-pub async fn check_clusters_exist(
+pub(super) async fn check_clusters_exist(
     client: &Client,
     clusters: &[String],
 ) -> Result<BTreeSet<String>, ConnectionError> {
@@ -378,7 +378,7 @@ pub async fn check_clusters_exist(
 /// Check which objects from a set exist in the production database.
 ///
 /// Returns fully-qualified names of objects that exist.
-pub async fn check_objects_exist(
+pub(super) async fn check_objects_exist(
     client: &Client,
     objects: &BTreeSet<ObjectId>,
 ) -> Result<Vec<String>, ConnectionError> {
@@ -463,7 +463,7 @@ async fn check_catalog_objects_exist(
 /// Check which tables from the given set exist in the database.
 ///
 /// Returns a BTreeSet of ObjectIds for tables that already exist.
-pub async fn check_tables_exist(
+pub(super) async fn check_tables_exist(
     client: &Client,
     tables: &BTreeSet<ObjectId>,
 ) -> Result<BTreeSet<ObjectId>, ConnectionError> {
@@ -473,7 +473,7 @@ pub async fn check_tables_exist(
 /// Check which sources from the given set exist in the database.
 ///
 /// Returns a BTreeSet of ObjectIds for sources that already exist.
-pub async fn check_sources_exist(
+pub(super) async fn check_sources_exist(
     client: &Client,
     sources: &BTreeSet<ObjectId>,
 ) -> Result<BTreeSet<ObjectId>, ConnectionError> {
@@ -483,7 +483,7 @@ pub async fn check_sources_exist(
 /// Check which secrets from the given set exist in the database.
 ///
 /// Returns a BTreeSet of ObjectIds for secrets that already exist.
-pub async fn check_secrets_exist(
+pub(super) async fn check_secrets_exist(
     client: &Client,
     secrets: &BTreeSet<ObjectId>,
 ) -> Result<BTreeSet<ObjectId>, ConnectionError> {
@@ -493,7 +493,7 @@ pub async fn check_secrets_exist(
 /// Check which connections from the given set exist in the database.
 ///
 /// Returns a BTreeSet of ObjectIds for connections that already exist.
-pub async fn check_connections_exist(
+pub(super) async fn check_connections_exist(
     client: &Client,
     connections: &BTreeSet<ObjectId>,
 ) -> Result<BTreeSet<ObjectId>, ConnectionError> {
@@ -504,7 +504,7 @@ pub async fn check_connections_exist(
 ///
 /// Returns a BTreeSet of ObjectIds for sinks that already exist.
 /// Used during apply to skip creating sinks that already exist (like tables).
-pub async fn check_sinks_exist(
+pub(super) async fn check_sinks_exist(
     client: &Client,
     sinks: &BTreeSet<ObjectId>,
 ) -> Result<BTreeSet<ObjectId>, ConnectionError> {
@@ -516,7 +516,7 @@ pub async fn check_sinks_exist(
 /// This is used during apply to identify sinks that need to be repointed
 /// before old schemas are dropped with CASCADE. Only returns sinks whose
 /// upstream object (FROM clause) is in one of the specified schemas.
-pub async fn find_sinks_depending_on_schemas(
+pub(super) async fn find_sinks_depending_on_schemas(
     client: &Client,
     schemas: &[SchemaQualifier],
 ) -> Result<Vec<DependentSink>, ConnectionError> {
@@ -587,7 +587,7 @@ pub async fn find_sinks_depending_on_schemas(
 }
 
 /// Check if a connection exists in the specified database and schema.
-pub async fn check_connection_exists(
+pub(super) async fn check_connection_exists(
     client: &Client,
     database: &str,
     schema: &str,
@@ -611,7 +611,7 @@ pub async fn check_connection_exists(
 /// Check if an object (MV, table, source) exists in the specified schema.
 ///
 /// Used to verify that a replacement object exists before repointing a sink.
-pub async fn object_exists(
+pub(super) async fn object_exists(
     client: &Client,
     database: &str,
     schema: &str,
@@ -635,7 +635,7 @@ pub async fn object_exists(
 }
 
 /// Get staging schema names for a specific deployment.
-pub async fn get_staging_schemas(
+pub(super) async fn get_staging_schemas(
     client: &Client,
     deploy_id: &str,
 ) -> Result<Vec<SchemaQualifier>, ConnectionError> {
@@ -662,7 +662,7 @@ pub async fn get_staging_schemas(
 }
 
 /// Get staging cluster names for a specific deployment.
-pub async fn get_staging_clusters(
+pub(super) async fn get_staging_clusters(
     client: &Client,
     deploy_id: &str,
 ) -> Result<Vec<String>, ConnectionError> {
@@ -695,7 +695,7 @@ fn mz_type_to_drop_keyword(obj_type: &str) -> Option<&'static str> {
 /// Drop all objects in a schema.
 ///
 /// Returns the fully-qualified names of dropped objects.
-pub async fn drop_schema_objects(
+pub(super) async fn drop_schema_objects(
     client: &Client,
     database: &str,
     schema: &str,
@@ -739,7 +739,7 @@ pub async fn drop_schema_objects(
 /// Drop specific objects by their ObjectIds.
 ///
 /// Returns the fully-qualified names of dropped objects.
-pub async fn drop_objects(
+pub(super) async fn drop_objects(
     client: &Client,
     objects: &BTreeSet<ObjectId>,
 ) -> Result<Vec<String>, ConnectionError> {
@@ -798,7 +798,7 @@ pub async fn drop_objects(
 }
 
 /// Drop staging schemas by name.
-pub async fn drop_staging_schemas(
+pub(super) async fn drop_staging_schemas(
     client: &Client,
     schemas: &[SchemaQualifier],
 ) -> Result<(), ConnectionError> {
@@ -815,7 +815,7 @@ pub async fn drop_staging_schemas(
 }
 
 /// Drop staging clusters by name.
-pub async fn drop_staging_clusters(
+pub(super) async fn drop_staging_clusters(
     client: &Client,
     clusters: &[String],
 ) -> Result<(), ConnectionError> {
@@ -875,7 +875,7 @@ async fn get_named_object_grants(
 }
 
 /// Get privilege grants on a cluster by name.
-pub async fn get_cluster_grants(
+pub(super) async fn get_cluster_grants(
     client: &Client,
     name: &str,
 ) -> Result<Vec<ObjectGrant>, ConnectionError> {
@@ -883,7 +883,7 @@ pub async fn get_cluster_grants(
 }
 
 /// Get privilege grants on a network policy by name.
-pub async fn get_network_policy_grants(
+pub(super) async fn get_network_policy_grants(
     client: &Client,
     name: &str,
 ) -> Result<Vec<ObjectGrant>, ConnectionError> {
@@ -893,7 +893,7 @@ pub async fn get_network_policy_grants(
 /// Get privilege grants on a database object (table, source, secret, connection).
 ///
 /// `catalog_table` is the system catalog table name (e.g., `"mz_tables"`, `"mz_secrets"`).
-pub async fn get_database_object_grants(
+pub(super) async fn get_database_object_grants(
     client: &Client,
     catalog_table: &str,
     database: &str,
@@ -984,7 +984,7 @@ async fn get_default_privilege_grants_for_named_object(
 }
 
 /// Get default privilege grants for a cluster by name.
-pub async fn get_default_privilege_grants_for_cluster(
+pub(super) async fn get_default_privilege_grants_for_cluster(
     client: &Client,
     name: &str,
 ) -> Result<Vec<ObjectGrant>, ConnectionError> {
@@ -992,7 +992,7 @@ pub async fn get_default_privilege_grants_for_cluster(
 }
 
 /// Get default privilege grants for a network policy by name.
-pub async fn get_default_privilege_grants_for_network_policy(
+pub(super) async fn get_default_privilege_grants_for_network_policy(
     client: &Client,
     name: &str,
 ) -> Result<Vec<ObjectGrant>, ConnectionError> {
@@ -1004,7 +1004,7 @@ pub async fn get_default_privilege_grants_for_network_policy(
 /// Queries `mz_default_privileges` to find grants that would be auto-applied
 /// to the given object based on its owner, database, schema, and any PUBLIC
 /// default privileges. These grants should be protected from revocation.
-pub async fn get_default_privilege_grants_for_database_object(
+pub(super) async fn get_default_privilege_grants_for_database_object(
     client: &Client,
     catalog_table: &str,
     database: &str,
@@ -1061,7 +1061,7 @@ pub async fn get_default_privilege_grants_for_database_object(
 /// Uses `SHOW CREATE CONNECTION` which returns the canonical, non-redacted SQL
 /// including fully-qualified secret references. Returns `None` if the
 /// connection does not exist.
-pub async fn get_connection_create_sql(
+pub(super) async fn get_connection_create_sql(
     client: &Client,
     database: &str,
     schema: &str,

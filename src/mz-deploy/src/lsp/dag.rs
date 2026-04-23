@@ -20,7 +20,7 @@ use std::path::Path;
 
 /// Complete DAG response returned by the `mz-deploy/dag` endpoint.
 #[derive(Debug, Serialize)]
-pub struct DagResponse {
+pub(super) struct DagResponse {
     /// All objects in the project, including external dependencies.
     pub objects: Vec<DagNode>,
     /// Dependency edges between objects.
@@ -29,7 +29,7 @@ pub struct DagResponse {
 
 /// A single node in the DAG.
 #[derive(Debug, Serialize)]
-pub struct DagNode {
+pub(super) struct DagNode {
     /// Fully-qualified object ID (e.g., `"db.schema.name"`).
     pub id: String,
     /// Unqualified object name.
@@ -46,7 +46,7 @@ pub struct DagNode {
 
 /// A dependency edge between two objects.
 #[derive(Debug, Serialize)]
-pub struct DagEdge {
+pub(super) struct DagEdge {
     /// Fully-qualified ID of the upstream (dependency) object.
     pub source: String,
     /// Fully-qualified ID of the downstream (dependent) object.
@@ -60,7 +60,7 @@ pub struct DagEdge {
 /// The semantic kind of a dependency edge.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EdgeKind {
+pub(super) enum EdgeKind {
     /// Secret consumed by a connection.
     UsesCredential,
     /// Connection consumed by a source.
@@ -104,7 +104,7 @@ fn cached_object_type(obj: &CachedObject) -> &str {
 /// Walks all cached project objects to create nodes and edges, then adds nodes
 /// for external dependencies (with `is_external: true` and no `file_path`).
 /// File paths are resolved relative to `root`.
-pub fn build_dag_response(project_cache: &ProjectCache, root: &Path) -> DagResponse {
+pub(super) fn build_dag_response(project_cache: &ProjectCache, root: &Path) -> DagResponse {
     let mut objects = Vec::new();
     let mut edges = Vec::new();
     // Track which object FQNs we've seen so we can add external deps after.

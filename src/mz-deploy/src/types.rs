@@ -102,7 +102,7 @@ impl fmt::Display for ObjectKind {
 }
 
 /// Directory name for mz-deploy build artifacts.
-pub const BUILD_DIR: &str = "target";
+pub(crate) const BUILD_DIR: &str = "target";
 
 /// Errors that can occur when reading, writing, or parsing `types.lock` files.
 #[derive(Error, Debug)]
@@ -409,7 +409,7 @@ fn write_toml(lock: &TypesLock) -> String {
 
 /// Load the types.lock file from the specified directory.
 /// Returns an error if the file doesn't exist or cannot be parsed.
-pub fn load_types_lock(directory: &Path) -> Result<Types, TypesError> {
+pub(crate) fn load_types_lock(directory: &Path) -> Result<Types, TypesError> {
     let path = directory.join("types.lock");
 
     let contents = fs::read_to_string(&path).map_err(|source| TypesError::FileReadFailed {
@@ -469,7 +469,7 @@ impl Types {
 /// Since `BTreeMap` iterates in sorted key order, the hash is stable across runs.
 /// Each `(column_name, type, nullable)` triple is fed into SHA-256 in order.
 /// The output format matches `compute_typed_hash`: `sha256:<hex>`.
-pub fn type_hash(columns: &BTreeMap<String, ColumnType>) -> String {
+pub(crate) fn type_hash(columns: &BTreeMap<String, ColumnType>) -> String {
     let mut hasher = Sha256::new();
     for (name, col_type) in columns {
         hasher.update(name.as_bytes());

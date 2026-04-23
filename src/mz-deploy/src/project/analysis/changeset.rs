@@ -52,7 +52,7 @@ mod diff;
 mod logging;
 mod types;
 
-pub use types::ChangeSet;
+pub(crate) use types::ChangeSet;
 
 use crate::client::DeploymentKind;
 use crate::project::SchemaQualifier;
@@ -78,7 +78,7 @@ impl ChangeSet {
     ///
     /// # Returns
     /// A ChangeSet identifying all objects requiring redeployment
-    pub fn from_deployment_snapshot_comparison(
+    pub(crate) fn from_deployment_snapshot_comparison(
         old_snapshot: &DeploymentSnapshot,
         new_snapshot: &DeploymentSnapshot,
         project: &Project,

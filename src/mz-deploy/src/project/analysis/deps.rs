@@ -351,7 +351,7 @@ impl From<compiled::Project> for Project {
 /// Find all external indexes on an object. That is,
 /// any index that lives on a different cluster than the one where
 /// the main object is installed.
-pub fn extract_external_indexes(
+pub(crate) fn extract_external_indexes(
     object: &DatabaseObject,
 ) -> Vec<(Cluster, CreateIndexStatement<Raw>)> {
     match &object.typed_object.stmt {
@@ -439,7 +439,7 @@ impl<'ast> Visit<'ast, Raw> for DependencyVisitor<'_> {
 ///
 /// This function is public to allow the changeset module to analyze
 /// cluster dependencies for incremental deployment.
-pub fn extract_dependencies(
+pub(crate) fn extract_dependencies(
     stmt: &Statement,
     default_database: &str,
     default_schema: &str,
@@ -539,7 +539,7 @@ fn extract_connection_option_deps(
 }
 
 /// Result of validating declared dependencies against discovered external references.
-pub struct DependencyValidation {
+pub(crate) struct DependencyValidation {
     /// External references found in SQL that are not declared in project.toml.
     pub undeclared: BTreeSet<ObjectId>,
     /// Dependencies declared in project.toml that no SQL object references.
@@ -552,7 +552,7 @@ pub struct DependencyValidation {
 /// Returns the set difference in both directions:
 /// - `undeclared`: discovered but not declared (should be a hard error)
 /// - `unused`: declared but not discovered (should be a warning)
-pub fn validate_dependencies(
+pub(crate) fn validate_dependencies(
     declared: &BTreeSet<ObjectId>,
     discovered: &BTreeSet<ObjectId>,
 ) -> DependencyValidation {

@@ -127,7 +127,7 @@ fn try_open_project_cache(
 }
 
 /// LSP backend holding session state.
-pub struct Backend {
+pub(super) struct Backend {
     /// Client handle for sending notifications (e.g., diagnostics).
     client: Client,
     /// Per-file text ropes, keyed by document URI.
@@ -151,7 +151,7 @@ pub struct Backend {
 
 impl Backend {
     /// Create a new backend with the given LSP client handle and project root.
-    pub fn new_with_root(client: Client, root: PathBuf) -> Self {
+    pub(super) fn new_with_root(client: Client, root: PathBuf) -> Self {
         Self {
             client,
             documents: Mutex::new(BTreeMap::new()),
@@ -232,7 +232,7 @@ impl Backend {
     /// Returns the project's dependency graph as JSON, or `null` if no project
     /// has been successfully built yet.
     #[allow(clippy::unused_async)] // async required by tower-lsp custom_method
-    pub async fn dag(&self) -> Result<serde_json::Value> {
+    pub(super) async fn dag(&self) -> Result<serde_json::Value> {
         let root = self.root.read().await.clone();
         let cache_guard = self.project_cache.lock().await;
         match cache_guard.as_ref() {
@@ -248,7 +248,7 @@ impl Backend {
     /// uppercase strings (e.g., `["ABORT", "ACCESS", ...]`). The keyword list
     /// is static and derived from [`mz_sql_lexer::keywords::KEYWORDS`].
     #[allow(clippy::unused_async)] // async required by tower-lsp custom_method
-    pub async fn keywords(&self) -> Result<serde_json::Value> {
+    pub(super) async fn keywords(&self) -> Result<serde_json::Value> {
         let kws: Vec<&str> = mz_sql_lexer::keywords::KEYWORDS
             .entries()
             .map(|(_, kw)| kw.as_str())
@@ -261,7 +261,7 @@ impl Backend {
     /// Returns the project's data catalog as JSON, or `null` if no project
     /// has been successfully built yet.
     #[allow(clippy::unused_async)] // async required by tower-lsp custom_method
-    pub async fn catalog(&self) -> tower_lsp::jsonrpc::Result<serde_json::Value> {
+    pub(super) async fn catalog(&self) -> tower_lsp::jsonrpc::Result<serde_json::Value> {
         let root = self.root.read().await.clone();
         let cache_guard = self.project_cache.lock().await;
         match cache_guard.as_ref() {

@@ -26,7 +26,7 @@ use mz_sql_parser::ast::{
 
 /// Extracted infrastructure metadata for an object.
 #[derive(Debug, Clone)]
-pub enum Infrastructure {
+pub(crate) enum Infrastructure {
     /// Connection properties (HOST, PORT, USER, PASSWORD, etc.)
     Connection {
         /// Connection type (e.g., "Postgres", "Kafka", "MySQL").
@@ -54,7 +54,7 @@ pub enum Infrastructure {
 
 /// A key-value property extracted from an infrastructure object's AST.
 #[derive(Debug, Clone)]
-pub struct Property {
+pub(crate) struct Property {
     /// Property name (e.g., "HOST", "DATABASE", "PUBLICATION").
     pub key: String,
     /// Display value. For secrets: the secret's fully-qualified name.
@@ -69,7 +69,7 @@ pub struct Property {
 ///
 /// Returns `Some` for connections, sources, and tables-from-source;
 /// `None` for all other statement types.
-pub fn extract(stmt: &crate::project::ast::Statement) -> Option<Infrastructure> {
+pub(crate) fn extract(stmt: &crate::project::ast::Statement) -> Option<Infrastructure> {
     match stmt {
         crate::project::ast::Statement::CreateConnection(s) => Some(extract_connection(s)),
         crate::project::ast::Statement::CreateSource(s) => Some(extract_source(s)),

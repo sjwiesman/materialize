@@ -490,7 +490,7 @@ impl std::error::Error for InvalidAtTimeError {}
 ///
 /// # Returns
 /// Ok(()) if validation passes, Err with detailed error messages if validation fails
-pub fn validate_unit_test(
+pub(crate) fn validate_unit_test(
     test: &UnitTest,
     target_id: &ObjectId,
     get_columns: &dyn Fn(&str) -> Option<BTreeMap<String, ColumnType>>,
@@ -766,7 +766,7 @@ fn normalize_type(t: &str) -> String {
 /// * `test` - The parsed unit test
 /// * `target_stmt` - The statement defining the target view
 /// * `target_fqn` - Fully qualified name of the target view
-pub fn desugar_unit_test(
+pub(crate) fn desugar_unit_test(
     test: &UnitTest,
     target_stmt: &Statement,
     target_fqn: &FullyQualifiedName,

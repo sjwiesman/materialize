@@ -10,7 +10,7 @@
 //!
 //! These modules describe how bytes on disk become structured compiler inputs.
 
-pub mod input;
-pub mod parser;
-pub mod profile_files;
-pub mod variables;
+pub(crate) mod input;
+pub(crate) mod parser;
+pub(crate) mod profile_files;
+pub(crate) mod variables;
