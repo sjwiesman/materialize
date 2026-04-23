@@ -1,7 +1,7 @@
 //! Describe command - show detailed information about a specific deployment.
 
 use crate::cli::CliError;
-use crate::client::{Client, DeploymentDetails, DeploymentKind, DeploymentMode};
+use crate::client::{Client, DeploymentDetails, DeploymentKind};
 use crate::config::Settings;
 use crate::log;
 use crate::project::ir::object_id::ObjectId;
@@ -19,20 +19,12 @@ struct DescribeOutput {
 
 impl fmt::Display for DescribeOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Display deployment header
-        let mode_label = if self.details.mode == DeploymentMode::Preview {
-            " (preview)".dimmed().to_string()
-        } else {
-            String::new()
-        };
-
         writeln!(
             f,
-            "{} {} [{}]{}",
+            "{} {} [{}]",
             "deployment".yellow().bold(),
             self.deploy_id.cyan(),
             self.details.kind.to_string().dimmed(),
-            mode_label
         )?;
 
         if let Some(commit_sha) = &self.details.git_commit {
@@ -61,12 +53,7 @@ impl fmt::Display for DescribeOutput {
                 writeln!(f, "{}: {}", "Promoted at".dimmed(), promoted_str)?;
             }
         } else {
-            let status_label = if self.details.mode == DeploymentMode::Preview {
-                "preview"
-            } else {
-                "staging"
-            };
-            writeln!(f, "{}: {}", "Status".dimmed(), status_label.yellow())?;
+            writeln!(f, "{}: {}", "Status".dimmed(), "staging".yellow())?;
         }
 
         writeln!(f)?;

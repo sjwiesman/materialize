@@ -48,25 +48,21 @@ impl FromStr for DeploymentKind {
     }
 }
 
-/// Whether a deployment is a full stage (promotable) or a preview (not promotable).
+/// Deployment mode tag stored alongside each deployment.
 ///
-/// Stage deployments require `materialize_deployer` role and can be promoted to
-/// production. Preview deployments require only `materialize_developer` role and
-/// cannot be promoted — they exist for testing changes without deploy powers.
+/// Currently only `Stage` exists; kept as an enum for schema compatibility
+/// with the `mode` column in `_mz_deploy.tables.deployments`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentMode {
     /// Full staging deployment that can be promoted to production.
     Stage,
-    /// Preview deployment for testing — cannot be promoted.
-    Preview,
 }
 
 impl fmt::Display for DeploymentMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DeploymentMode::Stage => write!(f, "stage"),
-            DeploymentMode::Preview => write!(f, "preview"),
         }
     }
 }
@@ -77,7 +73,6 @@ impl FromStr for DeploymentMode {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "stage" => Ok(DeploymentMode::Stage),
-            "preview" => Ok(DeploymentMode::Preview),
             _ => Err(format!("Invalid deployment mode: {}", s)),
         }
     }

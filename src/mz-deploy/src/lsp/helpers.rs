@@ -18,7 +18,9 @@ pub(super) fn extract_cached_description(comments: &[CachedComment]) -> Option<S
 ///
 /// Filters to comments where `target_column` is `Some`, returning a map
 /// from column name to description text.
-pub(super) fn extract_cached_column_comments(comments: &[CachedComment]) -> BTreeMap<String, String> {
+pub(super) fn extract_cached_column_comments(
+    comments: &[CachedComment],
+) -> BTreeMap<String, String> {
     comments
         .iter()
         .filter_map(|c| {

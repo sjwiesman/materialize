@@ -57,4 +57,3 @@ pub struct DatabaseObject {
     /// All profile variants for this object (at least one)
     pub variants: Vec<ObjectVariant>,
 }
-

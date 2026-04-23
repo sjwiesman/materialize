@@ -337,7 +337,10 @@ fn consume_dollar_quoted(bytes: &[u8], mut i: usize, len: usize, tag: &[u8]) -> 
 /// `(name, byte_offset_of_colon, byte_len)` if the offset is inside a
 /// `:name`, `:'name'`, or `:"name"` reference outside of strings/comments.
 /// `None` otherwise.
-pub(crate) fn find_variable_at_position(sql: &str, offset: usize) -> Option<(String, usize, usize)> {
+pub(crate) fn find_variable_at_position(
+    sql: &str,
+    offset: usize,
+) -> Option<(String, usize, usize)> {
     let bytes = sql.as_bytes();
     let len = bytes.len();
     let mut i = 0;
@@ -383,7 +386,10 @@ pub(crate) fn find_variable_at_position(sql: &str, offset: usize) -> Option<(Str
 /// Always returns `ResolvedSql` with the SQL text (unresolved variables left as-is),
 /// a list of unresolved variable names, and whether the pragma was detected.
 /// The caller decides whether unresolved variables are errors or warnings.
-pub(crate) fn resolve_variables<'a>(sql: &'a str, vars: &BTreeMap<String, String>) -> ResolvedSql<'a> {
+pub(crate) fn resolve_variables<'a>(
+    sql: &'a str,
+    vars: &BTreeMap<String, String>,
+) -> ResolvedSql<'a> {
     let bytes = sql.as_bytes();
     let len = bytes.len();
 

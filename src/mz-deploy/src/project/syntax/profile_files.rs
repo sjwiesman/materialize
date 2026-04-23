@@ -49,7 +49,6 @@ pub(crate) struct ObjectFiles {
     pub overrides: BTreeMap<String, PathBuf>,
 }
 
-
 /// Collect all `.sql` files from a directory grouped by object name without resolving.
 ///
 /// Returns all variants (default + all profile overrides) for each object.
@@ -167,7 +166,6 @@ mod tests {
     fn test_parse_single_underscore() {
         assert_eq!(parse_file_stem("my_table"), ("my_table", None));
     }
-
 
     // --- collect_all_sql_files tests ---
 

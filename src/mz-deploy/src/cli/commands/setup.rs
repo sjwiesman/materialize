@@ -194,8 +194,8 @@ pub fn require_deployer(role: MzDeployRole) -> Result<(), CliError> {
 
 /// Require that the validated role is `Developer`.
 ///
-/// Used by `preview` command. Strict — only accepts `Developer`,
-/// deployers should use `stage` instead.
+/// Used by `mz-deploy dev`. Strict — only accepts `Developer`; deployers
+/// should use `stage` instead.
 pub fn require_developer(role: MzDeployRole) -> Result<(), CliError> {
     if role != MzDeployRole::Developer {
         return Err(CliError::RoleNotAuthorized {

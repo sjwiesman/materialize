@@ -65,7 +65,10 @@ pub(super) async fn cluster_exists(client: &Client, name: &str) -> Result<bool, 
 }
 
 /// Get a cluster by name.
-pub(super) async fn get_cluster(client: &Client, name: &str) -> Result<Option<Cluster>, ConnectionError> {
+pub(super) async fn get_cluster(
+    client: &Client,
+    name: &str,
+) -> Result<Option<Cluster>, ConnectionError> {
     let query = r#"
         SELECT
             id,
@@ -220,7 +223,10 @@ pub(super) async fn get_cluster_config(
 }
 
 /// Check if a network policy exists.
-pub(super) async fn network_policy_exists(client: &Client, name: &str) -> Result<bool, ConnectionError> {
+pub(super) async fn network_policy_exists(
+    client: &Client,
+    name: &str,
+) -> Result<bool, ConnectionError> {
     let query = r#"
         SELECT EXISTS(
             SELECT 1 FROM mz_catalog.mz_network_policies WHERE name = $1

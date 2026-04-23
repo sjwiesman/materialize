@@ -35,8 +35,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::project::compiler::CompileMode;
-
 pub(crate) mod analysis;
 pub(crate) mod ast;
 pub(crate) mod clusters;
@@ -104,5 +102,5 @@ pub(crate) fn plan_sync<P: AsRef<Path>>(
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
 ) -> Result<ir::graph::Project, error::ProjectError> {
-    compiler::compile_sync(root, profile, profile_suffix, variables, CompileMode::Stage)
+    compiler::compile_sync(root, profile, profile_suffix, variables)
 }

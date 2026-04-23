@@ -113,9 +113,6 @@ pub enum ConnectionError {
     #[error("deployment '{deploy_id}' has already been promoted to production")]
     DeploymentAlreadyPromoted { deploy_id: String },
 
-    #[error("preview deployment '{deploy_id}' cannot be promoted to production")]
-    PreviewCannotBePromoted { deploy_id: String },
-
     #[error("unsupported statement type: {0}")]
     UnsupportedStatementType(String),
 
@@ -741,16 +738,6 @@ mod tests {
         let error_string = format!("{}", error);
         assert!(error_string.contains("prod_deploy"));
         assert!(error_string.contains("already been promoted"));
-    }
-
-    #[test]
-    fn test_connection_error_preview_cannot_be_promoted() {
-        let error = ConnectionError::PreviewCannotBePromoted {
-            deploy_id: "my-preview".to_string(),
-        };
-        let error_string = format!("{}", error);
-        assert!(error_string.contains("my-preview"));
-        assert!(error_string.contains("cannot be promoted"));
     }
 
     #[test]

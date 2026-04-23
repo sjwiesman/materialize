@@ -78,7 +78,6 @@ mod validation;
 pub(crate) use validation::{validate_constraint_columns, validate_constraint_fk_targets};
 
 use super::error::{LoadError, ProjectError, ValidationError, ValidationErrors};
-use crate::project::SchemaQualifier;
 use crate::project::ir::{compiled, graph};
 use crate::project::syntax::input;
 use crate::project::syntax::parser::parse_statements_with_context;
@@ -96,27 +95,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// Controls compiler name-rewrite behavior.
-///
-/// `Stage` is the default used by stage, preview, and apply. `DevOverlay`
-/// will (in a follow-up task) instruct the rewriter to redirect references
-/// to dirty `(database, schema)` pairs onto the `<base_db>__<profile>` overlay
-/// database used by `mz-deploy dev`, and to skip the stable-api replacement
-/// rewrite.
-#[derive(Clone, Debug)]
-pub(crate) enum CompileMode {
-    /// Normal compilation used by stage, preview, and apply.
-    Stage,
-    /// Dev overlay compilation.
-    ///
-    /// Currently accepted as a parameter but has no behavior of its own —
-    /// Task 7 will wire the rewriter and the stable-api bypass.
-    DevOverlay {
-        profile_name: String,
-        dirty_schemas: BTreeSet<SchemaQualifier>,
-    },
-}
 
 pub(crate) const COMPILER_DIR: &str = "compiler";
 
@@ -282,9 +260,8 @@ pub(crate) fn compile_sync<P: AsRef<Path>>(
     profile: &str,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
-    mode: CompileMode,
 ) -> Result<graph::Project, ProjectError> {
-    compile_sync_with_stats(root, profile, profile_suffix, variables, mode)
+    compile_sync_with_stats(root, profile, profile_suffix, variables)
         .map(|(project, _)| project)
 }
 
@@ -309,12 +286,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
     profile: &str,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
-    mode: CompileMode,
 ) -> Result<(graph::Project, CompileStats), ProjectError> {
-    // CompileMode is currently reserved for future use. `mz-deploy dev`
-    // applies the overlay rewrite per-object in dev::create_phase, not
-    // during compile_sync.
-    let _ = &mode;
     let root = root.as_ref();
     let mut db =
         BuildArtifact::open(root, profile, profile_suffix, variables).map_err(LoadError::from)?;
@@ -1172,13 +1144,13 @@ mod tests {
         );
 
         let (_, first_stats) =
-            compile_sync_with_stats(root, "default", None, &BTreeMap::new(), CompileMode::Stage)
+            compile_sync_with_stats(root, "default", None, &BTreeMap::new())
                 .unwrap();
         assert_eq!(first_stats.cache_hits, 0);
         assert_eq!(first_stats.cache_misses, 1);
 
         let (_, second_stats) =
-            compile_sync_with_stats(root, "default", None, &BTreeMap::new(), CompileMode::Stage)
+            compile_sync_with_stats(root, "default", None, &BTreeMap::new())
                 .unwrap();
         assert_eq!(second_stats.cache_hits, 1);
         assert_eq!(second_stats.cache_misses, 0);
@@ -1200,7 +1172,7 @@ mod tests {
         );
 
         let _ =
-            compile_sync_with_stats(root, "default", None, &BTreeMap::new(), CompileMode::Stage)
+            compile_sync_with_stats(root, "default", None, &BTreeMap::new())
                 .unwrap();
         write_sql(
             root,
@@ -1209,7 +1181,7 @@ mod tests {
         );
 
         let (_, stats) =
-            compile_sync_with_stats(root, "default", None, &BTreeMap::new(), CompileMode::Stage)
+            compile_sync_with_stats(root, "default", None, &BTreeMap::new())
                 .unwrap();
         assert_eq!(stats.cache_hits, 1);
         assert_eq!(stats.cache_misses, 1);

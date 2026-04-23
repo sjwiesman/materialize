@@ -21,7 +21,11 @@ pub enum ServerClusterHealth {
 }
 
 async fn check_server_cluster(client: &Client) -> Result<ServerClusterHealth, CliError> {
-    match client.introspection().get_cluster(SERVER_CLUSTER_NAME).await? {
+    match client
+        .introspection()
+        .get_cluster(SERVER_CLUSTER_NAME)
+        .await?
+    {
         None => Ok(ServerClusterHealth::Missing),
         Some(c) if c.replication_factor.unwrap_or(0) > 0 => Ok(ServerClusterHealth::Healthy),
         Some(_) => Ok(ServerClusterHealth::NotReady {
@@ -147,9 +151,7 @@ pub async fn run(settings: &Settings) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn query_session_info(
-    client: &Client,
-) -> Result<(String, String, String), CliError> {
+async fn query_session_info(client: &Client) -> Result<(String, String, String), CliError> {
     let row = client
         .query_one(
             r#"
