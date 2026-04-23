@@ -49,19 +49,24 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
     (MzDeployRole::Monitor, "materialize_monitor"),
 ];
 
-/// Create the `_mz_deploy_server` cluster if missing and grant `USAGE` on it
-/// to the three `materialize_*` roles. Idempotent.
+/// Ensure the deployment tracking infrastructure exists.
 ///
-/// If the cluster already exists at a different size, leave it alone — operators
-/// may have intentionally resized. GRANTs are safe to re-run.
-async fn ensure_server_cluster(client: &Client) -> Result<(), CliError> {
-    let exists = client
+/// Three phases, idempotent on re-run:
+/// 1. Create the `_mz_deploy_server` cluster if missing.
+/// 2. Create the `_mz_deploy` database and run `setup_schema.sql` (tables,
+///    views, indexes) on first creation.
+/// 3. Create the three `materialize_*` roles if missing and apply grants.
+///
+/// Called by both the explicit `setup` command and by other commands that
+/// need the infrastructure to be present (`stage`, `promote`, `list`, etc.).
+pub async fn ensure(client: &Client) -> Result<(), CliError> {
+    // Phase 1: cluster.
+    if client
         .introspection()
         .get_cluster(SERVER_CLUSTER_NAME)
         .await?
-        .is_some();
-
-    if !exists {
+        .is_none()
+    {
         let sql = format!(
             "CREATE CLUSTER {} (SIZE = '{}')",
             quote_identifier(SERVER_CLUSTER_NAME),
@@ -70,26 +75,64 @@ async fn ensure_server_cluster(client: &Client) -> Result<(), CliError> {
         client.execute(&sql, &[]).await?;
     }
 
-    for (_, role_name) in ALL_ROLES {
-        let sql = format!(
-            "GRANT USAGE ON CLUSTER {} TO {}",
-            quote_identifier(SERVER_CLUSTER_NAME),
-            role_name,
-        );
-        client.execute(&sql, &[]).await?;
+    // Phase 2: database + objects. The SQL file is the single source of
+    // truth for the _mz_deploy schema; it runs exactly once per DB lifetime.
+    let db_exists: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM mz_databases WHERE name = '_mz_deploy') AS exists",
+            &[],
+        )
+        .await?
+        .get("exists");
+
+    if !db_exists {
+        client.execute("CREATE DATABASE _mz_deploy", &[]).await?;
+        client
+            .batch_execute(include_str!("setup_schema.sql"))
+            .await?;
     }
 
-    Ok(())
-}
+    // Phase 3: roles + grants. GRANTs are safe to re-run and heal drift.
+    for (role, role_name) in ALL_ROLES {
+        if !client.introspection().role_exists(role_name).await? {
+            client
+                .execute(&format!("CREATE ROLE {}", role_name), &[])
+                .await?;
+        }
 
-/// Ensure the deployment tracking infrastructure exists.
-///
-/// This is the shared entry point used by both the explicit `setup` command
-/// and by other commands (`stage`, `promote`, `list`, `describe`, `log`)
-/// that need the `_mz_deploy` database to be present.
-pub async fn ensure(client: &Client) -> Result<(), CliError> {
-    client.deployments().create_deployments().await?;
-    ensure_server_cluster(client).await?;
+        // Common: navigation + read through the public view layer.
+        for sql in [
+            format!(
+                "GRANT USAGE ON CLUSTER {} TO {}",
+                quote_identifier(SERVER_CLUSTER_NAME),
+                role_name
+            ),
+            format!("GRANT USAGE ON DATABASE _mz_deploy TO {}", role_name),
+            format!("GRANT USAGE ON SCHEMA _mz_deploy.public TO {}", role_name),
+            format!("GRANT USAGE ON SCHEMA _mz_deploy.tables TO {}", role_name),
+            format!(
+                "GRANT SELECT ON ALL TABLES IN SCHEMA _mz_deploy.public TO {}",
+                role_name
+            ),
+        ] {
+            client.execute(&sql, &[]).await?;
+        }
+
+        // Deployer-only: writes on physical tables.
+        if *role == MzDeployRole::Deployer {
+            client
+                .execute(
+                    &format!(
+                        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES \
+                         IN SCHEMA _mz_deploy.tables TO {}",
+                        role_name,
+                    ),
+                    &[],
+                )
+                .await?;
+        }
+    }
+
     Ok(())
 }
 
