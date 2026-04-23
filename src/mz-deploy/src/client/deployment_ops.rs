@@ -298,11 +298,10 @@ pub(super) async fn get_deployment_clusters(
     deploy_id: &str,
 ) -> Result<Vec<String>, ConnectionError> {
     let query = r#"
-        SELECT c.name
-        FROM _mz_deploy.public.clusters dc
-        JOIN mz_catalog.mz_clusters c ON dc.cluster_id = c.id
-        WHERE dc.deploy_id = $1
-        ORDER BY c.name
+        SELECT name
+        FROM _mz_deploy.public.deployment_clusters
+        WHERE deploy_id = $1
+        ORDER BY name
     "#;
 
     let rows = client.query(query, &[&deploy_id]).await?;
@@ -319,10 +318,9 @@ pub(super) async fn validate_deployment_clusters(
     deploy_id: &str,
 ) -> Result<(), ConnectionError> {
     let query = r#"
-        SELECT dc.cluster_id
-        FROM _mz_deploy.public.clusters dc
-        LEFT JOIN mz_catalog.mz_clusters c ON dc.cluster_id = c.id
-        WHERE dc.deploy_id = $1 AND c.id IS NULL
+        SELECT cluster_id
+        FROM _mz_deploy.public.missing_clusters
+        WHERE deploy_id = $1
     "#;
 
     let rows = client.query(query, &[&deploy_id]).await?;
@@ -640,8 +638,7 @@ pub(super) async fn list_staging_deployments(
                mode,
                database,
                schema
-        FROM _mz_deploy.public.deployments
-        WHERE promoted_at IS NULL
+        FROM _mz_deploy.public.staging_deployments
         ORDER BY deploy_id, database, schema
     "#;
 
