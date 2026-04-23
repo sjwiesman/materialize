@@ -34,6 +34,13 @@ mod provisioning;
 mod type_info;
 mod validation;
 
+/// Name of the dedicated cluster mz-deploy creates during `setup` and
+/// pins every connection to via libpq options.
+pub const SERVER_CLUSTER_NAME: &str = "_mz_deploy_server";
+
+/// Size of the dedicated mz-deploy cluster created during `setup`.
+pub const SERVER_CLUSTER_SIZE: &str = "25cc";
+
 pub use crate::config::Profile;
 pub use connection::Client;
 
