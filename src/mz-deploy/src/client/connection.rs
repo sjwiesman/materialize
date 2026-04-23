@@ -96,7 +96,17 @@ impl Client {
             config.password(password.as_str());
         }
         config.application_name(APPLICATION_NAME);
-        if let Some(inner) = build_options_string(&profile.options) {
+
+        // Pin every connection to the mz-deploy server cluster via libpq
+        // options. Any user-supplied `cluster` in profile.options is silently
+        // overridden — mz-deploy owns the cluster it runs on. See the design
+        // at docs/superpowers/specs/2026-04-23-mz-deploy-server-cluster-design.md.
+        let mut effective_options = profile.options.clone();
+        effective_options.insert(
+            "cluster".to_string(),
+            crate::client::SERVER_CLUSTER_NAME.to_string(),
+        );
+        if let Some(inner) = build_options_string(&effective_options) {
             config.options(&inner);
         }
 
