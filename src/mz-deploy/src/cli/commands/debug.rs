@@ -1,7 +1,7 @@
 //! Debug command - test database connection.
 
 use crate::cli::CliError;
-use crate::client::{Client, Profile, SERVER_CLUSTER_NAME};
+use crate::client::{Client, SERVER_CLUSTER_NAME};
 use crate::config::Settings;
 use crate::log;
 use crate::project::compiler::typecheck::{DockerRuntime, DockerStatus};
@@ -36,7 +36,7 @@ struct DebugOutput {
     host: String,
     port: u16,
     environment_id: String,
-    cluster: String,
+    server_cluster_health: ServerClusterHealth,
     version: String,
     role: String,
     docker_status: String,
@@ -53,9 +53,31 @@ impl fmt::Display for DebugOutput {
             self.port.to_string().cyan()
         )?;
         writeln!(f, "  {}: {}", "Environment".dimmed(), self.environment_id)?;
-        writeln!(f, "  {}: {}", "Cluster".dimmed(), self.cluster)?;
         writeln!(f, "  {}: {}", "Version".dimmed(), self.version)?;
         writeln!(f, "  {}: {}", "Role".dimmed(), self.role.yellow())?;
+
+        let cluster_line = match &self.server_cluster_health {
+            ServerClusterHealth::Healthy => format!(
+                "{}: {} ({})",
+                "Server cluster".green(),
+                SERVER_CLUSTER_NAME.cyan(),
+                "healthy".green(),
+            ),
+            ServerClusterHealth::NotReady { reason } => format!(
+                "{}: {} ({}: {})\n  hint: run `mz-deploy setup`",
+                "Server cluster".green(),
+                SERVER_CLUSTER_NAME.cyan(),
+                "not ready".yellow(),
+                reason,
+            ),
+            ServerClusterHealth::Missing => format!(
+                "{}: {} ({})\n  hint: run `mz-deploy setup`",
+                "Server cluster".green(),
+                SERVER_CLUSTER_NAME.cyan(),
+                "missing".red(),
+            ),
+        };
+        writeln!(f, "{}", cluster_line)?;
 
         let docker_label = match self.docker_status.as_str() {
             "running" => format!(
@@ -89,13 +111,20 @@ impl fmt::Display for DebugOutput {
 pub async fn run(settings: &Settings) -> Result<(), CliError> {
     let profile = settings.connection();
 
-    // Run database connection and Docker check in parallel since they're independent.
-    let (db_result, docker_status) = tokio::join!(
-        connect_and_query(profile),
+    // Connect once, then run DB-side queries (version/env/role + cluster health)
+    // in parallel with the Docker check.
+    let client = Client::connect_with_profile(profile.clone())
+        .await
+        .map_err(CliError::Connection)?;
+
+    let (session_result, cluster_result, docker_status) = tokio::join!(
+        query_session_info(&client),
+        check_server_cluster(&client),
         DockerRuntime::check_availability(),
     );
 
-    let (version, environment_id, role, cluster) = db_result?;
+    let (version, environment_id, role) = session_result?;
+    let cluster_health = cluster_result?;
 
     let docker_status_str = match docker_status {
         DockerStatus::Running => "running",
@@ -108,7 +137,7 @@ pub async fn run(settings: &Settings) -> Result<(), CliError> {
         host: profile.host.to_string(),
         port: profile.port,
         environment_id,
-        cluster,
+        server_cluster_health: cluster_health,
         version,
         role,
         docker_status: docker_status_str.to_string(),
@@ -118,13 +147,9 @@ pub async fn run(settings: &Settings) -> Result<(), CliError> {
     Ok(())
 }
 
-async fn connect_and_query(
-    profile: &Profile,
-) -> Result<(String, String, String, String), CliError> {
-    let client = Client::connect_with_profile(profile.clone())
-        .await
-        .map_err(CliError::Connection)?;
-
+async fn query_session_info(
+    client: &Client,
+) -> Result<(String, String, String), CliError> {
     let row = client
         .query_one(
             r#"
@@ -140,8 +165,5 @@ async fn connect_and_query(
     let environment_id: String = row.get("environment_id");
     let role: String = row.get("role");
 
-    let row = client.query_one("show cluster", &[]).await?;
-    let cluster: String = row.get("cluster");
-
-    Ok((version, environment_id, role, cluster))
+    Ok((version, environment_id, role))
 }
