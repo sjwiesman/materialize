@@ -1,70 +1,78 @@
-# dev — Rebuild a per-developer overlay of views and materialized views
+# dev — Rebuild a per-developer overlay of your dirty views
 
-Surgically recreates only the objects in your dirty set inside an overlay
-database (`<db>__<profile>`), reusing production for all unchanged
-dependencies. Clusters are not cloned. Iteration is seconds and near-free.
+`dev` is the inner-loop command. It creates a throwaway overlay database
+per developer that contains only the views and materialized views you've
+changed since the last promoted production deployment. Unchanged
+dependencies resolve to production; external dependencies resolve as
+normal; clusters pass through unchanged.
 
-Use `dev` for inner-loop correctness checking against real data. Use
-`preview` when you need to validate end-to-end deployment mechanics
-(cluster sizing, hydration time, swap behavior). Use `stage` when you are
-ready to create a deployment candidate.
+Every run drops the overlay and rebuilds it from scratch — there is no
+incremental state to maintain. Typical iterations are seconds.
+
+    project db `app`  +  profile `alice`  →  overlay db `app__alice`
+
+Use `dev` to query results of a change against real production data. Use
+`stage` when you're ready to prepare a deployment candidate for promotion.
 
 ## Usage
 
     mz-deploy dev [FLAGS]
 
-## Requirements
+## Supported objects
 
-- Role: `materialize_developer` must be granted to the current user.
-- Privilege: the current user must have `CREATEDB` on the Materialize
-  environment (needed to create the overlay database on first run).
-
-## Supported Object Types
-
-`dev` overlays views and materialized views. Other object types (tables,
-sources, sinks, connections, secrets) are silently skipped — use
-`mz-deploy apply` for those.
+`dev` overlays **views and materialized views only**. Tables, sources,
+sinks, connections, and secrets are silently skipped — `apply` owns
+those, and overlays are meant to be throwaway.
 
 ## Behavior
 
-1. Compiles and validates the project (same as `compile`).
-2. Computes the dirty set: objects changed since the last production
-   snapshot, or all applicable objects when no production snapshot exists
-   yet (full overlay on first run).
-3. Validates the required role and CREATEDB privilege.
-4. Creates the overlay database `<db>__<profile>` if it does not exist.
-5. Drops and recreates only the dirty views and materialized views in the
-   overlay database. Unchanged objects remain in place; production objects
-   serve as dependencies for everything outside the dirty set.
-6. Records the overlay in `_mz_deploy.tables.dev_overlays` so subsequent
-   runs can compute an incremental dirty set.
-
-When no production snapshot exists, `dev` treats all project objects as
-dirty and overlays the full project — no prior `apply` is required.
-
-Cluster pass-through: `dev` does not create, rename, or substitute
-clusters. The `IN CLUSTER` clause in your SQL or profile variables
-determines which cluster each materialized view lands on.
-
-The overlay database name is `<db>__<profile>`. If `profile_suffix` is
-set, it is appended: `<db>__<profile>_<suffix>`.
+`dev` deploys the views and materialized views you've changed to your
+overlay database and rewrites their references so unchanged dependencies
+resolve to production. External dependencies and `IN CLUSTER` clauses
+pass through unchanged.
 
 ## Flags
 
-- `--down` — Tear down the overlay database for this profile and project,
-  then exit. Does not touch production.
-- `--dry-run` — Compute the dirty set and print the plan without issuing
-  any DDL. Shows which objects would be dropped and recreated.
+- `--down` — Drop every overlay database for this `(profile, project)`
+  and exit. Safe to run even when no overlay exists.
+- `--dry-run` — Print the dirty schemas and target overlay database
+  names without executing any DDL.
 
 ## Examples
 
-    mz-deploy dev                   # Rebuild dirty objects in overlay
-    mz-deploy dev --dry-run         # Preview the plan without executing
-    mz-deploy dev --down            # Remove the overlay and exit
+    mz-deploy dev                   # Rebuild the overlay for this profile
+    mz-deploy dev --dry-run         # Show the plan without touching the DB
+    mz-deploy dev --down            # Tear down the overlay
 
 ## Error Recovery
 
-- **Missing role** — Ask an administrator to grant `materialize_developer`
-  to your user, then re-run.
-- **Missing CREATEDB** — Ask an administrator to grant `CREATEDB` to your
-  user, then re-run.
+- **`materialize_developer` required** — Ask an administrator to grant
+  the role:
+
+        GRANT materialize_developer TO <user>;
+
+- **`CREATEDB` required** — Ask an administrator to grant the privilege:
+
+        GRANT CREATEDB ON SYSTEM TO <role>;
+
+- **Stale overlay after crash or manual DROP** — Re-run `mz-deploy dev`.
+  The sweep at the start of every run reconciles the manifest with the
+  live catalog.
+
+- **Manifest drift** — `mz-deploy dev --down` drops everything the
+  manifest knows about plus any leftover `<db>__<profile>` names. If
+  you need to scorch further, drop the overlay databases directly with
+  `DROP DATABASE <name> CASCADE`.
+
+## Exit Codes
+
+- **0** — Overlay rebuilt, `--down` succeeded, or dry-run completed.
+- **1** — Role or privilege check failed, compilation error, or DDL
+  execution error.
+
+## Related Commands
+
+- `mz-deploy compile` — Validate SQL without touching the database.
+- `mz-deploy stage` — Create a promotable staging deployment.
+- `mz-deploy apply` — Create tables, sources, and other infra that `dev`
+  does not manage.

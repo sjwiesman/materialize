@@ -2,7 +2,7 @@
 
 use crate::cli::CliError;
 use crate::cli::progress;
-use crate::client::{Client, ConnectionError, DeploymentMode};
+use crate::client::{Client, ConnectionError};
 use crate::config::Settings;
 use crate::log;
 use crate::verbose;
@@ -58,8 +58,8 @@ pub async fn run(settings: &Settings, deploy_id: &str) -> Result<(), CliError> {
     super::setup::ensure(&client).await?;
     let role = super::setup::validate_connection(&client).await?;
 
-    // Check role based on deployment mode — preview allows developer or deployer,
-    // stage requires deployer only.
+    super::setup::require_deployer(role)?;
+
     let metadata = client
         .deployments()
         .get_deployment_metadata(deploy_id)
@@ -71,18 +71,6 @@ pub async fn run(settings: &Settings, deploy_id: &str) -> Result<(), CliError> {
             })
         })?;
 
-    match metadata.mode {
-        DeploymentMode::Preview => {
-            if super::setup::require_deployer(role).is_err() {
-                super::setup::require_developer(role)?;
-            }
-        }
-        DeploymentMode::Stage => super::setup::require_deployer(role)?,
-    }
-
-    // Verify the deployment hasn't been promoted. We skip validate_staging()
-    // here because it also rejects preview deployments (which can be aborted
-    // but not promoted). We already have the metadata from the role check above.
     if metadata.promoted_at.is_some() {
         return Err(CliError::Connection(
             ConnectionError::DeploymentAlreadyPromoted {

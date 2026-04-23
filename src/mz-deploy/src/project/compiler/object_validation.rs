@@ -35,9 +35,9 @@
 use super::super::ast::Statement;
 use super::validation::{
     validate_comment_references, validate_constraint_clusters, validate_constraint_enforcement,
-    validate_constraint_references, validate_fqn_identifiers,
-    validate_grant_references, validate_ident, validate_index_clusters, validate_index_references,
-    validate_mv_cluster, validate_no_storage_and_computation_in_schema, validate_sink_cluster, validate_source_cluster,
+    validate_constraint_references, validate_fqn_identifiers, validate_grant_references,
+    validate_ident, validate_index_clusters, validate_index_references, validate_mv_cluster,
+    validate_no_storage_and_computation_in_schema, validate_sink_cluster, validate_source_cluster,
 };
 use crate::project::SchemaQualifier;
 use crate::project::error::{ValidationError, ValidationErrorKind, ValidationErrors};
@@ -540,7 +540,6 @@ impl DatabaseObject {
         .map(Some)
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub(crate) struct SchemaBuildMeta {

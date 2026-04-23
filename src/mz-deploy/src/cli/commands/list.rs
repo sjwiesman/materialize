@@ -2,7 +2,7 @@
 
 use crate::cli::CliError;
 use crate::client::{
-    Client, ClusterDeploymentStatus, ClusterStatusContext, DeploymentKind, DeploymentMode,
+    Client, ClusterDeploymentStatus, ClusterStatusContext, DeploymentKind,
 };
 use crate::config::Settings;
 use crate::log;
@@ -24,7 +24,6 @@ struct ListDeployment {
     deployed_by: String,
     git_commit: Option<String>,
     kind: DeploymentKind,
-    mode: DeploymentMode,
     schemas: Vec<SchemaQualifier>,
     clusters: Vec<ClusterStatusContext>,
 }
@@ -67,21 +66,14 @@ impl fmt::Display for ListOutput {
                 }
             };
 
-            let mode_label = if deployment.mode == DeploymentMode::Preview {
-                " (preview)".dimmed().to_string()
-            } else {
-                String::new()
-            };
-
             writeln!(
                 f,
-                "  {} {} by {} {} [{}]{}",
+                "  {} {} by {} {} [{}]",
                 "●".green(),
                 deployment.deploy_id.cyan().bold(),
                 deployment.deployed_by.yellow(),
                 format!("({})", timestamp).dimmed(),
                 deployment.kind.to_string().dimmed(),
-                mode_label
             )?;
 
             // Display commit if available
@@ -164,7 +156,6 @@ pub async fn run(settings: &Settings, allowed_lag_secs: i64) -> Result<(), CliEr
             deployed_by: deployment.deployed_by.clone(),
             git_commit: deployment.git_commit.clone(),
             kind: deployment.kind.clone(),
-            mode: deployment.mode,
             schemas: deployment.schemas.clone(),
             clusters,
         });

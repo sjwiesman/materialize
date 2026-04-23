@@ -141,7 +141,11 @@ pub(crate) fn rewrite_database_names(
 /// * `statements` - Parsed mod statements to rewrite (mutated in place)
 /// * `schema_name` - The original schema name to match
 /// * `suffix` - The suffix to append (e.g., `"_staging"`)
-pub(crate) fn rewrite_schema_names(statements: &mut [Statement<Raw>], schema_name: &str, suffix: &str) {
+pub(crate) fn rewrite_schema_names(
+    statements: &mut [Statement<Raw>],
+    schema_name: &str,
+    suffix: &str,
+) {
     let mut rewriter = SchemaNameRewriter {
         schema_name,
         suffix,

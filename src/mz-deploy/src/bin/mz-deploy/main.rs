@@ -10,7 +10,6 @@ use mz_deploy::cli;
 use mz_deploy::cli::CliError;
 use mz_deploy::cli::commands::delete;
 use mz_deploy::cli::commands::new_project::ScaffoldOpts;
-use mz_deploy::client::DeploymentMode;
 use mz_deploy::config::Settings;
 use mz_deploy::log;
 use std::path::PathBuf;
@@ -56,7 +55,6 @@ Infrastructure:
 
 Deploy:
   stage                Create a staging deployment for testing changes
-  preview              Create a preview deployment (developer role, not promotable)
   wait                 Wait for staging deployment clusters to be hydrated and ready
   promote              Promote a staging deployment to production
   abort                Clean up a staging deployment by dropping all resources
@@ -281,33 +279,6 @@ enum Command {
 
         /// Preview what would be deployed without executing any changes.
         /// Shows the staging resources that would be created.
-        /// Add --output json for machine-readable output.
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Create a preview deployment (developer role, not promotable)
-    ///
-    /// Like stage, but cannot be promoted to production. Useful for testing
-    /// changes without deploy powers. Does not require schema/cluster ownership.
-    #[command(
-        hide = true,
-        after_help = "Run 'mz-deploy help preview' for a detailed usage guide."
-    )]
-    Preview {
-        /// Deploy ID for this preview deployment (required)
-        ///
-        /// The deploy ID will be used as a suffix for schemas and clusters.
-        /// Must contain only alphanumeric characters, hyphens, and underscores.
-        #[arg(long, value_name = "DEPLOY_ID")]
-        deploy_id: String,
-
-        /// Skip automatic rollback on failure (leaves resources for debugging)
-        #[arg(long)]
-        no_rollback: bool,
-
-        /// Preview what would be deployed without executing any changes.
-        /// Shows the resources that would be created.
         /// Add --output json for machine-readable output.
         #[arg(long)]
         dry_run: bool,
@@ -954,22 +925,6 @@ async fn run(args: Args) -> Result<(), CliError> {
                 allow_dirty,
                 no_rollback,
                 dry_run,
-                DeploymentMode::Stage,
-            )
-            .await
-        }
-        Some(Command::Preview {
-            deploy_id,
-            no_rollback,
-            dry_run,
-        }) => {
-            cli::commands::stage::run(
-                &settings,
-                Some(deploy_id.as_str()),
-                true, // always allow dirty
-                no_rollback,
-                dry_run,
-                DeploymentMode::Preview,
             )
             .await
         }

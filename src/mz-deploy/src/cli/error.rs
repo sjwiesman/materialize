@@ -185,6 +185,11 @@ pub enum CliError {
         overlay_db: String,
     },
 
+    /// Project directory has no basename usable as a project identifier
+    /// (e.g. root or `.`).
+    #[error("cannot derive project name from directory '{path}'")]
+    InvalidProjectDirectory { path: String },
+
     /// Project references external objects not declared in project.toml
     #[error("undeclared external dependencies")]
     UndeclaredDependencies { undeclared: Vec<ObjectId> },
@@ -459,6 +464,7 @@ impl CliError {
                 None
             }
             Self::MissingCreatedb { .. } => None,
+            Self::InvalidProjectDirectory { .. } => None,
             Self::Io(_) | Self::Message(_) | Self::TestsFilterMissed { .. } => None,
         }
     }

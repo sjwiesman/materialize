@@ -302,7 +302,7 @@ pub(crate) async fn load_from_database(
 /// * `deploy_id` - Deploy ID (e.g., `"<init>"` for direct deploy, `"staging"` for staged)
 /// * `metadata` - Deployment metadata (user, git commit, etc.)
 /// * `promoted_at` - Optional promoted_at timestamp (Some(now) for direct apply, None for stage)
-/// * `mode` - Whether this is a stage or preview deployment
+/// * `mode` - Deployment mode tag stored on each row
 pub(crate) async fn write_to_database(
     client: &Client,
     snapshot: &DeploymentSnapshot,

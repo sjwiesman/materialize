@@ -1,9 +1,7 @@
-//! Stage command - deploy to staging or preview environment with renamed schemas and clusters.
+//! Stage command - deploy to staging environment with renamed schemas and clusters.
 //!
-//! The pipeline is parameterized by [`DeploymentMode`]: passing `DeploymentMode::Stage` runs
-//! the standard blue/green deployment that can later be promoted; passing `DeploymentMode::Preview`
-//! runs the same pipeline but with relaxed role requirements (developer instead of deployer) and
-//! without ownership validation, producing a throwaway environment for testing.
+//! Runs the standard blue/green deployment pipeline that can later be promoted
+//! to production via [`super::promote`].
 
 use super::ObjectRef;
 use crate::cli::{CliError, executor};
@@ -58,22 +56,15 @@ struct StageResult {
     objects_deployed: usize,
     #[serde(skip)]
     duration: std::time::Duration,
-    #[serde(skip)]
-    mode: DeploymentMode,
 }
 
 impl fmt::Display for StageResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let env_type = match self.mode {
-            DeploymentMode::Stage => "staging",
-            DeploymentMode::Preview => "preview",
-        };
         write!(
             f,
-            "  \u{2713} Successfully deployed {} objects to '{}' {} environment ({:.1}s)",
+            "  \u{2713} Successfully deployed {} objects to '{}' staging environment ({:.1}s)",
             self.objects_deployed,
             self.deploy_id,
-            env_type,
             self.duration.as_secs_f64()
         )
     }
@@ -87,8 +78,6 @@ struct StagePlan {
     objects: Vec<StagePlanObject>,
     sinks: Vec<StagePlanObject>,
     replacement_mvs: Vec<StagePlanObject>,
-    #[serde(skip)]
-    mode: DeploymentMode,
 }
 
 #[derive(serde::Serialize)]
@@ -113,11 +102,7 @@ struct StagePlanObject {
 
 impl fmt::Display for StagePlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let plan_type = match self.mode {
-            DeploymentMode::Stage => "Stage",
-            DeploymentMode::Preview => "Preview",
-        };
-        writeln!(f, "{} plan for '{}':", plan_type, self.deploy_id)?;
+        writeln!(f, "Stage plan for '{}':", self.deploy_id)?;
 
         if !self.schemas.is_empty() {
             writeln!(f, "\nSchemas ({}):", self.schemas.len())?;
@@ -166,12 +151,11 @@ impl fmt::Display for StagePlan {
     }
 }
 
-/// Deploy the project to a staging or preview environment.
+/// Deploy the project to a staging environment.
 ///
 /// Creates renamed schemas and clusters alongside production, deploys the
 /// project onto them, and records metadata so a later `apply` can atomically
-/// swap staging into production. `DeploymentMode::Preview` runs the same
-/// pipeline for a throwaway, non-promotable environment.
+/// swap staging into production.
 ///
 /// # Arguments
 /// * `settings` - Resolved CLI settings (project directory, profile, etc.)
@@ -180,7 +164,6 @@ impl fmt::Display for StagePlan {
 /// * `allow_dirty` - Allow deploying with uncommitted changes
 /// * `no_rollback` - Skip automatic rollback on failure (for debugging)
 /// * `dry_run` - Print SQL instead of executing it
-/// * `mode` - Stage vs. Preview deployment mode
 ///
 /// # Returns
 /// `Ok(())` if the deployment succeeds.
@@ -194,13 +177,12 @@ pub async fn run(
     allow_dirty: bool,
     no_rollback: bool,
     dry_run: bool,
-    mode: DeploymentMode,
 ) -> Result<(), CliError> {
     let profile = settings.connection();
     let directory = &settings.directory;
     let start_time = Instant::now();
 
-    if mode == DeploymentMode::Stage && !allow_dirty && git::is_dirty(directory) {
+    if !allow_dirty && git::is_dirty(directory) {
         return Err(CliError::GitDirty);
     }
 
@@ -209,13 +191,9 @@ pub async fn run(
         .or_else(|| git::get_git_commit(directory).map(|sha| sha.chars().take(7).collect()))
         .unwrap_or_else(executor::generate_random_env_name);
 
-    let mode_label = match mode {
-        DeploymentMode::Stage => "staging",
-        DeploymentMode::Preview => "preview",
-    };
     progress::info(&format!(
-        "Deploying to {} environment: {}",
-        mode_label, stage_name
+        "Deploying to staging environment: {}",
+        stage_name
     ));
 
     let planned_project = super::compile::run(settings, true).await?;
@@ -226,10 +204,7 @@ pub async fn run(
         .map_err(CliError::Connection)?;
 
     let role = crate::cli::commands::setup::validate_connection(&client).await?;
-    match mode {
-        DeploymentMode::Stage => crate::cli::commands::setup::require_deployer(role)?,
-        DeploymentMode::Preview => crate::cli::commands::setup::require_developer(role)?,
-    }
+    crate::cli::commands::setup::require_deployer(role)?;
 
     let Some(analysis) = analyze_project_changes(&client, &planned_project, &stage_name).await?
     else {
@@ -242,7 +217,6 @@ pub async fn run(
         directory,
         &analysis.schema_set,
         &analysis.cluster_set,
-        mode,
     )
     .await?;
 
@@ -256,7 +230,6 @@ pub async fn run(
             &analysis.sinks,
             &analysis.replacement_mvs,
             &planned_project.replacement_schemas,
-            mode,
         )
         .await?;
     }
@@ -308,7 +281,6 @@ pub async fn run(
                     object: id.object.clone(),
                 })
                 .collect(),
-            mode,
         };
         log::output(&plan);
         return Ok(());
@@ -332,7 +304,6 @@ pub async fn run(
         deploy_id: stage_name.to_string(),
         objects_deployed: success_count,
         duration: start_time.elapsed(),
-        mode,
     };
     log::output(&result);
     log::print_deploy_id(&stage_name);
@@ -553,17 +524,12 @@ fn collect_stage_resources(
 /// Runs all preflight database validations required before mutating deployment state.
 ///
 /// This is intentionally isolated so stage fails before any metadata/resource writes.
-///
-/// Ownership checks (`validate_schema_ownership`, `validate_cluster_ownership`) are gated on
-/// `DeploymentMode::Stage`. Preview deployments skip ownership validation since they are
-/// throwaway environments and do not require the caller to own the production resources.
 async fn validate_project_for_stage(
     client: &Client,
     planned_project: &project::ir::graph::Project,
     directory: &Path,
     schema_set: &BTreeSet<SchemaQualifier>,
     cluster_set: &BTreeSet<String>,
-    mode: DeploymentMode,
 ) -> Result<(), CliError> {
     progress::stage_start("Validating project");
     let validate_start = Instant::now();
@@ -579,16 +545,14 @@ async fn validate_project_for_stage(
         .validation()
         .validate_privileges(planned_project)
         .await?;
-    if mode == DeploymentMode::Stage {
-        client
-            .validation()
-            .validate_schema_ownership(schema_set)
-            .await?;
-        client
-            .validation()
-            .validate_cluster_ownership(cluster_set)
-            .await?;
-    }
+    client
+        .validation()
+        .validate_schema_ownership(schema_set)
+        .await?;
+    client
+        .validation()
+        .validate_cluster_ownership(cluster_set)
+        .await?;
     client
         .validation()
         .validate_sink_connections_exist(planned_project)
@@ -602,9 +566,6 @@ async fn validate_project_for_stage(
 ///
 /// Records object hashes plus schema deployment kinds, then stores sink/replacement
 /// records that the `apply` command consumes after swap.
-///
-/// The `mode` parameter is threaded through to `write_to_database()` so that the
-/// persisted deployment record reflects whether this is a stage or preview deployment.
 async fn record_stage_metadata(
     client: &Client,
     directory: &Path,
@@ -614,7 +575,6 @@ async fn record_stage_metadata(
     sinks: &[ObjectRef<'_>],
     replacement_mvs: &[ObjectRef<'_>],
     replacement_schemas: &BTreeSet<SchemaQualifier>,
-    mode: DeploymentMode,
 ) -> Result<(), CliError> {
     progress::stage_start("Recording deployment metadata");
     let metadata_start = Instant::now();
@@ -671,7 +631,7 @@ async fn record_stage_metadata(
         stage_name,
         &metadata,
         None,
-        mode,
+        DeploymentMode::Stage,
     )
     .await?;
 

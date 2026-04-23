@@ -93,7 +93,10 @@ impl SecretResolver {
     ///
     /// - `Expr::Function` matching a registered provider: validate and resolve to `Expr::Value(Value::String(...))`
     /// - Everything else: pass through unchanged
-    pub(crate) async fn resolve_expr(&self, expr: Expr<Raw>) -> Result<Expr<Raw>, SecretResolveError> {
+    pub(crate) async fn resolve_expr(
+        &self,
+        expr: Expr<Raw>,
+    ) -> Result<Expr<Raw>, SecretResolveError> {
         match &expr {
             Expr::Function(func) => {
                 let func_name = match &func.name {
@@ -179,7 +182,10 @@ impl SecretResolver {
     ///
     /// Secret statements have their provider functions resolved;
     /// all other statements are returned unchanged.
-    pub(crate) async fn resolve_statement_for_cli(&self, stmt: &Statement) -> Result<Statement, CliError> {
+    pub(crate) async fn resolve_statement_for_cli(
+        &self,
+        stmt: &Statement,
+    ) -> Result<Statement, CliError> {
         match stmt {
             Statement::CreateSecret(create_stmt) => {
                 let resolved = self.resolve_secret_for_cli(create_stmt).await?;

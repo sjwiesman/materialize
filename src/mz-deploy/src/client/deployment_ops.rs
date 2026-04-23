@@ -359,7 +359,10 @@ pub(super) async fn delete_deployment_clusters(
 }
 
 /// Update promoted_at timestamp for a staging deployment.
-pub(super) async fn update_promoted_at(client: &Client, deploy_id: &str) -> Result<(), ConnectionError> {
+pub(super) async fn update_promoted_at(
+    client: &Client,
+    deploy_id: &str,
+) -> Result<(), ConnectionError> {
     let update_sql = r#"
         UPDATE _mz_deploy.tables.deployments
         SET promoted_at = NOW()
@@ -371,7 +374,10 @@ pub(super) async fn update_promoted_at(client: &Client, deploy_id: &str) -> Resu
 }
 
 /// Delete all deployment records for a specific deployment.
-pub(super) async fn delete_deployment(client: &Client, deploy_id: &str) -> Result<(), ConnectionError> {
+pub(super) async fn delete_deployment(
+    client: &Client,
+    deploy_id: &str,
+) -> Result<(), ConnectionError> {
     client
         .execute(
             "DELETE FROM _mz_deploy.tables.deployments WHERE deploy_id = $1",
@@ -1351,15 +1357,10 @@ impl DeploymentsClient<'_> {
         get_deployment_metadata(self.client, deploy_id).await
     }
 
-    /// Validate that a staging deployment exists, has not been promoted, and is not a preview.
+    /// Validate that a staging deployment exists and has not been promoted.
     pub async fn validate_staging(&self, deploy_id: &str) -> Result<(), ConnectionError> {
         let metadata = self.get_deployment_metadata(deploy_id).await?;
         match metadata {
-            Some(meta) if meta.mode == DeploymentMode::Preview => {
-                Err(ConnectionError::PreviewCannotBePromoted {
-                    deploy_id: deploy_id.to_string(),
-                })
-            }
             Some(meta) if meta.promoted_at.is_some() => {
                 Err(ConnectionError::DeploymentAlreadyPromoted {
                     deploy_id: deploy_id.to_string(),
