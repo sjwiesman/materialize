@@ -49,7 +49,6 @@
 
 use crate::client::connection::{Client, DeploymentsClient, DeploymentsClientMut};
 use crate::client::errors::ConnectionError;
-use crate::client::introspection;
 use crate::client::models::{
     ApplyState, ConflictRecord, DeploymentDetails, DeploymentHistoryEntry, DeploymentKind,
     DeploymentMetadata, DeploymentMode, DeploymentObjectRecord, PendingStatement,
@@ -152,185 +151,8 @@ pub struct HydrationStatusUpdate {
     pub problematic_replicas: i64,
 }
 
-/// Create the deployment tracking database, tables, roles, and grants.
-///
-/// If the `_mz_deploy` database already exists, returns immediately — the
-/// infrastructure is already set up. We check the `mz_databases` catalog
-/// instead of using `CREATE DATABASE IF NOT EXISTS` so that non-owner roles
-/// (like `materialize_developer`) can call this without requiring CREATEDB
-/// privileges.
-///
-/// On first run (by a user with CREATEDB), this creates:
-/// - `_mz_deploy` database
-/// - `_mz_deploy.public.deployments` table for tracking deployment metadata
-/// - `_mz_deploy.public.objects` table for tracking deployed objects and their hashes
-/// - `_mz_deploy.public.clusters` table for tracking clusters used by deployments
-/// - `_mz_deploy.public.pending_statements` table for deferred statements (sinks)
-/// - `_mz_deploy.public.replacement_mvs` table for replacement materialized view tracking
-/// - `_mz_deploy.public.production` view for querying current production state
-/// - `materialize_developer`, `materialize_deployer`, and `materialize_monitor` roles
-///   with USAGE on the database/schema and SELECT, INSERT, UPDATE, DELETE on all tables
-///
-/// Privileges are granted to the built-in roles so that any user assigned one
-/// of these roles automatically inherits access to the deployment tracking
-/// infrastructure.
-pub async fn create_deployments(client: &Client) -> Result<(), ConnectionError> {
-    // Check if _mz_deploy already exists via the catalog. This avoids
-    // requiring CREATEDB privileges for roles that just need to use the
-    // existing infrastructure (e.g., materialize_developer running preview).
-    let row = client
-        .query_one(
-            "SELECT EXISTS(SELECT 1 FROM mz_databases WHERE name = '_mz_deploy') AS exists",
-            &[],
-        )
-        .await?;
-    let exists: bool = row.get("exists");
-    if exists {
-        return Ok(());
-    }
-
-    client.execute("CREATE DATABASE _mz_deploy;", &[]).await?;
-
-    client
-        .execute(
-            r#"CREATE TABLE _mz_deploy.public.deployments (
-            deploy_id TEXT NOT NULL,
-            deployed_at TIMESTAMPTZ NOT NULL,
-            promoted_at TIMESTAMPTZ,
-            database    TEXT NOT NULL,
-            schema      TEXT NOT NULL,
-            deployed_by TEXT NOT NULL,
-            commit      TEXT,
-            kind        TEXT NOT NULL,
-            mode        TEXT NOT NULL
-        ) WITH (
-            PARTITION BY (deploy_id, deployed_at, promoted_at)
-        );"#,
-            &[],
-        )
-        .await?;
-
-    client
-        .execute(
-            r#"CREATE TABLE _mz_deploy.public.objects (
-            deploy_id TEXT NOT NULL,
-            database TEXT NOT NULL,
-            schema   TEXT NOT NULL,
-            object   TEXT NOT NULL,
-            hash     TEXT NOT NULL
-        ) WITH (
-            PARTITION BY (deploy_id, database, schema)
-        );"#,
-            &[],
-        )
-        .await?;
-
-    client
-        .execute(
-            r#"CREATE TABLE _mz_deploy.public.clusters (
-            deploy_id TEXT NOT NULL,
-            cluster_id TEXT NOT NULL
-        ) WITH (
-            PARTITION BY (deploy_id)
-        );"#,
-            &[],
-        )
-        .await?;
-
-    client
-        .execute(
-            r#"CREATE TABLE _mz_deploy.public.pending_statements (
-            deploy_id TEXT NOT NULL,
-            sequence_num INT NOT NULL,
-            database TEXT NOT NULL,
-            schema TEXT NOT NULL,
-            object TEXT NOT NULL,
-            object_hash TEXT NOT NULL,
-            statement_sql TEXT NOT NULL,
-            statement_kind TEXT NOT NULL,
-            executed_at TIMESTAMPTZ
-        ) WITH (
-            PARTITION BY (deploy_id)
-        );"#,
-            &[],
-        )
-        .await?;
-
-    client
-        .execute(
-            r#"CREATE TABLE _mz_deploy.public.replacement_mvs (
-            deploy_id TEXT NOT NULL,
-            target_database TEXT NOT NULL,
-            target_schema TEXT NOT NULL,
-            target_name TEXT NOT NULL,
-            replacement_schema TEXT NOT NULL
-        ) WITH (
-            PARTITION BY (deploy_id)
-        );"#,
-            &[],
-        )
-        .await?;
-
-    client
-        .execute(
-            r#"
-        CREATE VIEW _mz_deploy.public.production AS
-        WITH candidates AS (
-            SELECT DISTINCT ON (database, schema) database, schema, deploy_id, promoted_at, commit, kind
-            FROM _mz_deploy.public.deployments
-            WHERE promoted_at IS NOT NULL
-            ORDER BY database, schema, promoted_at DESC
-        )
-
-        SELECT c.database, c.schema, c.deploy_id, c.promoted_at, c.commit, c.kind
-        FROM candidates c
-        JOIN mz_schemas s ON c.schema = s.name
-        JOIN mz_databases d ON c.database = d.name;
-    "#,
-            &[],
-        )
-        .await?;
-
-    // Create roles and grant privileges on the _mz_deploy database.
-    // Privileges are granted to the built-in roles so that any user
-    // assigned one of these roles automatically inherits access.
-    for role in &[
-        "materialize_developer",
-        "materialize_deployer",
-        "materialize_monitor",
-    ] {
-        let exists = introspection::role_exists(client, role).await?;
-        if !exists {
-            client.execute(&format!("CREATE ROLE {role};"), &[]).await?;
-        }
-
-        client
-            .execute(
-                &format!("GRANT USAGE ON DATABASE _mz_deploy TO {role};"),
-                &[],
-            )
-            .await?;
-        client
-            .execute(
-                &format!("GRANT USAGE ON SCHEMA _mz_deploy.public TO {role};"),
-                &[],
-            )
-            .await?;
-        client
-            .execute(
-                &format!(
-                    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA _mz_deploy.public TO {role};"
-                ),
-                &[],
-            )
-            .await?;
-    }
-
-    Ok(())
-}
-
 /// Insert schema deployment records (insert-only, no DELETE).
-pub async fn insert_schema_deployments(
+pub(super) async fn insert_schema_deployments(
     client: &Client,
     deployments: &[SchemaDeploymentRecord],
 ) -> Result<(), ConnectionError> {
@@ -370,7 +192,7 @@ pub async fn insert_schema_deployments(
 }
 
 /// Append deployment object records (insert-only, never update or delete).
-pub async fn append_deployment_objects(
+pub(super) async fn append_deployment_objects(
     client: &Client,
     objects: &[DeploymentObjectRecord],
 ) -> Result<(), ConnectionError> {
@@ -407,7 +229,7 @@ pub async fn append_deployment_objects(
 ///
 /// Accepts cluster names and resolves them to cluster IDs internally.
 /// Fails if any cluster names cannot be resolved (cluster doesn't exist).
-pub async fn insert_deployment_clusters(
+pub(super) async fn insert_deployment_clusters(
     client: &Client,
     deploy_id: &str,
     clusters: &[String],
@@ -471,7 +293,7 @@ pub async fn insert_deployment_clusters(
 /// Returns cluster names by resolving cluster IDs via JOIN with mz_catalog.mz_clusters.
 /// If a cluster ID exists in _mz_deploy.public.clusters but the cluster was deleted from the catalog,
 /// that cluster will be silently omitted from results.
-pub async fn get_deployment_clusters(
+pub(super) async fn get_deployment_clusters(
     client: &Client,
     deploy_id: &str,
 ) -> Result<Vec<String>, ConnectionError> {
@@ -492,7 +314,7 @@ pub async fn get_deployment_clusters(
 ///
 /// Returns an error if any cluster IDs in _mz_deploy.public.clusters cannot be resolved
 /// to clusters in mz_catalog.mz_clusters (i.e., clusters were deleted).
-pub async fn validate_deployment_clusters(
+pub(super) async fn validate_deployment_clusters(
     client: &Client,
     deploy_id: &str,
 ) -> Result<(), ConnectionError> {
@@ -525,7 +347,7 @@ pub async fn validate_deployment_clusters(
 }
 
 /// Delete cluster records for a staging deployment.
-pub async fn delete_deployment_clusters(
+pub(super) async fn delete_deployment_clusters(
     client: &Client,
     deploy_id: &str,
 ) -> Result<(), ConnectionError> {
@@ -539,7 +361,7 @@ pub async fn delete_deployment_clusters(
 }
 
 /// Update promoted_at timestamp for a staging deployment.
-pub async fn update_promoted_at(client: &Client, deploy_id: &str) -> Result<(), ConnectionError> {
+pub(super) async fn update_promoted_at(client: &Client, deploy_id: &str) -> Result<(), ConnectionError> {
     let update_sql = r#"
         UPDATE _mz_deploy.public.deployments
         SET promoted_at = NOW()
@@ -551,7 +373,7 @@ pub async fn update_promoted_at(client: &Client, deploy_id: &str) -> Result<(), 
 }
 
 /// Delete all deployment records for a specific deployment.
-pub async fn delete_deployment(client: &Client, deploy_id: &str) -> Result<(), ConnectionError> {
+pub(super) async fn delete_deployment(client: &Client, deploy_id: &str) -> Result<(), ConnectionError> {
     client
         .execute(
             "DELETE FROM _mz_deploy.public.deployments WHERE deploy_id = $1",
@@ -568,7 +390,7 @@ pub async fn delete_deployment(client: &Client, deploy_id: &str) -> Result<(), C
 }
 
 /// Get schema deployment records from the database for a specific deployment.
-pub async fn get_schema_deployments(
+pub(super) async fn get_schema_deployments(
     client: &Client,
     deploy_id: Option<&str>,
 ) -> Result<Vec<SchemaDeploymentRecord>, ConnectionError> {
@@ -644,7 +466,7 @@ pub async fn get_schema_deployments(
 }
 
 /// Get deployment object records from the database for a specific deployment.
-pub async fn get_deployment_objects(
+pub(super) async fn get_deployment_objects(
     client: &Client,
     deploy_id: Option<&str>,
 ) -> Result<DeploymentSnapshot, ConnectionError> {
@@ -702,7 +524,7 @@ pub async fn get_deployment_objects(
 }
 
 /// Get metadata about a deployment for validation.
-pub async fn get_deployment_metadata(
+pub(super) async fn get_deployment_metadata(
     client: &Client,
     deploy_id: &str,
 ) -> Result<Option<DeploymentMetadata>, ConnectionError> {
@@ -748,7 +570,7 @@ pub async fn get_deployment_metadata(
 /// Get detailed information about a specific deployment.
 ///
 /// Returns deployment details if the deployment exists, or None if not found.
-pub async fn get_deployment_details(
+pub(super) async fn get_deployment_details(
     client: &Client,
     deploy_id: &str,
 ) -> Result<Option<DeploymentDetails>, ConnectionError> {
@@ -806,7 +628,7 @@ pub async fn get_deployment_details(
 /// List all staging deployments (promoted_at IS NULL), grouped by deploy_id.
 ///
 /// Returns a map from deploy_id to staging deployment details.
-pub async fn list_staging_deployments(
+pub(super) async fn list_staging_deployments(
     client: &Client,
 ) -> Result<BTreeMap<String, StagingDeployment>, ConnectionError> {
     let query = r#"
@@ -865,7 +687,7 @@ pub async fn list_staging_deployments(
 /// List deployment history in chronological order (promoted deployments only).
 ///
 /// Returns a vector of deployment history entries ordered by promotion time.
-pub async fn list_deployment_history(
+pub(super) async fn list_deployment_history(
     client: &Client,
     limit: Option<usize>,
 ) -> Result<Vec<DeploymentHistoryEntry>, ConnectionError> {
@@ -954,7 +776,7 @@ pub async fn list_deployment_history(
 }
 
 /// Check for deployment conflicts (schemas updated after deployment started).
-pub async fn check_deployment_conflicts(
+pub(super) async fn check_deployment_conflicts(
     client: &Client,
     deploy_id: &str,
 ) -> Result<Vec<ConflictRecord>, ConnectionError> {
@@ -981,7 +803,7 @@ pub async fn check_deployment_conflicts(
 }
 
 /// Check if the deployment tracking table exists.
-pub async fn deployment_table_exists(client: &Client) -> Result<bool, ConnectionError> {
+pub(super) async fn deployment_table_exists(client: &Client) -> Result<bool, ConnectionError> {
     let query = r#"
         SELECT EXISTS(
             SELECT 1
@@ -1101,7 +923,7 @@ fn hydration_status_query(allowed_lag_secs: i64) -> String {
 ///
 /// # Returns
 /// A vector of `ClusterStatusContext` with full status details for each cluster.
-pub async fn get_deployment_hydration_status(
+pub(super) async fn get_deployment_hydration_status(
     client: &Client,
     deploy_id: &str,
     allowed_lag_secs: i64,
@@ -1172,7 +994,7 @@ pub async fn get_deployment_hydration_status(
 /// (if they don't have comments). During the swap transaction, the schemas
 /// exchange names, which effectively moves the 'swapped=true' comment to the
 /// `_pre` schema.
-pub async fn create_apply_state_schemas(
+pub(super) async fn create_apply_state_schemas(
     client: &Client,
     deploy_id: &str,
 ) -> Result<(), ConnectionError> {
@@ -1234,7 +1056,7 @@ pub async fn create_apply_state_schemas(
 /// - Schema doesn't exist → NotStarted
 /// - Schema exists with comment 'swapped=false' → PreSwap
 /// - Schema exists with comment 'swapped=true' → PostSwap
-pub async fn get_apply_state(
+pub(super) async fn get_apply_state(
     client: &Client,
     deploy_id: &str,
 ) -> Result<ApplyState, ConnectionError> {
@@ -1267,7 +1089,7 @@ pub async fn get_apply_state(
 }
 
 /// Delete apply state schemas after successful completion.
-pub async fn delete_apply_state_schemas(
+pub(super) async fn delete_apply_state_schemas(
     client: &Client,
     deploy_id: &str,
 ) -> Result<(), ConnectionError> {
@@ -1289,7 +1111,7 @@ pub async fn delete_apply_state_schemas(
 // =============================================================================
 
 /// Insert pending statements for deferred execution (e.g., sinks).
-pub async fn insert_pending_statements(
+pub(super) async fn insert_pending_statements(
     client: &Client,
     statements: &[PendingStatement],
 ) -> Result<(), ConnectionError> {
@@ -1327,7 +1149,7 @@ pub async fn insert_pending_statements(
 }
 
 /// Get pending statements for a deployment that haven't been executed yet.
-pub async fn get_pending_statements(
+pub(super) async fn get_pending_statements(
     client: &Client,
     deploy_id: &str,
 ) -> Result<Vec<PendingStatement>, ConnectionError> {
@@ -1360,7 +1182,7 @@ pub async fn get_pending_statements(
 }
 
 /// Mark a pending statement as executed.
-pub async fn mark_statement_executed(
+pub(super) async fn mark_statement_executed(
     client: &Client,
     deploy_id: &str,
     sequence_num: i32,
@@ -1379,7 +1201,7 @@ pub async fn mark_statement_executed(
 }
 
 /// Delete all pending statements for a deployment.
-pub async fn delete_pending_statements(
+pub(super) async fn delete_pending_statements(
     client: &Client,
     deploy_id: &str,
 ) -> Result<(), ConnectionError> {
@@ -1394,7 +1216,7 @@ pub async fn delete_pending_statements(
 }
 
 /// Insert replacement MV records for a deployment.
-pub async fn insert_replacement_mvs(
+pub(super) async fn insert_replacement_mvs(
     client: &Client,
     records: &[super::models::ReplacementMvRecord],
 ) -> Result<(), ConnectionError> {
@@ -1420,7 +1242,7 @@ pub async fn insert_replacement_mvs(
 }
 
 /// Get replacement MV records for a deployment.
-pub async fn get_replacement_mvs(
+pub(super) async fn get_replacement_mvs(
     client: &Client,
     deploy_id: &str,
 ) -> Result<Vec<super::models::ReplacementMvRecord>, ConnectionError> {
@@ -1448,10 +1270,6 @@ pub async fn get_replacement_mvs(
 }
 
 impl DeploymentsClient<'_> {
-    pub async fn create_deployments(&self) -> Result<(), ConnectionError> {
-        create_deployments(self.client).await
-    }
-
     pub async fn insert_schema_deployments(
         &self,
         deployments: &[SchemaDeploymentRecord],
@@ -1724,7 +1542,7 @@ impl DeploymentsClientMut<'_> {
 }
 
 /// Delete all replacement MV records for a deployment.
-pub async fn delete_replacement_mvs(
+pub(super) async fn delete_replacement_mvs(
     client: &Client,
     deploy_id: &str,
 ) -> Result<(), ConnectionError> {
