@@ -46,6 +46,7 @@ Develop:
   compile              Compile and validate SQL without connecting to database
   test                 Run SQL unit tests defined in test files
   explain              Show the EXPLAIN plan for a materialized view or index
+  dev                  Rebuild the developer overlay against the current dirty set
   lsp                  Start Language Server Protocol server for editor integration
 
 Infrastructure:
@@ -350,6 +351,31 @@ enum Command {
         /// Deployment ID to describe
         #[arg(value_name = "DEPLOY_ID")]
         deploy_id: String,
+    },
+
+    /// Rebuild the developer overlay against the current dirty set
+    ///
+    /// Creates or refreshes a personal developer overlay: isolated schemas and
+    /// clusters prefixed with your Materialize username, containing only the
+    /// objects that differ from the live production schemas. Use this for
+    /// fast, isolated local iteration without staging a full deployment.
+    ///
+    /// Examples:
+    ///   mz-deploy dev                  # Rebuild the overlay
+    ///   mz-deploy dev --dry-run        # Preview what would be created
+    ///   mz-deploy dev --down           # Tear down the overlay
+    #[command(
+        hide = true,
+        after_help = "Run 'mz-deploy help dev' for a detailed usage guide."
+    )]
+    Dev {
+        /// Tear down the overlay databases and exit (no rebuild).
+        #[arg(long)]
+        down: bool,
+
+        /// Compute the plan and print it, but issue no DDL.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Generate types.lock file with external dependency schemas
@@ -946,6 +972,9 @@ async fn run(args: Args) -> Result<(), CliError> {
                 DeploymentMode::Preview,
             )
             .await
+        }
+        Some(Command::Dev { down, dry_run }) => {
+            cli::commands::dev::run(&settings, down, dry_run).await
         }
         Some(Command::Setup) => cli::commands::setup::run(&settings).await,
         Some(Command::Debug) => cli::commands::debug::run(&settings).await,

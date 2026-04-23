@@ -84,9 +84,13 @@ pub async fn ensure(client: &Client) -> Result<(), CliError> {
 
     if !db_exists {
         client.execute("CREATE DATABASE _mz_deploy", &[]).await?;
-        client
-            .batch_execute(include_str!("setup_schema.sql"))
-            .await?;
+        // Execute each DDL statement individually. `batch_execute` sends a
+        // simple query with multiple semicolon-separated statements, which
+        // Postgres wraps in an implicit transaction — and Materialize
+        // rejects many DDL forms inside a transaction block.
+        for stmt in super::setup_schema::SETUP_STATEMENTS {
+            client.execute(*stmt, &[]).await?;
+        }
     }
 
     // Phase 3: roles + grants. GRANTs are safe to re-run and heal drift.
@@ -120,6 +124,17 @@ pub async fn ensure(client: &Client) -> Result<(), CliError> {
                     &format!(
                         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES \
                          IN SCHEMA _mz_deploy.tables TO {}",
+                        role_name,
+                    ),
+                    &[],
+                )
+                .await?;
+        } else if *role == MzDeployRole::Developer {
+            client
+                .execute(
+                    &format!(
+                        "GRANT SELECT, INSERT, DELETE \
+                         ON TABLE _mz_deploy.tables.dev_overlays TO {}",
                         role_name,
                     ),
                     &[],
@@ -186,6 +201,32 @@ pub fn require_developer(role: MzDeployRole) -> Result<(), CliError> {
         return Err(CliError::RoleNotAuthorized {
             current_role: role.to_string(),
             required_role: "materialize_developer".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Verify the current role has `CREATEDB` privilege. `mz-deploy dev`
+/// calls this before attempting to create overlay databases.
+///
+/// `sample_overlay_db` is used only for the error message, so the user
+/// sees a concrete name they'd fail to create.
+pub async fn require_createdb(
+    client: &Client,
+    current_role: &str,
+    sample_overlay_db: &str,
+) -> Result<(), CliError> {
+    let row = client
+        .query_one(
+            "SELECT has_system_privilege(current_user, 'CREATEDB') AS has_createdb",
+            &[],
+        )
+        .await?;
+    let has: bool = row.get("has_createdb");
+    if !has {
+        return Err(CliError::MissingCreatedb {
+            role: current_role.to_string(),
+            overlay_db: sample_overlay_db.to_string(),
         });
     }
     Ok(())

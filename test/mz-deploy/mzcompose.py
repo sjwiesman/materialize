@@ -141,6 +141,21 @@ def setup_base(c: Composition) -> None:
     # Ensure profiles exist before first run_mz_deploy call
     create_profiles(c)
 
+    # Pre-create the _mz_deploy_server cluster with a size that is valid in
+    # the mzcompose test environment.  The setup command uses the hardcoded
+    # production size "25cc" which is not available locally; pre-creating the
+    # cluster causes ensure() to skip the CREATE CLUSTER step entirely.
+    # Materialize does not support CREATE CLUSTER IF NOT EXISTS, so we check
+    # first and create only if absent.  Create as the materialize superuser so
+    # that materialize owns the cluster and can later GRANT privileges on it.
+    rows = c.sql_query(
+        "SELECT count(*) FROM mz_clusters WHERE name = '_mz_deploy_server'",
+    )
+    if int(rows[0][0]) == 0:
+        c.sql(
+            "CREATE CLUSTER _mz_deploy_server (SIZE = 'scale=1,workers=1')",
+        )
+
     # Run setup as superuser (creates materialize_* roles)
     result = run_mz_deploy(c, "basic/v1", "setup", "--profile", "admin")
     assert result.returncode == 0, f"setup failed: {result.stderr}"
@@ -158,11 +173,6 @@ def setup_base(c: Composition) -> None:
         user="mz_system",
         port=6877,
     )
-    c.sql(
-        "GRANT CREATESECRET ON SYSTEM TO deploy_user",
-        user="mz_system",
-        port=6877,
-    )
 
     c.sql("CREATE ROLE dev_user LOGIN", user="mz_system", port=6877)
     c.sql(
@@ -173,11 +183,6 @@ def setup_base(c: Composition) -> None:
     c.sql("GRANT CREATEDB ON SYSTEM TO dev_user", user="mz_system", port=6877)
     c.sql(
         "GRANT CREATECLUSTER ON SYSTEM TO dev_user",
-        user="mz_system",
-        port=6877,
-    )
-    c.sql(
-        "GRANT CREATESECRET ON SYSTEM TO dev_user",
         user="mz_system",
         port=6877,
     )
@@ -1070,3 +1075,104 @@ def workflow_preview(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert "materialize_developer" in combined, (
             f"Expected role error mentioning materialize_developer, got: {combined}"
         )
+
+
+def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
+    """Test the dev command — developer-role overlay for inner-loop iteration."""
+    setup_base(c)
+
+    # Apply v1 so production has the base MV.
+    result = run_mz_deploy(c, "dev-basic/v1", "apply")
+    assert result.returncode == 0, f"apply v1 failed: {result.stderr}"
+
+    # Grant dev_user privileges on the app database so it can read production
+    # tables when building the overlay MV (CREATEDB is already granted by
+    # setup_base; only schema/table access needs to be added here).
+    # Use mz_system (port 6877) because app is owned by deploy_user, not
+    # materialize, so the default superuser cannot grant on it directly.
+    c.sql(
+        "GRANT USAGE ON DATABASE app TO dev_user",
+        user="mz_system",
+        port=6877,
+    )
+    rows = c.sql_query(
+        "SELECT name FROM mz_schemas WHERE database_id = "
+        "(SELECT id FROM mz_databases WHERE name = 'app')",
+    )
+    for (schema,) in rows:
+        c.sql(
+            f"GRANT USAGE ON SCHEMA app.{schema} TO dev_user",
+            user="mz_system",
+            port=6877,
+        )
+        c.sql(
+            f"GRANT SELECT ON ALL TABLES IN SCHEMA app.{schema} TO dev_user",
+            user="mz_system",
+            port=6877,
+        )
+
+    # Grant CREATE on the production clusters so dev_user can create the
+    # overlay MV which references IN CLUSTER compute.
+    for cluster_name in ("compute", "ingest"):
+        c.sql(
+            f"GRANT CREATE ON CLUSTER {cluster_name} TO dev_user",
+            user="mz_system",
+            port=6877,
+        )
+
+    with c.test_case("mz-deploy-dev-happy-path"):
+        # Run dev against v2 (the edited project with an extra column).
+        result = run_mz_deploy(c, "dev-basic/v2", "dev", "--profile", "dev")
+        assert result.returncode == 0, f"dev failed: {result.stderr}"
+
+        # Overlay database exists.
+        rows = c.sql_query("SELECT name FROM mz_databases WHERE name = 'app__dev'")
+        assert len(rows) == 1, f"expected app__dev database, got {rows}"
+
+        # Manifest has one row for this profile+project.
+        # project_name = directory.file_name() = "v2" (basename of dev-basic/v2).
+        rows = c.sql_query(
+            "SELECT overlay_db FROM _mz_deploy.tables.dev_overlays "
+            "WHERE profile = 'dev' AND project = 'v2'",
+        )
+        assert rows == [("app__dev",)], f"unexpected manifest: {rows}"
+
+        # Overlay view is queryable (run as dev_user, who owns app__dev).
+        rows = c.sql_query(
+            "SELECT count(*) FROM app__dev.ops.customer_ltv",
+            user="dev_user",
+        )
+        assert len(rows) == 1
+
+    with c.test_case("mz-deploy-dev-rerun-rebuilds"):
+        # Re-run dev with no changes. Overlay is drop-and-rebuilt; final state identical.
+        result = run_mz_deploy(c, "dev-basic/v2", "dev", "--profile", "dev")
+        assert result.returncode == 0, f"second dev run failed: {result.stderr}"
+
+        rows = c.sql_query(
+            "SELECT overlay_db FROM _mz_deploy.tables.dev_overlays "
+            "WHERE profile = 'dev' AND project = 'v2'",
+        )
+        assert rows == [("app__dev",)], f"manifest drifted on re-run: {rows}"
+
+        # Overlay view still queryable after the rebuild (run as dev_user).
+        rows = c.sql_query(
+            "SELECT count(*) FROM app__dev.ops.customer_ltv",
+            user="dev_user",
+        )
+        assert len(rows) == 1
+
+    with c.test_case("mz-deploy-dev-teardown"):
+        result = run_mz_deploy(
+            c, "dev-basic/v2", "dev", "--down", "--profile", "dev",
+        )
+        assert result.returncode == 0, f"dev --down failed: {result.stderr}"
+
+        rows = c.sql_query("SELECT name FROM mz_databases WHERE name = 'app__dev'")
+        assert len(rows) == 0, f"overlay database should be dropped, got {rows}"
+
+        rows = c.sql_query(
+            "SELECT overlay_db FROM _mz_deploy.tables.dev_overlays "
+            "WHERE profile = 'dev' AND project = 'v2'",
+        )
+        assert rows == [], f"manifest should be empty after --down, got {rows}"

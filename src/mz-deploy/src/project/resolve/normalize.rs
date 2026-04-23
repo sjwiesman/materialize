@@ -28,15 +28,13 @@
 //! - `mod_rewriter`: AST-based rewriting of database/schema names in mod statements
 
 mod mod_rewriter;
+pub(crate) mod overlay_transformer;
 mod transformers;
 mod visitor;
 
 // Re-export all public types and functions
 pub(crate) use mod_rewriter::{rewrite_database_names, rewrite_schema_names};
-pub(crate) use transformers::{
-    ClusterTransformer,
-    NameTransformer,
-};
+pub(crate) use transformers::{ClusterTransformer, NameTransformer};
 pub(crate) use visitor::NormalizingVisitor;
 
 use mz_sql_parser::ast::{CreateIndexStatement, Ident, Raw, RawClusterName};
