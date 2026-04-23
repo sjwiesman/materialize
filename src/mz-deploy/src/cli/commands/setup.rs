@@ -93,49 +93,15 @@ pub async fn ensure(client: &Client) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Validate that the current connection is in a good state for mz-deploy operations.
+/// Validate that the current role has a valid mz-deploy role membership.
 ///
-/// Checks:
-/// 1. The connected cluster has replication factor > 0.
-/// 2. The current role has USAGE privilege on the cluster.
-/// 3. The current role is a member of exactly one mz-deploy role.
+/// The cluster-side checks (`replication_factor`, `USAGE`) are gone because
+/// every connection is pinned to `_mz_deploy_server` by `connection.rs`.
+/// A missing or unhealthy cluster is surfaced as a connection/query error;
+/// `debug` is the diagnostic tool.
 ///
 /// Returns the detected role on success.
 pub async fn validate_connection(client: &Client) -> Result<MzDeployRole, CliError> {
-    // 1. Check cluster replication factor
-    let row = client.query_one("SHOW CLUSTER", &[]).await?;
-    let cluster_name: String = row.get("cluster");
-
-    let cluster = client
-        .introspection()
-        .get_cluster(&cluster_name)
-        .await?
-        .ok_or_else(|| CliError::Message(format!("cluster '{}' does not exist", cluster_name)))?;
-
-    if cluster.replication_factor == Some(0) || cluster.replication_factor.is_none() {
-        return Err(CliError::ClusterNotReady {
-            cluster: cluster_name,
-            reason: "replication factor is 0".to_string(),
-        });
-    }
-
-    // 2. Check USAGE privilege on the cluster
-    let has_usage: bool = client
-        .query_one(
-            "SELECT has_cluster_privilege(current_role(), $1, 'USAGE') AS has_usage",
-            &[&cluster_name],
-        )
-        .await?
-        .get("has_usage");
-
-    if !has_usage {
-        return Err(CliError::ClusterNotReady {
-            cluster: cluster_name,
-            reason: "current role does not have USAGE privilege".to_string(),
-        });
-    }
-
-    // 3. Check role membership — exactly one of the three mz-deploy roles
     let mut matched_roles = Vec::new();
     for (role_enum, role_name) in ALL_ROLES {
         let row = client
