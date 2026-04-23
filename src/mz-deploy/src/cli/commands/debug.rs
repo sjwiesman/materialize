@@ -1,12 +1,34 @@
 //! Debug command - test database connection.
 
 use crate::cli::CliError;
-use crate::client::{Client, Profile};
+use crate::client::{Client, Profile, SERVER_CLUSTER_NAME};
 use crate::config::Settings;
 use crate::log;
 use crate::project::compiler::typecheck::{DockerRuntime, DockerStatus};
 use owo_colors::OwoColorize;
 use std::fmt;
+
+/// Health of the `_mz_deploy_server` cluster as observed by `debug`.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum ServerClusterHealth {
+    /// Cluster exists and has replication_factor > 0.
+    Healthy,
+    /// Cluster exists but is not usable (e.g., replication_factor == 0).
+    NotReady { reason: String },
+    /// Cluster is not present in `mz_catalog.mz_clusters`.
+    Missing,
+}
+
+async fn check_server_cluster(client: &Client) -> Result<ServerClusterHealth, CliError> {
+    match client.introspection().get_cluster(SERVER_CLUSTER_NAME).await? {
+        None => Ok(ServerClusterHealth::Missing),
+        Some(c) if c.replication_factor.unwrap_or(0) > 0 => Ok(ServerClusterHealth::Healthy),
+        Some(_) => Ok(ServerClusterHealth::NotReady {
+            reason: "replication factor is 0".into(),
+        }),
+    }
+}
 
 #[derive(serde::Serialize)]
 struct DebugOutput {
