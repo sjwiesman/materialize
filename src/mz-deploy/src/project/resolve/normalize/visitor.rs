@@ -509,10 +509,12 @@ mod tests {
             "my_view".to_string(),
         ));
         let in_project: BTreeSet<String> = ["app".to_string()].into_iter().collect();
-        let dirty: BTreeSet<SchemaQualifier> =
-            [SchemaQualifier::new("app".to_string(), "public".to_string())]
-                .into_iter()
-                .collect();
+        let dirty: BTreeSet<SchemaQualifier> = [SchemaQualifier::new(
+            "app".to_string(),
+            "public".to_string(),
+        )]
+        .into_iter()
+        .collect();
 
         let visitor = NormalizingVisitor::overlay(&fqn, "alice", &in_project, &dirty);
 

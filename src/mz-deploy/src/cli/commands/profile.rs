@@ -55,11 +55,7 @@ pub fn list(
 ///
 /// Validates that the profile exists in `profiles.toml` so typos fail at
 /// `set` time rather than at the next command invocation.
-pub fn set(
-    directory: &Path,
-    profiles_dir: Option<&Path>,
-    name: &str,
-) -> Result<(), CliError> {
+pub fn set(directory: &Path, profiles_dir: Option<&Path>, name: &str) -> Result<(), CliError> {
     let profiles_config = ProfilesConfig::load(profiles_dir)?;
     // `get_profile` returns ConfigError::ProfileNotFound if missing.
     let _ = profiles_config.get_profile(name)?;
@@ -91,11 +87,7 @@ pub fn current(directory: &Path, cli_profile: Option<&str>) -> Result<(), CliErr
 
     match read_mzprofile(directory)? {
         Some(name) => {
-            info!(
-                "  {} ({})",
-                name.green(),
-                "project default".dimmed(),
-            );
+            info!("  {} ({})", name.green(), "project default".dimmed(),);
         }
         None => {
             info!(
@@ -108,10 +100,7 @@ pub fn current(directory: &Path, cli_profile: Option<&str>) -> Result<(), CliErr
     Ok(())
 }
 
-fn resolve_active(
-    directory: &Path,
-    cli_profile: Option<&str>,
-) -> Result<Option<String>, CliError> {
+fn resolve_active(directory: &Path, cli_profile: Option<&str>) -> Result<Option<String>, CliError> {
     if let Some(p) = cli_profile {
         return Ok(Some(p.to_string()));
     }

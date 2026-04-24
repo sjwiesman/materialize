@@ -211,12 +211,12 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     with c.test_case("apply-initial"):
         # ── 1. Initial apply ─────────────────────────────────────
         # Dry-run first
-        result = run_mz_deploy(
-            c, "basic/v1", "apply", "--dry-run", "--output", "json"
-        )
+        result = run_mz_deploy(c, "basic/v1", "apply", "--dry-run", "--output", "json")
         dry_run = parse_dry_run_json(result)
         created = count_actions(dry_run["phases"], "created")
-        assert created > 0, f"Expected created actions in initial dry-run, got {dry_run}"
+        assert (
+            created > 0
+        ), f"Expected created actions in initial dry-run, got {dry_run}"
 
         # Execute
         result = run_mz_deploy(c, "basic/v1", "apply")
@@ -226,7 +226,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         rows = c.sql_query(
             "SELECT name FROM mz_clusters WHERE name IN ('compute', 'ingest', 'app') ORDER BY name"
         )
-        assert len(rows) == 3, f"Expected clusters 'app', 'compute', 'ingest', got {rows}"
+        assert (
+            len(rows) == 3
+        ), f"Expected clusters 'app', 'compute', 'ingest', got {rows}"
 
         # Verify database
         rows = c.sql_query("SELECT name FROM mz_databases WHERE name = 'app'")
@@ -262,17 +264,19 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             "WHERE t.name IN ('users', 'orders') AND sc.name = 'ingest' ORDER BY t.name",
             database="app",
         )
-        assert len(rows) == 2, f"Expected 2 tables in ingest (orders, users), got {rows}"
+        assert (
+            len(rows) == 2
+        ), f"Expected 2 tables in ingest (orders, users), got {rows}"
 
     with c.test_case("apply-idempotent"):
         # ── 2. Idempotent re-apply ────────────────────────────────
         # Dry-run: everything should be up_to_date
-        result = run_mz_deploy(
-            c, "basic/v1", "apply", "--dry-run", "--output", "json"
-        )
+        result = run_mz_deploy(c, "basic/v1", "apply", "--dry-run", "--output", "json")
         dry_run = parse_dry_run_json(result)
         created = count_actions(dry_run["phases"], "created")
-        assert created == 0, f"Expected no created actions on re-apply dry-run, got {created}"
+        assert (
+            created == 0
+        ), f"Expected no created actions on re-apply dry-run, got {created}"
 
         up_to_date = count_actions(dry_run["phases"], "up_to_date")
         assert up_to_date > 0, f"Expected up_to_date actions, got {up_to_date}"
@@ -304,19 +308,17 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     with c.test_case("apply-incremental"):
         # ── 3. Incremental apply: add table ───────────────────────
         # Dry-run: should show 1 created, 2 up_to_date for tables
-        result = run_mz_deploy(
-            c, "basic/v2", "apply", "--dry-run", "--output", "json"
-        )
+        result = run_mz_deploy(c, "basic/v2", "apply", "--dry-run", "--output", "json")
         dry_run = parse_dry_run_json(result)
         tables_phase = find_phase(dry_run["phases"], "tables")
         tables_created = phase_actions(tables_phase, "created")
         tables_up_to_date = phase_actions(tables_phase, "up_to_date")
-        assert len(tables_created) == 1, (
-            f"Expected 1 created table (products), got {len(tables_created)}"
-        )
-        assert len(tables_up_to_date) == 2, (
-            f"Expected 2 up_to_date tables, got {len(tables_up_to_date)}"
-        )
+        assert (
+            len(tables_created) == 1
+        ), f"Expected 1 created table (products), got {len(tables_created)}"
+        assert (
+            len(tables_up_to_date) == 2
+        ), f"Expected 2 up_to_date tables, got {len(tables_up_to_date)}"
 
         # Execute
         result = run_mz_deploy(c, "basic/v2", "apply")
@@ -343,19 +345,19 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     with c.test_case("apply-alter-connection"):
         # ── 4. Modify connection ──────────────────────────────────
         # Dry-run
-        result = run_mz_deploy(
-            c, "basic/v3", "apply", "--dry-run", "--output", "json"
-        )
+        result = run_mz_deploy(c, "basic/v3", "apply", "--dry-run", "--output", "json")
         dry_run = parse_dry_run_json(result)
         conn_phase = find_phase(dry_run["phases"], "connections")
         conn_altered = phase_actions(conn_phase, "altered")
-        assert len(conn_altered) == 1, (
-            f"Expected 1 altered connection, got {len(conn_altered)}"
-        )
+        assert (
+            len(conn_altered) == 1
+        ), f"Expected 1 altered connection, got {len(conn_altered)}"
 
         # Execute
         result = run_mz_deploy(c, "basic/v3", "apply")
-        assert result.returncode == 0, f"Modify connection apply failed: {result.stderr}"
+        assert (
+            result.returncode == 0
+        ), f"Modify connection apply failed: {result.stderr}"
 
     with c.test_case("apply-grants"):
         # ── 5. Grant changes ─────────────────────────────────────
@@ -377,9 +379,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     with c.test_case("unit-tests"):
         # ── 6. Run unit tests ─────────────────────────────────────
         result = run_mz_deploy(c, "basic/v1", "test", check=False)
-        assert result.returncode != 0, (
-            f"Expected non-zero exit from test (some tests intentionally fail)"
-        )
+        assert (
+            result.returncode != 0
+        ), "Expected non-zero exit from test (some tests intentionally fail)"
 
         combined_output = result.stdout + result.stderr
         # Passing tests
@@ -388,18 +390,18 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             "test_user_activity_counts",
             "test_top_spenders_filter",
         ]:
-            assert test_name in combined_output, (
-                f"Expected passing test '{test_name}' in output"
-            )
+            assert (
+                test_name in combined_output
+            ), f"Expected passing test '{test_name}' in output"
 
         # Failing tests
         for test_name in [
             "test_user_activity_wrong_expectation",
             "test_order_stats_wrong",
         ]:
-            assert test_name in combined_output, (
-                f"Expected failing test '{test_name}' in output"
-            )
+            assert (
+                test_name in combined_output
+            ), f"Expected failing test '{test_name}' in output"
 
     with c.test_case("stage-promote-v1"):
         # ── 7. Stage ──────────────────────────────────────────────
@@ -416,21 +418,15 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert len(rows) == 1, f"Expected ops_v1 schema, got {rows}"
 
         # compute_v1 cluster should exist (core MVs)
-        rows = c.sql_query(
-            "SELECT name FROM mz_clusters WHERE name = 'compute_v1'"
-        )
+        rows = c.sql_query("SELECT name FROM mz_clusters WHERE name = 'compute_v1'")
         assert len(rows) == 1, f"Expected compute_v1 cluster, got {rows}"
 
         # app_v1 cluster should exist (ops views)
-        rows = c.sql_query(
-            "SELECT name FROM mz_clusters WHERE name = 'app_v1'"
-        )
+        rows = c.sql_query("SELECT name FROM mz_clusters WHERE name = 'app_v1'")
         assert len(rows) == 1, f"Expected app_v1 cluster, got {rows}"
 
         # ingest should NOT be staged (sources/tables are apply-only)
-        rows = c.sql_query(
-            "SELECT name FROM mz_clusters WHERE name = 'ingest_v1'"
-        )
+        rows = c.sql_query("SELECT name FROM mz_clusters WHERE name = 'ingest_v1'")
         assert len(rows) == 0, f"Expected no ingest_v1 cluster, got {rows}"
 
         # ── 8. Wait ──────────────────────────────────────────────
@@ -440,9 +436,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert result.returncode == 0, f"wait v1 failed: {result.stderr}"
 
         # ── 9. Promote ───────────────────────────────────────────
-        result = run_mz_deploy(
-            c, "basic/v1", "promote", "v1", "--no-ready-check"
-        )
+        result = run_mz_deploy(c, "basic/v1", "promote", "v1", "--no-ready-check")
         assert result.returncode == 0, f"promote v1 failed: {result.stderr}"
 
         # Source still in ingest (untouched by promote)
@@ -483,9 +477,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert len(rows) == 2, f"Expected ops views after promote, got {rows}"
 
         # ingest cluster still exists
-        rows = c.sql_query(
-            "SELECT name FROM mz_clusters WHERE name = 'ingest'"
-        )
+        rows = c.sql_query("SELECT name FROM mz_clusters WHERE name = 'ingest'")
         assert len(rows) == 1, f"Expected ingest cluster after promote, got {rows}"
 
         # ── 10. Log ──────────────────────────────────────────────
@@ -501,9 +493,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert result.returncode == 0, f"stage v2 failed: {result.stderr}"
 
         # compute_v2 cluster should exist (core objects use compute)
-        rows = c.sql_query(
-            "SELECT name FROM mz_clusters WHERE name = 'compute_v2'"
-        )
+        rows = c.sql_query("SELECT name FROM mz_clusters WHERE name = 'compute_v2'")
         assert len(rows) == 1, f"Expected compute_v2 cluster, got {rows}"
 
         # Verify staging schemas exist
@@ -524,9 +514,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         )
         assert len(rows) == 0, f"Expected no v2 schemas after abort, got {rows}"
 
-        rows = c.sql_query(
-            "SELECT name FROM mz_clusters WHERE name LIKE '%\\_v2'"
-        )
+        rows = c.sql_query("SELECT name FROM mz_clusters WHERE name LIKE '%\\_v2'")
         assert len(rows) == 0, f"Expected no v2 clusters after abort, got {rows}"
 
         # ── 14. Re-stage v2 + promote ─────────────────────────────
@@ -540,9 +528,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         )
         assert result.returncode == 0, f"wait v2 failed: {result.stderr}"
 
-        result = run_mz_deploy(
-            c, "basic/v5", "promote", "v2", "--no-ready-check"
-        )
+        result = run_mz_deploy(c, "basic/v5", "promote", "v2", "--no-ready-check")
         assert result.returncode == 0, f"promote v2 failed: {result.stderr}"
 
         # Verify ingest untouched
@@ -596,9 +582,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         )
         assert len(rows) == 0, f"Expected no v3 schemas after abort, got {rows}"
 
-        rows = c.sql_query(
-            "SELECT name FROM mz_clusters WHERE name LIKE '%\\_v3'"
-        )
+        rows = c.sql_query("SELECT name FROM mz_clusters WHERE name LIKE '%\\_v3'")
         assert len(rows) == 0, f"Expected no v3 clusters after abort, got {rows}"
 
         # ── 18. Re-stage v3 + promote ─────────────────────────────
@@ -612,9 +596,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         )
         assert result.returncode == 0, f"wait v3 failed: {result.stderr}"
 
-        result = run_mz_deploy(
-            c, "basic/v6", "promote", "v3", "--no-ready-check"
-        )
+        result = run_mz_deploy(c, "basic/v6", "promote", "v3", "--no-ready-check")
         assert result.returncode == 0, f"promote v3 failed: {result.stderr}"
 
         # Verify ingest untouched
@@ -666,7 +648,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             database="app",
         )
         assert len(rows) == 1, f"Expected 1 comment row, got {rows}"
-        assert rows[0][0] == "default secret", f"Expected 'default secret', got '{rows[0][0]}'"
+        assert (
+            rows[0][0] == "default secret"
+        ), f"Expected 'default secret', got '{rows[0][0]}'"
 
         # Verify default_config exists (default-only table)
         rows = c.sql_query(
@@ -695,7 +679,14 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert result.returncode == 0
 
         result = run_mz_deploy(
-            c, "multi-profile/v1", "wait", "mp_default", "--timeout", "300", "--allowed-lag", "86400"
+            c,
+            "multi-profile/v1",
+            "wait",
+            "mp_default",
+            "--timeout",
+            "300",
+            "--allowed-lag",
+            "86400",
         )
         assert result.returncode == 0
 
@@ -730,9 +721,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert len(rows) == 3, f"Expected 3 rows from ambiguous view, got {rows}"
 
         # ── 3. Apply staging profile ──────────────────────
-        result = run_mz_deploy(
-            c, "multi-profile/v1", "apply", "--profile", "staging"
-        )
+        result = run_mz_deploy(c, "multi-profile/v1", "apply", "--profile", "staging")
         assert result.returncode == 0
 
         # Verify database "app__staging" exists (suffix applied)
@@ -740,7 +729,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert len(rows) == 1
 
         # Verify cluster "compute__staging" exists (suffix applied)
-        rows = c.sql_query("SELECT name FROM mz_clusters WHERE name = 'compute__staging'")
+        rows = c.sql_query(
+            "SELECT name FROM mz_clusters WHERE name = 'compute__staging'"
+        )
         assert len(rows) == 1
 
         # Verify secret comment is 'staging secret' (staging profile override)
@@ -752,8 +743,12 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             "WHERE mz_secrets.name = 'my_secret' AND mz_databases.name = 'app__staging'",
             database="app__staging",
         )
-        assert len(rows) == 1, f"Expected 1 comment row for my_secret in app__staging, got {rows}"
-        assert rows[0][0] == "staging secret", f"Expected 'staging secret', got '{rows[0][0]}'"
+        assert (
+            len(rows) == 1
+        ), f"Expected 1 comment row for my_secret in app__staging, got {rows}"
+        assert (
+            rows[0][0] == "staging secret"
+        ), f"Expected 'staging secret', got '{rows[0][0]}'"
 
         # Verify staging_config exists (staging-only table)
         rows = c.sql_query(
@@ -763,7 +758,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             "WHERE t.name = 'staging_config' AND sc.name = 'public' AND db.name = 'app__staging'",
             database="app__staging",
         )
-        assert len(rows) == 1, f"Expected staging_config table in app__staging, got {rows}"
+        assert (
+            len(rows) == 1
+        ), f"Expected staging_config table in app__staging, got {rows}"
 
         # Verify default_config does NOT exist (default-only table)
         rows = c.sql_query(
@@ -773,24 +770,45 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             "WHERE t.name = 'default_config' AND sc.name = 'public' AND db.name = 'app__staging'",
             database="app__staging",
         )
-        assert len(rows) == 0, f"Expected no default_config table in app__staging, got {rows}"
+        assert (
+            len(rows) == 0
+        ), f"Expected no default_config table in app__staging, got {rows}"
 
         # ── 4. Stage + promote staging profile (deploys MV) ──
         result = run_mz_deploy(
-            c, "multi-profile/v1", "stage", "--deploy-id", "mp_staging",
-            "--allow-dirty", "--profile", "staging"
+            c,
+            "multi-profile/v1",
+            "stage",
+            "--deploy-id",
+            "mp_staging",
+            "--allow-dirty",
+            "--profile",
+            "staging",
         )
         assert result.returncode == 0
 
         result = run_mz_deploy(
-            c, "multi-profile/v1", "wait", "mp_staging", "--timeout", "300",
-            "--allowed-lag", "86400", "--profile", "staging"
+            c,
+            "multi-profile/v1",
+            "wait",
+            "mp_staging",
+            "--timeout",
+            "300",
+            "--allowed-lag",
+            "86400",
+            "--profile",
+            "staging",
         )
         assert result.returncode == 0
 
         result = run_mz_deploy(
-            c, "multi-profile/v1", "promote", "mp_staging", "--no-ready-check",
-            "--profile", "staging"
+            c,
+            "multi-profile/v1",
+            "promote",
+            "mp_staging",
+            "--no-ready-check",
+            "--profile",
+            "staging",
         )
         assert result.returncode == 0
 
@@ -814,7 +832,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             database="app__staging",
             user="deploy_user",
         )
-        assert len(rows) == 3, f"Expected 3 rows from ambiguous view in staging, got {rows}"
+        assert (
+            len(rows) == 3
+        ), f"Expected 3 rows from ambiguous view in staging, got {rows}"
 
         # ── 5. Idempotent re-apply for both profiles ──────
         # Default
@@ -826,21 +846,27 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
 
         # Staging
         result = run_mz_deploy(
-            c, "multi-profile/v1", "apply", "--profile", "staging",
-            "--dry-run", "--output", "json"
+            c,
+            "multi-profile/v1",
+            "apply",
+            "--profile",
+            "staging",
+            "--dry-run",
+            "--output",
+            "json",
         )
         dry_run = parse_dry_run_json(result)
         assert count_actions(dry_run["phases"], "created") == 0
 
     with c.test_case("mz-deploy-undefined-var"):
         result = run_mz_deploy(c, "undefined-var/v1", "compile", check=False)
-        assert result.returncode != 0, (
-            f"Expected compile to fail for undefined variable, got rc={result.returncode}"
-        )
+        assert (
+            result.returncode != 0
+        ), f"Expected compile to fail for undefined variable, got rc={result.returncode}"
         combined = result.stdout + result.stderr
-        assert "undefined_var" in combined, (
-            f"Expected error to mention 'undefined_var', got: {combined}"
-        )
+        assert (
+            "undefined_var" in combined
+        ), f"Expected error to mention 'undefined_var', got: {combined}"
 
     with c.test_case("mz-deploy-constraints"):
         # ════════════════════════════════════════════════════════════
@@ -858,7 +884,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
                 f"WHERE t.name = '{table_name}' AND sc.name = 'ingest' AND db.name = 'cdb'",
                 database="cdb",
             )
-            assert len(rows) == 1, f"Expected table '{table_name}' in cdb.ingest, got {rows}"
+            assert (
+                len(rows) == 1
+            ), f"Expected table '{table_name}' in cdb.ingest, got {rows}"
 
         # Verify cluster created
         rows = c.sql_query(
@@ -875,19 +903,31 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert result.returncode == 0, f"stage c1 failed: {result.stderr}"
 
         result = run_mz_deploy(
-            c, "constraints/v1", "wait", "c1", "--timeout", "300", "--allowed-lag", "86400"
+            c,
+            "constraints/v1",
+            "wait",
+            "c1",
+            "--timeout",
+            "300",
+            "--allowed-lag",
+            "86400",
         )
         assert result.returncode == 0, f"wait c1 failed: {result.stderr}"
 
-        result = run_mz_deploy(
-            c, "constraints/v1", "promote", "c1", "--no-ready-check"
-        )
+        result = run_mz_deploy(c, "constraints/v1", "promote", "c1", "--no-ready-check")
         assert result.returncode == 0, f"promote c1 failed: {result.stderr}"
 
         # ════════════════════════════════════════════════════════════
         # Step 3: Verify MVs and enforced constraint MVs exist
         # ════════════════════════════════════════════════════════════
-        for mv_name in ["users", "emails", "orders", "users_pk", "emails_unique", "orders_fk"]:
+        for mv_name in [
+            "users",
+            "emails",
+            "orders",
+            "users_pk",
+            "emails_unique",
+            "orders_fk",
+        ]:
             rows = c.sql_query(
                 f"SELECT mv.name FROM mz_materialized_views mv "
                 f"JOIN mz_schemas sc ON mv.schema_id = sc.id "
@@ -917,7 +957,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             "WHERE mv.name = 'items_pk' AND sc.name = 'public' AND db.name = 'cdb'",
             database="cdb",
         )
-        assert len(rows) == 0, f"Expected no MV for not-enforced constraint 'items_pk', got {rows}"
+        assert (
+            len(rows) == 0
+        ), f"Expected no MV for not-enforced constraint 'items_pk', got {rows}"
 
         # ════════════════════════════════════════════════════════════
         # Step 5: Insert clean data into raw tables (no violations).
@@ -948,7 +990,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
                 database="cdb",
                 user="deploy_user",
             )
-            assert int(rows[0][0]) == 0, f"Expected 0 violations for '{mv_name}', got {rows[0][0]}"
+            assert (
+                int(rows[0][0]) == 0
+            ), f"Expected 0 violations for '{mv_name}', got {rows[0][0]}"
 
         # ════════════════════════════════════════════════════════════
         # Step 7: Insert data that causes violations into raw tables
@@ -981,7 +1025,9 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
                 database="cdb",
                 user="deploy_user",
             )
-            assert int(rows[0][0]) > 0, f"Expected violations for '{mv_name}', got {rows[0][0]}"
+            assert (
+                int(rows[0][0]) > 0
+            ), f"Expected violations for '{mv_name}', got {rows[0][0]}"
 
 
 def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
@@ -1011,9 +1057,7 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
     )
     assert result.returncode == 0, f"wait v1 failed: {result.stderr}"
 
-    result = run_mz_deploy(
-        c, "dev-basic/v1", "promote", "v1", "--no-ready-check"
-    )
+    result = run_mz_deploy(c, "dev-basic/v1", "promote", "v1", "--no-ready-check")
     assert result.returncode == 0, f"promote v1 failed: {result.stderr}"
 
     # Grant dev_user privileges on the app database so it can read production
@@ -1101,7 +1145,12 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
 
     with c.test_case("mz-deploy-dev-teardown"):
         result = run_mz_deploy(
-            c, "dev-basic/v2", "dev", "--down", "--profile", "dev",
+            c,
+            "dev-basic/v2",
+            "dev",
+            "--down",
+            "--profile",
+            "dev",
         )
         assert result.returncode == 0, f"dev --down failed: {result.stderr}"
 
@@ -1120,7 +1169,12 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
         # any DDL runs — so we use `check=False` and inspect the result
         # instead of letting `run_mz_deploy` raise on non-zero exit.
         result = run_mz_deploy(
-            c, "dev-basic/v2", "dev", "--profile", "dev_unsafe", check=False,
+            c,
+            "dev-basic/v2",
+            "dev",
+            "--profile",
+            "dev_unsafe",
+            check=False,
         )
         assert result.returncode != 0, (
             f"dev should refuse against a promoted cluster but exited 0: "
@@ -1134,25 +1188,25 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert (
             "refusing to deploy dev overlay onto production cluster" in combined
         ), f"expected DevTargetsProductionCluster error; got: {combined}"
-        assert "compute" in combined, (
-            f"error should name the protected cluster; got: {combined}"
-        )
-        assert "promoted" in combined.lower(), (
-            f"error should explain the cluster is promoted; got: {combined}"
-        )
+        assert (
+            "compute" in combined
+        ), f"error should name the protected cluster; got: {combined}"
+        assert (
+            "promoted" in combined.lower()
+        ), f"error should explain the cluster is promoted; got: {combined}"
 
         # The guard must fire before any overlay state is created, so no
         # overlay database should exist for this profile.
         rows = c.sql_query(
             "SELECT name FROM mz_databases WHERE name = 'app__dev_unsafe'",
         )
-        assert len(rows) == 0, (
-            f"refused dev run must not create an overlay database, got: {rows}"
-        )
+        assert (
+            len(rows) == 0
+        ), f"refused dev run must not create an overlay database, got: {rows}"
         rows = c.sql_query(
             "SELECT overlay_db FROM _mz_deploy.tables.dev_overlays "
             "WHERE profile = 'dev_unsafe' AND project = 'v2'",
         )
-        assert rows == [], (
-            f"refused dev run must not insert a manifest row, got: {rows}"
-        )
+        assert (
+            rows == []
+        ), f"refused dev run must not insert a manifest row, got: {rows}"

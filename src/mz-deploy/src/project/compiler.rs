@@ -261,8 +261,7 @@ pub(crate) fn compile_sync<P: AsRef<Path>>(
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
 ) -> Result<graph::Project, ProjectError> {
-    compile_sync_with_stats(root, profile, profile_suffix, variables)
-        .map(|(project, _)| project)
+    compile_sync_with_stats(root, profile, profile_suffix, variables).map(|(project, _)| project)
 }
 
 /// Internal entry point that returns compile statistics alongside the project.
@@ -1144,14 +1143,12 @@ mod tests {
         );
 
         let (_, first_stats) =
-            compile_sync_with_stats(root, "default", None, &BTreeMap::new())
-                .unwrap();
+            compile_sync_with_stats(root, "default", None, &BTreeMap::new()).unwrap();
         assert_eq!(first_stats.cache_hits, 0);
         assert_eq!(first_stats.cache_misses, 1);
 
         let (_, second_stats) =
-            compile_sync_with_stats(root, "default", None, &BTreeMap::new())
-                .unwrap();
+            compile_sync_with_stats(root, "default", None, &BTreeMap::new()).unwrap();
         assert_eq!(second_stats.cache_hits, 1);
         assert_eq!(second_stats.cache_misses, 0);
     }
@@ -1171,18 +1168,14 @@ mod tests {
             "CREATE VIEW v2 AS SELECT * FROM v1",
         );
 
-        let _ =
-            compile_sync_with_stats(root, "default", None, &BTreeMap::new())
-                .unwrap();
+        let _ = compile_sync_with_stats(root, "default", None, &BTreeMap::new()).unwrap();
         write_sql(
             root,
             "models/materialize/public/v1.sql",
             "CREATE VIEW v1 AS SELECT 2 AS id",
         );
 
-        let (_, stats) =
-            compile_sync_with_stats(root, "default", None, &BTreeMap::new())
-                .unwrap();
+        let (_, stats) = compile_sync_with_stats(root, "default", None, &BTreeMap::new()).unwrap();
         assert_eq!(stats.cache_hits, 1);
         assert_eq!(stats.cache_misses, 1);
     }

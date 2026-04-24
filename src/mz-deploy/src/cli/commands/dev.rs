@@ -124,10 +124,9 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
         return Ok(());
     }
 
-    let new_snapshot =
-        crate::project::analysis::deployment_snapshot::build_snapshot_from_planned(
-            &planned_project,
-        )?;
+    let new_snapshot = crate::project::analysis::deployment_snapshot::build_snapshot_from_planned(
+        &planned_project,
+    )?;
     let production_snapshot =
         crate::project::analysis::deployment_snapshot::load_from_database(&client, None).await?;
 
@@ -164,7 +163,10 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
         })
         .collect();
     if skipped > 0 {
-        verbose!("skipped {} object(s) of unsupported type (tables/sources/sinks)", skipped);
+        verbose!(
+            "skipped {} object(s) of unsupported type (tables/sources/sinks)",
+            skipped
+        );
     }
 
     refuse_if_targets_production_cluster(&client, &overlay_objects).await?;

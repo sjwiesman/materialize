@@ -15,7 +15,9 @@
 
 use crate::cli::CliError;
 use crate::cli::error::MissingObject;
-use crate::client::{Client, ConnectionError, SERVER_CLUSTER_NAME, SERVER_CLUSTER_SIZE, quote_identifier};
+use crate::client::{
+    Client, ConnectionError, SERVER_CLUSTER_NAME, SERVER_CLUSTER_SIZE, quote_identifier,
+};
 use crate::config::Settings;
 use crate::info;
 use std::collections::BTreeSet;
@@ -180,10 +182,7 @@ pub async fn setup(client: &Client) -> Result<(), CliError> {
             // needs CREATE on the database.
             client
                 .execute(
-                    &format!(
-                        "GRANT CREATE ON DATABASE _mz_deploy TO {}",
-                        role_name,
-                    ),
+                    &format!("GRANT CREATE ON DATABASE _mz_deploy TO {}", role_name,),
                     &[],
                 )
                 .await?;
