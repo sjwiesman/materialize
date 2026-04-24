@@ -32,6 +32,7 @@ order-monitoring/
 ├── network-policies/              # Network policy definitions
 ├── project.toml                   # Project configuration
 ├── types.lock                     # Column schemas (generated)
+├── README.md
 └── .gitignore
 ```
 
