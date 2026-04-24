@@ -38,7 +38,7 @@ time = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 clap_complete = { workspace = true }
 crossterm = { workspace = true }
-owo-colors = { workspace = true }
+owo-colors = { workspace = true, features = ["supports-colors"] }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true, features = ["with-chrono-0_4"] }
 postgres-openssl = { workspace = true }

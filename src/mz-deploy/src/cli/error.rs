@@ -3,7 +3,9 @@
 //! This module provides error types for high-level CLI commands that wrap
 //! lower-level errors from the client and project modules.
 
-use crate::client::{ConflictRecord, ConnectionError, DatabaseValidationError};
+use crate::client::{
+    ConflictRecord, ConnectionError, DatabaseValidationError, ProductionClusterRecord,
+};
 use crate::config::ConfigError;
 use crate::project::analysis::deployment_snapshot::DeploymentSnapshotError;
 use crate::project::compiler::typecheck::TypeCheckError;
@@ -15,6 +17,27 @@ use crate::unit_test::TestValidationError;
 use chrono::{DateTime, Local};
 use owo_colors::OwoColorize;
 use thiserror::Error;
+
+/// An object `setup::verify` expected to find but didn't.
+///
+/// Used to build an actionable hint on [`CliError::SetupRequired`] that names
+/// the missing pieces so the user knows whether to run `setup` for the first
+/// time or re-run it after an mz-deploy upgrade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissingObject {
+    /// The `_mz_deploy_server` cluster.
+    Cluster(String),
+    /// The `_mz_deploy` database.
+    Database(String),
+    /// A table, view, or index inside `_mz_deploy`.
+    SchemaObject {
+        schema: String,
+        name: String,
+        kind: String,
+    },
+    /// One of the `materialize_*` roles.
+    Role(String),
+}
 
 /// Top-level error type for CLI operations.
 ///
@@ -72,6 +95,37 @@ pub enum CliError {
     #[error("refusing to overwrite production objects")]
     ProductionOverwriteNotAllowed {
         objects: Vec<(String, String, String)>, // (database, schema, object)
+    },
+
+    /// `dev` would deploy to a cluster that hosts a promoted deployment.
+    #[error("refusing to deploy dev overlay onto production cluster(s)")]
+    DevTargetsProductionCluster {
+        clusters: Vec<ProductionClusterRecord>,
+    },
+
+    /// Required mz-deploy infrastructure is missing or partially installed.
+    /// Emitted by every non-`setup` command when `setup::verify` fails.
+    #[error("mz-deploy infrastructure is not fully initialized")]
+    SetupRequired { missing: Vec<MissingObject> },
+
+    /// `setup` was invoked by a role that is not the owner of the existing
+    /// `_mz_deploy` database. Only the owner can re-run `setup`.
+    #[error(
+        "`_mz_deploy` is owned by role '{owner}', not by the current role '{current_role}'"
+    )]
+    SetupNotDatabaseOwner {
+        owner: String,
+        current_role: String,
+    },
+
+    /// A unit test targets an object that isn't a view or materialized view.
+    /// Unlike assertion mismatches, this is a project-definition error: the
+    /// `test` run aborts rather than reporting it as a failed test.
+    #[error("unit test '{test_name}' on '{object_id}' cannot be desugared: {reason}")]
+    InvalidUnitTestTarget {
+        test_name: String,
+        object_id: String,
+        reason: String,
     },
 
     /// Failed to create deployment table
@@ -301,6 +355,110 @@ impl CliError {
                     "--staging-env".cyan()
                 ))
             }
+            Self::SetupRequired { missing } => {
+                let list = missing
+                    .iter()
+                    .take(5)
+                    .map(|m| match m {
+                        MissingObject::Cluster(name) => {
+                            format!("  • cluster {}", name.yellow())
+                        }
+                        MissingObject::Database(name) => {
+                            format!("  • database {}", name.yellow())
+                        }
+                        MissingObject::SchemaObject { schema, name, kind } => {
+                            format!(
+                                "  • {} _mz_deploy.{}.{}",
+                                kind,
+                                schema.yellow(),
+                                name.yellow(),
+                            )
+                        }
+                        MissingObject::Role(name) => {
+                            format!("  • role {}", name.yellow())
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let more = if missing.len() > 5 {
+                    format!("\n  ... and {} more", missing.len() - 5)
+                } else {
+                    String::new()
+                };
+                Some(format!(
+                    "the following mz-deploy objects are missing:\n{}{}\n\n\
+                     run {} as an admin role with the {}, {}, and {} system \
+                     privileges to initialize or self-heal the installation.",
+                    list,
+                    more,
+                    "mz-deploy setup".cyan(),
+                    "CREATECLUSTER".cyan(),
+                    "CREATEDB".cyan(),
+                    "CREATEROLE".cyan(),
+                ))
+            }
+            Self::InvalidUnitTestTarget { .. } => Some(
+                "unit tests can only target CREATE VIEW or CREATE MATERIALIZED VIEW \
+                 statements. Move the test to a view/MV or remove it from the target \
+                 object's file."
+                    .to_string(),
+            ),
+            Self::SetupNotDatabaseOwner {
+                owner,
+                current_role,
+            } => Some(format!(
+                "{} is the only command that writes to `_mz_deploy`, and only \
+                 the owning role can do so.\n\n  \
+                 Re-run as {}, or have {} run {} to transfer ownership.",
+                "mz-deploy setup".cyan(),
+                owner.cyan(),
+                owner.cyan(),
+                format!("ALTER DATABASE _mz_deploy OWNER TO {}", current_role).cyan(),
+            )),
+            Self::DevTargetsProductionCluster { clusters } => {
+                let cluster_list = clusters
+                    .iter()
+                    .take(5)
+                    .map(|rec| {
+                        let promoted_local: DateTime<Local> = rec.promoted_at.into();
+                        let promoted_str = promoted_local.format("%b %d, %Y").to_string();
+                        format!(
+                            "  • {}  (hosts {}.{}, promoted {})",
+                            rec.cluster_name.yellow(),
+                            rec.database,
+                            rec.schema,
+                            promoted_str,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let more = if clusters.len() > 5 {
+                    format!("\n  ... and {} more", clusters.len() - 5)
+                } else {
+                    String::new()
+                };
+                Some(format!(
+                    "these clusters host promoted deployments and cannot be \
+                     targeted by dev:\n{}{}\n\n\
+                     point this profile at a non-production cluster by \
+                     parameterizing {} with a {} and setting it per-profile \
+                     in {}:\n\n  \
+                     -- in your .sql file\n  \
+                     CREATE MATERIALIZED VIEW ... IN CLUSTER :\"analytics_cluster\" AS ...\n\n  \
+                     # in project.toml\n  \
+                     [profiles.dev.variables]\n  \
+                     analytics_cluster = \"analytics_dev\"\n\n  \
+                     [profiles.prod.variables]\n  \
+                     analytics_cluster = \"analytics_prod\"\n\n\
+                     If your project only uses one profile, put the variable \
+                     under [profiles.default.variables] instead.",
+                    cluster_list,
+                    more,
+                    "IN CLUSTER".cyan(),
+                    ":variable".cyan(),
+                    "project.toml".cyan(),
+                ))
+            }
             Self::DeploymentTableCreationFailed { .. } => Some(
                 "ensure your database user has CREATE privileges on the database"
                     .to_string(),
@@ -455,6 +613,14 @@ impl CliError {
                     list
                 ))
             }
+            Self::Config(ConfigError::NoProfileConfigured) => Some(format!(
+                "record a default profile for this project:\n  \
+                 {}\n\n\
+                 or pass {} for a one-off run, or export {}.",
+                "mz-deploy profile set <name>".cyan(),
+                "--profile <name>".cyan(),
+                "MZ_DEPLOY_PROFILE=<name>".cyan(),
+            )),
             Self::Config(_)
             | Self::Validation(_)
             | Self::Types(_)

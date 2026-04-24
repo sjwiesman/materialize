@@ -79,7 +79,7 @@ pub async fn run(settings: &Settings, limit: Option<usize>) -> Result<(), CliErr
         .await
         .map_err(CliError::Connection)?;
 
-    super::setup::ensure(&client).await?;
+    super::setup::verify(&client).await?;
     super::setup::validate_connection(&client).await?;
     let history = client.deployments().list_deployment_history(limit).await?;
 

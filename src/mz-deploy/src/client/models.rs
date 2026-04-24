@@ -259,6 +259,24 @@ pub struct ConflictRecord {
     pub promoted_at: DateTime<Utc>,
 }
 
+/// A cluster known to host at least one promoted deployment.
+///
+/// Returned by `list_production_clusters()` and used by `dev` to refuse
+/// overlay deployments that would land on production compute. Each record
+/// carries one representative protected deployment so the error message
+/// can explain why the cluster is considered production.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionClusterRecord {
+    /// Cluster name as it appears in `mz_clusters` (resolved from cluster_id).
+    pub cluster_name: String,
+    /// Database of one promoted deployment hosted on this cluster.
+    pub database: String,
+    /// Schema of one promoted deployment hosted on this cluster.
+    pub schema: String,
+    /// When that deployment was promoted.
+    pub promoted_at: DateTime<Utc>,
+}
+
 /// Details about a specific deployment.
 ///
 /// Returned by `get_deployment_details()` for the describe command.

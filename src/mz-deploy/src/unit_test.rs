@@ -770,7 +770,7 @@ pub(crate) fn desugar_unit_test(
     test: &UnitTest,
     target_stmt: &Statement,
     target_fqn: &FullyQualifiedName,
-) -> Vec<String> {
+) -> Result<Vec<String>, String> {
     let mut statements = Vec::new();
 
     // 1. Create temporary views for mocks
@@ -784,7 +784,7 @@ pub(crate) fn desugar_unit_test(
     statements.push(create_expected_view_sql(&test.expected));
 
     // 3. Create temporary view for target (flattened)
-    statements.push(create_target_view_sql(target_stmt, target_fqn));
+    statements.push(create_target_view_sql(target_stmt, target_fqn)?);
 
     // 4. Create test query
     let target_fqn_str = format!(
@@ -799,7 +799,7 @@ pub(crate) fn desugar_unit_test(
         test.at_time.as_deref(),
     ));
 
-    statements
+    Ok(statements)
 }
 
 /// Quote a fully qualified name as a single identifier with dots.
@@ -882,38 +882,46 @@ fn create_expected_view_sql(expected: &ExpectedResult) -> String {
 }
 
 /// Create SQL for the target view as a temporary view with flattened naming.
-fn create_target_view_sql(stmt: &Statement, fqn: &FullyQualifiedName) -> String {
+///
+/// Returns an error if the target statement is not a `CREATE VIEW` or
+/// `CREATE MATERIALIZED VIEW` — unit tests only apply to those object types.
+fn create_target_view_sql(
+    stmt: &Statement,
+    fqn: &FullyQualifiedName,
+) -> Result<String, String> {
     let mut visitor = NormalizingVisitor::flattening(fqn);
     let transformed_stmt = stmt
         .clone()
         .normalize_name_with(&visitor, &fqn.to_item_name())
         .normalize_dependencies_with(&mut visitor);
 
-    match transformed_stmt {
-        Statement::CreateView(view) => {
-            let stmt = CreateViewStatement {
-                if_exists: IfExistsBehavior::Error,
-                temporary: true,
-                definition: view.definition.clone(),
-            };
-
-            stmt.to_string()
+    let view_stmt = match transformed_stmt {
+        Statement::CreateView(view) => CreateViewStatement {
+            if_exists: IfExistsBehavior::Error,
+            temporary: true,
+            definition: view.definition.clone(),
+        },
+        Statement::CreateMaterializedView(mv) => CreateViewStatement {
+            if_exists: IfExistsBehavior::Error,
+            temporary: true,
+            definition: ViewDefinition {
+                name: mv.name,
+                columns: mv.columns,
+                query: mv.query,
+            },
+        },
+        other => {
+            return Err(format!(
+                "unit tests are only supported on views and materialized views; \
+                 target '{}.{}.{}' is a {}",
+                fqn.database(),
+                fqn.schema(),
+                fqn.object(),
+                other.kind(),
+            ));
         }
-        Statement::CreateMaterializedView(materialized_view) => {
-            let stmt = CreateViewStatement {
-                if_exists: IfExistsBehavior::Error,
-                temporary: true,
-                definition: ViewDefinition {
-                    name: materialized_view.name,
-                    columns: materialized_view.columns,
-                    query: materialized_view.query,
-                },
-            };
-
-            stmt.to_string()
-        }
-        _ => unimplemented!(),
-    }
+    };
+    Ok(view_stmt.to_string())
 }
 
 /// Create the test assertion query that returns failures.

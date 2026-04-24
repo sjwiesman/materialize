@@ -1,5 +1,3 @@
-profile = "default"
-
 [profiles.staging]
 profile_suffix = "__staging"
 

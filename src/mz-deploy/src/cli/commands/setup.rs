@@ -1,15 +1,24 @@
 //! Setup command and connection validation for deployment tracking infrastructure.
 //!
 //! Provides three concerns:
-//! - **`ensure()`** — Idempotent creation of the `_mz_deploy` database and tables.
-//! - **`validate_connection()`** — Pre-flight checks that the connected cluster is
-//!   usable and the current role has exactly one mz-deploy role membership.
+//! - **`setup()`** — Idempotent, self-healing creation of the `_mz_deploy`
+//!   database, tables, views, indexes, and roles. The **only** function that
+//!   writes to `_mz_deploy`. Invoked exclusively by the explicit `setup` CLI
+//!   command, which requires admin privileges (cluster ownership to grant
+//!   USAGE, CREATEDB to create the database). Safe to re-run.
+//! - **`verify()`** — Read-only existence check. Every non-`setup` command
+//!   calls this and surfaces `CliError::SetupRequired` if the infrastructure
+//!   is missing or partially installed. Never writes.
+//! - **`validate_connection()`** — Pre-flight checks that the connected role
+//!   has exactly one mz-deploy role membership.
 //! - **`run()`** — The `setup` CLI command entry point.
 
 use crate::cli::CliError;
-use crate::client::{Client, SERVER_CLUSTER_NAME, SERVER_CLUSTER_SIZE, quote_identifier};
+use crate::cli::error::MissingObject;
+use crate::client::{Client, ConnectionError, SERVER_CLUSTER_NAME, SERVER_CLUSTER_SIZE, quote_identifier};
 use crate::config::Settings;
 use crate::info;
+use std::collections::BTreeSet;
 
 /// The mz-deploy role assigned to the current database user.
 ///
@@ -49,17 +58,34 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
     (MzDeployRole::Monitor, "materialize_monitor"),
 ];
 
-/// Ensure the deployment tracking infrastructure exists.
+/// Bring the deployment tracking infrastructure up to the current schema.
 ///
-/// Three phases, idempotent on re-run:
+/// The only function in this crate that mutates `_mz_deploy`. Every statement
+/// is idempotent so re-running `setup` against an existing installation
+/// heals drift (missing tables, missing roles, missing grants) without
+/// losing data.
+///
+/// Four phases:
 /// 1. Create the `_mz_deploy_server` cluster if missing.
-/// 2. Create the `_mz_deploy` database and run `setup_schema.sql` (tables,
-///    views, indexes) on first creation.
-/// 3. Create the three `materialize_*` roles if missing and apply grants.
+/// 2. Create the `_mz_deploy` database (`IF NOT EXISTS`).
+/// 3. Run every statement in [`super::setup_schema::SETUP_STATEMENTS`] —
+///    each uses `IF NOT EXISTS` so existing objects are left alone. Seed the
+///    version row with a pre-check (no `INSERT IF NOT EXISTS` form).
+/// 4. Create the three `materialize_*` roles if missing and re-apply grants.
 ///
-/// Called by both the explicit `setup` command and by other commands that
-/// need the infrastructure to be present (`stage`, `promote`, `list`, etc.).
-pub async fn ensure(client: &Client) -> Result<(), CliError> {
+/// Requires admin privileges:
+/// - Ownership of `_mz_deploy_server` (granted at creation in phase 1) to
+///   `GRANT USAGE` on it.
+/// - `CREATEDB` to create the database.
+/// - `CREATEROLE` to create the roles.
+///
+/// Ordinary commands do **not** call this function — they call
+/// [`verify`] and surface [`CliError::SetupRequired`] if it fails. See the
+/// module docs for the full model.
+pub async fn setup(client: &Client) -> Result<(), CliError> {
+    // Phase 1: server cluster. `CREATE CLUSTER` has no `IF NOT EXISTS` form,
+    // so pre-check. The first create is what makes the calling role the owner,
+    // which is required to GRANT USAGE below.
     if client
         .introspection()
         .get_cluster(SERVER_CLUSTER_NAME)
@@ -74,26 +100,55 @@ pub async fn ensure(client: &Client) -> Result<(), CliError> {
         client.execute(&sql, &[]).await?;
     }
 
-    let db_exists: bool = client
+    // Phase 2: database.
+    client
+        .execute("CREATE DATABASE IF NOT EXISTS _mz_deploy", &[])
+        .await?;
+
+    // Only the database owner can re-run `setup` — the GRANTs in phase 4
+    // require ownership. Refuse early with a message naming the owner so
+    // a second admin knows exactly whose hands to transfer ownership from.
+    let owner_row = client
         .query_one(
-            "SELECT EXISTS(SELECT 1 FROM mz_databases WHERE name = '_mz_deploy') AS exists",
+            "SELECT r.name AS owner, current_user() AS current_role \
+             FROM mz_databases d \
+             JOIN mz_roles r ON d.owner_id = r.id \
+             WHERE d.name = '_mz_deploy'",
+            &[],
+        )
+        .await?;
+    let owner: String = owner_row.get("owner");
+    let current_role: String = owner_row.get("current_role");
+    if owner != current_role {
+        return Err(CliError::SetupNotDatabaseOwner {
+            owner,
+            current_role,
+        });
+    }
+
+    // Phase 3: schema DDL. Each statement uses `IF NOT EXISTS`. Executed one
+    // at a time — `batch_execute` wraps multi-statement input in an implicit
+    // transaction, which Materialize rejects for DDL.
+    for stmt in super::setup_schema::SETUP_STATEMENTS {
+        client.execute(*stmt, &[]).await?;
+    }
+
+    // Version row is seeded on first setup and left alone thereafter. No
+    // `INSERT IF NOT EXISTS` form exists in Materialize, so pre-check.
+    let has_version: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM _mz_deploy.tables.version) AS exists",
             &[],
         )
         .await?
         .get("exists");
-
-    if !db_exists {
-        client.execute("CREATE DATABASE _mz_deploy", &[]).await?;
-        // Execute each DDL statement individually. `batch_execute` sends a
-        // simple query with multiple semicolon-separated statements, which
-        // Postgres wraps in an implicit transaction — and Materialize
-        // rejects many DDL forms inside a transaction block.
-        for stmt in super::setup_schema::SETUP_STATEMENTS {
-            client.execute(*stmt, &[]).await?;
-        }
+    if !has_version {
+        client
+            .execute("INSERT INTO _mz_deploy.tables.version VALUES (1)", &[])
+            .await?;
     }
 
-    // Phase 3: roles + grants. GRANTs are safe to re-run and heal drift.
+    // Phase 4: roles + grants. GRANTs are safe to re-run.
     for (role, role_name) in ALL_ROLES {
         if !client.introspection().role_exists(role_name).await? {
             client
@@ -119,6 +174,19 @@ pub async fn ensure(client: &Client) -> Result<(), CliError> {
         }
 
         if *role == MzDeployRole::Deployer {
+            // Promote creates short-lived `apply_<deploy_id>_pre` and
+            // `apply_<deploy_id>_post` schemas inside `_mz_deploy` to
+            // serialize the apply-state handshake, so the deployer role
+            // needs CREATE on the database.
+            client
+                .execute(
+                    &format!(
+                        "GRANT CREATE ON DATABASE _mz_deploy TO {}",
+                        role_name,
+                    ),
+                    &[],
+                )
+                .await?;
             client
                 .execute(
                     &format!(
@@ -144,6 +212,86 @@ pub async fn ensure(client: &Client) -> Result<(), CliError> {
     }
 
     Ok(())
+}
+
+/// Check that every object `setup` would create is already present.
+///
+/// Existence-only — never writes, never grants, never checks columns. If the
+/// infrastructure was once fully initialized it stays verified unless
+/// something is dropped out from under us. Upgrading mz-deploy to a release
+/// that adds new tables will trip this check until the admin re-runs
+/// `setup`.
+///
+/// Every non-`setup` command calls this before touching `_mz_deploy`.
+pub async fn verify(client: &Client) -> Result<(), CliError> {
+    let missing = discover_missing(client).await?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(CliError::SetupRequired { missing })
+}
+
+async fn discover_missing(client: &Client) -> Result<Vec<MissingObject>, ConnectionError> {
+    let mut missing = Vec::new();
+
+    if client
+        .introspection()
+        .get_cluster(SERVER_CLUSTER_NAME)
+        .await?
+        .is_none()
+    {
+        missing.push(MissingObject::Cluster(SERVER_CLUSTER_NAME.to_string()));
+    }
+
+    let db_exists: bool = client
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM mz_databases WHERE name = '_mz_deploy') AS exists",
+            &[],
+        )
+        .await?
+        .get("exists");
+
+    if !db_exists {
+        missing.push(MissingObject::Database("_mz_deploy".to_string()));
+    } else {
+        let rows = client
+            .query(
+                "SELECT s.name AS schema_name, o.name AS object_name, o.type AS object_type \
+                 FROM mz_objects o \
+                 JOIN mz_schemas s ON o.schema_id = s.id \
+                 JOIN mz_databases d ON s.database_id = d.id \
+                 WHERE d.name = '_mz_deploy' AND s.name IN ('tables', 'public')",
+                &[],
+            )
+            .await?;
+        let present: BTreeSet<(String, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get::<_, String>("schema_name"),
+                    r.get::<_, String>("object_name"),
+                )
+            })
+            .collect();
+
+        for (schema, name, kind) in super::setup_schema::EXPECTED_OBJECTS {
+            if !present.contains(&(schema.to_string(), name.to_string())) {
+                missing.push(MissingObject::SchemaObject {
+                    schema: schema.to_string(),
+                    name: name.to_string(),
+                    kind: kind.to_string(),
+                });
+            }
+        }
+    }
+
+    for (_role, role_name) in ALL_ROLES {
+        if !client.introspection().role_exists(role_name).await? {
+            missing.push(MissingObject::Role(role_name.to_string()));
+        }
+    }
+
+    Ok(missing)
 }
 
 /// Validate that the current role has a valid mz-deploy role membership.
@@ -248,7 +396,7 @@ pub async fn run(settings: &Settings) -> Result<(), CliError> {
         .await
         .map_err(CliError::Connection)?;
 
-    ensure(&client).await?;
+    setup(&client).await?;
 
     info!("Deployment tracking initialized in _mz_deploy database");
     Ok(())

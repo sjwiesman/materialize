@@ -432,7 +432,7 @@ pub async fn run(
         .await
         .map_err(CliError::Connection)?;
 
-    super::setup::ensure(&client).await?;
+    super::setup::verify(&client).await?;
     let role = super::setup::validate_connection(&client).await?;
     super::setup::require_deployer(role)?;
 

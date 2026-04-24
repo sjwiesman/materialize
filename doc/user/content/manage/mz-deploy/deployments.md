@@ -13,15 +13,15 @@ menu:
 production deployment:
 
 ```nofmt
-compile ──▶ test ──▶ preview ──▶ stage ──▶ wait ──▶ promote
-  local      local    real env    real env
+compile ──▶ test ──▶ dev ──▶ stage ──▶ wait ──▶ promote
+  local      local   real env  real env
 ```
 
 [`compile`](/manage/mz-deploy/local-development/#compile-and-validate) and
 [`test`](/manage/mz-deploy/local-development/#write-and-run-unit-tests) run
 locally to catch errors fast.
-[`preview`](#preview-a-deployment) deploys to a real Materialize environment
-so developers can validate their changes without deployer permissions.
+[`dev`](#iterate-against-production-data) builds a per-developer overlay
+against real production data so you can validate behavior before staging.
 When ready, a deployer runs `stage`, `wait`, and `promote` to ship to
 production with zero downtime.
 
@@ -42,7 +42,7 @@ side effects.
 | Role | Capabilities |
 |------|-------------|
 | `materialize_deployer` | `apply`, `delete`, `stage`, `promote`, `abort` — full write access |
-| `materialize_developer` | `preview`, `abort` (previews only), `list`, `describe`, `log` |
+| `materialize_developer` | `dev`, `list`, `describe`, `log` |
 | `materialize_monitor` | `list`, `describe`, `log` — read-only deployment state |
 
 Your database user must be a member of exactly one of these roles to run
@@ -91,35 +91,43 @@ Common errors during staging:
 - **Uncommitted changes** — commit your changes or pass `--allow-dirty`.
 {{< /note >}}
 
-## Preview a deployment
+## Iterate against production data
 
-`preview` works like `stage` but creates a non-promotable deployment that
-only requires the `materialize_developer` role. Use it to test changes in a
-real Materialize environment without needing deployer permissions or ownership
-of production schemas.
-
-```bash
-mz-deploy preview --deploy-id my-feature
-```
-
-The deploy ID is required. Preview skips the git dirty check, so you can
-test uncommitted changes without flags.
-
-When you're done, clean up with `abort`:
+`dev` is the inner-loop command for developers. It creates a
+per-developer overlay database (`<db>__<profile>`) containing only the
+views and materialized views you've changed, with references rewritten
+so unchanged dependencies resolve to production. External dependencies
+and `IN CLUSTER` clauses pass through unchanged.
 
 ```bash
-mz-deploy abort my-feature
+mz-deploy dev
 ```
 
-Developers can abort their own preview deployments. Deployers can abort any
-deployment.
+Every run drops the overlay and rebuilds it from scratch, so iterations
+are seconds and there's no state to manage.
 
-| | `stage` | `preview` |
-|--|---------|-----------|
-| Required role | `materialize_deployer` | `materialize_developer` |
-| Deploy ID | Optional (defaults to git SHA) | Required |
+Show the plan without executing any DDL:
+
+```bash
+mz-deploy dev --dry-run
+```
+
+Tear down the overlay when you're done:
+
+```bash
+mz-deploy dev --down
+```
+
+`dev` requires the `materialize_developer` role and the `CREATEDB`
+system privilege. Tables, sources, sinks, connections, and secrets are
+silently skipped — `dev` only overlays views and materialized views.
+
+| | `stage` | `dev` |
+|--|---------|-------|
+| Required role | `materialize_deployer` | `materialize_developer` (plus `CREATEDB`) |
+| Target | Staging schemas alongside production | Per-developer overlay database |
 | Git dirty check | Yes | No |
-| Schema/cluster ownership | Required | Not required |
+| Object types | All project objects | Views and materialized views only |
 | Can be promoted | Yes | No |
 
 ## Wait for hydration

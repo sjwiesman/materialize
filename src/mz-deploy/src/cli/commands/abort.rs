@@ -25,13 +25,11 @@ impl fmt::Display for AbortResult {
     }
 }
 
-/// Abort a staged or preview deployment by dropping schemas, clusters, and deployment records.
+/// Abort a staged deployment by dropping schemas, clusters, and deployment records.
 ///
 /// This command:
 /// - Validates that the deployment exists and hasn't been promoted
-/// - Checks role authorization: preview deployments can be aborted by either
-///   `materialize_developer` or `materialize_deployer`, while stage deployments
-///   require `materialize_deployer`
+/// - Requires the `materialize_deployer` role
 /// - Drops all staging schemas (with _<deploy_id> suffix)
 /// - Drops all staging clusters (with _<deploy_id> suffix)
 /// - Deletes deployment tracking records
@@ -55,7 +53,7 @@ pub async fn run(settings: &Settings, deploy_id: &str) -> Result<(), CliError> {
         .await
         .map_err(CliError::Connection)?;
 
-    super::setup::ensure(&client).await?;
+    super::setup::verify(&client).await?;
     let role = super::setup::validate_connection(&client).await?;
 
     super::setup::require_deployer(role)?;

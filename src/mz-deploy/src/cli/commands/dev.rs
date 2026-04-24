@@ -18,10 +18,56 @@ use crate::project::ast::Statement;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::resolve::normalize::NormalizingVisitor;
 use crate::{info, verbose};
+use mz_sql_parser::ast::RawClusterName;
 
 /// Overlay database name convention: `<base_db>__<profile>`.
 fn overlay_db_name(base_db: &str, profile: &str) -> String {
     format!("{}__{}", base_db, profile)
+}
+
+/// Collect every cluster referenced by the overlay set.
+///
+/// Only the clusters that `create_phase` would actually write to: the
+/// `IN CLUSTER` of each materialized view and of each index. Views have
+/// no cluster, and constraints are not deployed in dev.
+fn overlay_cluster_references(objects: &[ObjectRef<'_>]) -> BTreeSet<String> {
+    let mut clusters = BTreeSet::new();
+    for (_, obj) in objects {
+        if let Statement::CreateMaterializedView(mv) = &obj.stmt {
+            if let Some(RawClusterName::Unresolved(name)) = &mv.in_cluster {
+                clusters.insert(name.to_string());
+            }
+        }
+        for index in &obj.indexes {
+            if let Some(RawClusterName::Unresolved(name)) = &index.in_cluster {
+                clusters.insert(name.to_string());
+            }
+        }
+    }
+    clusters
+}
+
+/// Refuse to proceed if any overlay object targets a cluster that hosts a
+/// promoted deployment.
+async fn refuse_if_targets_production_cluster(
+    client: &Client,
+    overlay_objects: &[ObjectRef<'_>],
+) -> Result<(), CliError> {
+    let overlay_clusters = overlay_cluster_references(overlay_objects);
+    if overlay_clusters.is_empty() {
+        return Ok(());
+    }
+    let production = client.deployments().list_production_clusters().await?;
+    let conflicting: Vec<_> = production
+        .into_iter()
+        .filter(|rec| overlay_clusters.contains(&rec.cluster_name))
+        .collect();
+    if conflicting.is_empty() {
+        return Ok(());
+    }
+    Err(CliError::DevTargetsProductionCluster {
+        clusters: conflicting,
+    })
 }
 
 /// Top-level entry point for `mz-deploy dev`.
@@ -56,6 +102,7 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
         .await
         .map_err(CliError::Connection)?;
 
+    crate::cli::commands::setup::verify(&client).await?;
     let role = crate::cli::commands::setup::validate_connection(&client).await?;
     crate::cli::commands::setup::require_developer(role)?;
 
@@ -119,6 +166,8 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
     if skipped > 0 {
         verbose!("skipped {} object(s) of unsupported type (tables/sources/sinks)", skipped);
     }
+
+    refuse_if_targets_production_cluster(&client, &overlay_objects).await?;
 
     let dirty_schemas: BTreeSet<SchemaQualifier> = overlay_objects
         .iter()
@@ -256,7 +305,6 @@ pub(crate) async fn create_phase(
         let mut visitor = NormalizingVisitor::overlay(
             &original_fqn,
             profile_name,
-            None,
             in_project_databases,
             dirty_schemas,
         );

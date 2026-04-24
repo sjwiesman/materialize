@@ -161,10 +161,11 @@ mz-deploy explain materialize.public.stalled_orders#stalled_orders_customer_idx
 All objects are created on the `quickstart` cluster regardless of your project's
 cluster configuration.
 
-## Next step: preview in a real environment
+## Next step: iterate against production data
 
-Once your changes compile and pass tests locally, you can validate them in a
-real Materialize environment using
-[`preview`](/manage/mz-deploy/deployments/#preview-a-deployment). Preview
-creates a non-promotable staging deployment that only requires the
-`materialize_developer` role — no deployer permissions needed.
+Once your changes compile and pass tests locally, use
+[`dev`](/manage/mz-deploy/deployments/#iterate-against-production-data)
+to validate behavior against real production data. `dev` creates a
+per-developer overlay database containing only your dirty views and
+requires the `materialize_developer` role — no deployer permissions
+needed.

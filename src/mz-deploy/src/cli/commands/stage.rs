@@ -203,6 +203,7 @@ pub async fn run(
         .await
         .map_err(CliError::Connection)?;
 
+    crate::cli::commands::setup::verify(&client).await?;
     let role = crate::cli::commands::setup::validate_connection(&client).await?;
     crate::cli::commands::setup::require_deployer(role)?;
 
@@ -322,7 +323,6 @@ async fn analyze_project_changes<'a>(
     progress::stage_start("Analyzing project changes");
     let analyze_start = Instant::now();
 
-    crate::cli::commands::setup::ensure(client).await?;
     if client
         .deployments()
         .get_deployment_metadata(stage_name)

@@ -1,6 +1,3 @@
-## Name of the connection profile from profiles.toml to use for deployments.
-profile = "default"
-
 ## Materialize version to use for local type-checking.
 ## Use "cloud" (or omit) to target the latest cloud release,
 ## or pin a specific version like "v26.0.0".
@@ -31,3 +28,8 @@ mz_version = "cloud"
 ## When set, enables the aws_secret() provider so CREATE SECRET statements
 ## can pull values from AWS Secrets Manager at deploy time.
 # aws_profile = "my-aws-profile"
+
+## The active profile is NOT configured here. Set a default for your checkout:
+##   mz-deploy profile set <name>
+##
+## Or pass --profile <name> / export MZ_DEPLOY_PROFILE=<name> for one-off runs.

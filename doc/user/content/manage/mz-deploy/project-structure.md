@@ -131,8 +131,6 @@ database-level statements:
 
 The `project.toml` file in your project root controls project-wide settings:
 
-- **`profile`** — the default connection profile name (must match a section in
-  your `profiles.toml`).
 - **`mz_version`** — the Materialize version used for local type-checking. Set
   to `"cloud"` to use the latest cloud version.
 - **`dependencies`** — external dependency declarations for objects your project
@@ -140,6 +138,10 @@ The `project.toml` file in your project root controls project-wide settings:
   for details.
 - **Per-profile config sections** — override settings for specific environments.
   See [Profiles](/manage/mz-deploy/profiles/) for multi-environment setup.
+
+The active connection profile is resolved per-invocation from `--profile`,
+`MZ_DEPLOY_PROFILE`, or the per-checkout default set by `mz-deploy profile
+set`. See [Profiles](/manage/mz-deploy/profiles/).
 
 ## profiles.toml
 

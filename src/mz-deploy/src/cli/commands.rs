@@ -65,7 +65,7 @@ pub mod list;
 pub mod lock;
 pub mod log;
 pub mod new_project;
-pub mod profiles;
+pub mod profile;
 pub mod promote;
 pub mod roles;
 pub mod setup;

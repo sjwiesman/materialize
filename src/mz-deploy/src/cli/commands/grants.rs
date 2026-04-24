@@ -250,8 +250,13 @@ pub fn desired_grants(
 }
 
 /// Parse a privilege type string (e.g. `"SELECT"`) into a [`Privilege`] enum value.
-fn parse_privilege(s: &str) -> Privilege {
-    if s.eq_ignore_ascii_case("SELECT") {
+///
+/// Returns `None` for privilege names mz-deploy doesn't recognize, which can
+/// happen if a future Materialize release introduces a new privilege type.
+/// Callers should skip unknown privileges rather than fail outright so the
+/// CLI keeps working against newer servers.
+fn parse_privilege(s: &str) -> Option<Privilege> {
+    let p = if s.eq_ignore_ascii_case("SELECT") {
         Privilege::SELECT
     } else if s.eq_ignore_ascii_case("INSERT") {
         Privilege::INSERT
@@ -272,8 +277,9 @@ fn parse_privilege(s: &str) -> Privilege {
     } else if s.eq_ignore_ascii_case("CREATENETWORKPOLICY") {
         Privilege::CREATENETWORKPOLICY
     } else {
-        panic!("unknown privilege type: {s}")
-    }
+        return None;
+    };
+    Some(p)
 }
 
 /// Compute REVOKE statements for grants that exist in `current` but not in
@@ -296,15 +302,23 @@ pub fn stale_grant_revocations(
             grant.grantee.to_lowercase(),
             grant.privilege_type.to_uppercase(),
         );
-        if !desired.contains(&key) && !protected.contains(&key) {
-            revocations.push(RevokePrivilegesStatement {
-                privileges: PrivilegeSpecification::Privileges(vec![parse_privilege(
-                    &grant.privilege_type,
-                )]),
-                target: target.clone(),
-                roles: vec![Ident::new_unchecked(grant.grantee.clone())],
-            });
+        if desired.contains(&key) || protected.contains(&key) {
+            continue;
         }
+        let Some(privilege) = parse_privilege(&grant.privilege_type) else {
+            crate::verbose!(
+                "skipping revocation of unknown privilege '{}' on grantee '{}' (target: {:?})",
+                grant.privilege_type,
+                grant.grantee,
+                target,
+            );
+            continue;
+        };
+        revocations.push(RevokePrivilegesStatement {
+            privileges: PrivilegeSpecification::Privileges(vec![privilege]),
+            target: target.clone(),
+            roles: vec![Ident::new_unchecked(grant.grantee.clone())],
+        });
     }
     revocations
 }

@@ -49,10 +49,11 @@
 
 use crate::client::connection::{Client, DeploymentsClient, DeploymentsClientMut};
 use crate::client::errors::ConnectionError;
+use crate::client::quote_identifier;
 use crate::client::models::{
     ApplyState, ConflictRecord, DeploymentDetails, DeploymentHistoryEntry, DeploymentKind,
     DeploymentMetadata, DeploymentMode, DeploymentObjectRecord, PendingStatement,
-    SchemaDeploymentRecord, StagingDeployment,
+    ProductionClusterRecord, SchemaDeploymentRecord, StagingDeployment,
 };
 use crate::project::SchemaQualifier;
 use crate::project::analysis::deployment_snapshot::DeploymentSnapshot;
@@ -398,9 +399,12 @@ pub(super) async fn get_schema_deployments(
     client: &Client,
     deploy_id: Option<&str>,
 ) -> Result<Vec<SchemaDeploymentRecord>, ConnectionError> {
-    // The production view does not expose a mode column (it was added after the view was
-    // defined and the view only surfaces promoted deployments). For that path we default
-    // to Stage — promoted previews cannot exist, so every row from the view is a stage.
+    // The production view does not expose a mode column, so the no-filter
+    // branch hardcodes `'stage'` as a schema-compatibility placeholder. Every
+    // row from the production view is by definition a promoted deployment
+    // (non-null `promoted_at`); no caller of `SchemaDeploymentRecord` branches
+    // on `mode` when the record represents a promotion. The filtered branch
+    // reads `mode` from `_mz_deploy.public.deployments` normally.
     let query = if deploy_id.is_none() {
         r#"
             SELECT deploy_id, database, schema,
@@ -449,9 +453,9 @@ pub(super) async fn get_schema_deployments(
         let kind = kind_str.parse().map_err(|e| {
             ConnectionError::Message(format!("Failed to parse deployment kind: {}", e))
         })?;
-        let mode = mode_str
-            .parse::<DeploymentMode>()
-            .unwrap_or(DeploymentMode::Stage);
+        let mode = mode_str.parse::<DeploymentMode>().map_err(|e| {
+            ConnectionError::Message(format!("Failed to parse deployment mode: {}", e))
+        })?;
 
         records.push(SchemaDeploymentRecord {
             deploy_id,
@@ -552,9 +556,9 @@ pub(super) async fn get_deployment_metadata(
     let deploy_id: String = first_row.get("deploy_id");
     let promoted_at: Option<DateTime<Utc>> = first_row.get("promoted_at");
     let mode_str: String = first_row.get("mode");
-    let mode = mode_str
-        .parse::<DeploymentMode>()
-        .unwrap_or(DeploymentMode::Stage);
+    let mode = mode_str.parse::<DeploymentMode>().map_err(|e| {
+        ConnectionError::Message(format!("Failed to parse deployment mode: {}", e))
+    })?;
 
     let mut schemas = Vec::new();
     for row in rows {
@@ -607,9 +611,9 @@ pub(super) async fn get_deployment_details(
     let kind_str: String = first_row.get("kind");
     let kind: DeploymentKind = kind_str.parse().map_err(ConnectionError::Message)?;
     let mode_str: String = first_row.get("mode");
-    let mode = mode_str
-        .parse::<DeploymentMode>()
-        .unwrap_or(DeploymentMode::Stage);
+    let mode = mode_str.parse::<DeploymentMode>().map_err(|e| {
+        ConnectionError::Message(format!("Failed to parse deployment mode: {}", e))
+    })?;
 
     let mut schemas = Vec::new();
     for row in rows {
@@ -662,23 +666,25 @@ pub(super) async fn list_staging_deployments(
         let database: String = row.get("database");
         let schema: String = row.get("schema");
 
+        // Parse outside the closure so errors propagate instead of silently
+        // defaulting — a garbled `kind` or `mode` column is data corruption
+        // and should surface loud.
+        let kind: DeploymentKind = kind_str.parse().map_err(|e| {
+            ConnectionError::Message(format!("Failed to parse deployment kind: {}", e))
+        })?;
+        let mode: DeploymentMode = mode_str.parse().map_err(|e| {
+            ConnectionError::Message(format!("Failed to parse deployment mode: {}", e))
+        })?;
+
         deployments
             .entry(deploy_id)
-            .or_insert_with(|| {
-                // Parse kind - default to Objects if parsing fails (shouldn't happen)
-                let kind = kind_str.parse().unwrap_or(DeploymentKind::Objects);
-                // Parse mode - default to Stage if parsing fails (shouldn't happen)
-                let mode = mode_str
-                    .parse::<DeploymentMode>()
-                    .unwrap_or(DeploymentMode::Stage);
-                StagingDeployment {
-                    deployed_at,
-                    deployed_by: deployed_by.clone(),
-                    git_commit: git_commit.clone(),
-                    kind,
-                    mode,
-                    schemas: Vec::new(),
-                }
+            .or_insert_with(|| StagingDeployment {
+                deployed_at,
+                deployed_by: deployed_by.clone(),
+                git_commit: git_commit.clone(),
+                kind,
+                mode,
+                schemas: Vec::new(),
             })
             .schemas
             .push(SchemaQualifier::new(database, schema));
@@ -803,6 +809,51 @@ pub(super) async fn check_deployment_conflicts(
         .collect();
 
     Ok(conflicts)
+}
+
+/// List clusters that host at least one promoted deployment.
+///
+/// For each such cluster, returns one representative protected deployment
+/// (the most recently promoted one) so callers can explain *why* the
+/// cluster is classified production. Used by `dev` to refuse overlay
+/// deployments that would land on production compute.
+pub(super) async fn list_production_clusters(
+    client: &Client,
+) -> Result<Vec<ProductionClusterRecord>, ConnectionError> {
+    // Walk the catalog rather than reading `_mz_deploy.tables.clusters`
+    // directly. Two reasons: (1) the promote swap renames the staging
+    // cluster into place, changing the `mz_clusters.id` of the production
+    // cluster — any id we stored at stage time is stale. (2) `mz_catalog`
+    // is readable by every role, while `_mz_deploy.tables.*` is only
+    // readable by `materialize_deployer`, so this query works for the
+    // `dev` guard run as `materialize_developer`.
+    let query = r#"
+        SELECT DISTINCT ON (c.name)
+            c.name         AS cluster_name,
+            p.database     AS database,
+            p.schema       AS schema,
+            p.promoted_at  AS promoted_at
+        FROM _mz_deploy.public.production p
+        JOIN mz_catalog.mz_databases d ON d.name = p.database
+        JOIN mz_catalog.mz_schemas s
+          ON s.name = p.schema AND s.database_id = d.id
+        JOIN mz_catalog.mz_objects o
+          ON o.schema_id = s.id AND o.cluster_id IS NOT NULL
+        JOIN mz_catalog.mz_clusters c ON c.id = o.cluster_id
+        ORDER BY c.name, p.promoted_at DESC
+    "#;
+
+    let rows = client.query(query, &[]).await?;
+    let records = rows
+        .iter()
+        .map(|row| ProductionClusterRecord {
+            cluster_name: row.get("cluster_name"),
+            database: row.get("database"),
+            schema: row.get("schema"),
+            promoted_at: row.get("promoted_at"),
+        })
+        .collect();
+    Ok(records)
 }
 
 /// Check if the deployment tracking table exists.
@@ -1003,16 +1054,21 @@ pub(super) async fn create_apply_state_schemas(
 ) -> Result<(), ConnectionError> {
     let pre_schema = format!("apply_{}_pre", deploy_id);
     let post_schema = format!("apply_{}_post", deploy_id);
+    let pre_schema_quoted = quote_identifier(&pre_schema);
+    let post_schema_quoted = quote_identifier(&post_schema);
 
-    // Create _pre schema if it doesn't exist
-    let create_pre = format!("CREATE SCHEMA IF NOT EXISTS _mz_deploy.{}", pre_schema);
+    let create_pre = format!(
+        "CREATE SCHEMA IF NOT EXISTS _mz_deploy.{}",
+        pre_schema_quoted
+    );
     client.execute(&create_pre, &[]).await?;
 
-    // Create _post schema if it doesn't exist
-    let create_post = format!("CREATE SCHEMA IF NOT EXISTS _mz_deploy.{}", post_schema);
+    let create_post = format!(
+        "CREATE SCHEMA IF NOT EXISTS _mz_deploy.{}",
+        post_schema_quoted
+    );
     client.execute(&create_post, &[]).await?;
 
-    // Query to check if a schema has a comment (using mz_internal.mz_comments)
     let comment_check_query = r#"
         SELECT c.comment
         FROM mz_catalog.mz_schemas s
@@ -1021,29 +1077,25 @@ pub(super) async fn create_apply_state_schemas(
         WHERE s.name = $1 AND d.name = '_mz_deploy'
     "#;
 
-    // Set comment on _pre schema if it doesn't have one
     let rows = client.query(comment_check_query, &[&pre_schema]).await?;
-
     if !rows.is_empty() {
         let comment: Option<String> = rows[0].get("comment");
         if comment.is_none() {
             let comment_pre = format!(
                 "COMMENT ON SCHEMA _mz_deploy.{} IS 'swapped=false'",
-                pre_schema
+                pre_schema_quoted
             );
             client.execute(&comment_pre, &[]).await?;
         }
     }
 
-    // Set comment on _post schema if it doesn't have one
     let rows = client.query(comment_check_query, &[&post_schema]).await?;
-
     if !rows.is_empty() {
         let comment: Option<String> = rows[0].get("comment");
         if comment.is_none() {
             let comment_post = format!(
                 "COMMENT ON SCHEMA _mz_deploy.{} IS 'swapped=true'",
-                post_schema
+                post_schema_quoted
             );
             client.execute(&comment_post, &[]).await?;
         }
@@ -1099,11 +1151,16 @@ pub(super) async fn delete_apply_state_schemas(
     let pre_schema = format!("apply_{}_pre", deploy_id);
     let post_schema = format!("apply_{}_post", deploy_id);
 
-    // Drop schemas if they exist
-    let drop_pre = format!("DROP SCHEMA IF EXISTS _mz_deploy.{}", pre_schema);
+    let drop_pre = format!(
+        "DROP SCHEMA IF EXISTS _mz_deploy.{}",
+        quote_identifier(&pre_schema)
+    );
     client.execute(&drop_pre, &[]).await?;
 
-    let drop_post = format!("DROP SCHEMA IF EXISTS _mz_deploy.{}", post_schema);
+    let drop_post = format!(
+        "DROP SCHEMA IF EXISTS _mz_deploy.{}",
+        quote_identifier(&post_schema)
+    );
     client.execute(&drop_post, &[]).await?;
 
     Ok(())
@@ -1307,6 +1364,14 @@ impl DeploymentsClient<'_> {
         deploy_id: &str,
     ) -> Result<(), ConnectionError> {
         validate_deployment_clusters(self.client, deploy_id).await
+    }
+
+    /// List clusters that host at least one promoted deployment, with one
+    /// representative protected deployment per cluster.
+    pub async fn list_production_clusters(
+        &self,
+    ) -> Result<Vec<ProductionClusterRecord>, ConnectionError> {
+        list_production_clusters(self.client).await
     }
 
     pub async fn get_deployment_hydration_status(

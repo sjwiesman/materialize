@@ -92,7 +92,33 @@ impl Client {
     /// default to `prefer` and everything else defaults to `require`. Verification
     /// (`verify-ca` / `verify-full`) sources CAs from `profile.sslrootcert`, then
     /// the platform CA hunt, then OpenSSL's compiled-in defaults.
+    ///
+    /// Every connection is pinned to `_mz_deploy_server` via libpq options;
+    /// any user-supplied `cluster` in profile.options is silently overridden.
+    /// The unit-test runtime uses [`connect_with_profile_no_pin`] instead —
+    /// its ephemeral Docker container has no `_mz_deploy_server` cluster.
     pub async fn connect_with_profile(profile: Profile) -> Result<Self, ConnectionError> {
+        Self::connect_with_profile_inner(profile, /* pin_server_cluster */ true).await
+    }
+
+    /// Connect without pinning the session cluster to `_mz_deploy_server`.
+    ///
+    /// Intended for the ephemeral Docker container used by unit-test
+    /// execution, where `_mz_deploy_server` does not exist. Uses whatever
+    /// cluster the profile or server default selects.
+    ///
+    /// Deliberately `pub(crate)` so nothing outside the crate can bypass
+    /// the production session-cluster pin.
+    pub(crate) async fn connect_with_profile_no_pin(
+        profile: Profile,
+    ) -> Result<Self, ConnectionError> {
+        Self::connect_with_profile_inner(profile, /* pin_server_cluster */ false).await
+    }
+
+    async fn connect_with_profile_inner(
+        profile: Profile,
+        pin_server_cluster: bool,
+    ) -> Result<Self, ConnectionError> {
         let mut config = tokio_postgres::Config::new();
         config.host(&profile.host);
         config.port(profile.port);
@@ -102,15 +128,13 @@ impl Client {
         }
         config.application_name(APPLICATION_NAME);
 
-        // Pin every connection to the mz-deploy server cluster via libpq
-        // options. Any user-supplied `cluster` in profile.options is silently
-        // overridden — mz-deploy owns the cluster it runs on. See the design
-        // at docs/superpowers/specs/2026-04-23-mz-deploy-server-cluster-design.md.
         let mut effective_options = profile.options.clone();
-        effective_options.insert(
-            "cluster".to_string(),
-            crate::client::SERVER_CLUSTER_NAME.to_string(),
-        );
+        if pin_server_cluster {
+            effective_options.insert(
+                "cluster".to_string(),
+                crate::client::SERVER_CLUSTER_NAME.to_string(),
+            );
+        }
         if let Some(inner) = build_options_string(&effective_options) {
             config.options(&inner);
         }

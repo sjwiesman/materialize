@@ -38,9 +38,16 @@ The active profile is resolved in this order:
 
 1. The `--profile` flag on the command line.
 2. The `MZ_DEPLOY_PROFILE` environment variable.
-3. The default set in `project.toml`.
+3. The per-checkout default recorded by `mz-deploy profile set`.
 
-Run `mz-deploy profiles` to list available profiles and see which one is active.
+Each developer on a team sets their own default without touching shared
+configuration:
+
+```bash
+mz-deploy profile list         # show every profile and which one is active
+mz-deploy profile set staging  # record `staging` as the default for this checkout
+mz-deploy profile current      # confirm what will be used and where it came from
+```
 
 ## Password resolution
 
