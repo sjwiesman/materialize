@@ -44,6 +44,7 @@ pub const SERVER_CLUSTER_SIZE: &str = "25cc";
 
 pub use crate::config::Profile;
 pub use connection::{Client, DevOverlaysClient};
+pub(crate) use connection::{build_options_string, default_sslmode};
 
 /// Double-quote a SQL identifier, escaping any embedded double quotes.
 pub fn quote_identifier(name: &str) -> String {

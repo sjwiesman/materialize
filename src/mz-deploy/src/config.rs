@@ -262,6 +262,19 @@ pub enum SslMode {
     VerifyFull,
 }
 
+impl SslMode {
+    /// Wire name accepted by libpq (`PGSSLMODE`, `sslmode=` in conninfo).
+    pub(crate) const fn libpq_name(self) -> &'static str {
+        match self {
+            SslMode::Disable => "disable",
+            SslMode::Prefer => "prefer",
+            SslMode::Require => "require",
+            SslMode::VerifyCa => "verify-ca",
+            SslMode::VerifyFull => "verify-full",
+        }
+    }
+}
+
 /// Resolved connection details for a Materialize region.
 ///
 /// Constructed from a `profiles.toml` entry after environment variable expansion.
@@ -532,7 +545,10 @@ impl Settings {
         let dependencies = project_settings.validate_dependencies()?;
 
         let connection = if needs_connection {
-            Some(ProfilesConfig::resolve_profile(profiles_dir, &profile_name)?)
+            Some(ProfilesConfig::resolve_profile(
+                profiles_dir,
+                &profile_name,
+            )?)
         } else {
             None
         };

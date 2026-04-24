@@ -320,7 +320,7 @@ const DEFAULT_CA_PATHS: &[&str] = &[
 /// without explicit config. Everything else gets `Require` — TLS is required
 /// but certificate verification is not. Users who want verification set
 /// `sslmode = "verify-ca"` or `sslmode = "verify-full"` explicitly.
-fn default_sslmode(host: &str) -> SslMode {
+pub(crate) fn default_sslmode(host: &str) -> SslMode {
     if host == "localhost" || host == "127.0.0.1" || host == "::1" {
         SslMode::Prefer
     } else {
@@ -619,7 +619,7 @@ fn escape_options_value(value: &str) -> String {
 /// Produces a space-separated string of `-c key=value` tokens in sorted-key
 /// order, with each value inner-escaped per [`escape_options_value`].
 /// Returns `None` when the map is empty so the caller can omit the fragment.
-fn build_options_string(options: &BTreeMap<String, String>) -> Option<String> {
+pub(crate) fn build_options_string(options: &BTreeMap<String, String>) -> Option<String> {
     if options.is_empty() {
         return None;
     }
