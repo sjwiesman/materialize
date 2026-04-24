@@ -51,10 +51,6 @@ pass through unchanged.
 
         GRANT materialize_developer TO <user>;
 
-- **`CREATEDB` required** — Ask an administrator to grant the privilege:
-
-        GRANT CREATEDB ON SYSTEM TO <role>;
-
 - **Stale overlay after crash or manual DROP** — Re-run `mz-deploy dev`.
   The sweep at the start of every run reconciles the manifest with the
   live catalog.
