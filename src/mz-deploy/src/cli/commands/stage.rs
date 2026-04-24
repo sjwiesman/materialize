@@ -191,10 +191,7 @@ pub async fn run(
         .or_else(|| git::get_git_commit(directory).map(|sha| sha.chars().take(7).collect()))
         .unwrap_or_else(executor::generate_random_env_name);
 
-    progress::info(&format!(
-        "Deploying to staging environment: {}",
-        stage_name
-    ));
+    progress::info(&format!("Deploying to staging environment: {}", stage_name));
 
     let planned_project = super::compile::run(settings, true).await?;
     let staging_suffix = format!("_{}", stage_name);

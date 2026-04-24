@@ -49,12 +49,12 @@
 
 use crate::client::connection::{Client, DeploymentsClient, DeploymentsClientMut};
 use crate::client::errors::ConnectionError;
-use crate::client::quote_identifier;
 use crate::client::models::{
     ApplyState, ConflictRecord, DeploymentDetails, DeploymentHistoryEntry, DeploymentKind,
     DeploymentMetadata, DeploymentMode, DeploymentObjectRecord, PendingStatement,
     ProductionClusterRecord, SchemaDeploymentRecord, StagingDeployment,
 };
+use crate::client::quote_identifier;
 use crate::project::SchemaQualifier;
 use crate::project::analysis::deployment_snapshot::DeploymentSnapshot;
 use crate::project::ir::object_id::ObjectId;
@@ -556,9 +556,9 @@ pub(super) async fn get_deployment_metadata(
     let deploy_id: String = first_row.get("deploy_id");
     let promoted_at: Option<DateTime<Utc>> = first_row.get("promoted_at");
     let mode_str: String = first_row.get("mode");
-    let mode = mode_str.parse::<DeploymentMode>().map_err(|e| {
-        ConnectionError::Message(format!("Failed to parse deployment mode: {}", e))
-    })?;
+    let mode = mode_str
+        .parse::<DeploymentMode>()
+        .map_err(|e| ConnectionError::Message(format!("Failed to parse deployment mode: {}", e)))?;
 
     let mut schemas = Vec::new();
     for row in rows {
@@ -611,9 +611,9 @@ pub(super) async fn get_deployment_details(
     let kind_str: String = first_row.get("kind");
     let kind: DeploymentKind = kind_str.parse().map_err(ConnectionError::Message)?;
     let mode_str: String = first_row.get("mode");
-    let mode = mode_str.parse::<DeploymentMode>().map_err(|e| {
-        ConnectionError::Message(format!("Failed to parse deployment mode: {}", e))
-    })?;
+    let mode = mode_str
+        .parse::<DeploymentMode>()
+        .map_err(|e| ConnectionError::Message(format!("Failed to parse deployment mode: {}", e)))?;
 
     let mut schemas = Vec::new();
     for row in rows {

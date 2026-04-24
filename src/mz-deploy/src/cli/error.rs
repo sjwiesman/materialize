@@ -110,13 +110,8 @@ pub enum CliError {
 
     /// `setup` was invoked by a role that is not the owner of the existing
     /// `_mz_deploy` database. Only the owner can re-run `setup`.
-    #[error(
-        "`_mz_deploy` is owned by role '{owner}', not by the current role '{current_role}'"
-    )]
-    SetupNotDatabaseOwner {
-        owner: String,
-        current_role: String,
-    },
+    #[error("`_mz_deploy` is owned by role '{owner}', not by the current role '{current_role}'")]
+    SetupNotDatabaseOwner { owner: String, current_role: String },
 
     /// A unit test targets an object that isn't a view or materialized view.
     /// Unlike assertion mismatches, this is a project-definition error: the
@@ -234,10 +229,7 @@ pub enum CliError {
          database {overlay_db}.\n\n\
          Ask an administrator to run:\n    GRANT CREATEDB ON SYSTEM TO {role};"
     )]
-    MissingCreatedb {
-        role: String,
-        overlay_db: String,
-    },
+    MissingCreatedb { role: String, overlay_db: String },
 
     /// Project directory has no basename usable as a project identifier
     /// (e.g. root or `.`).

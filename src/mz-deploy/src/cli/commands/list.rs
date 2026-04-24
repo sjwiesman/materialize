@@ -1,9 +1,7 @@
 //! Deployments command - list active staging deployments.
 
 use crate::cli::CliError;
-use crate::client::{
-    Client, ClusterDeploymentStatus, ClusterStatusContext, DeploymentKind,
-};
+use crate::client::{Client, ClusterDeploymentStatus, ClusterStatusContext, DeploymentKind};
 use crate::config::Settings;
 use crate::log;
 use crate::project::SchemaQualifier;

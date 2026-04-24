@@ -885,10 +885,7 @@ fn create_expected_view_sql(expected: &ExpectedResult) -> String {
 ///
 /// Returns an error if the target statement is not a `CREATE VIEW` or
 /// `CREATE MATERIALIZED VIEW` — unit tests only apply to those object types.
-fn create_target_view_sql(
-    stmt: &Statement,
-    fqn: &FullyQualifiedName,
-) -> Result<String, String> {
+fn create_target_view_sql(stmt: &Statement, fqn: &FullyQualifiedName) -> Result<String, String> {
     let mut visitor = NormalizingVisitor::flattening(fqn);
     let transformed_stmt = stmt
         .clone()
