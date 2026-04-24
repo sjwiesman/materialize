@@ -26,13 +26,11 @@ repository.
 ## Flags
 
 - `--no-git` — Skip git repository initialization.
-- `--no-skill` — Skip npx agent skill installation.
 
 ## Examples
 
     mz-deploy new my-project               # Create with git init
     mz-deploy new my-project --no-git      # Skip git init
-    mz-deploy new my-project --no-skill    # Skip npx skill install
 
 ## Error Recovery
 
@@ -41,8 +39,7 @@ repository.
 
 ## Exit Codes
 
-- **0** — Project scaffolded successfully. Also exits 0 if optional npm
-  skill installation fails (a warning is printed).
+- **0** — Project scaffolded successfully.
 - **1** — Target directory already exists, file I/O error, or git init failed.
 
 ## Related Commands
