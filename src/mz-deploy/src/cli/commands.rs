@@ -21,6 +21,7 @@
 //!   the live region.
 //! - **[`describe`]** — Print a summary of the compiled project.
 //! - **[`debug`]** — Dump internal state for troubleshooting.
+//! - **[`sql`]** — Launch an interactive psql session using the active profile.
 //! - **[`list`]** — List active deployments.
 //! - **[`setup`]** — Initialize deployment tracking infrastructure.
 //! - **[`log`]** — Show deployment history.
@@ -57,8 +58,8 @@ pub mod clusters;
 pub mod compile;
 pub mod debug;
 pub mod delete;
-pub mod dev;
 pub mod describe;
+pub mod dev;
 pub mod explain;
 pub mod grants;
 pub mod list;
@@ -70,6 +71,7 @@ pub mod promote;
 pub mod roles;
 pub mod setup;
 mod setup_schema;
+pub mod sql;
 pub mod stage;
 pub mod test;
 pub mod wait;

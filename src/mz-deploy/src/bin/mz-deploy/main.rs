@@ -306,6 +306,24 @@ enum Command {
     )]
     Debug,
 
+    /// Launch an interactive psql session using the active profile
+    ///
+    /// Starts psql with the current profile's host, user, password, SSL mode,
+    /// and session options. Trailing args are forwarded to psql unchanged.
+    ///
+    /// Examples:
+    ///   mz-deploy sql
+    ///   mz-deploy sql -- -c "SELECT 1"
+    #[command(
+        hide = true,
+        after_help = "Run 'mz-deploy help sql' for a detailed usage guide."
+    )]
+    Sql {
+        /// Arguments forwarded to psql (flags, SQL via -c, etc.).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        psql_args: Vec<String>,
+    },
+
     /// Show detailed information about a specific deployment
     ///
     /// Displays comprehensive information about a deployment including metadata
@@ -870,15 +888,12 @@ async fn run(args: Args) -> Result<(), CliError> {
                 args.profile.as_deref(),
                 args.profiles_dir.as_deref(),
             ),
-            ProfileCommand::Set { name } => cli::commands::profile::set(
-                &args.directory,
-                args.profiles_dir.as_deref(),
-                name,
-            ),
-            ProfileCommand::Current => cli::commands::profile::current(
-                &args.directory,
-                args.profile.as_deref(),
-            ),
+            ProfileCommand::Set { name } => {
+                cli::commands::profile::set(&args.directory, args.profiles_dir.as_deref(), name)
+            }
+            ProfileCommand::Current => {
+                cli::commands::profile::current(&args.directory, args.profile.as_deref())
+            }
         };
     }
 
@@ -974,6 +989,7 @@ async fn run(args: Args) -> Result<(), CliError> {
         }
         Some(Command::Setup) => cli::commands::setup::run(&settings).await,
         Some(Command::Debug) => cli::commands::debug::run(&settings).await,
+        Some(Command::Sql { psql_args }) => cli::commands::sql::run(&settings, psql_args),
         Some(Command::Describe { deploy_id }) => {
             cli::commands::describe::run(&settings, &deploy_id).await
         }
