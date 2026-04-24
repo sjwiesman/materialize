@@ -75,4 +75,3 @@ pub mod sql;
 pub mod stage;
 pub mod test;
 pub mod wait;
-pub mod walkthrough;
