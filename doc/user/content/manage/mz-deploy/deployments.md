@@ -118,13 +118,14 @@ Tear down the overlay when you're done:
 mz-deploy dev --down
 ```
 
-`dev` requires the `materialize_developer` role and the `CREATEDB`
-system privilege. Tables, sources, sinks, connections, and secrets are
+`dev` requires the `materialize_developer` role. `setup` grants the
+`CREATEDB` system privilege to that role, so members inherit it
+automatically. Tables, sources, sinks, connections, and secrets are
 silently skipped — `dev` only overlays views and materialized views.
 
 | | `stage` | `dev` |
 |--|---------|-------|
-| Required role | `materialize_deployer` | `materialize_developer` (plus `CREATEDB`) |
+| Required role | `materialize_deployer` | `materialize_developer` |
 | Target | Staging schemas alongside production | Per-developer overlay database |
 | Git dirty check | Yes | No |
 | Object types | All project objects | Views and materialized views only |

@@ -25,12 +25,17 @@ multiple times is safe and has no effect if the infrastructure already exists.
    - `materialize_monitor` — read-only monitoring access to deployment state
 6. Grants USAGE on the database and schema, and SELECT, INSERT, UPDATE,
    DELETE on all tables to each role.
-7. Creates the `_mz_deploy_server` cluster at size `25cc` (if it doesn't
+7. Grants system privileges to the deploy roles:
+   - `materialize_deployer` — `CREATEDB`, `CREATECLUSTER` (needed by
+     `stage`, `promote`, and `apply clusters`).
+   - `materialize_developer` — `CREATEDB` (needed by `dev` to create the
+     per-developer overlay database).
+8. Creates the `_mz_deploy_server` cluster at size `25cc` (if it doesn't
    exist). mz-deploy pins every connection to this cluster via libpq
    options; it is not intended for general-purpose use. If the cluster
    already exists (e.g. an operator resized it), setup leaves its
    configuration alone.
-8. Grants `USAGE` on `_mz_deploy_server` to each of the three roles.
+9. Grants `USAGE` on `_mz_deploy_server` to each of the three roles.
 
 ## Roles
 

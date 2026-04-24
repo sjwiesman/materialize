@@ -196,6 +196,17 @@ pub async fn setup(client: &Client) -> Result<(), CliError> {
                     &[],
                 )
                 .await?;
+            // `stage` and `apply clusters` create project clusters; `promote`
+            // creates the short-lived apply schemas under `_mz_deploy`.
+            client
+                .execute(
+                    &format!(
+                        "GRANT CREATEDB, CREATECLUSTER ON SYSTEM TO {}",
+                        role_name,
+                    ),
+                    &[],
+                )
+                .await?;
         } else if *role == MzDeployRole::Developer {
             client
                 .execute(
@@ -204,6 +215,13 @@ pub async fn setup(client: &Client) -> Result<(), CliError> {
                          ON TABLE _mz_deploy.tables.dev_overlays TO {}",
                         role_name,
                     ),
+                    &[],
+                )
+                .await?;
+            // `dev` creates per-developer overlay databases.
+            client
+                .execute(
+                    &format!("GRANT CREATEDB ON SYSTEM TO {}", role_name,),
                     &[],
                 )
                 .await?;
