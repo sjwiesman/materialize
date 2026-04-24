@@ -42,7 +42,9 @@ order-monitoring/
 │       └── public/        # SQL files → materialize.public.<filename>
 ├── clusters/              # Cluster definitions
 ├── roles/                 # Role definitions
+├── network-policies/      # Network policy definitions
 ├── project.toml           # Project configuration
+├── README.md
 └── .gitignore
 ```
 
@@ -81,7 +83,8 @@ mz-deploy debug
 ```
 
 This prints your Materialize version, environment ID, and current role,
-confirming that `mz-deploy` can reach your instance.
+confirming that `mz-deploy` can reach your instance. For an interactive
+psql shell against the active profile, use `mz-deploy sql`.
 
 {{< tip >}}
 As a best practice, we strongly recommend using [service accounts](/security/cloud/users-service-accounts/create-service-accounts) to connect external applications, like mz-deploy, to Materialize.
