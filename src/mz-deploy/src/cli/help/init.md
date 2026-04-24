@@ -21,25 +21,21 @@ derived from the current directory name.
     - `README.md` — Getting-started documentation
     - `.agents/skills/mz-deploy/SKILL.md` — LLM agent skill file
     - `.claude/skills/mz-deploy/` — Symlink (auto-loaded by Claude Code)
-4. Installs the Materialize agent skill via npx (unless `--no-skill`).
-5. Initializes a git repository (unless `--no-git`).
+4. Initializes a git repository (unless `--no-git`).
 
 ## Flags
 
 - `--no-git` — Skip git repository initialization.
-- `--no-skill` — Skip npx agent skill installation.
 
 ## Examples
 
     mkdir my-project && cd my-project
-    mz-deploy init                    # Initialize with git and skill install
+    mz-deploy init                    # Initialize with git
     mz-deploy init --no-git           # Skip git init
-    mz-deploy init --no-skill         # Skip npx skill install
 
 ## Exit Codes
 
-- **0** — Project initialized successfully. Also exits 0 if optional npm
-  skill installation fails (a warning is printed).
+- **0** — Project initialized successfully.
 - **1** — File I/O error or git init failed.
 
 ## Related Commands

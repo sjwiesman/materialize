@@ -478,10 +478,6 @@ enum Command {
         /// Skip git repository initialization
         #[arg(long)]
         no_git: bool,
-
-        /// Skip npx agent skill installation
-        #[arg(long)]
-        no_skill: bool,
     },
 
     /// Initialize current directory as an mz-deploy project
@@ -500,10 +496,6 @@ enum Command {
         /// Skip git repository initialization
         #[arg(long)]
         no_git: bool,
-
-        /// Skip npx agent skill installation
-        #[arg(long)]
-        no_skill: bool,
     },
 
     /// Manage the project's default profile.
@@ -832,25 +824,18 @@ async fn run(args: Args) -> Result<(), CliError> {
         return Ok(());
     }
 
-    if let Some(Command::New {
-        name,
-        no_git,
-        no_skill,
-    }) = &args.command
-    {
+    if let Some(Command::New { name, no_git }) = &args.command {
         return cli::commands::new_project::run(
             name,
             ScaffoldOpts {
                 init_git: !no_git,
-                install_skill: !no_skill,
             },
         );
     }
 
-    if let Some(Command::Init { no_git, no_skill }) = &args.command {
+    if let Some(Command::Init { no_git }) = &args.command {
         return cli::commands::new_project::init(ScaffoldOpts {
             init_git: !no_git,
-            install_skill: !no_skill,
         });
     }
 
