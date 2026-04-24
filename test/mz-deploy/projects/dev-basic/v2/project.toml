@@ -1,1 +1,11 @@
-profile = "default"
+[profiles.default.variables]
+compute_cluster = "compute"
+
+[profiles.dev.variables]
+compute_cluster = "compute_dev"
+
+# `dev_unsafe` is a deliberately-misconfigured profile used by the e2e
+# suite to verify that `dev` refuses to target a promoted cluster even
+# when a user's variables would send it there.
+[profiles.dev_unsafe.variables]
+compute_cluster = "compute"

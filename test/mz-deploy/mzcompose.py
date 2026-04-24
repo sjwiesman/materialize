@@ -62,6 +62,7 @@ def create_profiles(c: Composition) -> None:
             f'[default]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"\n\n'
             f'[staging]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"\n\n'
             f'[dev]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "dev_user"\n\n'
+            f'[dev_unsafe]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "dev_user"\n\n'
             f'[monitor]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "monitor_user"\n'
         )
 
@@ -75,6 +76,15 @@ def run_mz_deploy(
     create_profiles(c)
     binary = MZ_ROOT / "target" / "debug" / "mz-deploy"
     project_dir = PROJECTS_DIR / project_name
+
+    # Seed the per-project default-profile pointer (equivalent of
+    # `mz-deploy profile set default`). Tests that want a non-default profile
+    # still pass `--profile <name>` in `args`, which takes precedence over
+    # the file.
+    mzprofile = project_dir / ".mzprofile"
+    if not mzprofile.exists():
+        mzprofile.write_text("default\n")
+
     cmd = [
         str(binary),
         "-d",
@@ -694,9 +704,20 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         )
         assert result.returncode == 0
 
-        # Verify MV 'summary' has env column = 'production' (variable resolved)
-        c.sql("INSERT INTO app.public.my_table VALUES (1, 'test')", database="app")
-        rows = c.sql_query("SELECT env FROM app.core.summary", database="app")
+        # Verify MV 'summary' has env column = 'production' (variable resolved).
+        # The table is owned by deploy_user (who ran `apply`), so insert as
+        # deploy_user — the default superuser `materialize` isn't the owner
+        # and has no explicit INSERT grant.
+        c.sql(
+            "INSERT INTO app.public.my_table VALUES (1, 'test')",
+            database="app",
+            user="deploy_user",
+        )
+        rows = c.sql_query(
+            "SELECT env FROM app.core.summary",
+            database="app",
+            user="deploy_user",
+        )
         assert len(rows) == 1
         assert rows[0][0] == "production"
 
@@ -704,6 +725,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         rows = c.sql_query(
             "SELECT arr_slice::text, b FROM app.core.ambiguous ORDER BY b",
             database="app",
+            user="deploy_user",
         )
         assert len(rows) == 3, f"Expected 3 rows from ambiguous view, got {rows}"
 
@@ -776,10 +798,12 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         c.sql(
             "INSERT INTO app__staging.public.my_table VALUES (1, 'test')",
             database="app__staging",
+            user="deploy_user",
         )
         rows = c.sql_query(
             "SELECT env FROM app__staging.core.summary",
             database="app__staging",
+            user="deploy_user",
         )
         assert len(rows) == 1
         assert rows[0][0] == "staging"
@@ -788,6 +812,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         rows = c.sql_query(
             "SELECT arr_slice::text, b FROM app__staging.core.ambiguous ORDER BY b",
             database="app__staging",
+            user="deploy_user",
         )
         assert len(rows) == 3, f"Expected 3 rows from ambiguous view in staging, got {rows}"
 
@@ -895,11 +920,24 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert len(rows) == 0, f"Expected no MV for not-enforced constraint 'items_pk', got {rows}"
 
         # ════════════════════════════════════════════════════════════
-        # Step 5: Insert clean data into raw tables (no violations)
+        # Step 5: Insert clean data into raw tables (no violations).
+        # Tables are owned by deploy_user, who ran `apply`.
         # ════════════════════════════════════════════════════════════
-        c.sql("INSERT INTO cdb.ingest.users_raw VALUES (1, 'Alice'), (2, 'Bob')", database="cdb")
-        c.sql("INSERT INTO cdb.ingest.emails_raw VALUES (1, 'alice@test.com'), (2, 'bob@test.com')", database="cdb")
-        c.sql("INSERT INTO cdb.ingest.orders_raw VALUES (100, 1), (101, 2)", database="cdb")
+        c.sql(
+            "INSERT INTO cdb.ingest.users_raw VALUES (1, 'Alice'), (2, 'Bob')",
+            database="cdb",
+            user="deploy_user",
+        )
+        c.sql(
+            "INSERT INTO cdb.ingest.emails_raw VALUES (1, 'alice@test.com'), (2, 'bob@test.com')",
+            database="cdb",
+            user="deploy_user",
+        )
+        c.sql(
+            "INSERT INTO cdb.ingest.orders_raw VALUES (100, 1), (101, 2)",
+            database="cdb",
+            user="deploy_user",
+        )
 
         # ════════════════════════════════════════════════════════════
         # Step 6: Verify no violations — all constraint MVs return 0 rows
@@ -908,6 +946,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             rows = c.sql_query(
                 f"SELECT count(*) FROM cdb.public.{mv_name}",
                 database="cdb",
+                user="deploy_user",
             )
             assert int(rows[0][0]) == 0, f"Expected 0 violations for '{mv_name}', got {rows[0][0]}"
 
@@ -915,11 +954,23 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         # Step 7: Insert data that causes violations into raw tables
         # ════════════════════════════════════════════════════════════
         # PK violation: duplicate id
-        c.sql("INSERT INTO cdb.ingest.users_raw VALUES (1, 'Alice2')", database="cdb")
+        c.sql(
+            "INSERT INTO cdb.ingest.users_raw VALUES (1, 'Alice2')",
+            database="cdb",
+            user="deploy_user",
+        )
         # UNIQUE violation: duplicate email
-        c.sql("INSERT INTO cdb.ingest.emails_raw VALUES (3, 'alice@test.com')", database="cdb")
+        c.sql(
+            "INSERT INTO cdb.ingest.emails_raw VALUES (3, 'alice@test.com')",
+            database="cdb",
+            user="deploy_user",
+        )
         # FK violation: orphaned reference
-        c.sql("INSERT INTO cdb.ingest.orders_raw VALUES (102, 999)", database="cdb")
+        c.sql(
+            "INSERT INTO cdb.ingest.orders_raw VALUES (102, 999)",
+            database="cdb",
+            user="deploy_user",
+        )
 
         # ════════════════════════════════════════════════════════════
         # Step 8: Verify violations detected — constraint MVs return rows
@@ -928,6 +979,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
             rows = c.sql_query(
                 f"SELECT count(*) FROM cdb.public.{mv_name}",
                 database="cdb",
+                user="deploy_user",
             )
             assert int(rows[0][0]) > 0, f"Expected violations for '{mv_name}', got {rows[0][0]}"
 
@@ -936,9 +988,33 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
     """Test the dev command — developer-role overlay for inner-loop iteration."""
     setup_base(c)
 
-    # Apply v1 so production has the base MV.
+    # Apply v1 for infrastructure, then stage + wait + promote so the ops
+    # schema's MV is tracked as a production deployment on the `compute`
+    # cluster. That promotion is what the dev-time cluster guard reads from.
     result = run_mz_deploy(c, "dev-basic/v1", "apply")
     assert result.returncode == 0, f"apply v1 failed: {result.stderr}"
+
+    result = run_mz_deploy(
+        c, "dev-basic/v1", "stage", "--deploy-id", "v1", "--allow-dirty"
+    )
+    assert result.returncode == 0, f"stage v1 failed: {result.stderr}"
+
+    result = run_mz_deploy(
+        c,
+        "dev-basic/v1",
+        "wait",
+        "v1",
+        "--timeout",
+        "300",
+        "--allowed-lag",
+        "86400",
+    )
+    assert result.returncode == 0, f"wait v1 failed: {result.stderr}"
+
+    result = run_mz_deploy(
+        c, "dev-basic/v1", "promote", "v1", "--no-ready-check"
+    )
+    assert result.returncode == 0, f"promote v1 failed: {result.stderr}"
 
     # Grant dev_user privileges on the app database so it can read production
     # tables when building the overlay MV (CREATEDB is already granted by
@@ -966,14 +1042,20 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
             port=6877,
         )
 
-    # Grant CREATE on the production clusters so dev_user can create the
-    # overlay MV which references IN CLUSTER compute.
-    for cluster_name in ("compute", "ingest"):
-        c.sql(
-            f"GRANT CREATE ON CLUSTER {cluster_name} TO dev_user",
-            user="mz_system",
-            port=6877,
-        )
+    # Provision a dedicated dev cluster that the `dev` profile routes to
+    # via [profiles.dev.variables].compute_cluster = "compute_dev". The
+    # `compute` cluster is promoted, so targeting it directly is blocked
+    # by the dev-time production-cluster guard (exercised below).
+    c.sql(
+        "CREATE CLUSTER compute_dev (SIZE = 'scale=1,workers=1')",
+        user="mz_system",
+        port=6877,
+    )
+    c.sql(
+        "GRANT CREATE ON CLUSTER compute_dev TO dev_user",
+        user="mz_system",
+        port=6877,
+    )
 
     with c.test_case("mz-deploy-dev-happy-path"):
         # Run dev against v2 (the edited project with an extra column).
@@ -1031,3 +1113,46 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
             "WHERE profile = 'dev' AND project = 'v2'",
         )
         assert rows == [], f"manifest should be empty after --down, got {rows}"
+
+    with c.test_case("mz-deploy-dev-refuses-production-cluster"):
+        # `dev_unsafe` resolves `compute_cluster = "compute"`, which is the
+        # cluster seeded as promoted. The dev-time guard must refuse before
+        # any DDL runs — so we use `check=False` and inspect the result
+        # instead of letting `run_mz_deploy` raise on non-zero exit.
+        result = run_mz_deploy(
+            c, "dev-basic/v2", "dev", "--profile", "dev_unsafe", check=False,
+        )
+        assert result.returncode != 0, (
+            f"dev should refuse against a promoted cluster but exited 0: "
+            f"{result.stdout}\n{result.stderr}"
+        )
+        combined = result.stdout + result.stderr
+        # The `#[error]` message is color-free and unique to this variant;
+        # match on it to make sure we hit the right guard and not some other
+        # failure that happens to mention `compute`. Also sanity-check that
+        # the cluster list and the word "promoted" both appear.
+        assert (
+            "refusing to deploy dev overlay onto production cluster" in combined
+        ), f"expected DevTargetsProductionCluster error; got: {combined}"
+        assert "compute" in combined, (
+            f"error should name the protected cluster; got: {combined}"
+        )
+        assert "promoted" in combined.lower(), (
+            f"error should explain the cluster is promoted; got: {combined}"
+        )
+
+        # The guard must fire before any overlay state is created, so no
+        # overlay database should exist for this profile.
+        rows = c.sql_query(
+            "SELECT name FROM mz_databases WHERE name = 'app__dev_unsafe'",
+        )
+        assert len(rows) == 0, (
+            f"refused dev run must not create an overlay database, got: {rows}"
+        )
+        rows = c.sql_query(
+            "SELECT overlay_db FROM _mz_deploy.tables.dev_overlays "
+            "WHERE profile = 'dev_unsafe' AND project = 'v2'",
+        )
+        assert rows == [], (
+            f"refused dev run must not insert a manifest row, got: {rows}"
+        )

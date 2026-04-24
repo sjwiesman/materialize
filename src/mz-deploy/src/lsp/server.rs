@@ -33,7 +33,7 @@
 //!   changed. The VS Code extension uses this to refresh the catalog sidebar
 //!   and DAG panel with fresh data.
 
-use crate::config::{ProjectSettings, default_docker_image};
+use crate::config::{ProjectSettings, default_docker_image, read_mzprofile};
 use crate::lsp::{
     catalog, code_lens, completion, dag, diagnostics, document_symbol, goto_definition, hover,
     references, workspace_symbol,
@@ -85,6 +85,19 @@ struct DiagnosticActions {
 /// is the set of URIs that had diagnostics before this build.
 ///
 /// URIs in the old set that are not in the new set are scheduled for clearing.
+/// Resolve the default profile name for LSP operations.
+///
+/// The language server has no CLI flags; it reads the project root's
+/// `.mzprofile` and falls back to `"default"` so variable resolution, suffix
+/// lookup, and cluster normalization have *something* to key off even if the
+/// developer hasn't run `mz-deploy profile set` yet.
+fn resolve_lsp_profile_name(project_root: &Path) -> String {
+    read_mzprofile(project_root)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "default".to_string())
+}
+
 fn compute_diagnostic_actions(
     new_diagnostics: BTreeMap<PathBuf, Vec<Diagnostic>>,
     old_diagnostic_uris: &[Url],
@@ -173,7 +186,7 @@ impl Backend {
         let root = self.root.read().await.clone();
         match ProjectSettings::load(&root) {
             Ok(ps) => {
-                let name = ps.profile.clone();
+                let name = resolve_lsp_profile_name(&root);
                 let config = ps.config_for_profile(&name);
                 *self.variables.write().await = config.variables.clone();
                 *self.profile_name.write().await = name;
@@ -302,7 +315,7 @@ impl Backend {
             let settings_guard = self.settings.read().await;
             match settings_guard.as_ref() {
                 Some(ps) => {
-                    let profile = ps.profile.clone();
+                    let profile = resolve_lsp_profile_name(&root);
                     let config = ps.config_for_profile(&profile);
                     (
                         profile,
@@ -388,7 +401,7 @@ impl Backend {
             let settings_guard = self.settings.read().await;
             match settings_guard.as_ref() {
                 Some(ps) => {
-                    let profile = ps.profile.clone();
+                    let profile = resolve_lsp_profile_name(&root);
                     let config = ps.config_for_profile(&profile);
                     (
                         profile,

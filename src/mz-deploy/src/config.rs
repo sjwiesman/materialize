@@ -66,18 +66,66 @@ pub struct ProfileConfig {
 
 /// Parsed contents of `project.toml`.
 ///
-/// Specifies the default profile name, optional Materialize version override,
-/// per-profile configuration sections, and an optional list of external
-/// dependency object names (fully qualified `database.schema.object` strings).
+/// Specifies optional Materialize version override, per-profile configuration
+/// sections, and an optional list of external dependency object names (fully
+/// qualified `database.schema.object` strings).
+///
+/// The active profile is **not** stored here — it's resolved from `--profile`,
+/// `MZ_DEPLOY_PROFILE`, or the per-project `.mzprofile` file. See
+/// [`read_mzprofile`].
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectSettings {
-    pub profile: String,
     pub mz_version: Option<String>,
     pub profiles: Option<BTreeMap<String, ProfileConfig>>,
     /// Raw dependency strings from the `dependencies` array in `project.toml`.
     /// Each entry must be a fully qualified `database.schema.object` name.
     #[serde(default, rename = "dependencies")]
     raw_dependencies: Vec<String>,
+}
+
+/// Filename of the per-project default-profile pointer.
+///
+/// Lives at the project root (alongside `project.toml`), holds a single
+/// profile name as plain text. Analogous to kubectl's
+/// `current-context`. Machine-local — should be listed in `.gitignore` so
+/// developers on the same project can each set their own default.
+pub const MZPROFILE_FILENAME: &str = ".mzprofile";
+
+/// Read the default profile name from `<project_directory>/.mzprofile`.
+///
+/// Returns `Ok(None)` if the file doesn't exist. Blank lines and lines
+/// beginning with `#` are ignored; the first remaining trimmed line is the
+/// profile name.
+pub fn read_mzprofile(project_directory: &Path) -> Result<Option<String>, ConfigError> {
+    let path = project_directory.join(MZPROFILE_FILENAME);
+    match fs::read_to_string(&path) {
+        Ok(content) => {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                return Ok(Some(trimmed.to_string()));
+            }
+            Ok(None)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ConfigError::ReadError {
+            path: path.display().to_string(),
+            source,
+        }),
+    }
+}
+
+/// Write `profile_name` to `<project_directory>/.mzprofile`, replacing any
+/// existing content.
+pub fn write_mzprofile(project_directory: &Path, profile_name: &str) -> Result<(), ConfigError> {
+    let path = project_directory.join(MZPROFILE_FILENAME);
+    fs::write(&path, format!("{}\n", profile_name)).map_err(|source| ConfigError::WriteError {
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 impl ProjectSettings {
@@ -165,11 +213,20 @@ pub enum ConfigError {
         path: String,
         source: std::io::Error,
     },
+    #[error("failed to write {path}: {source}")]
+    WriteError {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("failed to parse {path}: {source}")]
     ParseError {
         path: String,
         source: toml::de::Error,
     },
+    #[error(
+        "no profile selected: pass --profile, set MZ_DEPLOY_PROFILE, or run `mz-deploy profile set <name>`"
+    )]
+    NoProfileConfigured,
     #[error("could not determine home directory; set $HOME or pass --profiles-dir")]
     HomeDirNotFound,
     #[error("project.toml not found at {path}")]
@@ -408,19 +465,13 @@ impl ProfilesConfig {
         &self.source_path
     }
 
-    /// Convenience method to load profiles and get a specific profile in one call
-    ///
-    /// # Arguments
-    /// * `profiles_dir` - Optional directory containing `profiles.toml`
-    /// * `cli_profile` - Optional profile name from CLI flag override
-    /// * `default_profile` - Default profile name from project.toml
-    pub fn load_profile(
+    /// Convenience method to resolve a profile by name from the configured
+    /// profiles file and expand its env-var references.
+    pub fn resolve_profile(
         profiles_dir: Option<&Path>,
-        cli_profile: Option<&str>,
-        default_profile: &str,
+        name: &str,
     ) -> Result<Profile, ConfigError> {
         let config = Self::load(profiles_dir)?;
-        let name = cli_profile.unwrap_or(default_profile);
         let profile = config.get_profile(name)?;
         config.expand_env_vars(profile)
     }
@@ -461,7 +512,15 @@ impl Settings {
         profiles_dir: Option<&Path>,
     ) -> Result<Self, ConfigError> {
         let project_settings = ProjectSettings::load(&directory)?;
-        let profile_name = cli_profile.unwrap_or(&project_settings.profile).to_string();
+
+        // Resolution order: --profile flag / MZ_DEPLOY_PROFILE env var (both
+        // arrive via `cli_profile`), then the project-root pointer written
+        // by `mz-deploy profile set`. Missing all three is a hard error —
+        // no implicit default.
+        let profile_name = match cli_profile {
+            Some(p) => p.to_string(),
+            None => read_mzprofile(&directory)?.ok_or(ConfigError::NoProfileConfigured)?,
+        };
 
         let profile_config = project_settings.config_for_profile(&profile_name);
 
@@ -473,11 +532,7 @@ impl Settings {
         let dependencies = project_settings.validate_dependencies()?;
 
         let connection = if needs_connection {
-            Some(ProfilesConfig::load_profile(
-                profiles_dir,
-                cli_profile,
-                &project_settings.profile,
-            )?)
+            Some(ProfilesConfig::resolve_profile(profiles_dir, &profile_name)?)
         } else {
             None
         };
@@ -521,7 +576,6 @@ mod tests {
     #[test]
     fn test_profile_config_deserializes_profile_suffix() {
         let toml = r#"
-            profile = "default"
 
             [profiles.staging]
             profile_suffix = "_staging"
@@ -534,7 +588,6 @@ mod tests {
     #[test]
     fn test_profile_config_profile_suffix_optional() {
         let toml = r#"
-            profile = "default"
 
             [profiles.prod.security]
             aws_profile = "prod-aws"
@@ -548,7 +601,6 @@ mod tests {
     #[test]
     fn test_suffix_for_profile_returns_suffix() {
         let toml = r#"
-            profile = "default"
 
             [profiles.staging]
             profile_suffix = "_staging"
@@ -560,7 +612,6 @@ mod tests {
     #[test]
     fn test_suffix_for_profile_missing_profile() {
         let toml = r#"
-            profile = "default"
 
             [profiles.staging]
             profile_suffix = "_staging"
@@ -572,7 +623,6 @@ mod tests {
     #[test]
     fn test_suffix_for_profile_no_profiles_section() {
         let toml = r#"
-            profile = "default"
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
         assert_eq!(settings.suffix_for_profile("staging"), None);
@@ -581,7 +631,6 @@ mod tests {
     #[test]
     fn test_config_for_profile_without_security_section() {
         let toml = r#"
-            profile = "default"
 
             [profiles.prod]
             profile_suffix = "_prod"
@@ -595,7 +644,6 @@ mod tests {
     #[test]
     fn test_profile_config_deserializes_variables() {
         let toml = r#"
-            profile = "default"
 
             [profiles.staging.variables]
             cluster = "staging_cluster"
@@ -616,7 +664,6 @@ mod tests {
     #[test]
     fn test_profile_config_variables_default_empty() {
         let toml = r#"
-            profile = "default"
 
             [profiles.prod]
             profile_suffix = "_prod"
@@ -629,7 +676,6 @@ mod tests {
     #[test]
     fn test_profile_config_variables_missing_profile() {
         let toml = r#"
-            profile = "default"
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
         let config = settings.config_for_profile("nonexistent");
@@ -639,7 +685,6 @@ mod tests {
     #[test]
     fn test_dependencies_parses_valid_entries() {
         let toml = r#"
-            profile = "default"
 
             dependencies = [
                 "ontology.public.customers",
@@ -656,7 +701,6 @@ mod tests {
     #[test]
     fn test_dependencies_defaults_to_empty() {
         let toml = r#"
-            profile = "default"
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
         assert!(settings.validate_dependencies().unwrap().is_empty());
@@ -665,7 +709,6 @@ mod tests {
     #[test]
     fn test_dependencies_rejects_two_part_name() {
         let toml = r#"
-            profile = "default"
             dependencies = ["public.orders"]
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
@@ -676,7 +719,6 @@ mod tests {
     #[test]
     fn test_dependencies_rejects_duplicates() {
         let toml = r#"
-            profile = "default"
             dependencies = [
                 "ontology.public.customers",
                 "ontology.public.customers",
@@ -765,5 +807,48 @@ mod tests {
             }
             other => panic!("expected InvalidOptionKey, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mzprofile_absent_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_mzprofile(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn mzprofile_reads_single_line() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(MZPROFILE_FILENAME), "staging\n").unwrap();
+        assert_eq!(
+            read_mzprofile(dir.path()).unwrap().as_deref(),
+            Some("staging")
+        );
+    }
+
+    #[test]
+    fn mzprofile_skips_comments_and_blanks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(MZPROFILE_FILENAME),
+            "# set by `mz-deploy profile set`\n\n  dev\n",
+        )
+        .unwrap();
+        assert_eq!(read_mzprofile(dir.path()).unwrap().as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn mzprofile_write_then_read_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        write_mzprofile(dir.path(), "prod").unwrap();
+        assert_eq!(read_mzprofile(dir.path()).unwrap().as_deref(), Some("prod"));
+    }
+
+    #[test]
+    fn project_toml_rejects_unknown_profile_field() {
+        // `profile = "..."` in project.toml is gone; strict deserialization
+        // makes leftover fields a parse error, forcing users to migrate to
+        // `mz-deploy profile set`.
+        let err = toml::from_str::<ProjectSettings>(r#"profile = "default""#).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got: {err}");
     }
 }

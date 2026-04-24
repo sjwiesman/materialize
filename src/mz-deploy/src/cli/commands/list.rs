@@ -135,7 +135,7 @@ pub async fn run(settings: &Settings, allowed_lag_secs: i64) -> Result<(), CliEr
         .await
         .map_err(CliError::Connection)?;
 
-    super::setup::ensure(&client).await?;
+    super::setup::verify(&client).await?;
     super::setup::validate_connection(&client).await?;
     let deployments = client.deployments().list_staging_deployments().await?;
 

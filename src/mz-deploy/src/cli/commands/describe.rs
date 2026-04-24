@@ -108,7 +108,7 @@ pub async fn run(settings: &Settings, deploy_id: &str) -> Result<(), CliError> {
         .await
         .map_err(CliError::Connection)?;
 
-    super::setup::ensure(&client).await?;
+    super::setup::verify(&client).await?;
     super::setup::validate_connection(&client).await?;
 
     // Get deployment metadata

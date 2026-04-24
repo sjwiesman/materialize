@@ -61,7 +61,9 @@ impl DockerRuntime {
         let start = std::time::Instant::now();
 
         let profile = Self::make_profile();
-        let client = match Client::connect_with_profile(profile).await {
+        // The ephemeral Docker container has no `_mz_deploy_server` cluster,
+        // so bypass the usual session-cluster pin and use the server default.
+        let client = match Client::connect_with_profile_no_pin(profile).await {
             Ok(client) => {
                 timing!("  connect (fast-path)", start.elapsed());
                 verbose!(
@@ -83,7 +85,7 @@ impl DockerRuntime {
                 let connect_start = std::time::Instant::now();
                 let profile = Self::make_profile();
                 verbose!("Connecting to Materialize...");
-                let client = Client::connect_with_profile(profile).await?;
+                let client = Client::connect_with_profile_no_pin(profile).await?;
                 timing!("  connect (slow-path)", connect_start.elapsed());
                 verbose!("Connected ({}ms)", connect_start.elapsed().as_millis());
                 client

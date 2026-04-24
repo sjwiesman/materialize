@@ -37,7 +37,7 @@ Getting started:
   new                  Create a new mz-deploy project
   init                 Initialize current directory as an mz-deploy project
   walkthrough          Create a new project with an interactive tutorial
-  profiles             List available connection profiles
+  profile              Manage the project's default profile (list/set/current)
   setup                Initialize deployment tracking database and tables
   debug                Test database connection and display environment information
 
@@ -511,16 +511,20 @@ enum Command {
         no_git: bool,
     },
 
-    /// List available connection profiles
+    /// Manage the project's default profile.
     ///
-    /// Shows all profiles defined in profiles.toml and indicates which one
-    /// is currently active. The active profile is determined by the --profile
-    /// flag, or the default set in project.toml.
+    /// Use `list` to see every profile defined in `profiles.toml`, `set` to
+    /// record a default for this checkout, or `current` to see which profile
+    /// would be used and where it was resolved from.
     #[command(
-        hide = true,
-        after_help = "Run 'mz-deploy help profiles' for a detailed usage guide."
+        subcommand_required = true,
+        arg_required_else_help = true,
+        after_help = "Run 'mz-deploy help profile' for a detailed usage guide."
     )]
-    Profiles,
+    Profile {
+        #[command(subcommand)]
+        subcommand: ProfileCommand,
+    },
 
     /// Wait for staging deployment clusters to be hydrated and ready
     ///
@@ -630,6 +634,23 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProfileCommand {
+    /// List profiles defined in `profiles.toml` and mark the active one.
+    List,
+    /// Record the project's default profile for this checkout.
+    ///
+    /// The named profile must exist in `profiles.toml`. The setting is
+    /// local to your checkout — other developers can pick their own
+    /// default without affecting you.
+    Set {
+        /// Profile name to record as the project default.
+        name: String,
+    },
+    /// Print the resolved profile for this project and where it came from.
+    Current,
 }
 
 #[derive(Subcommand, Debug)]
@@ -754,6 +775,15 @@ enum DeleteCommand {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+
+    // Suppress ANSI color escapes when NO_COLOR is set or stderr isn't a
+    // TTY (e.g. piped into a log aggregator or CI). Honors the widely
+    // adopted NO_COLOR convention (https://no-color.org/).
+    use std::io::IsTerminal;
+    if std::env::var_os("NO_COLOR").is_some() || !std::io::stderr().is_terminal() {
+        owo_colors::set_override(false);
+    }
+
     log::set_verbose(args.verbose);
     log::set_timing(args.timing);
     log::set_quiet(args.quiet);
@@ -833,12 +863,23 @@ async fn run(args: Args) -> Result<(), CliError> {
         return cli::commands::walkthrough::run(name, !no_git);
     }
 
-    if let Some(Command::Profiles) = &args.command {
-        return cli::commands::profiles::run(
-            &args.directory,
-            args.profile.as_deref(),
-            args.profiles_dir.as_deref(),
-        );
+    if let Some(Command::Profile { subcommand }) = &args.command {
+        return match subcommand {
+            ProfileCommand::List => cli::commands::profile::list(
+                &args.directory,
+                args.profile.as_deref(),
+                args.profiles_dir.as_deref(),
+            ),
+            ProfileCommand::Set { name } => cli::commands::profile::set(
+                &args.directory,
+                args.profiles_dir.as_deref(),
+                name,
+            ),
+            ProfileCommand::Current => cli::commands::profile::current(
+                &args.directory,
+                args.profile.as_deref(),
+            ),
+        };
     }
 
     // Handle lsp before Settings::load — it doesn't need connection or project.toml
@@ -983,7 +1024,7 @@ async fn run(args: Args) -> Result<(), CliError> {
         Some(Command::New { .. }) => unreachable!("handled above"),
         Some(Command::Init { .. }) => unreachable!("handled above"),
         Some(Command::Walkthrough { .. }) => unreachable!("handled above"),
-        Some(Command::Profiles) => unreachable!("handled above"),
+        Some(Command::Profile { .. }) => unreachable!("handled above"),
         None => unreachable!("handled above"),
     }
 }

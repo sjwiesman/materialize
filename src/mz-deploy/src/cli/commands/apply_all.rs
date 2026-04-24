@@ -32,6 +32,7 @@ pub async fn run(
     let client = Client::connect_with_profile(settings.connection().clone())
         .await
         .map_err(CliError::Connection)?;
+    crate::cli::commands::setup::verify(&client).await?;
     let role = crate::cli::commands::setup::validate_connection(&client).await?;
     crate::cli::commands::setup::require_deployer(role)?;
 

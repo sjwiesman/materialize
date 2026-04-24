@@ -64,8 +64,15 @@ username = "<your-username>"
 password = "<your-password>"
 ```
 
-The scaffolded `project.toml` already includes `profile = "default"`, so no
-additional configuration is needed.
+Tell mz-deploy which profile to use for your checkout:
+
+```bash
+mz-deploy profile set default
+```
+
+The setting is local to your checkout — teammates can pick their own
+default without affecting you. For one-off overrides, pass `--profile` or
+set `MZ_DEPLOY_PROFILE`.
 
 Verify the connection:
 

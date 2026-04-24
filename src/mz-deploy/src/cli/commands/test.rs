@@ -480,8 +480,12 @@ async fn run_single_test(
     };
 
     let typed_fqn = typed_fqn_from_object_id(object_id);
-    let sql_statements =
-        unit_test::desugar_unit_test(test, &target_obj.typed_object.stmt, &typed_fqn);
+    let sql_statements = unit_test::desugar_unit_test(test, &target_obj.typed_object.stmt, &typed_fqn)
+        .map_err(|reason| CliError::InvalidUnitTestTarget {
+            test_name: test.name.clone(),
+            object_id: object_id.to_string(),
+            reason,
+        })?;
 
     for (i, sql) in sql_statements[..sql_statements.len() - 1]
         .iter()

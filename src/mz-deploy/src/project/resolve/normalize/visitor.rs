@@ -423,36 +423,34 @@ impl<'a> NormalizingVisitor<OverlayTransformer<'a>> {
     /// Create a visitor that rewrites references for `mz-deploy dev` overlay
     /// compilation.
     ///
-    /// Applies the three-step schema-level resolution rule:
+    /// Applies the two-step schema-level resolution rule:
     /// - External databases (not in `in_project_databases`) → emit verbatim.
-    /// - In-project databases → apply `profile_suffix` (if set).
-    /// - Dirty `(base_db, schema)` pairs → rewrite database component to
-    ///   `<base_db>__<profile_name>`.
+    /// - Dirty `(database, schema)` pairs → rewrite database component to
+    ///   `<database>__<profile_name>`.
+    ///
+    /// Any configured `profile_suffix` is applied to in-project names by
+    /// the project planner before `dev` calls this constructor, so the
+    /// transformer sees already-suffixed names.
     ///
     /// # Arguments
     /// * `fqn` - Context used to resolve 1- and 2-part names to fully
     ///   qualified form.
     /// * `profile_name` - Developer profile name; becomes the `__<name>`
     ///   suffix on overlay databases.
-    /// * `profile_suffix` - Optional profile suffix that composes with the
-    ///   overlay (e.g., `Some("_staging")` → `db_staging__seth`).
     /// * `in_project_databases` - Set of databases declared in the project's
     ///   `project.toml` (or equivalent ownership declaration). References
     ///   to databases outside this set are treated as external and emitted
     ///   verbatim.
-    /// * `dirty_schemas` - Dirty `(database, schema)` pairs keyed by the
-    ///   post-`profile_suffix` database name.
+    /// * `dirty_schemas` - Dirty `(database, schema)` pairs.
     pub fn overlay(
         fqn: &'a FullyQualifiedName,
         profile_name: &'a str,
-        profile_suffix: Option<&'a str>,
         in_project_databases: &'a std::collections::BTreeSet<String>,
         dirty_schemas: &'a std::collections::BTreeSet<crate::project::SchemaQualifier>,
     ) -> Self {
         Self::new(OverlayTransformer {
             fqn,
             profile_name,
-            profile_suffix,
             in_project_databases,
             dirty_schemas,
         })
@@ -516,7 +514,7 @@ mod tests {
                 .into_iter()
                 .collect();
 
-        let visitor = NormalizingVisitor::overlay(&fqn, "alice", None, &in_project, &dirty);
+        let visitor = NormalizingVisitor::overlay(&fqn, "alice", &in_project, &dirty);
 
         let mut name = UnresolvedItemName(vec![
             Ident::new("app").unwrap(),
