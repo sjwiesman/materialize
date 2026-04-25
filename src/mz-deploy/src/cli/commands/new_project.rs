@@ -6,6 +6,7 @@
 
 use crate::cli::CliError;
 use crate::cli::progress;
+use crate::info;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -36,6 +37,7 @@ pub fn run(name: &str, opts: ScaffoldOpts) -> Result<(), CliError> {
 
     scaffold(project_dir, name, &opts)?;
     progress::success(&format!("Created project `{}`", name));
+    print_skill_hint();
     Ok(())
 }
 
@@ -50,7 +52,16 @@ pub fn init(opts: ScaffoldOpts) -> Result<(), CliError> {
     progress::info("Initializing project in current directory...");
     scaffold(project_dir, &name, &opts)?;
     progress::success(&format!("Initialized project `{}`", name));
+    print_skill_hint();
     Ok(())
+}
+
+/// Nudge users toward installing the optional Materialize agent skill.
+/// Mirrors the `## Agent skills` section of the scaffolded `README.md`.
+fn print_skill_hint() {
+    info!("");
+    info!("Tip: install the Materialize agent skill for AI coding agents:");
+    info!("  npx -y skills add MaterializeInc/agent-skills -a universal -a claude-code --project");
 }
 
 /// Common scaffolding logic shared by `new` and `init`.
