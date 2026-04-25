@@ -4,9 +4,9 @@
 //! - **`setup()`** — Idempotent, self-healing creation of the `_mz_deploy`
 //!   database, tables, views, indexes, and roles. The **only** function that
 //!   writes to `_mz_deploy`. Invoked exclusively by the explicit `setup` CLI
-//!   command, which must run as a superuser: phase 4 issues
+//!   command. When RBAC is enabled, must run as a superuser: phase 4 issues
 //!   `GRANT ... ON SYSTEM` statements (CREATEDB, CREATECLUSTER) that only a
-//!   superuser can execute. Safe to re-run.
+//!   superuser can execute under RBAC. Safe to re-run.
 //! - **`verify()`** — Read-only existence check. Every non-`setup` command
 //!   calls this and surfaces `CliError::SetupRequired` if the infrastructure
 //!   is missing or partially installed. Never writes.
@@ -76,10 +76,12 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
 ///    version row with a pre-check (no `INSERT IF NOT EXISTS` form).
 /// 4. Create the three `materialize_*` roles if missing and re-apply grants.
 ///
-/// Must be run by a **superuser**. Phase 4 issues `GRANT ... ON SYSTEM`
-/// statements (CREATEDB, CREATECLUSTER) which only superusers can execute,
-/// so the function refuses early via [`require_superuser`] when invoked
-/// by an ordinary role. The superuser also needs:
+/// Must be run by a **superuser** when RBAC is enabled. Phase 4 issues
+/// `GRANT ... ON SYSTEM` statements (CREATEDB, CREATECLUSTER) which only
+/// superusers can execute under RBAC, so the function refuses early via
+/// [`require_superuser`] when invoked by an ordinary role. With RBAC
+/// disabled, [`require_superuser`] is a no-op since system grants are
+/// permitted unconditionally. The superuser also needs:
 /// - Ownership of `_mz_deploy_server` (granted at creation in phase 1) to
 ///   `GRANT USAGE` on it.
 /// - `CREATEDB` to create the database.
@@ -380,17 +382,30 @@ pub fn require_developer(role: MzDeployRole) -> Result<(), CliError> {
 /// Verify the connecting role is a superuser.
 ///
 /// `setup` issues `GRANT ... ON SYSTEM` statements (CREATEDB, CREATECLUSTER)
-/// which only a superuser can execute. Materialize cloud admin users
-/// satisfy this through the cloud RBAC layer; on a self-hosted cluster
-/// only `mz_system` qualifies.
+/// which only a superuser can execute when RBAC is enforced. Materialize
+/// cloud admin users satisfy this through the cloud RBAC layer; on a
+/// self-hosted cluster only `mz_system` qualifies.
+///
+/// When RBAC is disabled (neither the global `enable_rbac_checks` nor the
+/// session-level `enable_session_rbac_checks` is on), Materialize allows
+/// any role to issue system grants, so the check is skipped. See
+/// <https://materialize.com/docs/security/self-managed/access-control/#enabling-rbac>.
 async fn require_superuser(client: &Client) -> Result<(), CliError> {
     let row = client
         .query_one(
-            "SELECT mz_is_superuser() AS is_superuser, \
-             current_user() AS current_role",
+            "SELECT \
+                current_setting('enable_rbac_checks')::bool \
+                  OR current_setting('enable_session_rbac_checks')::bool \
+                  AS rbac_enabled, \
+                mz_is_superuser() AS is_superuser, \
+                current_user() AS current_role",
             &[],
         )
         .await?;
+    let rbac_enabled: bool = row.get("rbac_enabled");
+    if !rbac_enabled {
+        return Ok(());
+    }
     let is_superuser: bool = row.get("is_superuser");
     if !is_superuser {
         let current_role: String = row.get("current_role");

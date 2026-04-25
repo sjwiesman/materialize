@@ -413,8 +413,9 @@ impl CliError {
                 format!("ALTER DATABASE _mz_deploy OWNER TO {}", current_role).cyan(),
             )),
             Self::SetupRequiresSuperuser { current_role } => Some(format!(
-                "{} grants {} and {} on the system, which only a superuser \
-                 can do. The active role {} is not a superuser.\n\n  \
+                "{} grants {} and {} on the system. With RBAC enabled, only \
+                 a superuser can issue system grants, and the active role \
+                 {} is not a superuser.\n\n  \
                  Re-run setup using a Materialize admin user, or have an \
                  admin run it once on your behalf. After setup completes, \
                  ordinary deployer/developer/monitor roles use mz-deploy \
