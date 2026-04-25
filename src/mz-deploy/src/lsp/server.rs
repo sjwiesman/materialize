@@ -36,7 +36,7 @@
 use crate::config::{ProjectSettings, default_docker_image, read_mzprofile};
 use crate::lsp::{
     catalog, code_lens, completion, dag, diagnostics, document_symbol, goto_definition, hover,
-    references, workspace_symbol,
+    references, semantic_tokens, workspace_symbol,
 };
 use crate::project;
 use crate::project::error::{ProjectError, ValidationErrors};
@@ -253,20 +253,6 @@ impl Backend {
                 .unwrap_or(serde_json::Value::Null)),
             None => Ok(serde_json::Value::Null),
         }
-    }
-
-    /// Handle the `mz-deploy/keywords` custom request.
-    ///
-    /// Returns the full list of Materialize SQL keywords as a JSON array of
-    /// uppercase strings (e.g., `["ABORT", "ACCESS", ...]`). The keyword list
-    /// is static and derived from [`mz_sql_lexer::keywords::KEYWORDS`].
-    #[allow(clippy::unused_async)] // async required by tower-lsp custom_method
-    pub(super) async fn keywords(&self) -> Result<serde_json::Value> {
-        let kws: Vec<&str> = mz_sql_lexer::keywords::KEYWORDS
-            .entries()
-            .map(|(_, kw)| kw.as_str())
-            .collect();
-        Ok(serde_json::to_value(kws).unwrap_or(serde_json::Value::Null))
     }
 
     /// Handle the `mz-deploy/catalog` custom request.
@@ -486,6 +472,18 @@ impl LanguageServer for Backend {
                 code_lens_provider: Some(CodeLensOptions {
                     resolve_provider: Some(false),
                 }),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: SemanticTokensLegend {
+                                token_types: semantic_tokens::legend_token_types(),
+                                token_modifiers: vec![],
+                            },
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            ..Default::default()
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
             ..Default::default()
@@ -709,6 +707,28 @@ impl LanguageServer for Backend {
         let cache_guard = self.project_cache.lock().await;
         let lenses = code_lens::code_lenses(&file_uri, text, &root, cache_guard.as_ref());
         Ok(Some(lenses))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let file_uri = params.text_document.uri;
+
+        let doc_text = {
+            let docs = self.documents.lock().await;
+            docs.get(&file_uri).map(|rope| rope.to_string())
+        };
+        let text = match doc_text.as_deref() {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        let data = semantic_tokens::compute_semantic_tokens(text);
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data,
+        })))
     }
 }
 

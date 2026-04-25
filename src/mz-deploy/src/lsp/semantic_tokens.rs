@@ -34,7 +34,7 @@ const TOKEN_TYPE_PARAMETER: u32 = 5;
 const TOKEN_TYPE_COMMENT: u32 = 6;
 
 /// Token types in the order required for legend indices.
-pub fn legend_token_types() -> Vec<SemanticTokenType> {
+pub(super) fn legend_token_types() -> Vec<SemanticTokenType> {
     vec![
         SemanticTokenType::KEYWORD,
         SemanticTokenType::STRING,
@@ -69,7 +69,7 @@ struct LineToken {
 /// a `SemanticTokensResult::Tokens`. Returns an empty vec on empty input.
 /// On lexer error, emits the tokens collected up to the error site plus
 /// comments from the full pre-scan; never panics.
-pub fn compute_semantic_tokens(text: &str) -> Vec<SemanticToken> {
+pub(super) fn compute_semantic_tokens(text: &str) -> Vec<SemanticToken> {
     let mut spans = Vec::new();
     collect_comments(text, &mut spans);
     if let Ok(tokens) = lexer::lex(text) {
