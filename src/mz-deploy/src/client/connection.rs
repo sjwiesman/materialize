@@ -726,7 +726,7 @@ mod tests {
                     assert!(host_check.is_none());
                     assert!(matches!(ca_source, CaSource::None));
                 }
-                other => panic!("expected Tls for {:?}, got {:?}", mode, other),
+                ConnectorSpec::NoTls => panic!("expected Tls for {:?}, got NoTls", mode),
             }
         }
     }
@@ -753,7 +753,7 @@ mod tests {
                     matches!(ca_source, CaSource::Hunted(p) if p == Path::new("/tmp/fake-ca.pem"))
                 );
             }
-            other => panic!("expected Tls, got {:?}", other),
+            ConnectorSpec::NoTls => panic!("expected Tls, got NoTls"),
         }
     }
 
