@@ -4,6 +4,12 @@ Creates the `_mz_deploy` database and all tracking tables, views, and roles
 used by mz-deploy's deployment commands. This is idempotent — running it
 multiple times is safe and has no effect if the infrastructure already exists.
 
+**Must be run as a superuser.** Setup grants `CREATEDB` and `CREATECLUSTER`
+on the system to the deploy roles, and only a superuser can grant system
+privileges. Once setup is complete, ordinary deployer/developer/monitor
+roles can use mz-deploy normally — only this bootstrap step needs elevated
+privileges.
+
 ## Usage
 
     mz-deploy setup
@@ -58,6 +64,9 @@ profiles with distinct users for deploying, developing, and monitoring.
 
 - **Connection refused** — Verify the host and port in `profiles.toml`.
 - **Authentication failed** — Check your credentials or app-password.
+- **Requires a superuser role** — Setup grants system privileges and must
+  be run by a superuser. Re-run with a Materialize admin user, or have an
+  admin run it once on your behalf.
 - **Insufficient privileges** — The user running setup must have permission
   to create databases and roles.
 
