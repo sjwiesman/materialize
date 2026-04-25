@@ -56,9 +56,11 @@ def create_profiles(c: Composition) -> None:
     mzcompose Materialized instance.  Every project under projects/ can
     then use ``--profiles-dir <PROJECTS_DIR>``."""
     mz_port = c.default_port("materialized")
+    # `setup` issues GRANT ... ON SYSTEM, which only mz_system can perform.
+    mz_system_port = c.port("materialized", 6877)
     with open(PROJECTS_DIR / "profiles.toml", "w") as f:
         f.write(
-            f'[admin]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "materialize"\n\n'
+            f'[admin]\nhost = "127.0.0.1"\nport = {mz_system_port}\nusername = "mz_system"\n\n'
             f'[default]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"\n\n'
             f'[staging]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"\n\n'
             f'[dev]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "dev_user"\n\n'

@@ -46,6 +46,7 @@ Develop:
   explain              Show the EXPLAIN plan for a materialized view or index
   dev                  Rebuild the developer overlay against the current dirty set
   lsp                  Start Language Server Protocol server for editor integration
+  sql                  Launch an interactive psql session using the active profile
 
 Infrastructure:
   lock                 Generate types.lock file with external dependency schemas
