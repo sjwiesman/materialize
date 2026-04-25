@@ -1,7 +1,7 @@
 {
   "name": "mz-deploy-lsp",
   "displayName": "mz-deploy",
-  "description": "SQL language support for mz-deploy projects (go-to-definition, parse diagnostics)",
+  "description": "SQL language support for mz-deploy projects via the mz-deploy LSP server",
   "version": "0.1.0",
   "publisher": "materialize",
   "engines": {
@@ -15,7 +15,7 @@
   ],
   "main": "./out/extension.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsc -p tsconfig.webview.json",
+    "build": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch"
   },
   "contributes": {
@@ -28,32 +28,7 @@
           "description": "Path to the mz-deploy binary"
         }
       }
-    },
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "mz-deploy",
-          "title": "mz-deploy",
-          "icon": "icons/mz-logo.svg"
-        }
-      ]
-    },
-    "views": {
-      "mz-deploy": [
-        {
-          "type": "webview",
-          "id": "mz-deploy-catalog",
-          "name": "Data Catalog"
-        }
-      ]
-    },
-    "commands": [
-      {
-        "command": "mz-deploy.openDAG",
-        "title": "mz-deploy: Open DAG View",
-        "icon": "$(type-hierarchy)"
-      }
-    ]
+    }
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
