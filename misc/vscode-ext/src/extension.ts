@@ -26,8 +26,6 @@
 import { LanguageClient, ServerOptions, LanguageClientOptions } from "vscode-languageclient/node";
 import * as vscode from "vscode";
 import * as path from "path";
-import * as os from "os";
-import * as fs from "fs";
 import { CatalogProvider } from "./sidebar/catalog-provider";
 import { DAGPanel } from "./panels/dag-panel";
 import { DagData, CatalogData, CatalogOutboundMessage, DagOutboundMessage } from "./types";
@@ -94,7 +92,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
       const terminal = vscode.window.createTerminal("mz-deploy test");
       terminal.show();
       terminal.sendText(
-        `~/materialize/target/release/mz-deploy test '${filter}'`
+        `${resolveBinaryPath()} test '${filter}'`
       );
     })
   );
@@ -108,7 +106,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
       const terminal = vscode.window.createTerminal("mz-deploy explain");
       terminal.show();
       terminal.sendText(
-        `~/materialize/target/release/mz-deploy explain '${target}'`
+        `${resolveBinaryPath()} explain '${target}'`
       );
     })
   );
@@ -125,12 +123,13 @@ function registerNotificationHandlers(): void {
   });
 }
 
+/**
+ * Returns the mz-deploy binary path configured by the `mz-deploy.path` setting.
+ * Defaults to the bare string `"mz-deploy"`, which resolves through the user's
+ * `$PATH` at spawn time.
+ */
 function resolveBinaryPath(): string {
-  const localPath = path.join(os.homedir(), "materialize", "target", "release", "mz-deploy");
-  if (fs.existsSync(localPath)) {
-    return localPath;
-  }
-  return "mz-deploy";
+  return vscode.workspace.getConfiguration("mz-deploy").get<string>("path") || "mz-deploy";
 }
 
 export function activate(context: vscode.ExtensionContext): void {

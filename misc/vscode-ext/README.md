@@ -22,8 +22,10 @@ From the Materialize workspace root:
 cargo build --release -p mz-deploy
 ```
 
-The extension checks `~/materialize/target/release/mz-deploy` first for easier
-local development, then falls back to `mz-deploy` on your PATH.
+The extension launches the binary configured by the `mz-deploy.path` setting,
+which defaults to `mz-deploy` (resolved through your `$PATH` at spawn time).
+For development builds, set `mz-deploy.path` to the absolute path of the
+binary you want to run (e.g. via the VS Code settings UI or `settings.json`).
 
 ### 2. Install npm dependencies
 
