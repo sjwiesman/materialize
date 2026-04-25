@@ -2,7 +2,7 @@
 //!
 //! Provides IDE integration for `.sql` files in mz-deploy projects via the
 //! Language Server Protocol (LSP). The server runs over stdio and supports
-//! eight capabilities:
+//! nine capabilities:
 //!
 //! ## Go-to-definition
 //!
@@ -41,6 +41,15 @@
 //!   dot-qualified prefix the user has already typed (0 dots = minimum, 1 dot =
 //!   schema.object, 2+ dots = db.schema.object).
 //!
+//! ## Semantic Tokens
+//!
+//! Drives editor syntax coloring via `textDocument/semanticTokens/full`. The
+//! document is lexed with `mz_sql_lexer` and each token is mapped to a standard
+//! LSP token type (KEYWORD, STRING, NUMBER, OPERATOR, VARIABLE, PARAMETER,
+//! COMMENT). This covers Materialize-specific keywords that VS Code's built-in
+//! SQL grammar doesn't know about, so the editor's theme colors apply uniformly
+//! across the full Materialize keyword set.
+//!
 //! ## Document Symbols
 //!
 //! Returns the structural outline of a `.sql` file: the main CREATE statement
@@ -78,10 +87,6 @@
 //!   full object metadata (columns, constraints, grants, indexes) for the
 //!   detail panel. See the `catalog` module for the data model.
 //!
-//! - **`mz-deploy/keywords`** — Returns the full list of Materialize SQL
-//!   keywords as a JSON array of uppercase strings. Used by the VS Code
-//!   extension to apply keyword syntax highlighting via editor decorations.
-//!
 //! ## Architecture
 //!
 //! ```text
@@ -109,6 +114,7 @@ mod helpers;
 pub mod hover;
 mod references;
 mod run;
+mod semantic_tokens;
 mod server;
 mod symbol_kind;
 mod workspace_symbol;

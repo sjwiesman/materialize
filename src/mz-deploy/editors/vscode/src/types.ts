@@ -2,8 +2,8 @@
  * Shared type definitions for the mz-deploy VS Code extension.
  *
  * Covers three boundaries:
- * 1. **LSP response types** — shapes returned by `mz-deploy/catalog`, `mz-deploy/dag`,
- *    and `mz-deploy/keywords` requests.
+ * 1. **LSP response types** — shapes returned by `mz-deploy/catalog` and
+ *    `mz-deploy/dag` requests.
  * 2. **Extension ↔ webview messages** — discriminated unions for `postMessage` protocols
  *    between the extension host and the DAG/catalog webview scripts.
  * 3. **Layout types** — intermediate values produced by the DAG layout algorithm.

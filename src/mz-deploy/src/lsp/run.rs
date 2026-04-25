@@ -20,7 +20,6 @@ pub async fn run(root: PathBuf) -> Result<(), CliError> {
     let (service, socket) = LspService::build(|client| Backend::new_with_root(client, root))
         .custom_method("mz-deploy/dag", Backend::dag)
         .custom_method("mz-deploy/catalog", Backend::catalog)
-        .custom_method("mz-deploy/keywords", Backend::keywords)
         .finish();
 
     Server::new(stdin, stdout, socket).serve(service).await;

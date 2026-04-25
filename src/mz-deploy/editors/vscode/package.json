@@ -53,17 +53,6 @@
         "title": "mz-deploy: Open DAG View",
         "icon": "$(type-hierarchy)"
       }
-    ],
-    "colors": [
-      {
-        "id": "mzDeploy.keywordForeground",
-        "description": "Color for Materialize SQL keywords",
-        "defaults": {
-          "dark": "#569CD6",
-          "light": "#0000FF",
-          "highContrast": "#569CD6"
-        }
-      }
     ]
   },
   "dependencies": {
