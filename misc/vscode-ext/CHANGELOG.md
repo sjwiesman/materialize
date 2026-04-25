@@ -10,3 +10,7 @@ Initial release.
   the corresponding `mz-deploy` subcommand in a terminal.
 - `mz-deploy.path` setting controls which `mz-deploy` binary the extension
   spawns.
+- Pre-flight check on activation and on every command invocation: if the
+  configured binary is missing or won't run, the extension surfaces an
+  actionable error dialog with an "Open Settings" button instead of failing
+  silently.
