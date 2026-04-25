@@ -70,3 +70,16 @@ npm run publish
 
 Bump `version` in `package.json` and add an entry to `CHANGELOG.md` before
 each release.
+
+## Updating the icon
+
+The marketplace listing uses `icons/mz-logo.png`, generated from
+`icons/mz-logo.svg`. To regenerate after editing the SVG (macOS):
+
+```sh
+sips -s format png -z 256 256 icons/mz-logo.svg --out icons/mz-logo.png
+```
+
+The fill color is baked into the SVG (`#7F4EFF`, Materialize purple) since
+the marketplace renders the PNG without VS Code's theme-driven `currentColor`
+substitution.
