@@ -12,6 +12,5 @@
     "resolveJsonModule": true,
     "sourceMap": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/panels/dag.ts", "src/sidebar/catalog.ts"]
+  "include": ["src/**/*.ts"]
 }
