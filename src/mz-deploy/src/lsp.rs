@@ -74,19 +74,6 @@
 //! - **"Run Test"** above each `EXECUTE UNIT TEST` statement.
 //! - **"Explain"** above `CREATE MATERIALIZED VIEW` and named `CREATE INDEX`.
 //!
-//! ## Custom Endpoints
-//!
-//! - **`mz-deploy/dag`** — Returns the project's dependency graph as JSON
-//!   (`dag::DagResponse`) for rendering in the VS Code workspace webview.
-//!   The response contains lightweight node metadata and edges; see the
-//!   `dag` module for the data model.
-//!
-//! - **`mz-deploy/catalog`** — Returns the project's data catalog as JSON
-//!   (`catalog::CatalogResponse`) for the VS Code workspace catalog view.
-//!   The response contains a database/schema tree for sidebar navigation and
-//!   full object metadata (columns, constraints, grants, indexes) for the
-//!   detail panel. See the `catalog` module for the data model.
-//!
 //! ## Architecture
 //!
 //! ```text
@@ -102,10 +89,8 @@
 //! Parse diagnostics run per-file on every keystroke. Incremental updates may
 //! come later; the pipeline is fast enough for typical project sizes.
 
-mod catalog;
 mod code_lens;
 mod completion;
-mod dag;
 pub mod diagnostics;
 mod document_symbol;
 pub mod functions;

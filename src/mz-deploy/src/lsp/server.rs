@@ -23,20 +23,12 @@
 //! After every `rebuild_project()`, the server runs [`run_typecheck()`] which
 //! performs incremental typechecking. If definitions are unchanged since the
 //! last typecheck, validation is skipped entirely. If the typecheck backend
-//! is unavailable, typechecking is silently skipped — the catalog retains its
-//! last known column data.
-//!
-//! ## Custom Notifications
-//!
-//! - **`mz-deploy/projectRebuilt`** — Sent to the client after
-//!   `rebuild_project()` and again after `run_typecheck()` if column data
-//!   changed. The VS Code extension uses this to refresh the catalog sidebar
-//!   and DAG panel with fresh data.
+//! is unavailable, typechecking is silently skipped.
 
 use crate::config::{ProjectSettings, default_docker_image, read_mzprofile};
 use crate::lsp::{
-    catalog, code_lens, completion, dag, diagnostics, document_symbol, goto_definition, hover,
-    references, semantic_tokens, workspace_symbol,
+    code_lens, completion, diagnostics, document_symbol, goto_definition, hover, references,
+    semantic_tokens, workspace_symbol,
 };
 use crate::project;
 use crate::project::error::{ProjectError, ValidationErrors};
@@ -51,17 +43,6 @@ use tokio::sync::{Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
-
-/// Custom notification sent to the client after a project rebuild completes.
-///
-/// The extension listens for this to refresh catalog and DAG data, replacing
-/// the old timer-based approach that was prone to race conditions.
-struct ProjectRebuilt;
-
-impl notification::Notification for ProjectRebuilt {
-    type Params = ();
-    const METHOD: &'static str = "mz-deploy/projectRebuilt";
-}
 
 /// Actions to take after a project rebuild, expressed as pure data.
 ///
@@ -157,9 +138,6 @@ pub(super) struct Backend {
     variables: RwLock<BTreeMap<String, String>>,
     /// Name of the active profile (for hover display).
     profile_name: RwLock<String>,
-    /// Last project build error, if the most recent build failed.
-    /// Used by the catalog endpoint to report errors to the sidebar.
-    last_build_error: RwLock<Option<String>>,
 }
 
 impl Backend {
@@ -174,7 +152,6 @@ impl Backend {
             settings: RwLock::new(None),
             variables: RwLock::new(BTreeMap::new()),
             profile_name: RwLock::new("default".to_string()),
-            last_build_error: RwLock::new(None),
         }
     }
 
@@ -240,51 +217,6 @@ impl Backend {
         Some((text, byte_offset, parts))
     }
 
-    /// Handle the `mz-deploy/dag` custom request.
-    ///
-    /// Returns the project's dependency graph as JSON, or `null` if no project
-    /// has been successfully built yet.
-    #[allow(clippy::unused_async)] // async required by tower-lsp custom_method
-    pub(super) async fn dag(&self) -> Result<serde_json::Value> {
-        let root = self.root.read().await.clone();
-        let cache_guard = self.project_cache.lock().await;
-        match cache_guard.as_ref() {
-            Some(cache) => Ok(serde_json::to_value(dag::build_dag_response(cache, &root))
-                .unwrap_or(serde_json::Value::Null)),
-            None => Ok(serde_json::Value::Null),
-        }
-    }
-
-    /// Handle the `mz-deploy/catalog` custom request.
-    ///
-    /// Returns the project's data catalog as JSON, or `null` if no project
-    /// has been successfully built yet.
-    #[allow(clippy::unused_async)] // async required by tower-lsp custom_method
-    pub(super) async fn catalog(&self) -> tower_lsp::jsonrpc::Result<serde_json::Value> {
-        let root = self.root.read().await.clone();
-        let cache_guard = self.project_cache.lock().await;
-        match cache_guard.as_ref() {
-            Some(cache) => {
-                let types_lock = types::load_types_lock(&root).unwrap_or_default();
-                Ok(
-                    serde_json::to_value(catalog::build_catalog_response(
-                        cache,
-                        &types_lock,
-                        &root,
-                    ))
-                    .unwrap_or(serde_json::Value::Null),
-                )
-            }
-            None => {
-                let error = self.last_build_error.read().await.clone();
-                Ok(
-                    serde_json::to_value(catalog::build_error_response(error.as_deref()))
-                        .unwrap_or(serde_json::Value::Null),
-                )
-            }
-        }
-    }
-
     /// Rebuild the project model and types cache from disk.
     ///
     /// Delegates to [`compute_diagnostic_actions`] for the pure diagnostic
@@ -328,17 +260,13 @@ impl Backend {
         let old_uris = self.project_diagnostic_uris.lock().await.clone();
         let actions = compute_diagnostic_actions(new_diagnostics, &old_uris);
 
-        // Return the project on success, log and record error on failure.
+        // Return the project on success, log and discard the error on failure.
         let project = match build_result {
-            Ok(p) => {
-                *self.last_build_error.write().await = None;
-                Some(Arc::new(p))
-            }
+            Ok(p) => Some(Arc::new(p)),
             Err(ref e) => {
                 self.client
                     .log_message(MessageType::ERROR, format!("Project build failed: {e}"))
                     .await;
-                *self.last_build_error.write().await = Some(format!("{e}"));
                 None
             }
         };
@@ -363,10 +291,6 @@ impl Backend {
             }
         }
 
-        // Notify the client that the project has been rebuilt so it can
-        // refresh catalog/DAG data.
-        self.client.send_notification::<ProjectRebuilt>(()).await;
-
         project
     }
 
@@ -375,11 +299,10 @@ impl Backend {
     /// The compiler compares the current compiled objects to persisted
     /// typecheck artifacts, validates only the dirty runtime frontier, and
     /// lazily stages both internal and external dependencies as temp tables.
-    /// On success, it writes the refreshed internal types cache, then reloads
-    /// those types so the extension can refresh column data in the catalog.
+    /// On success, it writes the refreshed internal types cache.
     ///
-    /// Silently returns on any failure — the  catalog simply won't have updated
-    /// column data until the next successful typecheck.
+    /// Silently returns on any failure — the next successful typecheck will
+    /// catch up.
     async fn run_typecheck(&self, project: Arc<graph::Project>) {
         let root = self.root.read().await.clone();
 
@@ -434,10 +357,6 @@ impl Backend {
             plan,
         )
         .await;
-
-        // Notify the client so it can refresh column data from the existing
-        // ProjectCache connection (which sees new data on the next query).
-        self.client.send_notification::<ProjectRebuilt>(()).await;
     }
 }
 
