@@ -1,9 +1,26 @@
 {
   "name": "mz-deploy-lsp",
   "displayName": "mz-deploy",
-  "description": "SQL language support for mz-deploy projects via the mz-deploy LSP server",
+  "description": "SQL language support for mz-deploy projects: go-to-definition, hover, completion, diagnostics, and code lenses for running tests and explaining objects.",
   "version": "0.1.0",
   "publisher": "materialize",
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://github.com/MaterializeInc/materialize/tree/main/misc/vscode-ext",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MaterializeInc/materialize.git",
+    "directory": "misc/vscode-ext"
+  },
+  "bugs": {
+    "url": "https://github.com/MaterializeInc/materialize/issues"
+  },
+  "keywords": [
+    "materialize",
+    "mz-deploy",
+    "sql",
+    "lsp",
+    "language-server"
+  ],
   "engines": {
     "vscode": "^1.88.0"
   },
@@ -15,8 +32,11 @@
   ],
   "main": "./out/extension.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "watch": "tsc -p tsconfig.json --watch"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "npm run typecheck && esbuild src/extension.ts --bundle --outfile=out/extension.js --platform=node --target=node18 --external:vscode --format=cjs --minify --sourcemap",
+    "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --platform=node --target=node18 --external:vscode --format=cjs --sourcemap --watch",
+    "package": "npm run build && vsce package",
+    "publish": "npm run build && vsce publish"
   },
   "contributes": {
     "configuration": {
@@ -25,7 +45,7 @@
         "mz-deploy.path": {
           "type": "string",
           "default": "mz-deploy",
-          "description": "Path to the mz-deploy binary"
+          "description": "Path to the mz-deploy binary. Defaults to `mz-deploy` (resolved through your $PATH at spawn time)."
         }
       }
     }
@@ -34,7 +54,9 @@
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
-    "@types/vscode": "^1.110.0",
+    "@types/vscode": "^1.88.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.2",
     "typescript": "^5.9.3"
   }
 }
