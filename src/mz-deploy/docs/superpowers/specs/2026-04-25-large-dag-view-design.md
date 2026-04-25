@@ -6,7 +6,7 @@
 
 ## Problem
 
-The VS Code DAG view (`editors/vscode/src/panels/dag.ts`) renders every object in
+The VS Code DAG view (`misc/vscode-ext/src/panels/dag.ts`) renders every object in
 the project as one Sugiyama-laid-out SVG. Performance is acceptable, but the
 view becomes unusable around the 20,000-object mark for human reasons, not
 technical ones: a wall of boxes carries no signal. Users cannot trace lineage,
@@ -191,8 +191,8 @@ consults for decoration without recomputing.
 
 ### Data flow
 
-The wire protocol between the extension host (`dag-panel.ts`) and the webview
-(`dag.ts`) does not change. The host continues to send:
+The wire protocol between the extension host (`src/panels/dag-panel.ts`) and
+the webview (`src/panels/dag.ts`) does not change. The host continues to send:
 
 - `dag-data` — full project graph in one shot.
 - `focus` — set focus to an object id.
@@ -219,7 +219,7 @@ attachInteraction`) carries over. Two changes:
 The current `dag.ts` is ~770 lines and packs data, layout, state, scene
 resolution, rendering, and interaction into one file. The new design pushes
 that toward unmaintainable, so the file gets split. Target structure under
-`editors/vscode/src/panels/dag/`:
+`misc/vscode-ext/src/panels/dag/`:
 
 - `data.ts` — `DagData` types, schema-graph builder, per-schema indexes,
   findings analysis. Pure functions, no DOM.

@@ -28,7 +28,7 @@ local development, then falls back to `mz-deploy` on your PATH.
 ### 2. Install npm dependencies
 
 ```sh
-cd src/mz-deploy/editors/vscode
+cd misc/vscode-ext
 npm install
 ```
 
@@ -49,7 +49,7 @@ This compiles two separate TypeScript projects:
 
 ### Option A: Debug (F5)
 
-Open `src/mz-deploy/editors/vscode/` as a VS Code workspace and press **F5**.
+Open `misc/vscode-ext/` as a VS Code workspace and press **F5**.
 The launch configuration runs `npm: build` automatically, then opens an Extension
 Development Host window. Open any folder containing a `project.toml` to activate
 the extension.
@@ -57,7 +57,7 @@ the extension.
 ### Option B: Install locally
 
 ```sh
-# From editors/vscode/
+# From misc/vscode-ext/
 npx @vscode/vsce package --no-dependencies
 code --install-extension mz-deploy-lsp-0.1.0.vsix
 ```
