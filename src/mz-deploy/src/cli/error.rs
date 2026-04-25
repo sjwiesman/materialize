@@ -113,6 +113,11 @@ pub enum CliError {
     #[error("`_mz_deploy` is owned by role '{owner}', not by the current role '{current_role}'")]
     SetupNotDatabaseOwner { owner: String, current_role: String },
 
+    /// `setup` was invoked by a non-superuser. Setup issues
+    /// `GRANT ... ON SYSTEM` statements that only superusers can execute.
+    #[error("`mz-deploy setup` requires a superuser role (current role: '{current_role}')")]
+    SetupRequiresSuperuser { current_role: String },
+
     /// A unit test targets an object that isn't a view or materialized view.
     /// Unlike assertion mismatches, this is a project-definition error: the
     /// `test` run aborts rather than reporting it as a failed test.
@@ -406,6 +411,19 @@ impl CliError {
                 owner.cyan(),
                 owner.cyan(),
                 format!("ALTER DATABASE _mz_deploy OWNER TO {}", current_role).cyan(),
+            )),
+            Self::SetupRequiresSuperuser { current_role } => Some(format!(
+                "{} grants {} and {} on the system, which only a superuser \
+                 can do. The active role {} is not a superuser.\n\n  \
+                 Re-run setup using a Materialize admin user, or have an \
+                 admin run it once on your behalf. After setup completes, \
+                 ordinary deployer/developer/monitor roles use mz-deploy \
+                 normally — only this bootstrap step requires elevated \
+                 privileges.",
+                "mz-deploy setup".cyan(),
+                "CREATEDB".cyan(),
+                "CREATECLUSTER".cyan(),
+                current_role.cyan(),
             )),
             Self::DevTargetsProductionCluster { clusters } => {
                 let cluster_list = clusters

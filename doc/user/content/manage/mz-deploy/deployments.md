@@ -35,6 +35,11 @@ This creates the `_mz_deploy` database, tracking tables, and three roles for
 access control. The command is idempotent — you can safely run it again without
 side effects.
 
+`setup` must be run by a **superuser**. It grants `CREATEDB` and
+`CREATECLUSTER` on the system to the deploy roles, and only a superuser can
+grant system privileges. Once setup completes, the deployer, developer, and
+monitor roles use mz-deploy without any further superuser involvement.
+
 ### Roles
 
 `setup` creates three roles that control who can do what:

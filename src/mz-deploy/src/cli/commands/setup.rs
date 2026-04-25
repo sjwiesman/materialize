@@ -4,8 +4,9 @@
 //! - **`setup()`** — Idempotent, self-healing creation of the `_mz_deploy`
 //!   database, tables, views, indexes, and roles. The **only** function that
 //!   writes to `_mz_deploy`. Invoked exclusively by the explicit `setup` CLI
-//!   command, which requires admin privileges (cluster ownership to grant
-//!   USAGE, CREATEDB to create the database). Safe to re-run.
+//!   command, which must run as a superuser: phase 4 issues
+//!   `GRANT ... ON SYSTEM` statements (CREATEDB, CREATECLUSTER) that only a
+//!   superuser can execute. Safe to re-run.
 //! - **`verify()`** — Read-only existence check. Every non-`setup` command
 //!   calls this and surfaces `CliError::SetupRequired` if the infrastructure
 //!   is missing or partially installed. Never writes.
@@ -75,7 +76,10 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
 ///    version row with a pre-check (no `INSERT IF NOT EXISTS` form).
 /// 4. Create the three `materialize_*` roles if missing and re-apply grants.
 ///
-/// Requires admin privileges:
+/// Must be run by a **superuser**. Phase 4 issues `GRANT ... ON SYSTEM`
+/// statements (CREATEDB, CREATECLUSTER) which only superusers can execute,
+/// so the function refuses early via [`require_superuser`] when invoked
+/// by an ordinary role. The superuser also needs:
 /// - Ownership of `_mz_deploy_server` (granted at creation in phase 1) to
 ///   `GRANT USAGE` on it.
 /// - `CREATEDB` to create the database.
@@ -85,6 +89,8 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
 /// [`verify`] and surface [`CliError::SetupRequired`] if it fails. See the
 /// module docs for the full model.
 pub async fn setup(client: &Client) -> Result<(), CliError> {
+    require_superuser(client).await?;
+
     // Phase 1: server cluster. `CREATE CLUSTER` has no `IF NOT EXISTS` form,
     // so pre-check. The first create is what makes the calling role the owner,
     // which is required to GRANT USAGE below.
@@ -367,6 +373,28 @@ pub fn require_developer(role: MzDeployRole) -> Result<(), CliError> {
             current_role: role.to_string(),
             required_role: "materialize_developer".to_string(),
         });
+    }
+    Ok(())
+}
+
+/// Verify the connecting role is a superuser.
+///
+/// `setup` issues `GRANT ... ON SYSTEM` statements (CREATEDB, CREATECLUSTER)
+/// which only a superuser can execute. Materialize cloud admin users
+/// satisfy this through the cloud RBAC layer; on a self-hosted cluster
+/// only `mz_system` qualifies.
+async fn require_superuser(client: &Client) -> Result<(), CliError> {
+    let row = client
+        .query_one(
+            "SELECT mz_is_superuser() AS is_superuser, \
+             current_user() AS current_role",
+            &[],
+        )
+        .await?;
+    let is_superuser: bool = row.get("is_superuser");
+    if !is_superuser {
+        let current_role: String = row.get("current_role");
+        return Err(CliError::SetupRequiresSuperuser { current_role });
     }
     Ok(())
 }
