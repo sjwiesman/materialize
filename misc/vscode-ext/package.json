@@ -27,6 +27,7 @@
   "categories": [
     "Programming Languages"
   ],
+  "icon": "icons/mz-logo.png",
   "activationEvents": [
     "workspaceContains:project.toml"
   ],
