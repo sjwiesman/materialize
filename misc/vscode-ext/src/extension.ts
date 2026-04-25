@@ -8,9 +8,9 @@
  *   mz-deploy.runExplain — runs `mz-deploy explain '<target>'` in a terminal
  *
  * The binary is resolved via the `mz-deploy.path` setting, which defaults to
- * `"mz-deploy"` (looked up through `$PATH` at spawn time). On activation and
- * on every command invocation, the extension verifies that the configured
- * binary is actually runnable and surfaces an actionable error dialog if not.
+ * `"mz-deploy"` (looked up through `$PATH` at spawn time). On activation the
+ * extension verifies that the configured binary is actually runnable and
+ * surfaces an actionable error dialog if not.
  */
 
 import { LanguageClient, ServerOptions, LanguageClientOptions } from "vscode-languageclient/node";
@@ -59,43 +59,30 @@ async function notifyBinaryUnavailable(): Promise<void> {
   }
 }
 
-/** Run the given handler if the binary is available; otherwise show an error. */
-async function runIfBinaryAvailable(handler: () => Promise<void> | void): Promise<void> {
-  if (!(await isBinaryAvailable())) {
-    await notifyBinaryUnavailable();
-    return;
-  }
-  await handler();
-}
-
 /** Registers code-lens-invoked commands. */
 function registerCommands(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand("mz-deploy.runTest", (filter: string) =>
-      runIfBinaryAvailable(async () => {
-        const activeEditor = vscode.window.activeTextEditor;
-        if (activeEditor) {
-          await activeEditor.document.save();
-        }
-        const terminal = vscode.window.createTerminal("mz-deploy test");
-        terminal.show();
-        terminal.sendText(`${resolveBinaryPath()} test '${filter}'`);
-      }),
-    ),
+    vscode.commands.registerCommand("mz-deploy.runTest", async (filter: string) => {
+      const activeEditor = vscode.window.activeTextEditor;
+      if (activeEditor) {
+        await activeEditor.document.save();
+      }
+      const terminal = vscode.window.createTerminal("mz-deploy test");
+      terminal.show();
+      terminal.sendText(`${resolveBinaryPath()} test '${filter}'`);
+    }),
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("mz-deploy.runExplain", (target: string) =>
-      runIfBinaryAvailable(async () => {
-        const activeEditor = vscode.window.activeTextEditor;
-        if (activeEditor) {
-          await activeEditor.document.save();
-        }
-        const terminal = vscode.window.createTerminal("mz-deploy explain");
-        terminal.show();
-        terminal.sendText(`${resolveBinaryPath()} explain '${target}'`);
-      }),
-    ),
+    vscode.commands.registerCommand("mz-deploy.runExplain", async (target: string) => {
+      const activeEditor = vscode.window.activeTextEditor;
+      if (activeEditor) {
+        await activeEditor.document.save();
+      }
+      const terminal = vscode.window.createTerminal("mz-deploy explain");
+      terminal.show();
+      terminal.sendText(`${resolveBinaryPath()} explain '${target}'`);
+    }),
   );
 }
 
