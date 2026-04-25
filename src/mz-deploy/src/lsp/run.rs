@@ -17,10 +17,7 @@ pub async fn run(root: PathBuf) -> Result<(), CliError> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::build(|client| Backend::new_with_root(client, root))
-        .custom_method("mz-deploy/dag", Backend::dag)
-        .custom_method("mz-deploy/catalog", Backend::catalog)
-        .finish();
+    let (service, socket) = LspService::build(|client| Backend::new_with_root(client, root)).finish();
 
     Server::new(stdin, stdout, socket).serve(service).await;
     Ok(())
