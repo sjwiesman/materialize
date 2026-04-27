@@ -819,7 +819,9 @@ fn load_or_generate_types_cache(
 
     let directory = &settings.directory;
     let external_types = types::load_types_lock(directory).unwrap_or_default();
-    let plan = typecheck::plan(
+
+    info!("{}", "Running type check...".yellow());
+    typecheck::run(
         directory,
         &settings.profile_name,
         settings.profile_suffix(),
@@ -827,48 +829,13 @@ fn load_or_generate_types_cache(
         planned_project,
         external_types,
     )
-    .map_err(|e| CliError::Message(format!("failed to plan typecheck: {}", e)))?;
+    .map_err(CliError::TypeCheckFailed)?;
 
-    if plan.is_up_to_date() {
-        info!(
-            "{}",
-            format!(
-                "Using cached types from {}/build_artifact.db",
-                types::BUILD_DIR
-            )
-            .dimmed()
-        );
-        return ProjectCache::open(
-            directory,
-            &settings.profile_name,
-            settings.profile_suffix(),
-            settings.variables(),
-        )
-        .map_err(|e| CliError::Message(format!("Failed to open types cache: {}", e)));
-    }
-
-    info!(
-        "{}",
-        "Types cache stale or missing, running type check...".yellow()
-    );
-
-    let result = typecheck::execute(
-        planned_project,
+    ProjectCache::open(
         directory,
         &settings.profile_name,
         settings.profile_suffix(),
         settings.variables(),
-        plan,
-    );
-
-    match result {
-        Ok(_) => ProjectCache::open(
-            directory,
-            &settings.profile_name,
-            settings.profile_suffix(),
-            settings.variables(),
-        )
-        .map_err(|e| CliError::Message(format!("Failed to open types cache: {}", e))),
-        Err(e) => Err(CliError::TypeCheckFailed(e)),
-    }
+    )
+    .map_err(|e| CliError::Message(format!("Failed to open types cache: {}", e)))
 }
