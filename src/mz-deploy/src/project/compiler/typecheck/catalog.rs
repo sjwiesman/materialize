@@ -97,14 +97,8 @@ impl CatalogRuntime {
         for object in project.iter_objects() {
             namespaces.insert((object.id.database.clone(), object.id.schema.clone()));
         }
-        for fqn in external_types.tables.keys() {
-            let mut parts = fqn.splitn(3, '.');
-            let (Some(database), Some(schema), Some(_object)) =
-                (parts.next(), parts.next(), parts.next())
-            else {
-                continue;
-            };
-            namespaces.insert((database.to_string(), schema.to_string()));
+        for id in external_types.tables.keys() {
+            namespaces.insert((id.database.clone(), id.schema.clone()));
         }
 
         for (database, schema) in namespaces {
@@ -584,7 +578,7 @@ struct LocalCatalog {
     ambient_schemas_by_name: BTreeMap<String, SchemaSpecifier>,
     schemas_by_key: BTreeMap<(ResolvedDatabaseSpecifier, String), LocalSchema>,
     schemas_by_id: BTreeMap<(ResolvedDatabaseSpecifier, SchemaSpecifier), LocalSchema>,
-    items_by_id: BTreeMap<CatalogItemId, LocalItem>,
+    items_by_id: BTreeMap<CatalogItemId, Arc<LocalItem>>,
     items_by_global_id: BTreeMap<GlobalId, CatalogItemId>,
     /// Maps qualified names to item IDs. A `Vec` because Materialize's builtin
     /// catalog has types and functions that share the same qualified name (e.g.
@@ -966,7 +960,7 @@ impl LocalCatalog {
             .entry(item.name.clone())
             .or_default()
             .push(item.id);
-        self.items_by_id.insert(item.id, item);
+        self.items_by_id.insert(item.id, Arc::new(item));
     }
 
     /// Ensure the given database and schema exist, creating them if needed.
@@ -1207,7 +1201,7 @@ impl LocalCatalog {
             for item_id in item_ids {
                 let item = self.items_by_id.get(item_id).expect("item exists");
                 if predicate(item) {
-                    return Ok(item);
+                    return Ok(item.as_ref());
                 }
             }
             Err(unknown(name.to_string()))
@@ -1224,7 +1218,7 @@ impl LocalCatalog {
                     for item_id in item_ids {
                         let item = self.items_by_id.get(item_id).expect("item exists");
                         if predicate(item) {
-                            return Ok(item);
+                            return Ok(item.as_ref());
                         }
                     }
                 }
@@ -1532,7 +1526,7 @@ impl SessionCatalog for LocalCatalog {
                     for item_id in item_ids {
                         let item = self.items_by_id.get(item_id).expect("system type exists");
                         if item.item_type == CatalogItemType::Type {
-                            return item;
+                            return item.as_ref();
                         }
                     }
                 }
@@ -1544,7 +1538,7 @@ impl SessionCatalog for LocalCatalog {
     fn try_get_item(&self, id: &CatalogItemId) -> Option<&dyn CatalogItem> {
         self.items_by_id
             .get(id)
-            .map(|item| item as &dyn CatalogItem)
+            .map(|item| item.as_ref() as &dyn CatalogItem)
     }
 
     fn try_get_item_by_global_id<'a>(
@@ -1554,11 +1548,13 @@ impl SessionCatalog for LocalCatalog {
         self.items_by_global_id
             .get(id)
             .and_then(|item_id| self.items_by_id.get(item_id))
-            .map(|item| Box::new(item.clone()) as Box<dyn mz_sql::catalog::CatalogCollectionItem>)
+            .map(|item| {
+                Box::new(LocalItem::clone(item)) as Box<dyn mz_sql::catalog::CatalogCollectionItem>
+            })
     }
 
     fn get_item(&self, id: &CatalogItemId) -> &dyn CatalogItem {
-        self.items_by_id.get(id).expect("item exists")
+        self.items_by_id.get(id).expect("item exists").as_ref()
     }
 
     fn get_item_by_global_id<'a>(
@@ -1571,7 +1567,7 @@ impl SessionCatalog for LocalCatalog {
     fn get_items(&self) -> Vec<&dyn CatalogItem> {
         self.items_by_id
             .values()
-            .map(|item| item as &dyn CatalogItem)
+            .map(|item| item.as_ref() as &dyn CatalogItem)
             .collect()
     }
 
@@ -1580,7 +1576,7 @@ impl SessionCatalog for LocalCatalog {
             .get(name)
             .and_then(|item_ids| item_ids.first())
             .and_then(|item_id| self.items_by_id.get(item_id))
-            .map(|item| item as &dyn CatalogItem)
+            .map(|item| item.as_ref() as &dyn CatalogItem)
     }
 
     fn get_type_by_name(&self, name: &QualifiedItemName) -> Option<&dyn CatalogItem> {
@@ -1588,7 +1584,7 @@ impl SessionCatalog for LocalCatalog {
             item_ids.iter().find_map(|item_id| {
                 let item = self.items_by_id.get(item_id)?;
                 if item.item_type == CatalogItemType::Type {
-                    Some(item as &dyn CatalogItem)
+                    Some(item.as_ref() as &dyn CatalogItem)
                 } else {
                     None
                 }
