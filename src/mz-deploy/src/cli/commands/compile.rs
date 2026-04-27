@@ -290,7 +290,6 @@ fn typecheck_project(
     }
     let typecheck_start = Instant::now();
 
-    let plan_start = Instant::now();
     let external_types = crate::types::load_types_lock(directory).unwrap_or_else(|_| {
         if show_progress {
             progress::info("No types.lock found, assuming no external dependencies");
@@ -299,44 +298,17 @@ fn typecheck_project(
         crate::types::Types::default()
     });
 
-    let plan = typecheck::plan(
+    typecheck::run(
         directory,
         &settings.profile_name,
         settings.profile_suffix(),
         settings.variables(),
         planned_project,
         external_types,
-    )
-    .map_err(|e| CliError::Message(format!("failed to plan typecheck: {}", e)))?;
-    timing!("typecheck_plan", plan_start.elapsed());
+    )?;
+    timing!("typecheck", typecheck_start.elapsed());
 
-    if plan.is_up_to_date() {
-        verbose!("Typecheck artifacts unchanged — skipping type check");
-        if show_progress {
-            progress::info("Types unchanged, skipping type check");
-        }
-        return Ok(None);
-    }
-
-    let tc_start = Instant::now();
-    let result = typecheck::execute(
-        planned_project,
-        directory,
-        &settings.profile_name,
-        settings.profile_suffix(),
-        settings.variables(),
-        plan,
-    );
-
-    match result {
-        Ok(_) => {
-            timing!("typecheck", tc_start.elapsed());
-
-            let duration = typecheck_start.elapsed();
-            Ok(Some(duration))
-        }
-        Err(e) => Err(e.into()),
-    }
+    Ok(Some(typecheck_start.elapsed()))
 }
 
 /// Validate FK constraints before runtime typecheck.
