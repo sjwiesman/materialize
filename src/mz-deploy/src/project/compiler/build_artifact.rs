@@ -604,7 +604,7 @@ impl BuildArtifact {
     /// replaced (no partial updates).
     pub(crate) fn upsert_typecheck_results(
         &mut self,
-        rows: &[(String, String, String, &BTreeMap<String, ColumnType>)],
+        rows: &[(String, String, String, BTreeMap<String, ColumnType>)],
     ) -> Result<(), BuildArtifactError> {
         let tx = self.conn.transaction().map_err(|source| {
             BuildArtifactError::DatabaseOperationFailed {
@@ -656,7 +656,7 @@ impl BuildArtifact {
                         source,
                     }
                 })?;
-                for (col_name, col_type) in *columns {
+                for (col_name, col_type) in columns {
                     insert_col
                         .execute(params![
                             key,
@@ -1385,19 +1385,18 @@ mod tests {
             },
         ])
         .unwrap();
-        let empty_cols: BTreeMap<String, ColumnType> = BTreeMap::new();
         db.upsert_typecheck_results(&[
             (
                 "db.public.keep".into(),
                 "sem".into(),
                 "view".into(),
-                &empty_cols,
+                BTreeMap::new(),
             ),
             (
                 "db.public.drop".into(),
                 "sem".into(),
                 "view".into(),
-                &empty_cols,
+                BTreeMap::new(),
             ),
         ])
         .unwrap();

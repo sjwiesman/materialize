@@ -1,19 +1,7 @@
 //! Runtime typechecking integrated with the project compiler.
 //!
-//! ## Algorithm
-//!
-//! Typechecking runs in three phases:
-//!
-//! 1. Build the base catalog (serial): seeds builtins, namespaces, external
-//!    types, and all non-typechecked project objects.
-//! 2. Run the DAG executor (parallel): each view/MV is a node; tasks fire as
-//!    soon as their dependencies have produced column maps.
-//! 3. Persist successful outcomes to SQLite.
-//!
-//! ## Backend
-//!
 //! Validation runs against an `mz-deploy` in-memory catalog using `mz-sql`
-//! directly (see [`catalog`]).
+//! directly (see [`catalog`]). See [`run`] for the algorithm.
 
 use super::build_artifact::BuildArtifact;
 use crate::project::ast::Statement;
@@ -120,6 +108,20 @@ impl fmt::Display for ObjectTypeCheckError {
 
 impl std::error::Error for ObjectTypeCheckError {}
 
+impl ObjectTypeCheckError {
+    /// Build an internal-error variant with no SQL snippet, detail, or hint.
+    fn internal(object_id: ObjectId, file_path: PathBuf, error_message: String) -> Self {
+        Self {
+            object_id,
+            file_path,
+            sql_statement: String::new(),
+            error_message,
+            detail: None,
+            hint: None,
+        }
+    }
+}
+
 /// Collection of typecheck errors, rendered as a numbered error summary.
 #[derive(Debug)]
 pub struct TypeCheckErrors {
@@ -176,7 +178,6 @@ pub(crate) fn run(
         base_columns,
     } = base::build_base_catalog(project, &external_types)?;
 
-    // Identify the typecheck-eligible nodes (views and materialized views).
     let sorted = project.get_sorted_objects()?;
     let mut node_ids: Vec<ObjectId> = Vec::new();
     let mut typed_objects: BTreeMap<ObjectId, &crate::project::ir::compiled::DatabaseObject> =
@@ -190,28 +191,28 @@ pub(crate) fn run(
     }
     let node_set: BTreeSet<ObjectId> = node_ids.iter().cloned().collect();
 
-    // Build direct_deps / dependents restricted to view/MV nodes.
+    let reverse_graph = project.build_reverse_dependency_graph();
     let mut direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
     let mut dependents: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
     for node_id in &node_ids {
-        let deps = project
+        let node_deps = project
             .dependency_graph
             .get(node_id)
-            .cloned()
-            .unwrap_or_default();
-        let node_only_deps: Vec<ObjectId> = deps
-            .iter()
+            .into_iter()
+            .flatten()
             .filter(|d| node_set.contains(d))
             .cloned()
             .collect();
-        for dep_id in &node_only_deps {
-            dependents
-                .entry(dep_id.clone())
-                .or_default()
-                .push(node_id.clone());
-        }
-        direct_deps.insert(node_id.clone(), node_only_deps);
-        dependents.entry(node_id.clone()).or_default(); // ensure key exists
+        direct_deps.insert(node_id.clone(), node_deps);
+
+        let node_dependents = reverse_graph
+            .get(node_id)
+            .into_iter()
+            .flatten()
+            .filter(|d| node_set.contains(d))
+            .cloned()
+            .collect();
+        dependents.insert(node_id.clone(), node_dependents);
     }
 
     // Phase 2.
@@ -229,35 +230,26 @@ pub(crate) fn run(
                     .get(node_id)
                     .expect("typed_object exists for every scheduled node");
                 let mut runtime = (*base_catalog).clone();
-                // Stub view/MV deps from upstream task results.
                 for (dep_id, columns) in dep_results {
                     runtime
                         .create_stub_table(dep_id, columns.as_ref())
                         .map_err(|err| match err {
                             TypeCheckError::TypeCheckFailed(e) => e,
-                            other => ObjectTypeCheckError {
-                                object_id: dep_id.clone(),
-                                file_path: db_obj.path.clone(),
-                                sql_statement: String::new(),
-                                error_message: format!("failed to stub dependency: {other}"),
-                                detail: None,
-                                hint: None,
-                            },
+                            other => ObjectTypeCheckError::internal(
+                                dep_id.clone(),
+                                db_obj.path.clone(),
+                                format!("failed to stub dependency: {other}"),
+                            ),
                         })?;
                 }
-                // Base-column deps (tables, sources, externals) are already
-                // present in the cloned base catalog — no need to re-stub them.
                 let fqn: crate::project::ir::compiled::FullyQualifiedName = node_id.clone().into();
                 let sql =
                     catalog::create_catalog_item_sql(&db_obj.stmt, &fqn).ok_or_else(|| {
-                        ObjectTypeCheckError {
-                            object_id: node_id.clone(),
-                            file_path: db_obj.path.clone(),
-                            sql_statement: String::new(),
-                            error_message: "internal: failed to render catalog SQL".into(),
-                            detail: None,
-                            hint: None,
-                        }
+                        ObjectTypeCheckError::internal(
+                            node_id.clone(),
+                            db_obj.path.clone(),
+                            "internal: failed to render catalog SQL".into(),
+                        )
                     })?;
                 let desc = runtime.create_or_replace_item(node_id, &sql)?;
                 Ok(catalog::relation_desc_to_columns(&desc))
@@ -271,15 +263,18 @@ pub(crate) fn run(
     let mut merged_tables: BTreeMap<String, BTreeMap<String, ColumnType>> = BTreeMap::new();
     let mut merged_kinds: BTreeMap<String, ObjectKind> = BTreeMap::new();
 
-    // Seed merged maps from base_columns (tables/sources/etc.).
+    let project_objects_by_id: BTreeMap<&ObjectId, &crate::project::ir::compiled::DatabaseObject> =
+        project
+            .iter_objects()
+            .map(|o| (&o.id, &o.typed_object))
+            .collect();
     for (id, columns) in base_columns_arc.iter() {
         let key = id.to_string();
         merged_tables.insert(key.clone(), columns.clone());
-        if let Some(db_obj) = project.iter_objects().find(|o| o.id == *id) {
-            merged_kinds.insert(key, object_kind_for_stmt(&db_obj.typed_object.stmt));
+        if let Some(typed_obj) = project_objects_by_id.get(id) {
+            merged_kinds.insert(key, object_kind_for_stmt(&typed_obj.stmt));
         }
     }
-    // Seed from external types.lock so callers see the full surface.
     for (fqn, columns) in &external_types.tables {
         merged_tables.insert(fqn.clone(), columns.clone());
         if let Some(kind) = external_types.kinds.get(fqn) {
@@ -321,17 +316,12 @@ pub(crate) fn run(
         }
     }
 
-    // Persist successful outcomes; preserve the last successful row for objects
-    // that failed or were blocked in this run by *not* including them in the
-    // upsert. The keep-set passed to prune is every typecheck-eligible object
-    // currently in the project.
+    // Failed/blocked nodes keep their last successful row by being absent from
+    // upsert_rows. The keep-set retains every typecheck-eligible object so
+    // prune only deletes rows for objects no longer in the project.
     let mut db = BuildArtifact::open(directory, profile, profile_suffix, variables)
         .map_err(TypesError::from)?;
-    let row_refs: Vec<(String, String, String, &BTreeMap<String, ColumnType>)> = upsert_rows
-        .iter()
-        .map(|(k, sf, kind, cols)| (k.clone(), sf.clone(), kind.clone(), cols))
-        .collect();
-    db.upsert_typecheck_results(&row_refs)
+    db.upsert_typecheck_results(&upsert_rows)
         .map_err(TypesError::from)?;
     let keep: BTreeSet<String> = node_ids.iter().map(|id| id.to_string()).collect();
     db.prune_typecheck_results(&keep)

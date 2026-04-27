@@ -1,9 +1,9 @@
 //! Ready-queue DAG executor for parallel typechecking.
 //!
-//! Generic over a value type `T` produced by each node and a work closure that
-//! validates one node given its direct dependencies' results. The scheduler
-//! itself has no `LocalCatalog` knowledge — typecheck-specific work is supplied
-//! by the caller.
+//! Each node carries an `OnceLock<Result<Arc<T>, NodeFailure>>`. Workers pull
+//! ready nodes from a shared queue, run the supplied closure with the node's
+//! direct-dep results, set the result slot, then enqueue any dependent whose
+//! remaining-dep count reached zero.
 
 use crate::project::compiler::typecheck::ObjectTypeCheckError;
 use crate::project::ir::object_id::ObjectId;
@@ -62,8 +62,6 @@ where
         return BTreeMap::new();
     }
 
-    // Build per-node bookkeeping in an Arc-wrapped map so workers can
-    // resolve dep slots and dependent slots through shared lookups.
     let bookkeeping: BTreeMap<ObjectId, Arc<NodeBookkeeping<T>>> = nodes
         .iter()
         .map(|node_id| {
@@ -87,7 +85,6 @@ where
     let completed = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = unbounded::<ObjectId>();
 
-    // Seed the queue with nodes that already have zero remaining deps.
     for (node_id, bk) in bookkeeping.iter() {
         if bk.remaining_deps.load(Ordering::Relaxed) == 0 {
             tx.send(node_id.clone()).expect("channel open");
@@ -108,25 +105,21 @@ where
         }
     });
 
-    // Materialize outcomes in the caller's preferred order (insertion order of
-    // `nodes`).
-    let mut outcomes = BTreeMap::new();
-    for node_id in nodes {
-        let bk = bookkeeping
-            .get(&node_id)
-            .expect("bookkeeping entry exists for every node");
-        let outcome = match bk
-            .result
-            .get()
-            .expect("every node's result must be set before run() returns")
-        {
-            Ok(value) => NodeOutcome::Ok(Arc::clone(value)),
-            Err(NodeFailure::Failed(err)) => NodeOutcome::Err(NodeFailure::Failed(err.clone())),
-            Err(NodeFailure::Blocked(id)) => NodeOutcome::Err(NodeFailure::Blocked(id.clone())),
-        };
-        outcomes.insert(node_id, outcome);
-    }
-    outcomes
+    bookkeeping
+        .iter()
+        .map(|(node_id, bk)| {
+            let outcome = match bk
+                .result
+                .get()
+                .expect("every node's result must be set before run() returns")
+            {
+                Ok(value) => NodeOutcome::Ok(Arc::clone(value)),
+                Err(NodeFailure::Failed(err)) => NodeOutcome::Err(NodeFailure::Failed(err.clone())),
+                Err(NodeFailure::Blocked(id)) => NodeOutcome::Err(NodeFailure::Blocked(id.clone())),
+            };
+            (node_id.clone(), outcome)
+        })
+        .collect()
 }
 
 fn worker_loop<T, F>(
@@ -152,42 +145,17 @@ fn worker_loop<T, F>(
                 .expect("scheduled node has a bookkeeping entry"),
         );
 
-        // Gather direct dep results.
-        let mut dep_results: BTreeMap<ObjectId, Arc<T>> = BTreeMap::new();
-        let mut blocked_by: Option<ObjectId> = None;
-        for dep_id in &bk.direct_deps {
-            let dep_bk = bookkeeping
-                .get(dep_id)
-                .expect("dep has a bookkeeping entry");
-            match dep_bk
-                .result
-                .get()
-                .expect("dep result set before dependent runs")
-            {
-                Ok(value) => {
-                    dep_results.insert(dep_id.clone(), Arc::clone(value));
-                }
-                Err(_) => {
-                    blocked_by = Some(dep_id.clone());
-                    break;
-                }
-            }
-        }
-
-        let outcome: Result<Arc<T>, NodeFailure> = if let Some(dep_id) = blocked_by {
-            Err(NodeFailure::Blocked(dep_id))
-        } else {
-            match work(&node_id, &dep_results) {
+        let outcome = match gather_dep_results(&bk, &bookkeeping) {
+            Ok(deps) => match work(&node_id, &deps) {
                 Ok(value) => Ok(Arc::new(value)),
                 Err(err) => Err(NodeFailure::Failed(err)),
-            }
+            },
+            Err(blocker) => Err(NodeFailure::Blocked(blocker)),
         };
 
-        if bk.result.set(outcome).is_err() {
-            panic!(
-                "result slot is filled exactly once. Each node is enqueued exactly once via the prev == 1 transition, so set() runs at most once per slot."
-            );
-        }
+        bk.result
+            .set(outcome)
+            .unwrap_or_else(|_| panic!("result slot already filled for {node_id:?}"));
 
         for dependent_id in &bk.dependents {
             let dep_bk = bookkeeping
@@ -199,11 +167,36 @@ fn worker_loop<T, F>(
                 tx.send(dependent_id.clone()).expect("channel open");
             }
         }
-        // Bump after fan-out so any worker observing `completed == total`
-        // has transitively observed every node's fan-out writes (Release/Acquire pair
-        // with the loop predicate's load).
+        // Bump after fan-out so a worker that observes `completed == total`
+        // and exits has transitively observed every fan-out write
+        // (Release/Acquire pair with the loop predicate's load).
         completed.fetch_add(1, Ordering::Release);
     }
+}
+
+/// Collect direct-dep results for `bk`. Returns `Err(blocker_id)` on the first
+/// dep whose result is a failure.
+fn gather_dep_results<T>(
+    bk: &NodeBookkeeping<T>,
+    bookkeeping: &BTreeMap<ObjectId, Arc<NodeBookkeeping<T>>>,
+) -> Result<BTreeMap<ObjectId, Arc<T>>, ObjectId> {
+    let mut deps = BTreeMap::new();
+    for dep_id in &bk.direct_deps {
+        let dep_bk = bookkeeping
+            .get(dep_id)
+            .expect("dep has a bookkeeping entry");
+        match dep_bk
+            .result
+            .get()
+            .expect("dep result set before dependent runs")
+        {
+            Ok(value) => {
+                deps.insert(dep_id.clone(), Arc::clone(value));
+            }
+            Err(_) => return Err(dep_id.clone()),
+        }
+    }
+    Ok(deps)
 }
 
 #[cfg(test)]
@@ -212,7 +205,6 @@ mod tests {
 
     #[test]
     fn node_outcome_types_compile() {
-        // Sanity: enums are public to the typecheck module and parameterize correctly.
         let _: NodeOutcome<i32> = NodeOutcome::Ok(Arc::new(7));
         let _: NodeOutcome<i32> = NodeOutcome::Err(NodeFailure::Blocked(ObjectId {
             database: "d".into(),
@@ -265,7 +257,6 @@ mod tests {
 
     #[test]
     fn linear_chain_threads_results() {
-        // a -> b -> c
         let a = id("a");
         let b = id("b");
         let c = id("c");
@@ -286,7 +277,6 @@ mod tests {
         .collect();
 
         let outcomes = run::<u64, _>(nodes, direct_deps, dependents, |_id, deps| {
-            // Each node returns 1 + sum of dep values; chain produces 1, 2, 3.
             let upstream: u64 = deps.values().map(|v| **v).sum();
             Ok(1 + upstream)
         });

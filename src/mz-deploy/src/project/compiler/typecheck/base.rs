@@ -36,11 +36,7 @@ pub(super) fn build_base_catalog(
 
     // Stub external types.lock entries.
     for (fqn, columns) in &external_types.tables {
-        let Some(object_id) = parse_external_fqn(fqn) else {
-            // Malformed FQN in types.lock; skip silently to match historic
-            // behavior of bootstrap_namespaces.
-            continue;
-        };
+        let Some(object_id) = fqn.parse::<ObjectId>();
         runtime.create_stub_table(&object_id, columns)?;
     }
 
@@ -75,17 +71,5 @@ pub(super) fn build_base_catalog(
     Ok(BaseCatalog {
         catalog: Arc::new(runtime),
         base_columns,
-    })
-}
-
-fn parse_external_fqn(fqn: &str) -> Option<ObjectId> {
-    let mut parts = fqn.splitn(3, '.');
-    let database = parts.next()?.to_string();
-    let schema = parts.next()?.to_string();
-    let object = parts.next()?.to_string();
-    Some(ObjectId {
-        database,
-        schema,
-        object,
     })
 }
