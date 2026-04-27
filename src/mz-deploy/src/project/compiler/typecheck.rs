@@ -435,7 +435,6 @@ pub(crate) fn run(
     let base_columns_arc = Arc::new(base_columns);
     let outcomes = {
         let typed_objects = Arc::clone(&typed_objects);
-        let base_columns = Arc::clone(&base_columns_arc);
         let base_catalog = Arc::clone(&base_catalog);
         executor::run::<BTreeMap<String, ColumnType>, _>(
             node_ids.clone(),
