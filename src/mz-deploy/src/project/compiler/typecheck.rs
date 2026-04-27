@@ -247,18 +247,18 @@ pub(crate) fn run(
                 }
                 // Base-column deps (tables, sources, externals) are already
                 // present in the cloned base catalog — no need to re-stub them.
-                let fqn: crate::project::ir::compiled::FullyQualifiedName =
-                    node_id.clone().into();
-                let sql = catalog::create_catalog_item_sql(&db_obj.stmt, &fqn).ok_or_else(|| {
-                    ObjectTypeCheckError {
-                        object_id: node_id.clone(),
-                        file_path: db_obj.path.clone(),
-                        sql_statement: String::new(),
-                        error_message: "internal: failed to render catalog SQL".into(),
-                        detail: None,
-                        hint: None,
-                    }
-                })?;
+                let fqn: crate::project::ir::compiled::FullyQualifiedName = node_id.clone().into();
+                let sql =
+                    catalog::create_catalog_item_sql(&db_obj.stmt, &fqn).ok_or_else(|| {
+                        ObjectTypeCheckError {
+                            object_id: node_id.clone(),
+                            file_path: db_obj.path.clone(),
+                            sql_statement: String::new(),
+                            error_message: "internal: failed to render catalog SQL".into(),
+                            detail: None,
+                            hint: None,
+                        }
+                    })?;
                 let desc = runtime.create_or_replace_item(node_id, &sql)?;
                 Ok(catalog::relation_desc_to_columns(&desc))
             },
@@ -267,12 +267,7 @@ pub(crate) fn run(
 
     // Phase 3.
     let mut errors: Vec<ObjectTypeCheckError> = Vec::new();
-    let mut upsert_rows: Vec<(
-        String,
-        String,
-        String,
-        BTreeMap<String, ColumnType>,
-    )> = Vec::new();
+    let mut upsert_rows: Vec<(String, String, String, BTreeMap<String, ColumnType>)> = Vec::new();
     let mut merged_tables: BTreeMap<String, BTreeMap<String, ColumnType>> = BTreeMap::new();
     let mut merged_kinds: BTreeMap<String, ObjectKind> = BTreeMap::new();
 
@@ -491,7 +486,15 @@ mod run_tests {
         );
 
         let project = compile_sync(root, "default", None, &BTreeMap::new()).unwrap();
-        let merged = run(root, "default", None, &BTreeMap::new(), &project, Types::default()).unwrap();
+        let merged = run(
+            root,
+            "default",
+            None,
+            &BTreeMap::new(),
+            &project,
+            Types::default(),
+        )
+        .unwrap();
 
         // The view is in the merged Types map.
         assert!(merged.tables.contains_key("materialize.public.v1"));

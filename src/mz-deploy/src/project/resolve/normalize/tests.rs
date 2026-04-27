@@ -336,7 +336,6 @@ fn test_complex_multi_cte_query() {
     }
 }
 
-
 #[test]
 fn test_implicit_alias_unqualified_table() {
     // Test that unqualified table names get implicit aliases
@@ -540,7 +539,6 @@ fn test_implicit_alias_in_lateral_join() {
     }
 }
 
-
 #[test]
 fn test_having_clause_with_subquery() {
     // Test that subqueries in HAVING clauses are normalized
@@ -654,7 +652,6 @@ fn test_having_with_cte_reference() {
         panic!("Expected CreateView statement");
     }
 }
-
 
 #[test]
 fn test_and_operator_with_subqueries() {
@@ -828,7 +825,6 @@ fn test_arithmetic_operators_with_subqueries() {
     }
 }
 
-
 #[test]
 fn test_schema_qualified_with_having_subquery() {
     // Integration test: schema-qualified tables with HAVING subquery
@@ -971,7 +967,6 @@ fn test_wmr_with_operators_and_having() {
         panic!("Expected CreateView statement");
     }
 }
-
 
 #[test]
 fn test_flattening_unqualified_name() {
@@ -1130,7 +1125,6 @@ fn test_flattening_cte_not_flattened() {
         panic!("Expected CreateView statement");
     }
 }
-
 
 use crate::project::ir::object_id::ObjectId;
 use std::collections::BTreeSet;
@@ -1630,7 +1624,6 @@ fn test_staging_cte_not_transformed() {
         panic!("Expected CreateView statement");
     }
 }
-
 
 #[test]
 fn test_nested_cte_in_derived_table() {

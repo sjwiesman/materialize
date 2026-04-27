@@ -329,9 +329,9 @@ pub(crate) fn validate_schema_mod_statements(
                                     SetVariableValue::Ident(ident) => {
                                         ident.as_str().eq_ignore_ascii_case("stable")
                                     }
-                                    SetVariableValue::Literal(
-                                        Value::String(s),
-                                    ) => s.eq_ignore_ascii_case("stable"),
+                                    SetVariableValue::Literal(Value::String(s)) => {
+                                        s.eq_ignore_ascii_case("stable")
+                                    }
                                     SetVariableValue::Literal(_) => false,
                                 }
                         }

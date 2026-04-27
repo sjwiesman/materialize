@@ -103,9 +103,9 @@ fn first_string_arg(args: &[Value]) -> Option<&str> {
 }
 
 fn load_settings_inner(root: &Path) -> std::result::Result<Settings, String> {
-    // `needs_connection: false` — test doesn't need a live DB connection and
-    // explain establishes its own per-run; this matches main.rs:852-855 which
-    // flags the CLI path the same way.
+    // `needs_connection: false` — neither test nor explain needs a live DB
+    // connection (both run against an ephemeral Docker container); this matches
+    // main.rs which flags the CLI path the same way.
     Settings::load(root.to_path_buf(), None, None, false, None)
         .map_err(|e| format!("failed to load project settings: {e}"))
 }

@@ -136,9 +136,9 @@ enum Command {
 
     /// Show the EXPLAIN plan for a materialized view or index
     ///
-    /// Compiles the project, stages the target object's dependencies in a
-    /// temporary schema on the live Materialize instance, creates the target,
-    /// and runs EXPLAIN. The temporary schema is always dropped after completion.
+    /// Compiles the project, stages the target object's dependencies in an
+    /// ephemeral Materialize Docker container, creates the target, and runs
+    /// EXPLAIN to show the query plan. Requires Docker to be running.
     ///
     /// All objects are created on the `quickstart` cluster regardless of
     /// what cluster is specified in the project.
@@ -849,14 +849,13 @@ async fn run(args: Args) -> Result<(), CliError> {
         };
     }
 
-    // Handle lsp before Settings::load — it doesn't need connection or project.toml
     if let Some(Command::Lsp) = &args.command {
         return mz_deploy::lsp::run(args.directory).await;
     }
 
     let needs_connection = !matches!(
         &args.command,
-        Some(Command::Compile { .. }) | Some(Command::Test { .. })
+        Some(Command::Compile { .. }) | Some(Command::Test { .. }) | Some(Command::Explain { .. })
     );
     let settings = Settings::load(
         args.directory,

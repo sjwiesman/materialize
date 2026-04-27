@@ -420,8 +420,7 @@ pub async fn run(
     verbose!("Apply state: {:?}", apply_state);
 
     let staging_snapshot =
-        deployment_snapshot::load_from_database(&client, Some(deploy_id))
-            .await?;
+        deployment_snapshot::load_from_database(&client, Some(deploy_id)).await?;
     verbose!(
         "Found {} objects in staging deployment",
         staging_snapshot.objects.len()
@@ -594,8 +593,7 @@ async fn gather_resources_and_check_conflicts(
     // Load production snapshot to check which schemas are already Replacement.
     // This distinguishes Objects→Replacement transitions (need swap) from
     // steady-state Replacement deploys (skip swap, use APPLY REPLACEMENT).
-    let production_snapshot =
-        deployment_snapshot::load_from_database(client, None).await?;
+    let production_snapshot = deployment_snapshot::load_from_database(client, None).await?;
 
     // Build list of (database, staging_schema) pairs to check, filtering out Sinks
     // and steady-state Replacement schemas (already Replacement in production).

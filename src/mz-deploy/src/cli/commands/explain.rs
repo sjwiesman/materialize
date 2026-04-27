@@ -1,8 +1,8 @@
 //! Explain command — show the EXPLAIN plan for a materialized view or index.
 //!
-//! This command compiles the project, stages the target object's dependencies
-//! in a dedicated schema on the live Materialize instance, creates the target,
-//! and runs `EXPLAIN` to show the query plan.
+//! This command compiles the project, spins up an ephemeral Materialize Docker
+//! container, stages the target object's dependencies in a dedicated schema,
+//! creates the target, and runs `EXPLAIN` to show the query plan.
 //!
 //! ## Target Format
 //!
@@ -24,14 +24,17 @@
 //!
 //! ## Schema Lifecycle
 //!
-//! A dedicated schema `_mz_explain_<uuid>` is created before staging and
-//! dropped with `CASCADE` after completion (even on error).
+//! The target's database is created with `IF NOT EXISTS` and a dedicated
+//! schema `_mz_explain_<timestamp>` is created before staging. The schema is
+//! dropped with `CASCADE` after completion (even on error). The Docker
+//! container itself is reused across runs.
 
 use crate::cli::CliError;
 use crate::cli::commands::compile;
 use crate::client::Client;
 use crate::client::quote_identifier;
 use crate::config::Settings;
+use crate::docker_runtime::{DockerRuntime, DockerRuntimeError};
 use crate::project::ast::Statement;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::graph;
@@ -86,8 +89,9 @@ impl fmt::Display for ExplainOutput {
 
 /// Run the explain command.
 ///
-/// Compiles the project, stages dependencies in a temporary schema on the live
-/// Materialize instance, creates the target object, runs EXPLAIN, and cleans up.
+/// Compiles the project, spins up an ephemeral Materialize Docker container,
+/// stages dependencies in a temporary schema, creates the target object, runs
+/// EXPLAIN, and cleans up.
 pub async fn run(settings: &Settings, target: &str) -> Result<(), CliError> {
     let target = parse_target(target)?;
 
@@ -115,15 +119,28 @@ pub async fn run(settings: &Settings, target: &str) -> Result<(), CliError> {
             .or_else(|| types_lock.get_table(fqn).cloned())
     };
 
-    // Connect to live Materialize
-    let client = Client::connect_with_profile(settings.connection().clone())
-        .await
-        .map_err(CliError::Connection)?;
+    // Connect to ephemeral Materialize Docker container
+    let runtime = DockerRuntime::new().with_image(&settings.docker_image);
+    let client = match runtime.get_client().await {
+        Ok(client) => client,
+        Err(DockerRuntimeError::ContainerStartFailed(e)) => {
+            return Err(CliError::Message(format!(
+                "Docker not available for running explain: {}",
+                e
+            )));
+        }
+        Err(e) => {
+            return Err(CliError::Message(format!(
+                "Failed to start explain environment: {}",
+                e
+            )));
+        }
+    };
 
     // Build the staging plan (pure core)
     let actions = plan_staging(&project, &target, &target_cluster, &get_columns)?;
 
-    // Generate a unique schema name using timestamp + random suffix
+    // Generate a unique schema name using timestamp
     let explain_schema = format!(
         "_mz_explain_{}",
         std::time::SystemTime::now()
@@ -439,8 +456,11 @@ fn get_columns_for_stub(
                 .options
                 .iter()
                 .any(|opt| matches!(opt.option, ColumnOption::NotNull));
+            // Use `as_str()` to get the raw identifier — `to_string()` would
+            // wrap non-bare names in literal quotes, which we'd then re-quote
+            // when building the stub table SQL.
             columns.insert(
-                col.name.to_string(),
+                col.name.as_str().to_string(),
                 ColumnType {
                     r#type: col.data_type.to_string(),
                     nullable,
@@ -468,6 +488,19 @@ async fn execute_explain(
     target_typed_obj: &crate::project::ir::compiled::DatabaseObject,
     target_cluster: &str,
 ) -> Result<String, CliError> {
+    // Create the explain database (the Docker container starts empty, so the
+    // user's target database may not exist). Idempotent so reused containers
+    // are fine.
+    let create_db_sql = format!(
+        "CREATE DATABASE IF NOT EXISTS {}",
+        quote_identifier(explain_db),
+    );
+    verbose!("Creating explain database: {}", create_db_sql);
+    client
+        .execute(&create_db_sql, &[])
+        .await
+        .map_err(|e| CliError::Message(format!("failed to create explain database: {}", e)))?;
+
     // Create the explain schema
     let create_schema_sql = format!(
         "CREATE SCHEMA {}.{}",

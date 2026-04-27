@@ -1024,7 +1024,6 @@ mod tests {
         assert!(sql.contains("AS OF '2024-01-15 10:00:00'::mz_timestamp"));
     }
 
-
     fn make_test_types() -> Types {
         let mut objects = BTreeMap::new();
 
@@ -1557,7 +1556,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_normalize_fqn_unqualified() {
         let target_id = ObjectId {
@@ -1593,7 +1591,6 @@ mod tests {
         let normalized = normalize_fqn("other_db.other_schema.users", &target_id);
         assert_eq!(normalized, "other_db.other_schema.users");
     }
-
 
     #[test]
     fn test_normalize_type_integer_aliases() {
@@ -1779,7 +1776,6 @@ mod tests {
         assert_eq!(normalize_type("json"), normalize_type("JSON"));
     }
 
-
     #[test]
     fn test_compare_columns_exact_match() {
         let test_columns = vec![
@@ -1920,7 +1916,6 @@ mod tests {
         assert_eq!(type_mismatches[0].2, "bigint");
     }
 
-
     #[test]
     fn test_validate_with_unqualified_mock_name() {
         // Test that unqualified mock names get resolved correctly
@@ -2043,7 +2038,6 @@ mod tests {
         );
         assert!(result.is_ok());
     }
-
 
     #[test]
     fn test_normalize_type_list() {

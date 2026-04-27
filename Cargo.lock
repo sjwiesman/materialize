@@ -6338,6 +6338,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "crossbeam-channel",
  "crossterm",
  "dirs",
  "futures",

@@ -399,7 +399,6 @@ mod tests {
         revocations.iter().map(|r| r.to_string()).collect()
     }
 
-
     #[test]
     fn test_desired_grants_single_privilege_single_role() {
         let grant = parse_grant("GRANT USAGE ON CLUSTER my_cluster TO reader");
@@ -488,7 +487,6 @@ mod tests {
         assert!(result.contains(&("admin".to_string(), "UPDATE".to_string())));
         assert!(result.contains(&("admin".to_string(), "DELETE".to_string())));
     }
-
 
     #[test]
     fn test_stale_grant_revocations_no_stale() {
@@ -654,7 +652,6 @@ mod tests {
         assert!(strings[0].contains("writer"));
         assert!(!strings[0].contains("reader"));
     }
-
 
     #[test]
     fn test_end_to_end_no_revocations_when_grants_match() {

@@ -7,12 +7,11 @@
 
 use crate::project::compiler::typecheck::ObjectTypeCheckError;
 use crate::project::ir::object_id::ObjectId;
-use crossbeam_channel::{unbounded, RecvTimeoutError};
+use crossbeam_channel::{RecvTimeoutError, unbounded};
 use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Reason a node did not produce a successful result.
@@ -57,17 +56,15 @@ pub(super) fn run<T, F>(
 ) -> BTreeMap<ObjectId, NodeOutcome<T>>
 where
     T: Send + Sync + 'static,
-    F: Fn(&ObjectId, &BTreeMap<ObjectId, Arc<T>>) -> Result<T, ObjectTypeCheckError>
-        + Send
-        + Sync,
+    F: Fn(&ObjectId, &BTreeMap<ObjectId, Arc<T>>) -> Result<T, ObjectTypeCheckError> + Send + Sync,
 {
     if nodes.is_empty() {
         return BTreeMap::new();
     }
 
-    // Build per-node bookkeeping in an Arc-wrapped HashMap so workers can
+    // Build per-node bookkeeping in an Arc-wrapped map so workers can
     // resolve dep slots and dependent slots through shared lookups.
-    let bookkeeping: HashMap<ObjectId, Arc<NodeBookkeeping<T>>> = nodes
+    let bookkeeping: BTreeMap<ObjectId, Arc<NodeBookkeeping<T>>> = nodes
         .iter()
         .map(|node_id| {
             let deps = direct_deps.remove(node_id).unwrap_or_default();
@@ -135,15 +132,13 @@ where
 fn worker_loop<T, F>(
     rx: crossbeam_channel::Receiver<ObjectId>,
     tx: crossbeam_channel::Sender<ObjectId>,
-    bookkeeping: Arc<HashMap<ObjectId, Arc<NodeBookkeeping<T>>>>,
+    bookkeeping: Arc<BTreeMap<ObjectId, Arc<NodeBookkeeping<T>>>>,
     completed: Arc<AtomicUsize>,
     total: usize,
     work: &F,
 ) where
     T: Send + Sync + 'static,
-    F: Fn(&ObjectId, &BTreeMap<ObjectId, Arc<T>>) -> Result<T, ObjectTypeCheckError>
-        + Send
-        + Sync,
+    F: Fn(&ObjectId, &BTreeMap<ObjectId, Arc<T>>) -> Result<T, ObjectTypeCheckError> + Send + Sync,
 {
     while completed.load(Ordering::Acquire) < total {
         let node_id = match rx.recv_timeout(Duration::from_millis(10)) {
@@ -151,10 +146,11 @@ fn worker_loop<T, F>(
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let bk = bookkeeping
-            .get(&node_id)
-            .expect("scheduled node has a bookkeeping entry")
-            .clone();
+        let bk = Arc::clone(
+            bookkeeping
+                .get(&node_id)
+                .expect("scheduled node has a bookkeeping entry"),
+        );
 
         // Gather direct dep results.
         let mut dep_results: BTreeMap<ObjectId, Arc<T>> = BTreeMap::new();
@@ -210,7 +206,6 @@ fn worker_loop<T, F>(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,14 +245,10 @@ mod tests {
     #[test]
     fn independent_leaves_run_to_completion() {
         let nodes = vec![id("a"), id("b"), id("c"), id("d")];
-        let direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> = nodes
-            .iter()
-            .map(|id| (id.clone(), Vec::new()))
-            .collect();
-        let dependents: BTreeMap<ObjectId, Vec<ObjectId>> = nodes
-            .iter()
-            .map(|id| (id.clone(), Vec::new()))
-            .collect();
+        let direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> =
+            nodes.iter().map(|id| (id.clone(), Vec::new())).collect();
+        let dependents: BTreeMap<ObjectId, Vec<ObjectId>> =
+            nodes.iter().map(|id| (id.clone(), Vec::new())).collect();
 
         let outcomes = run::<String, _>(nodes.clone(), direct_deps, dependents, |id, _deps| {
             Ok(id.object.clone())
@@ -313,8 +304,8 @@ mod tests {
 
     #[test]
     fn diamond_dispatches_b_and_c_in_parallel() {
-        use std::sync::atomic::AtomicI32;
         use std::sync::Mutex;
+        use std::sync::atomic::AtomicI32;
 
         // a -> {b, c} -> d, where b and c park briefly so we can verify both
         // are in flight simultaneously.

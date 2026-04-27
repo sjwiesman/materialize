@@ -1034,7 +1034,6 @@ pub(super) async fn get_deployment_hydration_status(
     Ok(results)
 }
 
-
 /// Create apply state schemas with comments for tracking apply progress.
 ///
 /// Creates two schemas in `_mz_deploy`:
@@ -1162,7 +1161,6 @@ pub(super) async fn delete_apply_state_schemas(
 
     Ok(())
 }
-
 
 /// Insert pending statements for deferred execution (e.g., sinks).
 pub(super) async fn insert_pending_statements(
