@@ -1,27 +1,23 @@
 //! Catalog-backed runtime typechecking.
 //!
-//! Validates dirty objects against an in-memory catalog built from `mz-sql`,
+//! Validates objects against an in-memory catalog built from `mz-sql`,
 //! without requiring a running Materialize container. This backend is faster
 //! and more portable than the Docker backend, at the cost of lower fidelity
 //! (the in-memory catalog may not reproduce all Materialize behaviors).
 //!
 //! **Key invariant:** Each catalog instance is scoped to a single typecheck
-//! run. A fresh catalog is created for each `execute()` call, populated with
-//! the object's dependencies, then discarded. This avoids state leaking
-//! between validation of unrelated objects.
+//! run. A fresh catalog is created for each object's validation, populated
+//! with its dependencies, then discarded. This avoids state leaking between
+//! validation of unrelated objects.
 
-use super::{
-    CompletedState, DepAction, DepContext, IncrementalState, ObjectTypeCheckError, TypeCheckError,
-    TypeCheckErrors, TypecheckPlan, TypecheckedObjectArtifact, compute_semantic_fingerprint,
-    object_kind_for_stmt, plan_dep_creation, requires_typecheck, write_typecheck_outputs,
-};
+use super::{ObjectTypeCheckError, TypeCheckError};
 use crate::client::quote_identifier;
 use crate::project::ast::Statement as ProjectStatement;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::object_id::ObjectId;
 use crate::project::resolve::normalize::NormalizingVisitor;
-use crate::types::{ColumnType, type_hash};
-use crate::{timing, verbose};
+use crate::types::ColumnType;
+use crate::timing;
 use chrono::Utc;
 use mz_build_info::DUMMY_BUILD_INFO;
 use mz_catalog::builtin::{BUILTINS, Builtin, BuiltinType};
@@ -62,296 +58,13 @@ use mz_storage_types::connections::inline::{
 use mz_storage_types::sources::{SourceDesc, SourceExportDataConfig, SourceExportDetails};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
 const DEFAULT_CLUSTER_NAME: &str = "mz_deploy";
 const FIRST_USER_OID: u32 = 50_000;
-
-/// Execute one incremental typecheck run against an in-memory catalog.
-///
-/// Validates dirty objects, writes updated artifacts to the build artifact
-/// database, and returns a new [`TypecheckPlan`] with merged type metadata.
-pub(super) fn execute(
-    project: &super::Project,
-    project_root: &Path,
-    profile: &str,
-    profile_suffix: Option<&str>,
-    variables: &BTreeMap<String, String>,
-    state: IncrementalState,
-    cached_types: &super::Types,
-    external_types: &super::Types,
-    current_fingerprints: BTreeMap<ObjectId, String>,
-) -> Result<TypecheckPlan, TypeCheckError> {
-    let execute_start = Instant::now();
-    let sorted_objects = project.get_sorted_objects()?;
-
-    verbose!(
-        "Type checking {} runtime object(s) with mz-deploy catalog",
-        sorted_objects.len()
-    );
-
-    let incremental_start = Instant::now();
-    let completed_state = typecheck_incremental(
-        project,
-        &sorted_objects,
-        cached_types,
-        external_types,
-        state,
-    )?;
-    timing!("  catalog: incremental", incremental_start.elapsed());
-
-    let write_start = Instant::now();
-    write_typecheck_outputs(
-        project_root,
-        profile,
-        profile_suffix,
-        variables,
-        &current_fingerprints,
-        &completed_state.updated_artifacts,
-    )?;
-    timing!("  catalog: write_outputs", write_start.elapsed());
-    timing!("catalog: total", execute_start.elapsed());
-
-    Ok(TypecheckPlan {
-        state: None,
-        cached_types: completed_state.merged_types,
-        external_types: external_types.clone(),
-        current_fingerprints,
-    })
-}
-
-/// Core incremental typecheck loop.
-///
-/// Validates dirty objects against the in-memory catalog in topological order.
-/// For each dirty object, ensures its dependencies exist in the catalog (as
-/// stubs or full items), then parses, resolves, and type-checks the object's
-/// SQL. Column changes are reported to the dirty propagator, which may cascade
-/// re-validation to downstream dependents.
-fn typecheck_incremental(
-    project: &super::Project,
-    sorted_objects: &[(ObjectId, &crate::project::ir::compiled::DatabaseObject)],
-    cached_types: &super::Types,
-    external_types: &super::Types,
-    state: IncrementalState,
-) -> Result<CompletedState, TypeCheckError> {
-    let total_start = Instant::now();
-    let setup_start = Instant::now();
-    let reverse_deps = project.build_reverse_dependency_graph();
-    let propagator_start = Instant::now();
-    let mut propagator = super::DirtyPropagator::new(
-        state.dirty,
-        cached_types.clone(),
-        reverse_deps,
-        state.previous_artifacts,
-    );
-    timing!("  catalog: dirty_propagator", propagator_start.elapsed());
-    let mut created = BTreeSet::new();
-
-    let object_map_start = Instant::now();
-    let object_map: BTreeMap<ObjectId, &crate::project::ir::compiled::DatabaseObject> =
-        sorted_objects
-            .iter()
-            .map(|(oid, obj)| (oid.clone(), *obj))
-            .collect();
-    timing!("  catalog: object_map", object_map_start.elapsed());
-
-    let ctx = DepContext {
-        cached_types,
-        external_types,
-        object_map: &object_map,
-        dependency_graph: &project.dependency_graph,
-    };
-
-    let open_start = Instant::now();
-    let mut runtime = CatalogRuntime::open()?;
-    timing!("  catalog: open", open_start.elapsed());
-    let bootstrap_start = Instant::now();
-    runtime.bootstrap_namespaces(project, external_types);
-    timing!("  catalog: bootstrap_namespaces", bootstrap_start.elapsed());
-    timing!("  catalog: setup", setup_start.elapsed());
-    let mut errors = Vec::new();
-
-    let object_loop_start = Instant::now();
-    for (object_id, typed_object) in sorted_objects {
-        if !requires_typecheck(&typed_object.stmt) || !propagator.is_dirty(object_id) {
-            continue;
-        }
-
-        let object_start = Instant::now();
-        if let Some(deps) = project.dependency_graph.get(object_id) {
-            let deps_start = Instant::now();
-            for dep in deps {
-                ensure_dep_exists(dep, &mut created, &mut runtime, &ctx)?;
-            }
-            timing!(
-                &format!("    deps: total {}", object_id),
-                deps_start.elapsed()
-            );
-        }
-
-        verbose!("Type checking (dirty, catalog): {}", object_id);
-
-        let fqn = object_id.clone().into();
-        let sql_start = Instant::now();
-        let Some(sql) = create_catalog_item_sql(&typed_object.stmt, &fqn) else {
-            timing!(
-                &format!("    object: sql_normalize {}", object_id),
-                sql_start.elapsed()
-            );
-            timing!(
-                &format!("  catalog: object {}", object_id),
-                object_start.elapsed()
-            );
-            continue;
-        };
-        timing!(
-            &format!("    object: sql_normalize {}", object_id),
-            sql_start.elapsed()
-        );
-
-        let create_start = Instant::now();
-        match runtime.create_or_replace_item(object_id, &sql) {
-            Ok(desc) => {
-                timing!(
-                    &format!("    object: create_or_replace {}", object_id),
-                    create_start.elapsed()
-                );
-                let columns_start = Instant::now();
-                let new_columns = relation_desc_to_columns(&desc);
-                timing!(
-                    &format!("    object: relation_desc_to_columns {}", object_id),
-                    columns_start.elapsed()
-                );
-                let report_start = Instant::now();
-                propagator.report_columns(
-                    object_id,
-                    TypecheckedObjectArtifact {
-                        semantic_fingerprint: compute_semantic_fingerprint(typed_object),
-                        output_fingerprint: type_hash(&new_columns),
-                        columns: new_columns,
-                        object_kind: object_kind_for_stmt(&typed_object.stmt),
-                    },
-                );
-                timing!(
-                    &format!("    object: report_columns {}", object_id),
-                    report_start.elapsed()
-                );
-            }
-            Err(error) => {
-                timing!(
-                    &format!("    object: create_or_replace {}", object_id),
-                    create_start.elapsed()
-                );
-                verbose!("  ✗ Type check failed: {}", error.error_message);
-                errors.push(error);
-            }
-        }
-
-        created.insert(object_id.to_string());
-        timing!(
-            &format!("  catalog: object {}", object_id),
-            object_start.elapsed()
-        );
-    }
-    timing!("  catalog: object_loop", object_loop_start.elapsed());
-
-    if !errors.is_empty() {
-        return Err(TypeCheckError::Multiple(TypeCheckErrors { errors }));
-    }
-
-    let view_ids: Vec<ObjectId> = sorted_objects
-        .iter()
-        .filter(|(_, typed_obj)| requires_typecheck(&typed_obj.stmt))
-        .map(|(oid, _)| oid.clone())
-        .collect();
-
-    let merge_start = Instant::now();
-    let completed = CompletedState {
-        merged_types: propagator.into_merged_cache(&view_ids),
-        updated_artifacts: propagator.into_updated_artifacts(&view_ids),
-    };
-    timing!("  catalog: finalize", merge_start.elapsed());
-    timing!("catalog: incremental_total", total_start.elapsed());
-    Ok(completed)
-}
-
-/// Ensure all dependencies of a dirty object exist in the catalog.
-///
-/// Processes dependency actions in order — each dependency is either stubbed
-/// from cached/external schemas or created from its compiled definition.
-/// Skips dependencies that have already been created in this run.
-fn ensure_dep_exists(
-    dep_id: &ObjectId,
-    created: &mut BTreeSet<String>,
-    runtime: &mut CatalogRuntime,
-    ctx: &DepContext<'_>,
-) -> Result<(), TypeCheckError> {
-    let plan_start = Instant::now();
-    let actions = plan_dep_creation(dep_id, created, ctx);
-    timing!(
-        &format!("      deps: plan_actions {}", dep_id),
-        plan_start.elapsed()
-    );
-    for action in actions {
-        let object_id = action.object_id();
-        let fqn = object_id.to_string();
-        if created.contains(&fqn) {
-            timing!(
-                &format!("      deps: skip_existing {}", object_id),
-                std::time::Duration::ZERO
-            );
-            continue;
-        }
-
-        match action {
-            DepAction::StubInternal(_) => {
-                let stub_start = Instant::now();
-                let cols = ctx
-                    .cached_types
-                    .get_table(&fqn)
-                    .expect("cached stub exists");
-                runtime.create_stub_table(object_id, cols)?;
-                timing!(
-                    &format!("      deps: stub_internal {}", object_id),
-                    stub_start.elapsed()
-                );
-            }
-            DepAction::StubExternal(_) => {
-                let stub_start = Instant::now();
-                let cols = ctx
-                    .external_types
-                    .get_table(&fqn)
-                    .expect("external stub exists");
-                runtime.create_stub_table(object_id, cols)?;
-                timing!(
-                    &format!("      deps: stub_external {}", object_id),
-                    stub_start.elapsed()
-                );
-            }
-            DepAction::CreateFromAst(id) => {
-                let ast_start = Instant::now();
-                let typed_object = ctx
-                    .object_map
-                    .get(&id)
-                    .expect("CreateFromAst only emitted when object exists");
-                let fqn = id.clone().into();
-                if let Some(sql) = create_catalog_item_sql(&typed_object.stmt, &fqn) {
-                    runtime.create_or_replace_item(&id, &sql).map(|_| ())?;
-                }
-                timing!(
-                    &format!("      deps: create_from_ast {}", id),
-                    ast_start.elapsed()
-                );
-            }
-        }
-
-        created.insert(fqn);
-    }
-    Ok(())
-}
 
 /// Runtime state for a single catalog-based typecheck run.
 ///
