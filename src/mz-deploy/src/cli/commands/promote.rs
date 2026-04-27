@@ -997,34 +997,29 @@ async fn repoint_dependent_sinks(client: &Client, plan: &DeploymentPlan) -> Resu
         })
         .collect();
 
-    let existing_fqns: BTreeSet<String> = client
+    let existing_ids = client
         .introspection()
         .check_objects_exist(&replacement_ids)
         .await
-        .map_err(CliError::Connection)?
-        .into_iter()
-        .collect();
+        .map_err(CliError::Connection)?;
 
     for sink in dependent_sinks {
         // Compute new schema name (strip suffix to get production schema name)
         let new_schema = sink.dependency_schema.trim_end_matches(staging_suffix);
 
-        // Check if replacement object exists using batch result
-        let replacement_fqn = format!(
-            "{}.{}.{}",
-            sink.dependency_database, new_schema, sink.dependency_name
-        );
+        let replacement_id = ObjectId {
+            database: sink.dependency_database.clone(),
+            schema: new_schema.to_string(),
+            object: sink.dependency_name.clone(),
+        };
 
-        if !existing_fqns.contains(&replacement_fqn) {
+        if !existing_ids.contains(&replacement_id) {
             return Err(CliError::SinkRepointFailed {
                 sink: format!(
                     "{}.{}.{}",
                     sink.sink_database, sink.sink_schema, sink.sink_name
                 ),
-                reason: format!(
-                    "replacement object {}.{}.{} does not exist",
-                    sink.dependency_database, new_schema, sink.dependency_name
-                ),
+                reason: format!("replacement object {} does not exist", replacement_id),
             });
         }
 

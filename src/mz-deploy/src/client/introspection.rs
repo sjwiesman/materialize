@@ -382,16 +382,16 @@ pub(super) async fn check_clusters_exist(
 }
 
 /// Check which objects from a set exist in the production database.
-///
-/// Returns fully-qualified names of objects that exist.
 pub(super) async fn check_objects_exist(
     client: &Client,
     objects: &BTreeSet<ObjectId>,
-) -> Result<Vec<String>, ConnectionError> {
-    let fqns: Vec<String> = objects.iter().map(|o| o.to_string()).collect();
-    if fqns.is_empty() {
-        return Ok(Vec::new());
+) -> Result<BTreeSet<ObjectId>, ConnectionError> {
+    if objects.is_empty() {
+        return Ok(BTreeSet::new());
     }
+
+    let fqn_map: BTreeMap<String, &ObjectId> = objects.iter().map(|o| (o.to_string(), o)).collect();
+    let fqns: Vec<&String> = fqn_map.keys().collect();
 
     let placeholders_str = sql_placeholders(fqns.len());
 
@@ -415,7 +415,13 @@ pub(super) async fn check_objects_exist(
 
     let rows = client.query(&query, &params).await?;
 
-    Ok(rows.iter().map(|row| row.get("fqn")).collect())
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let fqn: String = row.get("fqn");
+            fqn_map.get(&fqn).map(|id| (*id).clone())
+        })
+        .collect())
 }
 
 /// Check which objects from the given set exist in a specific catalog table.
@@ -1094,7 +1100,7 @@ impl IntrospectionClient<'_> {
     pub async fn check_objects_exist(
         &self,
         objects: &BTreeSet<ObjectId>,
-    ) -> Result<Vec<String>, ConnectionError> {
+    ) -> Result<BTreeSet<ObjectId>, ConnectionError> {
         check_objects_exist(self.client, objects).await
     }
 

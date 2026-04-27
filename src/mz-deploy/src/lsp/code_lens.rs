@@ -47,7 +47,7 @@ pub(super) fn code_lenses(
     let file_object_id = ObjectId::new(default_db.clone(), default_schema.clone(), object_name);
     let fqn = file_object_id.to_string();
 
-    let cached_obj = match project_cache.get_object(&fqn) {
+    let cached_obj = match project_cache.get_object(&file_object_id) {
         Some(obj) => obj,
         None => return Vec::new(),
     };
@@ -90,7 +90,7 @@ pub(super) fn code_lenses(
     }
 
     // Test lenses
-    let tests = project_cache.get_tests(&fqn);
+    let tests = project_cache.get_tests(&file_object_id);
     for test in &tests {
         let test_name = &test.name;
         if let Some(line) = find_test_line(file_text, test_name) {

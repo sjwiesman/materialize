@@ -5,6 +5,7 @@
 //! a read-only connection and serves per-object queries lazily. Consumers
 //! see this as an opaque data structure — SQLite is an implementation detail.
 
+use crate::project::ir::object_id::ObjectId;
 use crate::types::{ColumnType, ObjectKind};
 use rusqlite::{Connection, OpenFlags, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -162,8 +163,8 @@ impl ProjectCache {
         Ok(Some(Self { conn }))
     }
 
-    /// Get the column schema for an object by fully-qualified name.
-    pub fn get_columns(&self, fqn: &str) -> Option<BTreeMap<String, ColumnType>> {
+    /// Get the column schema for an object.
+    pub fn get_columns(&self, id: &ObjectId) -> Option<BTreeMap<String, ColumnType>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -172,7 +173,7 @@ impl ProjectCache {
             )
             .ok()?;
         let rows = stmt
-            .query_map(params![fqn], |row| {
+            .query_map(params![id.to_string()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     ColumnType {
@@ -196,12 +197,12 @@ impl ProjectCache {
         }
     }
 
-    /// Get the object kind for a fully-qualified name.
-    pub fn get_kind(&self, fqn: &str) -> Option<ObjectKind> {
+    /// Get the object kind for an object.
+    pub fn get_kind(&self, id: &ObjectId) -> Option<ObjectKind> {
         self.conn
             .query_row(
                 "SELECT object_kind FROM typecheck_objects WHERE object_key = ?1",
-                params![fqn],
+                params![id.to_string()],
                 |row| {
                     let kind_str: String = row.get(0)?;
                     Ok(ObjectKind::from_db_str(&kind_str))
@@ -213,12 +214,12 @@ impl ProjectCache {
     /// Get lowercased column names for a batch of objects.
     ///
     /// Used by constraint validation. Issues a single SQL query for all
-    /// requested FQNs rather than materializing the full types cache.
-    pub fn get_column_names(&self, fqns: &[&str]) -> BTreeMap<String, BTreeSet<String>> {
-        if fqns.is_empty() {
+    /// requested objects rather than materializing the full types cache.
+    pub fn get_column_names(&self, ids: &[&ObjectId]) -> BTreeMap<String, BTreeSet<String>> {
+        if ids.is_empty() {
             return BTreeMap::new();
         }
-        let placeholders: Vec<String> = (1..=fqns.len()).map(|i| format!("?{}", i)).collect();
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
         let sql = format!(
             "SELECT object_key, column_name FROM typecheck_columns WHERE object_key IN ({})",
             placeholders.join(", ")
@@ -227,8 +228,11 @@ impl ProjectCache {
             Ok(s) => s,
             Err(_) => return BTreeMap::new(),
         };
-        let params: Vec<&dyn rusqlite::ToSql> =
-            fqns.iter().map(|s| -> &dyn rusqlite::ToSql { s }).collect();
+        let key_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        let params: Vec<&dyn rusqlite::ToSql> = key_strings
+            .iter()
+            .map(|s| -> &dyn rusqlite::ToSql { s })
+            .collect();
         let rows = match stmt.query_map(params.as_slice(), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }) {
@@ -252,7 +256,8 @@ impl ProjectCache {
     /// Queries the object row plus all associated comments, indexes,
     /// constraints, grants, and infrastructure. Returns `None` if the
     /// object doesn't exist in the cache.
-    pub fn get_object(&self, fqn: &str) -> Option<CachedObject> {
+    pub fn get_object(&self, id: &ObjectId) -> Option<CachedObject> {
+        let fqn = id.to_string();
         let row = self
             .conn
             .query_row(
@@ -325,7 +330,8 @@ impl ProjectCache {
                 |row| row.get(0),
             )
             .ok()?;
-        self.get_object(&fqn)
+        let id = fqn.parse::<ObjectId>().ok()?;
+        self.get_object(&id)
     }
 
     /// List all project objects as lightweight summaries.
@@ -383,10 +389,10 @@ impl ProjectCache {
                 Ok(r) => r
                     .filter_map(|r| r.ok())
                     .map(|(schema_name, schema_type)| {
-                        let object_keys = self.query_object_keys_in_schema(&db_name, &schema_name);
-                        let objects = object_keys
+                        let object_ids = self.query_object_keys_in_schema(&db_name, &schema_name);
+                        let objects = object_ids
                             .iter()
-                            .filter_map(|key| self.get_object(key))
+                            .filter_map(|id| self.get_object(id))
                             .collect();
                         CachedSchema {
                             name: schema_name,
@@ -405,8 +411,8 @@ impl ProjectCache {
         result
     }
 
-    /// List all external dependency FQNs.
-    pub fn list_external_dependencies(&self) -> Vec<String> {
+    /// List all external dependencies.
+    pub fn list_external_dependencies(&self) -> Vec<ObjectId> {
         let mut stmt = match self
             .conn
             .prepare("SELECT object_key FROM project_external_dependencies")
@@ -414,14 +420,17 @@ impl ProjectCache {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        match stmt.query_map([], |row| row.get(0)) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
+        match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(r) => r
+                .filter_map(|r| r.ok())
+                .filter_map(|s| s.parse::<ObjectId>().ok())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
 
-    /// Get the FQNs of objects that `fqn` depends on.
-    pub fn get_dependencies(&self, fqn: &str) -> Vec<String> {
+    /// Get the objects that `id` depends on.
+    pub fn get_dependencies(&self, id: &ObjectId) -> Vec<ObjectId> {
         let mut stmt = match self
             .conn
             .prepare("SELECT dependency_key FROM project_dependencies WHERE object_key = ?1")
@@ -429,14 +438,17 @@ impl ProjectCache {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        match stmt.query_map(params![fqn], |row| row.get(0)) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
+        match stmt.query_map(params![id.to_string()], |row| row.get::<_, String>(0)) {
+            Ok(r) => r
+                .filter_map(|r| r.ok())
+                .filter_map(|s| s.parse::<ObjectId>().ok())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
 
-    /// Get the FQNs of objects that depend on `fqn` (reverse lookup).
-    pub fn get_dependents(&self, fqn: &str) -> Vec<String> {
+    /// Get the objects that depend on `id` (reverse lookup).
+    pub fn get_dependents(&self, id: &ObjectId) -> Vec<ObjectId> {
         let mut stmt = match self
             .conn
             .prepare("SELECT object_key FROM project_dependencies WHERE dependency_key = ?1")
@@ -444,14 +456,17 @@ impl ProjectCache {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        match stmt.query_map(params![fqn], |row| row.get(0)) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
+        match stmt.query_map(params![id.to_string()], |row| row.get::<_, String>(0)) {
+            Ok(r) => r
+                .filter_map(|r| r.ok())
+                .filter_map(|s| s.parse::<ObjectId>().ok())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
 
     /// Get unit tests associated with an object.
-    pub fn get_tests(&self, fqn: &str) -> Vec<CachedTest> {
+    pub fn get_tests(&self, id: &ObjectId) -> Vec<CachedTest> {
         let mut stmt = match self
             .conn
             .prepare("SELECT test_name, sql_text FROM project_tests WHERE object_key = ?1")
@@ -459,7 +474,7 @@ impl ProjectCache {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        match stmt.query_map(params![fqn], |row| {
+        match stmt.query_map(params![id.to_string()], |row| {
             Ok(CachedTest {
                 name: row.get(0)?,
                 sql_text: row.get(1)?,
@@ -643,7 +658,7 @@ impl ProjectCache {
         }
     }
 
-    fn query_object_keys_in_schema(&self, database: &str, schema: &str) -> Vec<String> {
+    fn query_object_keys_in_schema(&self, database: &str, schema: &str) -> Vec<ObjectId> {
         let mut stmt = match self
             .conn
             .prepare("SELECT object_key FROM project_objects WHERE database = ?1 AND schema = ?2")
@@ -651,8 +666,11 @@ impl ProjectCache {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        match stmt.query_map(params![database, schema], |row| row.get(0)) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
+        match stmt.query_map(params![database, schema], |row| row.get::<_, String>(0)) {
+            Ok(r) => r
+                .filter_map(|r| r.ok())
+                .filter_map(|s| s.parse::<ObjectId>().ok())
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -836,7 +854,9 @@ mod tests {
             )
             .unwrap(),
         };
-        let columns = cache.get_columns("db.schema.my_view").unwrap();
+        let columns = cache
+            .get_columns(&"db.schema.my_view".parse::<ObjectId>().unwrap())
+            .unwrap();
         assert_eq!(columns.len(), 2);
 
         let id_col = &columns["id"];
@@ -863,7 +883,11 @@ mod tests {
             )
             .unwrap(),
         };
-        assert!(cache.get_columns("nonexistent.object").is_none());
+        assert!(
+            cache
+                .get_columns(&"nonexistent.object.x".parse::<ObjectId>().unwrap())
+                .is_none()
+        );
     }
 
     #[test]
@@ -887,7 +911,7 @@ mod tests {
             .unwrap(),
         };
         assert_eq!(
-            cache.get_kind("db.schema.my_mv"),
+            cache.get_kind(&"db.schema.my_mv".parse::<ObjectId>().unwrap()),
             Some(ObjectKind::MaterializedView)
         );
     }
@@ -905,7 +929,11 @@ mod tests {
             )
             .unwrap(),
         };
-        assert!(cache.get_kind("nonexistent.object").is_none());
+        assert!(
+            cache
+                .get_kind(&"nonexistent.object.x".parse::<ObjectId>().unwrap())
+                .is_none()
+        );
     }
 
     #[test]
@@ -949,7 +977,9 @@ mod tests {
             .unwrap(),
         };
 
-        let result = cache.get_column_names(&["db.schema.obj_a", "db.schema.obj_b"]);
+        let id_a: ObjectId = "db.schema.obj_a".parse().unwrap();
+        let id_b: ObjectId = "db.schema.obj_b".parse().unwrap();
+        let result = cache.get_column_names(&[&id_a, &id_b]);
         assert_eq!(result.len(), 2);
         assert!(result["db.schema.obj_a"].contains("col_x"));
         assert!(result["db.schema.obj_b"].contains("col_y"));
@@ -1140,7 +1170,9 @@ mod tests {
         drop(conn);
 
         let cache = open_cache(&db_path);
-        let obj = cache.get_object("mydb.public.orders").unwrap();
+        let obj = cache
+            .get_object(&"mydb.public.orders".parse::<ObjectId>().unwrap())
+            .unwrap();
 
         assert_eq!(obj.fqn, "mydb.public.orders");
         assert_eq!(obj.database, "mydb");
@@ -1194,7 +1226,11 @@ mod tests {
         drop(conn);
 
         let cache = open_cache(&db_path);
-        assert!(cache.get_object("nonexistent").is_none());
+        assert!(
+            cache
+                .get_object(&"nonexistent.x.y".parse::<ObjectId>().unwrap())
+                .is_none()
+        );
     }
 
     #[test]
@@ -1263,16 +1299,16 @@ mod tests {
 
         let cache = open_cache(&db_path);
 
-        // orders depends on users
-        let deps = cache.get_dependencies("mydb.public.orders");
-        assert_eq!(deps, vec!["mydb.public.users"]);
+        let orders: ObjectId = "mydb.public.orders".parse().unwrap();
+        let users: ObjectId = "mydb.public.users".parse().unwrap();
 
-        // users has orders as a dependent
-        let dependents = cache.get_dependents("mydb.public.users");
-        assert_eq!(dependents, vec!["mydb.public.orders"]);
+        let deps = cache.get_dependencies(&orders);
+        assert_eq!(deps, vec![users.clone()]);
 
-        // no dependencies for users
-        assert!(cache.get_dependencies("mydb.public.users").is_empty());
+        let dependents = cache.get_dependents(&users);
+        assert_eq!(dependents, vec![orders.clone()]);
+
+        assert!(cache.get_dependencies(&users).is_empty());
     }
 
     #[test]
@@ -1285,7 +1321,10 @@ mod tests {
 
         let cache = open_cache(&db_path);
         let ext = cache.list_external_dependencies();
-        assert_eq!(ext, vec!["ext.public.raw_data"]);
+        assert_eq!(
+            ext,
+            vec!["ext.public.raw_data".parse::<ObjectId>().unwrap()]
+        );
     }
 
     #[test]
@@ -1297,12 +1336,14 @@ mod tests {
         drop(conn);
 
         let cache = open_cache(&db_path);
-        let tests = cache.get_tests("mydb.public.orders");
+        let orders: ObjectId = "mydb.public.orders".parse().unwrap();
+        let users: ObjectId = "mydb.public.users".parse().unwrap();
+
+        let tests = cache.get_tests(&orders);
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].name, "test_orders_not_empty");
 
-        // no tests for users
-        assert!(cache.get_tests("mydb.public.users").is_empty());
+        assert!(cache.get_tests(&users).is_empty());
     }
 
     #[test]
@@ -1356,7 +1397,9 @@ mod tests {
         drop(conn);
 
         let cache = open_cache(&db_path);
-        let obj = cache.get_object("db.s.t").unwrap();
+        let obj = cache
+            .get_object(&"db.s.t".parse::<ObjectId>().unwrap())
+            .unwrap();
         assert_eq!(obj.constraints.len(), 1);
         let c = &obj.constraints[0];
         assert_eq!(c.kind, "FOREIGN KEY");

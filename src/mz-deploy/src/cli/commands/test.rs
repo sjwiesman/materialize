@@ -451,11 +451,11 @@ async fn run_single_test(
         .cloned()
         .unwrap_or_else(BTreeSet::new);
 
-    let get_columns = |fqn: &str| -> Option<BTreeMap<String, types::ColumnType>> {
+    let get_columns = |id: &ObjectId| -> Option<BTreeMap<String, types::ColumnType>> {
         types_cache
             .as_ref()
-            .and_then(|tc| tc.get_columns(fqn))
-            .or_else(|| types_lock.get_table(fqn).cloned())
+            .and_then(|tc| tc.get_columns(id))
+            .or_else(|| types_lock.get_table(id).cloned())
     };
 
     if let Err(e) = unit_test::validate_unit_test(test, object_id, &get_columns, &dependencies) {

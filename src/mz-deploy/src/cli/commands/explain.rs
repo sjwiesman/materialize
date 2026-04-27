@@ -112,11 +112,11 @@ pub async fn run(settings: &Settings, target: &str) -> Result<(), CliError> {
     // Load column schemas for stub tables
     let (types_lock, types_cache) = load_types_and_cache(settings);
 
-    let get_columns = |fqn: &str| -> Option<BTreeMap<String, ColumnType>> {
+    let get_columns = |id: &ObjectId| -> Option<BTreeMap<String, ColumnType>> {
         types_cache
             .as_ref()
-            .and_then(|tc| tc.get_columns(fqn))
-            .or_else(|| types_lock.get_table(fqn).cloned())
+            .and_then(|tc| tc.get_columns(id))
+            .or_else(|| types_lock.get_table(id).cloned())
     };
 
     // Connect to ephemeral Materialize Docker container
@@ -301,7 +301,7 @@ fn plan_staging(
     project: &graph::Project,
     target: &ExplainTarget,
     target_cluster: &str,
-    get_columns: &dyn Fn(&str) -> Option<BTreeMap<String, ColumnType>>,
+    get_columns: &dyn Fn(&ObjectId) -> Option<BTreeMap<String, ColumnType>>,
 ) -> Result<Vec<StagingAction>, CliError> {
     let mut actions = Vec::new();
     let mut visited = BTreeSet::new();
@@ -332,7 +332,7 @@ fn plan_dep(
     project: &graph::Project,
     dep_id: &ObjectId,
     target_cluster: &str,
-    get_columns: &dyn Fn(&str) -> Option<BTreeMap<String, ColumnType>>,
+    get_columns: &dyn Fn(&ObjectId) -> Option<BTreeMap<String, ColumnType>>,
     actions: &mut Vec<StagingAction>,
     visited: &mut BTreeSet<ObjectId>,
 ) -> Result<(), CliError> {
@@ -439,12 +439,9 @@ fn plan_dep(
 fn get_columns_for_stub(
     object_id: &ObjectId,
     stmt: Option<&Statement>,
-    get_columns: &dyn Fn(&str) -> Option<BTreeMap<String, ColumnType>>,
+    get_columns: &dyn Fn(&ObjectId) -> Option<BTreeMap<String, ColumnType>>,
 ) -> Result<BTreeMap<String, ColumnType>, CliError> {
-    let fqn = object_id.to_string();
-
-    // Try types cache / types.lock first
-    if let Some(columns) = get_columns(&fqn) {
+    if let Some(columns) = get_columns(object_id) {
         return Ok(columns);
     }
 

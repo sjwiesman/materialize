@@ -48,8 +48,8 @@ impl TypeInfoClient<'_> {
         let mut kinds = BTreeMap::new();
         let mut comments = BTreeMap::new();
 
-        let source_table_set: std::collections::BTreeSet<String> =
-            source_tables.iter().map(|oid| oid.to_string()).collect();
+        let source_table_set: std::collections::BTreeSet<&ObjectId> =
+            source_tables.iter().collect();
 
         let all_oids: Vec<&ObjectId> = objects.iter().chain(source_tables.iter()).collect();
 
@@ -79,7 +79,6 @@ impl TypeInfoClient<'_> {
                 )
                 .await?;
 
-            let fqn = oid.to_string();
             let mut columns = BTreeMap::new();
             let mut object_kind_set = false;
 
@@ -93,7 +92,7 @@ impl TypeInfoClient<'_> {
                 // Extract object-level metadata from the first row
                 if !object_kind_set {
                     let object_type: String = row.get("object_type");
-                    let kind = if source_table_set.contains(&fqn) {
+                    let kind = if source_table_set.contains(*oid) {
                         ObjectKind::Table
                     } else {
                         match object_type.as_str() {
@@ -107,11 +106,11 @@ impl TypeInfoClient<'_> {
                             _ => ObjectKind::Table,
                         }
                     };
-                    kinds.insert(fqn.clone(), kind);
+                    kinds.insert((*oid).clone(), kind);
 
                     let obj_comment: Option<String> = row.get("object_comment");
                     if let Some(comment) = obj_comment {
-                        comments.insert(fqn.clone(), comment);
+                        comments.insert((*oid).clone(), comment);
                     }
 
                     object_kind_set = true;
@@ -128,7 +127,7 @@ impl TypeInfoClient<'_> {
                 );
             }
 
-            tables.insert(fqn, columns);
+            tables.insert((*oid).clone(), columns);
         }
 
         Ok(Types {
@@ -210,7 +209,7 @@ impl TypeInfoClient<'_> {
 
         for oid in object_ids {
             let columns = self.query_object_columns(oid, flatten).await?;
-            objects.insert(oid.to_string(), columns);
+            objects.insert((*oid).clone(), columns);
         }
 
         Ok(Types {

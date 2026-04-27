@@ -181,7 +181,7 @@ pub fn resolve_reference(
     project_cache: &ProjectCache,
 ) -> Option<Location> {
     let id = resolve_object_id(parts, file_uri, root)?;
-    let cached_obj = project_cache.get_object(&id.to_string())?;
+    let cached_obj = project_cache.get_object(&id)?;
     let file_path = root.join(&cached_obj.file_path);
     let uri = Url::from_file_path(&file_path).ok()?;
 

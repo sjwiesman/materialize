@@ -94,7 +94,7 @@ impl DeleteTarget {
             | ObjectKind::Secret
             | ObjectKind::Source
             | ObjectKind::Table => {
-                let oid = ObjectId::from_fqn(name).map_err(CliError::Message)?;
+                let oid = name.parse::<ObjectId>().map_err(CliError::Message)?;
                 (
                     directory
                         .join("models")
