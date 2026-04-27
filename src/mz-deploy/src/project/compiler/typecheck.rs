@@ -70,6 +70,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+mod base;
 mod catalog;
 mod executor;
 
@@ -638,7 +639,7 @@ fn plan_deps_dfs(
     }
 }
 
-fn requires_typecheck(stmt: &Statement) -> bool {
+pub(super) fn requires_typecheck(stmt: &Statement) -> bool {
     matches!(
         stmt,
         Statement::CreateView(_) | Statement::CreateMaterializedView(_)
