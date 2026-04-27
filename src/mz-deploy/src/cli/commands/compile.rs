@@ -48,9 +48,11 @@ use std::time::{Duration, Instant};
 /// Returns `CliError::Project` if compilation or validation fails
 pub async fn run(settings: &Settings, show_progress: bool) -> Result<Project, CliError> {
     let settings = settings.clone();
-    mz_ore::task::spawn_blocking(|| "compile-run", move || {
-        run_inner(&settings, show_progress, false)
-    }).await
+    mz_ore::task::spawn_blocking(
+        || "compile-run",
+        move || run_inner(&settings, show_progress, false),
+    )
+    .await
 }
 
 /// Compile the project without type checking.
@@ -64,9 +66,11 @@ pub async fn run_without_typecheck(
     show_progress: bool,
 ) -> Result<Project, CliError> {
     let settings = settings.clone();
-    mz_ore::task::spawn_blocking(|| "compile-run", move || {
-        run_inner(&settings, show_progress, false)
-    }).await
+    mz_ore::task::spawn_blocking(
+        || "compile-run",
+        move || run_inner(&settings, show_progress, false),
+    )
+    .await
 }
 
 fn run_inner(
