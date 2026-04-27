@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const DB_FILE: &str = "build_artifact.db";
 const OBJECT_STATE_TABLE: &str = "object_state";
 const TYPECHECK_OBJECTS_TABLE: &str = "typecheck_objects";
@@ -263,7 +263,6 @@ impl BuildArtifact {
                 CREATE TABLE IF NOT EXISTS typecheck_objects (
                     object_key TEXT PRIMARY KEY,
                     semantic_fingerprint TEXT NOT NULL,
-                    output_fingerprint TEXT NOT NULL,
                     object_kind TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS typecheck_columns (
@@ -379,7 +378,7 @@ impl BuildArtifact {
                     sql_text TEXT NOT NULL,
                     PRIMARY KEY (database, schema, position)
                 );
-                INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '5');
+                INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '6');
                 ",
             )
             .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
@@ -623,7 +622,6 @@ impl BuildArtifact {
             String,
             String,
             String,
-            String,
             &BTreeMap<String, ColumnType>,
         )],
     ) -> Result<(), BuildArtifactError> {
@@ -637,11 +635,10 @@ impl BuildArtifact {
             let mut upsert_obj = tx
                 .prepare(
                     "
-                    INSERT INTO typecheck_objects(object_key, semantic_fingerprint, output_fingerprint, object_kind)
-                    VALUES(?1, ?2, ?3, ?4)
+                    INSERT INTO typecheck_objects(object_key, semantic_fingerprint, object_kind)
+                    VALUES(?1, ?2, ?3)
                     ON CONFLICT(object_key) DO UPDATE SET
                         semantic_fingerprint = excluded.semantic_fingerprint,
-                        output_fingerprint = excluded.output_fingerprint,
                         object_kind = excluded.object_kind
                     ",
                 )
@@ -665,9 +662,9 @@ impl BuildArtifact {
                     source,
                 })?;
 
-            for (key, semantic_fp, output_fp, kind, columns) in rows {
+            for (key, semantic_fp, kind, columns) in rows {
                 upsert_obj
-                    .execute(params![key, semantic_fp, output_fp, kind])
+                    .execute(params![key, semantic_fp, kind])
                     .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
                         path: self.path.clone(),
                         source,
@@ -1495,14 +1492,12 @@ mod tests {
             (
                 "db.public.keep".into(),
                 "sem".into(),
-                "out".into(),
                 "view".into(),
                 &empty_cols,
             ),
             (
                 "db.public.drop".into(),
                 "sem".into(),
-                "out".into(),
                 "view".into(),
                 &empty_cols,
             ),
