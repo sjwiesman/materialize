@@ -40,6 +40,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use thiserror::Error;
 
 /// The kind of database object recorded in a `types.lock` entry.
@@ -56,6 +57,23 @@ pub enum ObjectKind {
     Sink,
     Secret,
     Connection,
+}
+
+impl FromStr for ObjectKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "table" => Ok(ObjectKind::Table),
+            "view" => Ok(ObjectKind::View),
+            "materialized-view" => Ok(ObjectKind::MaterializedView),
+            "source" => Ok(ObjectKind::Source),
+            "sink" => Ok(ObjectKind::Sink),
+            "secret" => Ok(ObjectKind::Secret),
+            "connection" => Ok(ObjectKind::Connection),
+            _ => Err(format!("unknown object kind: {}", s)),
+        }
+    }
 }
 
 impl ObjectKind {
@@ -661,7 +679,7 @@ columns = [
 ]
 "#;
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        std::fs::write(dir.path().join("types.lock"), toml).unwrap();
+        fs::write(dir.path().join("types.lock"), toml).unwrap();
 
         let loaded = load_types_lock(dir.path()).expect("should parse without comments");
         assert_eq!(loaded.tables.len(), 1);

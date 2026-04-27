@@ -105,11 +105,7 @@ mod tests {
     use crate::project::ir::object_id::ObjectId;
 
     fn make_fqn(database: &str, schema: &str, object: &str) -> FullyQualifiedName {
-        FullyQualifiedName::from_object_id(ObjectId::new(
-            database.to_string(),
-            schema.to_string(),
-            object.to_string(),
-        ))
+        ObjectId::new(database.to_string(), schema.to_string(), object.to_string()).into()
     }
 
     fn make_name(parts: &[&str]) -> UnresolvedItemName {

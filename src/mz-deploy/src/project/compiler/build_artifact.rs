@@ -1310,7 +1310,7 @@ fn file_metadata_signature(path: &Path) -> Result<(i64, i64), BuildArtifactError
 }
 
 /// Extract the cluster name from a statement's `IN CLUSTER` clause, if present.
-fn statement_cluster(stmt: &crate::project::ast::Statement) -> Option<String> {
+fn statement_cluster(stmt: &Statement) -> Option<String> {
     use crate::project::ast::Statement;
 
     let in_cluster = match stmt {

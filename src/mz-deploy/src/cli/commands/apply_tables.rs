@@ -11,6 +11,7 @@ use crate::client::Client;
 use crate::config::Settings;
 use crate::project;
 use crate::project::ast::Statement;
+use crate::project::ir::graph::Project;
 use std::collections::BTreeSet;
 
 const PHASE_NAME: &str = "tables";
@@ -28,7 +29,7 @@ pub async fn plan(
     _settings: &Settings,
     client: &Client,
     executor: &DeploymentExecutor<'_>,
-    planned_project: &project::ir::graph::Project,
+    planned_project: &Project,
     apply_plan: &mut ApplyPlan,
 ) -> Result<ApplyResult, CliError> {
     let mut target_ids = BTreeSet::new();
@@ -128,7 +129,7 @@ pub async fn run(settings: &Settings, dry_run: bool) -> Result<ApplyPlan, CliErr
     let (planned_project, client) = compile_apply_project_and_connect(settings).await?;
     let mut apply_plan = ApplyPlan::new();
     let executor = DeploymentExecutor::new_dry_run(&client);
-    let phase = self::plan(
+    let phase = plan(
         settings,
         &client,
         &executor,

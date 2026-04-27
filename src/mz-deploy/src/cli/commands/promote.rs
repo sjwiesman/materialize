@@ -8,8 +8,9 @@ use crate::client::{
 use crate::config::Settings;
 use crate::log;
 use crate::project::SchemaQualifier;
+use crate::project::analysis::deployment_snapshot;
 use crate::project::ir::object_id::ObjectId;
-use crate::{info, project, verbose};
+use crate::{info, verbose};
 use itertools::Itertools;
 use owo_colors::OwoColorize;
 use std::collections::BTreeSet;
@@ -29,10 +30,6 @@ struct DeploymentPlan {
     replacement_mvs: Vec<ReplacementMvRecord>,
     dependent_sinks: Vec<DependentSink>,
 }
-
-// ---------------------------------------------------------------------------
-// View structs for JSON serialization
-// ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize)]
 struct SchemaSwapView<'a> {
@@ -77,10 +74,6 @@ struct ResourceToDropView {
     kind: String,
     name: String,
 }
-
-// ---------------------------------------------------------------------------
-// DeploymentPlan helper methods
-// ---------------------------------------------------------------------------
 
 impl DeploymentPlan {
     fn apply_state_str(&self) -> &'static str {
@@ -194,10 +187,6 @@ impl DeploymentPlan {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Serialize impl — produces the exact same JSON shape as old DeploymentPlanJson
-// ---------------------------------------------------------------------------
-
 impl serde::Serialize for DeploymentPlan {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
@@ -213,10 +202,6 @@ impl serde::Serialize for DeploymentPlan {
         state.end()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Display impl — human-readable deployment plan
-// ---------------------------------------------------------------------------
 
 impl fmt::Display for DeploymentPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -349,10 +334,6 @@ impl fmt::Display for DeploymentPlan {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Plan generation
-// ---------------------------------------------------------------------------
-
 /// Build a complete deployment plan by querying the database once for all data.
 async fn generate_deployment_plan(
     client: &Client,
@@ -409,10 +390,6 @@ async fn generate_deployment_plan(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-
 /// Promote a staging deployment to production using ALTER SWAP.
 pub async fn run(
     settings: &Settings,
@@ -443,7 +420,7 @@ pub async fn run(
     verbose!("Apply state: {:?}", apply_state);
 
     let staging_snapshot =
-        project::analysis::deployment_snapshot::load_from_database(&client, Some(deploy_id))
+        deployment_snapshot::load_from_database(&client, Some(deploy_id))
             .await?;
     verbose!(
         "Found {} objects in staging deployment",
@@ -483,10 +460,6 @@ pub async fn run(
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Execution functions
-// ---------------------------------------------------------------------------
 
 /// Runs the swap portion of apply according to persisted resume state.
 async fn execute_swap_phase(client: &Client, plan: &DeploymentPlan) -> Result<(), CliError> {
@@ -622,7 +595,7 @@ async fn gather_resources_and_check_conflicts(
     // This distinguishes Objects→Replacement transitions (need swap) from
     // steady-state Replacement deploys (skip swap, use APPLY REPLACEMENT).
     let production_snapshot =
-        project::analysis::deployment_snapshot::load_from_database(client, None).await?;
+        deployment_snapshot::load_from_database(client, None).await?;
 
     // Build list of (database, staging_schema) pairs to check, filtering out Sinks
     // and steady-state Replacement schemas (already Replacement in production).

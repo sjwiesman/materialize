@@ -20,6 +20,7 @@
 use crate::cli::CliError;
 use crate::cli::progress;
 use crate::config::Settings;
+use crate::project::ir::graph::{ModStatement, Project};
 use crate::project::ir::object_id::ObjectId;
 use crate::{project, timing, verbose};
 use std::time::{Duration, Instant};
@@ -48,7 +49,7 @@ use std::time::{Duration, Instant};
 pub async fn run(
     settings: &Settings,
     show_progress: bool,
-) -> Result<project::ir::graph::Project, CliError> {
+) -> Result<Project, CliError> {
     run_inner(settings, show_progress, false).await
 }
 
@@ -61,7 +62,7 @@ pub async fn run(
 pub async fn run_without_typecheck(
     settings: &Settings,
     show_progress: bool,
-) -> Result<project::ir::graph::Project, CliError> {
+) -> Result<Project, CliError> {
     run_inner(settings, show_progress, true).await
 }
 
@@ -69,7 +70,7 @@ async fn run_inner(
     settings: &Settings,
     show_progress: bool,
     skip_typecheck: bool,
-) -> Result<project::ir::graph::Project, CliError> {
+) -> Result<Project, CliError> {
     let start_time = Instant::now();
     let directory = &settings.directory;
 
@@ -170,7 +171,7 @@ async fn run_inner(
     }
 
     // Stage 3b: Validate declared dependencies
-    let validation = crate::project::analysis::deps::validate_dependencies(
+    let validation = project::analysis::deps::validate_dependencies(
         &settings.dependencies,
         &planned_project.external_dependencies,
     );
@@ -208,8 +209,7 @@ async fn run_inner(
 
     // Type checking (skipped for apply-only compilation)
     if !skip_typecheck {
-        let typecheck_duration =
-            typecheck_project(settings, &planned_project, show_progress).await?;
+        let typecheck_duration = typecheck_project(settings, &planned_project, show_progress)?;
 
         if show_progress {
             if let Some(duration) = typecheck_duration {
@@ -276,10 +276,10 @@ async fn run_inner(
     Ok(planned_project)
 }
 
-/// Perform type checking using the configured backend.
-async fn typecheck_project(
+/// Perform type checking using the in-process catalog backend.
+fn typecheck_project(
     settings: &Settings,
-    planned_project: &project::ir::graph::Project,
+    planned_project: &Project,
     show_progress: bool,
 ) -> Result<Option<Duration>, CliError> {
     let directory = &settings.directory;
@@ -325,10 +325,8 @@ async fn typecheck_project(
         &settings.profile_name,
         settings.profile_suffix(),
         settings.variables(),
-        Some(&settings.docker_image),
         plan,
-    )
-    .await;
+    );
 
     match result {
         Ok(_) => {
@@ -348,7 +346,7 @@ async fn typecheck_project(
 /// known schemas are checked. Full column validation runs after typecheck
 /// produces complete metadata.
 fn validate_constraints_with_types(
-    planned_project: &project::ir::graph::Project,
+    planned_project: &Project,
     types_lock: &crate::types::Types,
     types_cache: Option<&crate::project_cache::ProjectCache>,
 ) -> Result<(), CliError> {
@@ -360,8 +358,8 @@ fn validate_constraints_with_types(
     };
     let fk_errors = project::compiler::validate_constraint_fk_targets(planned_project, get_kind);
     if !fk_errors.is_empty() {
-        return Err(crate::project::error::ProjectError::from(
-            crate::project::error::ValidationErrors::new(fk_errors),
+        return Err(project::error::ProjectError::from(
+            project::error::ValidationErrors::new(fk_errors),
         )
         .into());
     }
@@ -378,8 +376,8 @@ fn validate_constraints_with_types(
             .collect();
     let col_errors = project::compiler::validate_constraint_columns(planned_project, &column_map);
     if !col_errors.is_empty() {
-        return Err(crate::project::error::ProjectError::from(
-            crate::project::error::ValidationErrors::new(col_errors),
+        return Err(project::error::ProjectError::from(
+            project::error::ValidationErrors::new(col_errors),
         )
         .into());
     }
@@ -391,9 +389,9 @@ fn validate_constraints_with_types(
 ///
 /// Returns FQNs for both parent objects (that have constraints) and FK
 /// reference targets, enabling targeted column validation.
-fn collect_constraint_fqns(project: &project::ir::graph::Project) -> Vec<String> {
+fn collect_constraint_fqns(planned_project: &Project) -> Vec<String> {
     let mut fqns = std::collections::BTreeSet::new();
-    for obj in project.iter_objects() {
+    for obj in planned_project.iter_objects() {
         if !obj.typed_object.constraints.is_empty() {
             fqns.insert(obj.id.to_string());
         }
@@ -413,7 +411,7 @@ fn collect_constraint_fqns(project: &project::ir::graph::Project) -> Vec<String>
 }
 
 /// Print verbose details about the project (only shown with VERBOSE env var)
-fn print_verbose_details(planned_project: &project::ir::graph::Project, sorted: &[ObjectId]) {
+fn print_verbose_details(planned_project: &Project, sorted: &[ObjectId]) {
     let mod_stmts = planned_project.iter_mod_statements();
     print_external_dependencies(planned_project);
     print_cluster_dependencies(planned_project);
@@ -427,7 +425,7 @@ fn print_verbose_details(planned_project: &project::ir::graph::Project, sorted: 
 /// Prints dependencies that are referenced but not declared in this project tree.
 ///
 /// These are the objects operators must provision externally before deployment.
-fn print_external_dependencies(planned_project: &project::ir::graph::Project) {
+fn print_external_dependencies(planned_project: &Project) {
     if planned_project.external_dependencies.is_empty() {
         return;
     }
@@ -440,7 +438,7 @@ fn print_external_dependencies(planned_project: &project::ir::graph::Project) {
 }
 
 /// Prints cluster prerequisites inferred from object and index definitions.
-fn print_cluster_dependencies(planned_project: &project::ir::graph::Project) {
+fn print_cluster_dependencies(planned_project: &Project) {
     if planned_project.cluster_dependencies.is_empty() {
         return;
     }
@@ -456,7 +454,7 @@ fn print_cluster_dependencies(planned_project: &project::ir::graph::Project) {
 ///
 /// External dependencies are annotated inline to separate project-internal edges
 /// from dependencies that are expected to pre-exist.
-fn print_dependency_graph(planned_project: &project::ir::graph::Project) {
+fn print_dependency_graph(planned_project: &Project) {
     verbose!("\nDependency Graph:");
     for (object_id, deps) in &planned_project.dependency_graph {
         if deps.is_empty() {
@@ -485,20 +483,20 @@ fn print_deployment_order(sorted: &[ObjectId]) {
 ///
 /// This section shows database/schema-level setup artifacts separately from
 /// object creation steps, which helps explain side-effect ordering.
-fn print_module_setup_statements(mod_stmts: &[project::ModStatement]) {
+fn print_module_setup_statements(mod_stmts: &[ModStatement]) {
     if mod_stmts.is_empty() {
         return;
     }
     verbose!("\nModule Setup Statements:");
     for (idx, mod_stmt) in mod_stmts.iter().enumerate() {
         match mod_stmt {
-            project::ModStatement::Database {
+            ModStatement::Database {
                 database,
                 statement,
             } => {
                 verbose!("  {}. Database {}: {}", idx + 1, database, statement);
             }
-            project::ModStatement::Schema {
+            ModStatement::Schema {
                 database,
                 schema,
                 statement,
@@ -516,11 +514,11 @@ fn print_module_setup_statements(mod_stmts: &[project::ModStatement]) {
 }
 
 /// Prints executable SQL for module setup statements in run order.
-fn print_full_sql_plan(mod_stmts: &[project::ModStatement]) {
+fn print_full_sql_plan(mod_stmts: &[ModStatement]) {
     verbose!("\nSQL Deployment Plan (fully qualified)");
     for (idx, mod_stmt) in mod_stmts.iter().enumerate() {
         match mod_stmt {
-            project::ModStatement::Database {
+            ModStatement::Database {
                 database,
                 statement,
             } => {
@@ -528,7 +526,7 @@ fn print_full_sql_plan(mod_stmts: &[project::ModStatement]) {
                 verbose!("{};", statement);
                 verbose!();
             }
-            project::ModStatement::Schema {
+            ModStatement::Schema {
                 database,
                 schema,
                 statement,
@@ -550,7 +548,7 @@ fn print_full_sql_plan(mod_stmts: &[project::ModStatement]) {
 ///
 /// Includes statement SQL and attached indexes/grants/comments so verbose output
 /// reflects what the deploy command would execute end-to-end.
-fn print_sorted_object_sql(planned_project: &project::ir::graph::Project) {
+fn print_sorted_object_sql(planned_project: &Project) {
     if let Ok(objects) = planned_project.get_sorted_objects() {
         for (idx, (object_id, typed_obj)) in objects.iter().enumerate() {
             verbose!("-- Step {}: {}", idx + 1, object_id);

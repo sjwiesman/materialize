@@ -26,9 +26,11 @@ use crate::cli::CliError;
 use crate::cli::progress;
 use crate::client::Client;
 use crate::config::Settings;
-use crate::project::compiler::typecheck::{DockerRuntime, TypeCheckError};
+use crate::docker_runtime::{DockerRuntime, DockerRuntimeError};
+use crate::project::ir::compiled::FullyQualifiedName;
+use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
-use crate::project::{self, ir::compiled};
+use crate::project::{self};
 use crate::project_cache::ProjectCache;
 use crate::types::{self, Types};
 use crate::unit_test;
@@ -382,7 +384,7 @@ async fn run_tests(
     }
 
     let types_lock = types::load_types_lock(directory).unwrap_or_default();
-    let types_cache = load_or_generate_types_cache(settings, &planned_project).await?;
+    let types_cache = load_or_generate_types_cache(settings, &planned_project)?;
 
     let mut test_entries: Vec<TestResultEntry> = Vec::new();
     let (mut passed_tests, mut failed_tests, mut validation_failed) = (0, 0, 0);
@@ -440,7 +442,7 @@ async fn run_tests(
 /// Returns a `TestOutcome` without performing any terminal output so the caller
 /// can own all presentation (printing, JUnit building, counting).
 async fn run_single_test(
-    planned_project: &project::ir::graph::Project,
+    planned_project: &Project,
     object_id: &ObjectId,
     test: &unit_test::UnitTest,
     types_cache: &Option<ProjectCache>,
@@ -454,7 +456,7 @@ async fn run_single_test(
         .cloned()
         .unwrap_or_else(BTreeSet::new);
 
-    let get_columns = |fqn: &str| -> Option<BTreeMap<String, crate::types::ColumnType>> {
+    let get_columns = |fqn: &str| -> Option<BTreeMap<String, types::ColumnType>> {
         types_cache
             .as_ref()
             .and_then(|tc| tc.get_columns(fqn))
@@ -479,7 +481,7 @@ async fn run_single_test(
         ))));
     };
 
-    let typed_fqn = typed_fqn_from_object_id(object_id);
+    let typed_fqn: FullyQualifiedName = object_id.clone().into();
     let sql_statements =
         unit_test::desugar_unit_test(test, &target_obj.typed_object.stmt, &typed_fqn).map_err(
             |reason| CliError::InvalidUnitTestTarget {
@@ -646,7 +648,7 @@ fn print_test_validation_error(error: &unit_test::TestValidationError) {
 async fn runtime_client(runtime: &DockerRuntime, _empty_types: &Types) -> Result<Client, CliError> {
     match runtime.get_client().await {
         Ok(client) => Ok(client),
-        Err(TypeCheckError::ContainerStartFailed(e)) => Err(CliError::Message(format!(
+        Err(DockerRuntimeError::ContainerStartFailed(e)) => Err(CliError::Message(format!(
             "Docker not available for running tests: {}",
             e
         ))),
@@ -677,11 +679,6 @@ async fn validate_at_time(
         }
     }
     Ok(Ok(()))
-}
-
-/// Converts planned object identity into the AST form expected by unit test desugaring.
-fn typed_fqn_from_object_id(object_id: &ObjectId) -> compiled::FullyQualifiedName {
-    compiled::FullyQualifiedName::from_object_id(object_id.clone())
 }
 
 /// Formats failing assertion rows into a readable, ANSI-colored table for
@@ -814,9 +811,9 @@ fn extract_assertion_data(
 /// Reuses previously validated schemas when possible, re-validating only
 /// objects whose definitions have changed. Returns a project cache handle
 /// for resolving column metadata during test runs.
-async fn load_or_generate_types_cache(
+fn load_or_generate_types_cache(
     settings: &Settings,
-    planned_project: &project::ir::graph::Project,
+    planned_project: &Project,
 ) -> Result<Option<ProjectCache>, CliError> {
     use crate::project::compiler::typecheck;
 
@@ -861,10 +858,8 @@ async fn load_or_generate_types_cache(
         &settings.profile_name,
         settings.profile_suffix(),
         settings.variables(),
-        Some(&settings.docker_image),
         plan,
-    )
-    .await;
+    );
 
     match result {
         Ok(_) => ProjectCache::open(

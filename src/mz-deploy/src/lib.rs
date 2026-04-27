@@ -27,10 +27,12 @@
 #![deny(clippy::print_stdout)]
 #![deny(clippy::print_stderr)]
 #![warn(unreachable_pub)]
+#![warn(unused_qualifications)]
 
 pub mod cli;
 pub mod client;
 pub mod config;
+pub(crate) mod docker_runtime;
 pub mod log;
 pub mod lsp;
 pub(crate) mod project;

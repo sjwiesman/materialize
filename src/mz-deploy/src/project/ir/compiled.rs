@@ -123,24 +123,6 @@ impl FullyQualifiedName {
             item_name,
         })
     }
-
-    /// Create a fully qualified name directly from an object identifier.
-    ///
-    /// This is used by runtime typechecking, which already has a validated
-    /// logical object key and does not need to recover it from an unresolved
-    /// item-name list.
-    pub fn from_object_id(id: ObjectId) -> Self {
-        let item_name = UnresolvedItemName(vec![
-            Ident::new(id.database()).expect("validated database identifier"),
-            Ident::new(id.schema()).expect("validated schema identifier"),
-            Ident::new(id.object()).expect("validated object identifier"),
-        ]);
-        Self {
-            id,
-            path: PathBuf::new(),
-            item_name,
-        }
-    }
 }
 
 impl TryFrom<UnresolvedItemName> for FullyQualifiedName {
@@ -244,6 +226,21 @@ impl TryFrom<(&std::path::Path, &str)> for FullyQualifiedName {
             path: path.to_path_buf(),
             item_name,
         })
+    }
+}
+
+impl From<ObjectId> for FullyQualifiedName {
+    fn from(id: ObjectId) -> Self {
+        let item_name = UnresolvedItemName(vec![
+            Ident::new(id.database()).expect("validated database identifier"),
+            Ident::new(id.schema()).expect("validated schema identifier"),
+            Ident::new(id.object()).expect("validated object identifier"),
+        ]);
+        Self {
+            id,
+            path: PathBuf::new(),
+            item_name,
+        }
     }
 }
 

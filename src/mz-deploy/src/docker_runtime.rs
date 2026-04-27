@@ -1,16 +1,25 @@
-//! Docker runtime for compiler-owned runtime typechecking.
+//! Docker runtime for managing a persistent Materialize container.
 //!
-//! This module manages a persistent Materialize container and returns a
-//! connected client. Dependency staging is handled by the typecheck executor,
-//! which creates only the temporary objects required for the current dirty
-//! frontier.
+//! Provides a connected client backed by a long-lived `materialize/materialized`
+//! container. Used by the `test` command to execute unit tests against a real
+//! Materialize instance.
 
-use super::TypeCheckError;
-use crate::client::{Client, Profile};
+use crate::client::{Client, ConnectionError, Profile};
 use crate::config::default_docker_image;
 use crate::{timing, verbose};
+use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::{Duration, sleep};
+
+/// Errors raised while starting or connecting to the Materialize container.
+#[derive(Debug, Error)]
+pub(crate) enum DockerRuntimeError {
+    #[error("failed to start Materialize container: {0}")]
+    ContainerStartFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("failed to connect to Materialize: {0}")]
+    ConnectionFailed(#[from] ConnectionError),
+}
 
 /// Possible states of Docker availability on the host system.
 pub(crate) enum DockerStatus {
@@ -57,7 +66,7 @@ impl DockerRuntime {
         self
     }
 
-    pub(crate) async fn get_client(&self) -> Result<Client, TypeCheckError> {
+    pub(crate) async fn get_client(&self) -> Result<Client, DockerRuntimeError> {
         let start = std::time::Instant::now();
 
         let profile = Self::make_profile();
@@ -109,7 +118,7 @@ impl DockerRuntime {
         }
     }
 
-    async fn container_exists(&self) -> Result<bool, TypeCheckError> {
+    async fn container_exists(&self) -> Result<bool, DockerRuntimeError> {
         let output = Command::new("docker")
             .args([
                 "ps",
@@ -121,12 +130,12 @@ impl DockerRuntime {
             ])
             .output()
             .await
-            .map_err(|e| TypeCheckError::ContainerStartFailed(Box::new(e)))?;
+            .map_err(|e| DockerRuntimeError::ContainerStartFailed(Box::new(e)))?;
 
         Ok(output.status.success() && !output.stdout.is_empty())
     }
 
-    async fn container_is_running(&self) -> Result<bool, TypeCheckError> {
+    async fn container_is_running(&self) -> Result<bool, DockerRuntimeError> {
         let output = Command::new("docker")
             .args([
                 "ps",
@@ -137,7 +146,7 @@ impl DockerRuntime {
             ])
             .output()
             .await
-            .map_err(|e| TypeCheckError::ContainerStartFailed(Box::new(e)))?;
+            .map_err(|e| DockerRuntimeError::ContainerStartFailed(Box::new(e)))?;
 
         Ok(output.status.success() && !output.stdout.is_empty())
     }
@@ -148,24 +157,24 @@ impl DockerRuntime {
             .is_ok()
     }
 
-    async fn remove_container(&self) -> Result<(), TypeCheckError> {
+    async fn remove_container(&self) -> Result<(), DockerRuntimeError> {
         verbose!("Removing existing container: {}", CONTAINER_NAME);
         let output = Command::new("docker")
             .args(["rm", "-f", CONTAINER_NAME])
             .output()
             .await
-            .map_err(|e| TypeCheckError::ContainerStartFailed(Box::new(e)))?;
+            .map_err(|e| DockerRuntimeError::ContainerStartFailed(Box::new(e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(TypeCheckError::ContainerStartFailed(
+            return Err(DockerRuntimeError::ContainerStartFailed(
                 format!("Failed to remove container: {}", stderr).into(),
             ));
         }
         Ok(())
     }
 
-    async fn create_container(&self) -> Result<(), TypeCheckError> {
+    async fn create_container(&self) -> Result<(), DockerRuntimeError> {
         verbose!(
             "Creating persistent container: {} (image: {})",
             CONTAINER_NAME,
@@ -188,36 +197,36 @@ impl DockerRuntime {
             ])
             .output()
             .await
-            .map_err(|e| TypeCheckError::ContainerStartFailed(Box::new(e)))?;
+            .map_err(|e| DockerRuntimeError::ContainerStartFailed(Box::new(e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(TypeCheckError::ContainerStartFailed(
+            return Err(DockerRuntimeError::ContainerStartFailed(
                 format!("Failed to create container: {}", stderr).into(),
             ));
         }
         Ok(())
     }
 
-    async fn start_existing_container(&self) -> Result<(), TypeCheckError> {
+    async fn start_existing_container(&self) -> Result<(), DockerRuntimeError> {
         verbose!("Starting existing container: {}", CONTAINER_NAME);
 
         let output = Command::new("docker")
             .args(["start", CONTAINER_NAME])
             .output()
             .await
-            .map_err(|e| TypeCheckError::ContainerStartFailed(Box::new(e)))?;
+            .map_err(|e| DockerRuntimeError::ContainerStartFailed(Box::new(e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(TypeCheckError::ContainerStartFailed(
+            return Err(DockerRuntimeError::ContainerStartFailed(
                 format!("Failed to start container: {}", stderr).into(),
             ));
         }
         Ok(())
     }
 
-    async fn wait_for_container(&self) -> Result<(), TypeCheckError> {
+    async fn wait_for_container(&self) -> Result<(), DockerRuntimeError> {
         verbose!("Waiting for container to be ready...");
         for i in 0..30 {
             if self.container_is_healthy().await {
@@ -228,12 +237,12 @@ impl DockerRuntime {
                 sleep(Duration::from_secs(1)).await;
             }
         }
-        Err(TypeCheckError::ContainerStartFailed(
+        Err(DockerRuntimeError::ContainerStartFailed(
             "Container failed to become healthy within 30 seconds".into(),
         ))
     }
 
-    async fn ensure_container(&self) -> Result<(), TypeCheckError> {
+    async fn ensure_container(&self) -> Result<(), DockerRuntimeError> {
         let exists = self.container_exists().await?;
         let is_running = if exists {
             self.container_is_running().await?

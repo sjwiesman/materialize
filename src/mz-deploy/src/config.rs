@@ -803,7 +803,7 @@ mod tests {
     fn test_profiles_config_rejects_invalid_option_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profiles.toml");
-        std::fs::write(
+        fs::write(
             &path,
             r#"
                 [staging]

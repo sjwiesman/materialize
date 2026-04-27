@@ -336,9 +336,6 @@ fn test_complex_multi_cte_query() {
     }
 }
 
-// ============================================================================
-// Tests for implicit alias creation (fix for tables without explicit aliases)
-// ============================================================================
 
 #[test]
 fn test_implicit_alias_unqualified_table() {
@@ -543,9 +540,6 @@ fn test_implicit_alias_in_lateral_join() {
     }
 }
 
-// ============================================================================
-// Tests for HAVING clause normalization
-// ============================================================================
 
 #[test]
 fn test_having_clause_with_subquery() {
@@ -661,9 +655,6 @@ fn test_having_with_cte_reference() {
     }
 }
 
-// ============================================================================
-// Tests for Expr::Op (operator) handling
-// ============================================================================
 
 #[test]
 fn test_and_operator_with_subqueries() {
@@ -837,9 +828,6 @@ fn test_arithmetic_operators_with_subqueries() {
     }
 }
 
-// ============================================================================
-// Integration tests combining multiple features
-// ============================================================================
 
 #[test]
 fn test_schema_qualified_with_having_subquery() {
@@ -984,9 +972,6 @@ fn test_wmr_with_operators_and_having() {
     }
 }
 
-// ============================================================================
-// Tests for FlatteningTransformer
-// ============================================================================
 
 #[test]
 fn test_flattening_unqualified_name() {
@@ -1146,9 +1131,6 @@ fn test_flattening_cte_not_flattened() {
     }
 }
 
-// ============================================================================
-// Tests for StagingTransformer
-// ============================================================================
 
 use crate::project::ir::object_id::ObjectId;
 use std::collections::BTreeSet;
@@ -1649,9 +1631,6 @@ fn test_staging_cte_not_transformed() {
     }
 }
 
-// ============================================================================
-// Nested CTE Tests
-// ============================================================================
 
 #[test]
 fn test_nested_cte_in_derived_table() {
@@ -2177,14 +2156,9 @@ fn test_nested_cte_in_exists_subquery() {
     }
 }
 
-// ============================================================================
-// Regression tests: expression traversal coverage
-//
-// These tests verify that table references nested inside expression variants
+// Regression tests: verify table references nested inside expression variants
 // (COALESCE, NOT, AND/OR, NULLIF, GREATEST/LEAST, parenthesized expressions)
-// are properly normalized. A previous bug had a `_ => {}` catch-all that
-// silently skipped these variants.
-// ============================================================================
+// are properly normalized. A previous `_ => {}` catch-all silently skipped them.
 
 #[test]
 fn test_coalesce_with_subquery_normalized() {

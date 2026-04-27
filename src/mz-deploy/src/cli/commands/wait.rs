@@ -76,7 +76,7 @@ pub async fn run(
 /// Run in snapshot mode: query hydration status once and display.
 async fn run_snapshot(
     deploy_id: &str,
-    client: &crate::client::Client,
+    client: &Client,
     allowed_lag_secs: i64,
 ) -> Result<(), CliError> {
     let statuses = client
@@ -125,7 +125,7 @@ async fn run_snapshot(
 /// Run in snapshot mode with JSON output.
 async fn run_snapshot_json(
     deploy_id: &str,
-    client: &crate::client::Client,
+    client: &Client,
     allowed_lag_secs: i64,
 ) -> Result<(), CliError> {
     let statuses = client
@@ -161,7 +161,7 @@ async fn run_snapshot_json(
 /// Run in continuous mode with NDJSON output.
 async fn run_continuous_json(
     deploy_id: &str,
-    client: &mut crate::client::Client,
+    client: &mut Client,
     timeout: Option<u64>,
     allowed_lag_secs: i64,
 ) -> Result<(), CliError> {
@@ -183,7 +183,7 @@ async fn run_continuous_json(
 /// Monitor hydration via SUBSCRIBE, emitting one NDJSON line per update.
 async fn monitor_hydration_ndjson(
     deploy_id: &str,
-    client: &mut crate::client::Client,
+    client: &mut Client,
     allowed_lag_secs: i64,
 ) -> Result<(), CliError> {
     let initial_statuses = client
@@ -357,7 +357,7 @@ fn print_summary(statuses: &[ClusterStatusContext]) {
 /// Run in continuous mode: subscribe to hydration updates and show live dashboard.
 async fn run_continuous(
     deploy_id: &str,
-    client: &mut crate::client::Client,
+    client: &mut Client,
     timeout: Option<u64>,
     allowed_lag_secs: i64,
 ) -> Result<(), CliError> {
@@ -399,7 +399,7 @@ async fn run_continuous(
 /// Monitor hydration status via SUBSCRIBE and update live dashboard.
 async fn monitor_hydration_live(
     deploy_id: &str,
-    client: &mut crate::client::Client,
+    client: &mut Client,
     initial_statuses: Vec<ClusterStatusContext>,
     start_time: Instant,
     allowed_lag_secs: i64,

@@ -208,10 +208,7 @@ pub async fn setup(client: &Client) -> Result<(), CliError> {
             // creates the short-lived apply schemas under `_mz_deploy`.
             client
                 .execute(
-                    &format!(
-                        "GRANT CREATEDB, CREATECLUSTER ON SYSTEM TO {}",
-                        role_name,
-                    ),
+                    &format!("GRANT CREATEDB, CREATECLUSTER ON SYSTEM TO {}", role_name,),
                     &[],
                 )
                 .await?;
@@ -228,10 +225,7 @@ pub async fn setup(client: &Client) -> Result<(), CliError> {
                 .await?;
             // `dev` creates per-developer overlay databases.
             client
-                .execute(
-                    &format!("GRANT CREATEDB ON SYSTEM TO {}", role_name,),
-                    &[],
-                )
+                .execute(&format!("GRANT CREATEDB ON SYSTEM TO {}", role_name,), &[])
                 .await?;
         }
     }

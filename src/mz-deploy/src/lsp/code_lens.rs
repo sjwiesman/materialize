@@ -154,7 +154,7 @@ fn find_test_line(file_text: &str, test_name: &str) -> Option<u32> {
 mod tests {
     use super::*;
 
-    fn write_project_toml(root: &std::path::Path) {
+    fn write_project_toml(root: &Path) {
         std::fs::write(root.join("project.toml"), "[project]\nname = \"test\"\n").unwrap();
     }
 

@@ -826,18 +826,11 @@ async fn run(args: Args) -> Result<(), CliError> {
     }
 
     if let Some(Command::New { name, no_git }) = &args.command {
-        return cli::commands::new_project::run(
-            name,
-            ScaffoldOpts {
-                init_git: !no_git,
-            },
-        );
+        return cli::commands::new_project::run(name, ScaffoldOpts { init_git: !no_git });
     }
 
     if let Some(Command::Init { no_git }) = &args.command {
-        return cli::commands::new_project::init(ScaffoldOpts {
-            init_git: !no_git,
-        });
+        return cli::commands::new_project::init(ScaffoldOpts { init_git: !no_git });
     }
 
     if let Some(Command::Profile { subcommand }) = &args.command {

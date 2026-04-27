@@ -399,9 +399,6 @@ mod tests {
         revocations.iter().map(|r| r.to_string()).collect()
     }
 
-    // =========================================================================
-    // desired_grants tests
-    // =========================================================================
 
     #[test]
     fn test_desired_grants_single_privilege_single_role() {
@@ -492,9 +489,6 @@ mod tests {
         assert!(result.contains(&("admin".to_string(), "DELETE".to_string())));
     }
 
-    // =========================================================================
-    // stale_grant_revocations tests
-    // =========================================================================
 
     #[test]
     fn test_stale_grant_revocations_no_stale() {
@@ -661,9 +655,6 @@ mod tests {
         assert!(!strings[0].contains("reader"));
     }
 
-    // =========================================================================
-    // Integration: desired_grants + stale_grant_revocations together
-    // =========================================================================
 
     #[test]
     fn test_end_to_end_no_revocations_when_grants_match() {

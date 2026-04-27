@@ -26,6 +26,9 @@ use crate::cli::CliError;
 use crate::cli::git::get_git_commit;
 use crate::client::{Client, ClusterConfig, quote_identifier};
 use crate::config::Settings;
+use crate::project::analysis::deployment_snapshot::DeploymentMetadata;
+use crate::project::ir::graph::Project;
+use crate::project::resolve::normalize;
 use crate::project::{self, ir::compiled};
 use crate::{info, verbose};
 use owo_colors::OwoColorize;
@@ -204,7 +207,7 @@ impl ApplyPlan {
     pub async fn prepare_schemas(
         &mut self,
         executor: &DeploymentExecutor<'_>,
-        planned_project: &project::ir::graph::Project,
+        planned_project: &Project,
         schema_set: &BTreeSet<project::SchemaQualifier>,
     ) -> Result<(), CliError> {
         let new_schemas: BTreeSet<_> = schema_set
@@ -334,7 +337,7 @@ impl fmt::Display for ApplyPlan {
 pub async fn collect_deployment_metadata(
     client: &Client,
     directory: &Path,
-) -> project::analysis::deployment_snapshot::DeploymentMetadata {
+) -> DeploymentMetadata {
     let deployed_by = client
         .introspection()
         .get_current_user()
@@ -346,7 +349,7 @@ pub async fn collect_deployment_metadata(
 
     let git_commit = get_git_commit(directory);
 
-    project::analysis::deployment_snapshot::DeploymentMetadata {
+    DeploymentMetadata {
         deployed_by,
         git_commit,
     }
@@ -368,7 +371,7 @@ pub async fn connect_apply_client(settings: &Settings) -> Result<Client, CliErro
 /// for database-object apply commands.
 pub async fn compile_apply_project_and_connect(
     settings: &Settings,
-) -> Result<(project::ir::graph::Project, Client), CliError> {
+) -> Result<(Project, Client), CliError> {
     let planned_project = crate::cli::commands::compile::run_without_typecheck(
         settings,
         !crate::log::json_output_enabled(),
@@ -491,7 +494,7 @@ impl<'a> DeploymentExecutor<'a> {
     /// schema references are rewritten at the AST level to target staging schemas.
     pub async fn prepare_databases_and_schemas(
         &self,
-        planned_project: &project::ir::graph::Project,
+        planned_project: &Project,
         schema_set: &BTreeSet<project::SchemaQualifier>,
         staging_suffix: Option<&str>,
     ) -> Result<(), CliError> {
@@ -550,7 +553,7 @@ impl<'a> DeploymentExecutor<'a> {
                         if let Some(suffix) = staging_suffix {
                             let staging_schema = format!("{}{}", schema, suffix);
                             let mut rewritten = statement.clone();
-                            project::resolve::normalize::rewrite_schema_names(
+                            normalize::rewrite_schema_names(
                                 std::slice::from_mut(&mut rewritten),
                                 schema,
                                 suffix,
