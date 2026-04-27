@@ -271,7 +271,6 @@ pub(crate) fn run(
         String,
         String,
         String,
-        String,
         BTreeMap<String, ColumnType>,
     )> = Vec::new();
     let mut merged_tables: BTreeMap<String, BTreeMap<String, ColumnType>> = BTreeMap::new();
@@ -310,7 +309,6 @@ pub(crate) fn run(
                 upsert_rows.push((
                     key,
                     semantic_fingerprint,
-                    String::new(), // output_fingerprint placeholder, removed in Task 15
                     kind.as_str().to_string(),
                     columns.as_ref().clone(),
                 ));
@@ -334,11 +332,10 @@ pub(crate) fn run(
     // currently in the project.
     let mut db = BuildArtifact::open(directory, profile, profile_suffix, variables)
         .map_err(TypesError::from)?;
-    let row_refs: Vec<(String, String, String, String, &BTreeMap<String, ColumnType>)> =
-        upsert_rows
-            .iter()
-            .map(|(k, sf, of, kind, cols)| (k.clone(), sf.clone(), of.clone(), kind.clone(), cols))
-            .collect();
+    let row_refs: Vec<(String, String, String, &BTreeMap<String, ColumnType>)> = upsert_rows
+        .iter()
+        .map(|(k, sf, kind, cols)| (k.clone(), sf.clone(), kind.clone(), cols))
+        .collect();
     db.upsert_typecheck_results(&row_refs)
         .map_err(TypesError::from)?;
     let keep: BTreeSet<String> = node_ids.iter().map(|id| id.to_string()).collect();
