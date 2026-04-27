@@ -357,7 +357,7 @@ fn ensure_dep_exists(
 ///
 /// Wraps the in-memory catalog and provides high-level operations for
 /// dependency setup and object validation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct CatalogRuntime {
     catalog: LocalCatalog,
 }
@@ -856,9 +856,8 @@ impl mz_sql::catalog::CatalogCollectionItem for LocalItem {
 /// system objects on creation, then incrementally extended with project
 /// objects during validation. Each instance is scoped to a single typecheck
 /// run to avoid state leakage between validations.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct LocalCatalog {
-    humanizer: DummyHumanizer,
     active_role: LocalRole,
     active_database: Option<mz_sql::names::DatabaseId>,
     active_cluster_name: String,
@@ -924,7 +923,6 @@ impl LocalCatalog {
             helm_chart_version: None,
         };
         let mut catalog = Self {
-            humanizer: DummyHumanizer,
             active_role,
             active_database: None,
             active_cluster_name: DEFAULT_CLUSTER_NAME.into(),
@@ -1553,7 +1551,7 @@ impl ExprHumanizer for LocalCatalog {
     }
 
     fn humanize_sql_scalar_type(&self, ty: &SqlScalarType, postgres_compat: bool) -> String {
-        self.humanizer.humanize_sql_scalar_type(ty, postgres_compat)
+        DummyHumanizer.humanize_sql_scalar_type(ty, postgres_compat)
     }
 
     fn column_names_for_id(&self, id: GlobalId) -> Option<Vec<String>> {
