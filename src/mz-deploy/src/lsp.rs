@@ -95,7 +95,6 @@ pub mod diagnostics;
 mod document_symbol;
 pub mod functions;
 pub mod goto_definition;
-mod helpers;
 pub mod hover;
 mod references;
 mod run;
