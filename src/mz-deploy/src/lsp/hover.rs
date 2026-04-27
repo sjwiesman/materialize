@@ -41,15 +41,13 @@
 //!   and source file path. Constraints are shown after the path if present.
 //! - **Unknown identifier** — Returns `None`.
 
+use super::{functions, goto_definition};
 use crate::project::syntax::variables::find_variable_at_position;
 use crate::project_cache::{CachedConstraint, ProjectCache};
 use crate::types::Types;
 use std::collections::BTreeMap;
 use std::path::Path;
 use tower_lsp::lsp_types::{Hover, HoverContents, MarkupContent, MarkupKind, Url};
-
-use super::helpers::{extract_cached_column_comments, extract_cached_description};
-use super::{functions, goto_definition};
 
 /// Resolve hover information for a variable reference at the given byte offset.
 ///
@@ -121,9 +119,21 @@ pub fn resolve_hover(
     let cached_obj = cached_obj.unwrap();
     let kind = cached_obj.kind;
 
-    let description = extract_cached_description(&cached_obj.comments)
+    let comments = &cached_obj.comments;
+    let description = comments
+        .iter()
+        .find(|c| c.target_column.is_none())
+        .map(|c| c.text.clone())
         .or_else(|| types_lock.comments.get(&fqn).cloned());
-    let mut column_comments = extract_cached_column_comments(&cached_obj.comments);
+    let comments = &cached_obj.comments;
+    let mut column_comments: BTreeMap<_, _> = comments
+        .iter()
+        .filter_map(|c| {
+            c.target_column
+                .as_ref()
+                .map(|col| (col.clone(), c.text.clone()))
+        })
+        .collect();
     let columns = project_cache
         .get_columns(&fqn)
         .or_else(|| types_lock.get_table(&fqn).cloned());
