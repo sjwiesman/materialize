@@ -310,4 +310,69 @@ mod tests {
         assert_eq!(unwrap_ok(&b), 2);
         assert_eq!(unwrap_ok(&c), 3);
     }
+
+    #[test]
+    fn diamond_dispatches_b_and_c_in_parallel() {
+        use std::sync::atomic::AtomicI32;
+        use std::sync::Mutex;
+
+        // a -> {b, c} -> d, where b and c park briefly so we can verify both
+        // are in flight simultaneously.
+        let a = id("a");
+        let b = id("b");
+        let c = id("c");
+        let d = id("d");
+        let nodes = vec![a.clone(), b.clone(), c.clone(), d.clone()];
+        let direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
+            (a.clone(), vec![]),
+            (b.clone(), vec![a.clone()]),
+            (c.clone(), vec![a.clone()]),
+            (d.clone(), vec![b.clone(), c.clone()]),
+        ]
+        .into_iter()
+        .collect();
+        let dependents: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
+            (a.clone(), vec![b.clone(), c.clone()]),
+            (b.clone(), vec![d.clone()]),
+            (c.clone(), vec![d.clone()]),
+            (d.clone(), vec![]),
+        ]
+        .into_iter()
+        .collect();
+
+        let inflight = Arc::new(AtomicI32::new(0));
+        let max_inflight = Arc::new(AtomicI32::new(0));
+        let observed_for_d = Arc::new(Mutex::new(Vec::<ObjectId>::new()));
+
+        let inflight_w = Arc::clone(&inflight);
+        let max_inflight_w = Arc::clone(&max_inflight);
+        let observed_for_d_w = Arc::clone(&observed_for_d);
+
+        let outcomes = run::<u64, _>(nodes, direct_deps, dependents, move |id, deps| {
+            if id.object == "b" || id.object == "c" {
+                let now = inflight_w.fetch_add(1, Ordering::AcqRel) + 1;
+                max_inflight_w.fetch_max(now, Ordering::AcqRel);
+                std::thread::sleep(Duration::from_millis(50));
+                inflight_w.fetch_sub(1, Ordering::AcqRel);
+            }
+            if id.object == "d" {
+                let mut keys: Vec<ObjectId> = deps.keys().cloned().collect();
+                keys.sort();
+                *observed_for_d_w.lock().unwrap() = keys;
+            }
+            Ok(1u64)
+        });
+
+        assert!(matches!(outcomes.get(&a), Some(NodeOutcome::Ok(_))));
+        assert!(matches!(outcomes.get(&b), Some(NodeOutcome::Ok(_))));
+        assert!(matches!(outcomes.get(&c), Some(NodeOutcome::Ok(_))));
+        assert!(matches!(outcomes.get(&d), Some(NodeOutcome::Ok(_))));
+        assert_eq!(
+            max_inflight.load(Ordering::Acquire),
+            2,
+            "expected b and c to overlap in flight"
+        );
+        let observed = observed_for_d.lock().unwrap().clone();
+        assert_eq!(observed, vec![b.clone(), c.clone()]);
+    }
 }
