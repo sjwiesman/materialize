@@ -375,4 +375,70 @@ mod tests {
         let observed = observed_for_d.lock().unwrap().clone();
         assert_eq!(observed, vec![b.clone(), c.clone()]);
     }
+
+    fn fake_typecheck_error(id: &ObjectId, msg: &str) -> ObjectTypeCheckError {
+        ObjectTypeCheckError {
+            object_id: id.clone(),
+            file_path: std::path::PathBuf::from("test"),
+            sql_statement: String::new(),
+            error_message: msg.into(),
+            detail: None,
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn failure_propagates_to_dependents_and_isolates_other_branches() {
+        // Failing branch:  a (FAIL) -> b -> c
+        // Healthy branch:  x -> y
+        let a = id("a");
+        let b = id("b");
+        let c = id("c");
+        let x = id("x");
+        let y = id("y");
+        let nodes = vec![a.clone(), b.clone(), c.clone(), x.clone(), y.clone()];
+
+        let direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
+            (a.clone(), vec![]),
+            (b.clone(), vec![a.clone()]),
+            (c.clone(), vec![b.clone()]),
+            (x.clone(), vec![]),
+            (y.clone(), vec![x.clone()]),
+        ]
+        .into_iter()
+        .collect();
+        let dependents: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
+            (a.clone(), vec![b.clone()]),
+            (b.clone(), vec![c.clone()]),
+            (c.clone(), vec![]),
+            (x.clone(), vec![y.clone()]),
+            (y.clone(), vec![]),
+        ]
+        .into_iter()
+        .collect();
+
+        let a_for_closure = a.clone();
+        let outcomes = run::<u32, _>(nodes, direct_deps, dependents, move |id, _deps| {
+            if *id == a_for_closure {
+                Err(fake_typecheck_error(id, "boom"))
+            } else {
+                Ok(1)
+            }
+        });
+
+        match outcomes.get(&a).unwrap() {
+            NodeOutcome::Err(NodeFailure::Failed(err)) => assert_eq!(err.error_message, "boom"),
+            other => panic!("expected Failed for a, got {other:?}"),
+        }
+        match outcomes.get(&b).unwrap() {
+            NodeOutcome::Err(NodeFailure::Blocked(blocker)) => assert_eq!(blocker, &a),
+            other => panic!("expected Blocked(a) for b, got {other:?}"),
+        }
+        match outcomes.get(&c).unwrap() {
+            NodeOutcome::Err(NodeFailure::Blocked(blocker)) => assert_eq!(blocker, &b),
+            other => panic!("expected Blocked(b) for c, got {other:?}"),
+        }
+        assert!(matches!(outcomes.get(&x), Some(NodeOutcome::Ok(_))));
+        assert!(matches!(outcomes.get(&y), Some(NodeOutcome::Ok(_))));
+    }
 }
