@@ -311,9 +311,9 @@ Unit tests in `executor.rs`:
 
 Existing tests:
 
-- The `incremental_compile_*` tests in `compiler.rs::tests` are unaffected —
-  they cover the object compiler's cache hit/miss behavior, which this design
-  does not change.
+- The `incremental_compile_*` tests in `compiler.rs::tests` are deleted. They
+  cover the object compiler's cache hit/miss behavior, which this design does
+  not change, but they aren't pulling enough weight to keep around.
 - All existing CLI / LSP / mzcompose integration tests remain untouched as
   regression coverage: the user-visible error format and SQLite read path are
   unchanged.
