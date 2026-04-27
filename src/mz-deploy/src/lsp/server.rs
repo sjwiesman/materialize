@@ -323,29 +323,13 @@ impl Backend {
         };
 
         let types_lock = types::load_types_lock(&root).unwrap_or_default();
-        let plan = match project::compiler::typecheck::plan(
+        let _ = project::compiler::typecheck::run(
             &root,
             &profile,
             profile_suffix.as_deref(),
             &variables,
             &project,
             types_lock,
-        ) {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        if plan.is_up_to_date() {
-            return;
-        }
-
-        let _ = project::compiler::typecheck::execute(
-            &project,
-            &root,
-            &profile,
-            profile_suffix.as_deref(),
-            &variables,
-            plan,
         );
     }
 }
