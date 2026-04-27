@@ -71,6 +71,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 mod catalog;
+mod executor;
 
 /// Errors that can occur during runtime typechecking.
 #[derive(Debug, Error)]
