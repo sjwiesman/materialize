@@ -378,7 +378,7 @@ pub(crate) fn execute(
 ///
 /// Returns the merged `Types` covering newly-validated columns, base columns
 /// (tables/sources/etc.), and external `types.lock` entries.
-pub fn run(
+pub(crate) fn run(
     directory: &Path,
     profile: &str,
     profile_suffix: Option<&str>,
