@@ -159,14 +159,17 @@ impl ObjectId {
             None
         }
     }
+}
 
-    #[must_use = "this returns the parsed ObjectId, which should be used"]
-    pub fn from_fqn(fqn: &str) -> Result<Self, String> {
-        let parts: Vec<&str> = fqn.split('.').collect();
+impl FromStr for ObjectId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split('.').collect();
         if parts.len() != 3 {
             return Err(format!(
-                "invalid FQN '{}': expected format 'database.schema.object'",
-                fqn
+                "invalid object id '{}': expected format 'database.schema.object'",
+                s
             ));
         }
         Ok(ObjectId {
@@ -174,14 +177,6 @@ impl ObjectId {
             schema: parts[1].to_string(),
             object: parts[2].to_string(),
         })
-    }
-}
-
-impl FromStr for ObjectId {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_fqn(s)
     }
 }
 

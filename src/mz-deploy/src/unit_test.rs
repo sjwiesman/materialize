@@ -493,13 +493,10 @@ impl std::error::Error for InvalidAtTimeError {}
 pub(crate) fn validate_unit_test(
     test: &UnitTest,
     target_id: &ObjectId,
-    get_columns: &dyn Fn(&str) -> Option<BTreeMap<String, ColumnType>>,
+    get_columns: &dyn Fn(&ObjectId) -> Option<BTreeMap<String, ColumnType>>,
     dependencies: &BTreeSet<ObjectId>,
 ) -> Result<(), TestValidationError> {
-    let target_fqn = target_id.to_string();
-
-    // Build set of mocked FQNs (normalize to fully qualified)
-    let mocked_fqns: BTreeSet<String> = test
+    let mocked_ids: BTreeSet<ObjectId> = test
         .mocks
         .iter()
         .map(|m| normalize_fqn(&m.fqn, target_id))
@@ -508,7 +505,7 @@ pub(crate) fn validate_unit_test(
     // 1. Check that all dependencies are mocked
     let missing_mocks: Vec<String> = dependencies
         .iter()
-        .filter(|dep| !mocked_fqns.contains(&dep.to_string()))
+        .filter(|dep| !mocked_ids.contains(*dep))
         .map(|dep| dep.to_string())
         .collect();
 
@@ -516,7 +513,7 @@ pub(crate) fn validate_unit_test(
         return Err(TestValidationError::UnmockedDependency(
             UnmockedDependencyError {
                 test_name: test.name.clone(),
-                target_view: target_fqn.clone(),
+                target_view: target_id.to_string(),
                 missing_mocks,
             },
         ));
@@ -524,13 +521,12 @@ pub(crate) fn validate_unit_test(
 
     // 2. Validate each mock's schema against the actual types
     for mock in &test.mocks {
-        let mock_fqn = normalize_fqn(&mock.fqn, target_id);
+        let mock_id = normalize_fqn(&mock.fqn, target_id);
 
-        if let Some(actual_columns) = get_columns(&mock_fqn) {
+        if let Some(actual_columns) = get_columns(&mock_id) {
             let (extra, missing, type_mismatches) = compare_columns(&mock.columns, &actual_columns);
 
             if !extra.is_empty() || !missing.is_empty() || !type_mismatches.is_empty() {
-                // Extract actual schema for error message
                 let actual_schema: Vec<(String, String)> = actual_columns
                     .iter()
                     .map(|(name, col_type)| (name.clone(), col_type.r#type.clone()))
@@ -539,7 +535,7 @@ pub(crate) fn validate_unit_test(
                 return Err(TestValidationError::MockSchemaMismatch(
                     MockSchemaMismatchError {
                         test_name: test.name.clone(),
-                        mock_fqn,
+                        mock_fqn: mock_id.to_string(),
                         extra_columns: extra,
                         missing_columns: missing,
                         type_mismatches,
@@ -553,7 +549,7 @@ pub(crate) fn validate_unit_test(
     }
 
     // 3. Validate expected output schema against target view
-    if let Some(target_columns) = get_columns(&target_fqn) {
+    if let Some(target_columns) = get_columns(target_id) {
         let (extra, missing, type_mismatches) =
             compare_columns(&test.expected.columns, &target_columns);
 
@@ -567,7 +563,7 @@ pub(crate) fn validate_unit_test(
             return Err(TestValidationError::ExpectedSchemaMismatch(
                 ExpectedSchemaMismatchError {
                     test_name: test.name.clone(),
-                    target_view: target_fqn,
+                    target_view: target_id.to_string(),
                     extra_columns: extra,
                     missing_columns: missing,
                     type_mismatches,
@@ -581,13 +577,26 @@ pub(crate) fn validate_unit_test(
     Ok(())
 }
 
-/// Normalize a potentially partial FQN to a fully qualified name using the target's context.
-fn normalize_fqn(fqn: &str, target_id: &ObjectId) -> String {
+/// Normalize a potentially partial FQN to a fully qualified `ObjectId` using the target's context.
+fn normalize_fqn(fqn: &str, target_id: &ObjectId) -> ObjectId {
     let parts: Vec<&str> = fqn.split('.').collect();
-    match parts.len() {
-        1 => format!("{}.{}.{}", target_id.database, target_id.schema, fqn),
-        2 => format!("{}.{}", target_id.database, fqn),
-        _ => fqn.to_string(),
+    match parts.as_slice() {
+        [object] => ObjectId::new(
+            target_id.database.clone(),
+            target_id.schema.clone(),
+            (*object).to_string(),
+        ),
+        [schema, object] => ObjectId::new(
+            target_id.database.clone(),
+            (*schema).to_string(),
+            (*object).to_string(),
+        ),
+        [db, schema, object] => ObjectId::new(
+            (*db).to_string(),
+            (*schema).to_string(),
+            (*object).to_string(),
+        ),
+        _ => ObjectId::new(String::new(), String::new(), fqn.to_string()),
     }
 }
 
@@ -1056,7 +1065,10 @@ mod tests {
                 comment: None,
             },
         );
-        objects.insert("materialize.public.users".to_string(), users_cols);
+        objects.insert(
+            "materialize.public.users".parse::<ObjectId>().unwrap(),
+            users_cols,
+        );
 
         // Add orders table schema
         let mut orders_cols = BTreeMap::new();
@@ -1087,7 +1099,10 @@ mod tests {
                 comment: None,
             },
         );
-        objects.insert("materialize.public.orders".to_string(), orders_cols);
+        objects.insert(
+            "materialize.public.orders".parse::<ObjectId>().unwrap(),
+            orders_cols,
+        );
 
         // Add target view schema (user_order_summary)
         let mut summary_cols = BTreeMap::new();
@@ -1119,7 +1134,9 @@ mod tests {
             },
         );
         objects.insert(
-            "materialize.public.user_order_summary".to_string(),
+            "materialize.public.user_order_summary"
+                .parse::<ObjectId>()
+                .unwrap(),
             summary_cols,
         );
 
@@ -1565,7 +1582,7 @@ mod tests {
         };
 
         let normalized = normalize_fqn("users", &target_id);
-        assert_eq!(normalized, "mydb.myschema.users");
+        assert_eq!(normalized.to_string(), "mydb.myschema.users");
     }
 
     #[test]
@@ -1577,7 +1594,7 @@ mod tests {
         };
 
         let normalized = normalize_fqn("other_schema.users", &target_id);
-        assert_eq!(normalized, "mydb.other_schema.users");
+        assert_eq!(normalized.to_string(), "mydb.other_schema.users");
     }
 
     #[test]
@@ -1589,7 +1606,7 @@ mod tests {
         };
 
         let normalized = normalize_fqn("other_db.other_schema.users", &target_id);
-        assert_eq!(normalized, "other_db.other_schema.users");
+        assert_eq!(normalized.to_string(), "other_db.other_schema.users");
     }
 
     #[test]

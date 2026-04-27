@@ -103,8 +103,8 @@ struct CompletionContext<'a> {
 
 /// The current file's resolved context for column completions.
 struct FileObject {
-    /// FQN strings of objects this file depends on.
-    dependencies: Vec<String>,
+    /// Objects this file depends on.
+    dependencies: Vec<ObjectId>,
     /// Alias/bare-table-name → target FQN map from the SQL AST.
     alias_map: BTreeMap<String, String>,
 }
@@ -129,11 +129,12 @@ fn resolve_context<'a>(
         .and_then(|object_name| {
             let file_object_id =
                 ObjectId::new(default_db.clone(), default_schema.clone(), object_name);
-            let fqn = file_object_id.to_string();
-            project_cache.get_object(&fqn).map(|obj| FileObject {
-                dependencies: project_cache.get_dependencies(&obj.fqn),
-                alias_map: obj.aliases.clone(),
-            })
+            project_cache
+                .get_object(&file_object_id)
+                .map(|obj| FileObject {
+                    dependencies: project_cache.get_dependencies(&file_object_id),
+                    alias_map: obj.aliases.clone(),
+                })
         });
 
     Some(CompletionContext {
@@ -250,14 +251,10 @@ fn gather_objects<'a>(
         }
     }
 
-    for fqn in project_cache.list_external_dependencies() {
-        let id = match ObjectId::from_fqn(&fqn) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
+    for id in project_cache.list_external_dependencies() {
         let kind = project_cache
-            .get_kind(&fqn)
-            .or_else(|| types_lock.kinds.get(&fqn).copied())
+            .get_kind(&id)
+            .or_else(|| types_lock.kinds.get(&id).copied())
             .unwrap_or(ObjectKind::Table);
         if let Some((label, sort_key)) =
             qualify_and_filter(&id, &ctx.default_db, &ctx.default_schema, ctx.prefix)
@@ -306,17 +303,17 @@ fn gather_columns<'a>(
 
 /// Gather columns from all dependencies, filtered by prefix (case-insensitive).
 fn gather_unqualified_columns<'a>(
-    dependencies: &[String],
+    dependencies: &[ObjectId],
     project_cache: Option<&ProjectCache>,
     types_lock: &Types,
     filter_text: &str,
 ) -> Vec<CompletionCandidate<'a>> {
     let filter = filter_text.to_lowercase();
     let mut candidates = Vec::new();
-    for fqn in dependencies {
+    for id in dependencies {
         let columns = project_cache
-            .and_then(|tc| tc.get_columns(fqn))
-            .or_else(|| types_lock.get_table(fqn).cloned());
+            .and_then(|tc| tc.get_columns(id))
+            .or_else(|| types_lock.get_table(id).cloned());
         if let Some(columns) = columns {
             for (col_name, col_type) in columns {
                 if filter.is_empty() || col_name.to_lowercase().starts_with(&filter) {
@@ -361,14 +358,13 @@ fn gather_qualified_columns<'a>(
         None => return Vec::new(),
     };
 
-    let fqn = object_id.to_string();
-    if !file_object.dependencies.contains(&fqn) {
+    if !file_object.dependencies.contains(&object_id) {
         return Vec::new();
     }
 
     let columns = project_cache
-        .and_then(|tc| tc.get_columns(&fqn))
-        .or_else(|| types_lock.get_table(&fqn).cloned());
+        .and_then(|tc| tc.get_columns(&object_id))
+        .or_else(|| types_lock.get_table(&object_id).cloned());
 
     match columns {
         Some(columns) => columns
@@ -399,7 +395,7 @@ fn resolve_qualified_object(
     match parts.len() {
         1 => {
             if let Some(fqn) = alias_map.get(&parts[0].to_lowercase()) {
-                ObjectId::from_fqn(fqn).ok()
+                fqn.parse::<ObjectId>().ok()
             } else {
                 Some(ObjectId::new(
                     default_db.to_string(),

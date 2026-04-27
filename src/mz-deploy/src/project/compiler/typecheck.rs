@@ -260,8 +260,8 @@ pub(crate) fn run(
     // Phase 3.
     let mut errors: Vec<ObjectTypeCheckError> = Vec::new();
     let mut upsert_rows: Vec<(String, String, String, BTreeMap<String, ColumnType>)> = Vec::new();
-    let mut merged_tables: BTreeMap<String, BTreeMap<String, ColumnType>> = BTreeMap::new();
-    let mut merged_kinds: BTreeMap<String, ObjectKind> = BTreeMap::new();
+    let mut merged_tables: BTreeMap<ObjectId, BTreeMap<String, ColumnType>> = BTreeMap::new();
+    let mut merged_kinds: BTreeMap<ObjectId, ObjectKind> = BTreeMap::new();
 
     let project_objects_by_id: BTreeMap<&ObjectId, &crate::project::ir::compiled::DatabaseObject> =
         project
@@ -269,16 +269,15 @@ pub(crate) fn run(
             .map(|o| (&o.id, &o.typed_object))
             .collect();
     for (id, columns) in base_columns_arc.iter() {
-        let key = id.to_string();
-        merged_tables.insert(key.clone(), columns.clone());
+        merged_tables.insert(id.clone(), columns.clone());
         if let Some(typed_obj) = project_objects_by_id.get(id) {
-            merged_kinds.insert(key, object_kind_for_stmt(&typed_obj.stmt));
+            merged_kinds.insert(id.clone(), object_kind_for_stmt(&typed_obj.stmt));
         }
     }
-    for (fqn, columns) in &external_types.tables {
-        merged_tables.insert(fqn.clone(), columns.clone());
-        if let Some(kind) = external_types.kinds.get(fqn) {
-            merged_kinds.insert(fqn.clone(), *kind);
+    for (id, columns) in &external_types.tables {
+        merged_tables.insert(id.clone(), columns.clone());
+        if let Some(kind) = external_types.kinds.get(id) {
+            merged_kinds.insert(id.clone(), *kind);
         }
     }
 
@@ -291,13 +290,12 @@ pub(crate) fn run(
                 let db_obj = typed_objects
                     .get(node_id)
                     .expect("typed_object exists for outcome");
-                let key = node_id.to_string();
                 let kind = object_kind_for_stmt(&db_obj.stmt);
                 let semantic_fingerprint = compute_semantic_fingerprint(db_obj);
-                merged_tables.insert(key.clone(), columns.as_ref().clone());
-                merged_kinds.insert(key.clone(), kind);
+                merged_tables.insert(node_id.clone(), columns.as_ref().clone());
+                merged_kinds.insert(node_id.clone(), kind);
                 upsert_rows.push((
-                    key,
+                    node_id.to_string(),
                     semantic_fingerprint,
                     kind.as_str().to_string(),
                     columns.as_ref().clone(),
@@ -486,9 +484,15 @@ mod run_tests {
         )
         .unwrap();
 
-        // The view is in the merged Types map.
-        assert!(merged.tables.contains_key("materialize.public.v1"));
-        // The table is too (from base_columns).
-        assert!(merged.tables.contains_key("materialize.storage.t1"));
+        assert!(
+            merged
+                .tables
+                .contains_key(&"materialize.public.v1".parse::<ObjectId>().unwrap())
+        );
+        assert!(
+            merged
+                .tables
+                .contains_key(&"materialize.storage.t1".parse::<ObjectId>().unwrap())
+        );
     }
 }

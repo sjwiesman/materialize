@@ -57,7 +57,7 @@ pub(super) fn document_symbols(
 
     let id = ObjectId::new(default_db, default_schema, object_name);
     let fqn = id.to_string();
-    let cached_obj = match project_cache.get_object(&fqn) {
+    let cached_obj = match project_cache.get_object(&id) {
         Some(o) => o,
         None => return Vec::new(),
     };
@@ -108,7 +108,7 @@ pub(super) fn document_symbols(
     }
 
     // Unit tests
-    let tests = project_cache.get_tests(&fqn);
+    let tests = project_cache.get_tests(&id);
     for t in &tests {
         children.push(child_symbol(format!("TEST {}", t.name), SymbolKind::METHOD));
     }

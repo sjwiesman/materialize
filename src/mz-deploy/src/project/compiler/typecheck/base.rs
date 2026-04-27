@@ -34,10 +34,8 @@ pub(super) fn build_base_catalog(
     let mut runtime = CatalogRuntime::open()?;
     runtime.bootstrap_namespaces(project, external_types);
 
-    // Stub external types.lock entries.
-    for (fqn, columns) in &external_types.tables {
-        let Some(object_id) = fqn.parse::<ObjectId>();
-        runtime.create_stub_table(&object_id, columns)?;
+    for (id, columns) in &external_types.tables {
+        runtime.create_stub_table(id, columns)?;
     }
 
     // Register every non-typechecked project object.

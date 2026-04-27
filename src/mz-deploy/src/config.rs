@@ -182,9 +182,11 @@ impl ProjectSettings {
     pub fn validate_dependencies(&self) -> Result<BTreeSet<ObjectId>, ConfigError> {
         let mut seen = BTreeSet::new();
         for entry in &self.raw_dependencies {
-            let id = ObjectId::from_fqn(entry).map_err(|_| ConfigError::InvalidDependency {
-                entry: entry.clone(),
-            })?;
+            let id = entry
+                .parse::<ObjectId>()
+                .map_err(|_| ConfigError::InvalidDependency {
+                    entry: entry.clone(),
+                })?;
             if id.database().is_empty() || id.schema().is_empty() || id.object().is_empty() {
                 return Err(ConfigError::InvalidDependency {
                     entry: entry.clone(),

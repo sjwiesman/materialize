@@ -34,6 +34,7 @@
 //! - [`ColumnType`] — A single column's type name, nullability, and optional
 //!   `COMMENT ON COLUMN` description.
 
+use crate::project::ir::object_id::ObjectId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -171,20 +172,18 @@ pub struct ColumnType {
 
 /// In-memory representation of a `types.lock` file.
 ///
-/// Maps fully-qualified object names (`database.schema.object`) to their
-/// column schemas. Used for type-checking views against external dependencies.
+/// Maps `ObjectId` (fully-qualified `database.schema.object`) to column
+/// schemas. Used for type-checking views against external dependencies.
 /// Optionally includes object-level and column-level comments from
 /// `COMMENT ON` statements in the source database.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct Types {
     pub version: u8,
-    pub tables: BTreeMap<String, BTreeMap<String, ColumnType>>,
-    /// Object kind for each fully-qualified name.
-    pub kinds: BTreeMap<String, ObjectKind>,
-    /// Object-level comments (fqn → comment text) from `COMMENT ON` in the
-    /// source database. Only populated for objects that have comments.
+    pub tables: BTreeMap<ObjectId, BTreeMap<String, ColumnType>>,
+    pub kinds: BTreeMap<ObjectId, ObjectKind>,
+    /// Object-level comments from `COMMENT ON` in the source database.
     #[serde(default)]
-    pub comments: BTreeMap<String, String>,
+    pub comments: BTreeMap<ObjectId, String>,
 }
 
 impl Default for Types {
@@ -216,6 +215,21 @@ struct TypesLock {
     secret: Vec<ObjectLock>,
     #[serde(default)]
     connection: Vec<ObjectLock>,
+}
+
+impl Default for TypesLock {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            table: vec![],
+            view: vec![],
+            materialized_view: vec![],
+            source: vec![],
+            sink: vec![],
+            secret: vec![],
+            connection: vec![],
+        }
+    }
 }
 
 impl TypesLock {
@@ -262,7 +276,7 @@ impl TypesLock {
 
 #[derive(Serialize, Deserialize)]
 struct ObjectLock {
-    name: String,
+    name: ObjectId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     comment: Option<String>,
     columns: Vec<ColumnLock>,
@@ -291,11 +305,8 @@ impl From<&Types> for TypesLock {
             connection: Vec::new(),
         };
 
-        // Collect and sort by fqn for deterministic output
-        let mut entries: Vec<_> = types.tables.iter().collect();
-        entries.sort_by_key(|(fqn, _)| *fqn);
-
-        for (fqn, columns) in entries {
+        // BTreeMap iteration is already FQN-sorted; preserves deterministic output.
+        for (id, columns) in &types.tables {
             let mut cols: Vec<_> = columns.iter().collect();
             cols.sort_by_key(|(_, ct)| ct.position);
             let cols: Vec<ColumnLock> = cols
@@ -308,11 +319,11 @@ impl From<&Types> for TypesLock {
                 })
                 .collect();
 
-            let kind = types.kinds[fqn.as_str()];
-            let comment = types.comments.get(fqn).cloned();
+            let kind = types.kinds[id];
+            let comment = types.comments.get(id).cloned();
 
             let obj = ObjectLock {
-                name: fqn.clone(),
+                name: id.clone(),
                 comment,
                 columns: cols,
             };
@@ -331,7 +342,7 @@ impl From<TypesLock> for Types {
         let mut comments = BTreeMap::new();
 
         for (kind, obj) in lock.all_objects() {
-            let fqn = obj.name.clone();
+            let id = obj.name.clone();
             let mut columns = BTreeMap::new();
             for (position, col) in obj.columns.iter().enumerate() {
                 columns.insert(
@@ -344,11 +355,11 @@ impl From<TypesLock> for Types {
                     },
                 );
             }
-            kinds.insert(fqn.clone(), kind);
+            kinds.insert(id.clone(), kind);
             if let Some(comment) = &obj.comment {
-                comments.insert(fqn.clone(), comment.clone());
+                comments.insert(id.clone(), comment.clone());
             }
-            tables.insert(fqn, columns);
+            tables.insert(id, columns);
         }
 
         Types {
@@ -400,7 +411,10 @@ fn write_toml(lock: &TypesLock) -> String {
         for obj in *objs {
             out.push('\n');
             out.push_str(&format!("[[{}]]\n", kind.as_str()));
-            out.push_str(&format!("name = \"{}\"\n", escape_toml_string(&obj.name)));
+            out.push_str(&format!(
+                "name = \"{}\"\n",
+                escape_toml_string(&obj.name.to_string())
+            ));
             if let Some(comment) = &obj.comment {
                 out.push_str(&format!("comment = \"{}\"\n", escape_toml_string(comment)));
             }
@@ -451,33 +465,17 @@ impl Types {
         fs::write(&path, contents).map_err(|source| TypesError::FileWriteFailed { path, source })
     }
 
-    /// Merge another Types instance into this one.
-    ///
-    /// Objects from `other` will be added to this Types. If the same object
-    /// exists in both, the one from `other` will overwrite.
-    pub fn merge(&mut self, other: &Types) {
-        for (key, value) in &other.tables {
-            self.tables.insert(key.clone(), value.clone());
-        }
-        for (key, value) in &other.kinds {
-            self.kinds.insert(key.clone(), *value);
-        }
-        for (key, value) in &other.comments {
-            self.comments.insert(key.clone(), value.clone());
-        }
+    /// Get the column schema for an object.
+    pub fn get_table(&self, id: &ObjectId) -> Option<&BTreeMap<String, ColumnType>> {
+        self.tables.get(id)
     }
 
-    /// Get the column schema for an object by its fully qualified name.
-    pub fn get_table(&self, fqn: &str) -> Option<&BTreeMap<String, ColumnType>> {
-        self.tables.get(fqn)
-    }
-
-    /// Get the object kind for a fully-qualified name.
+    /// Get the object kind for an object.
     ///
-    /// Returns `Table` if the name is not in the kinds map, which can happen
+    /// Returns `Table` if the id is not in the kinds map, which can happen
     /// when `Types` is constructed programmatically (e.g., from `type_info`).
-    pub fn get_kind(&self, fqn: &str) -> ObjectKind {
-        self.kinds.get(fqn).copied().unwrap_or(ObjectKind::Table)
+    pub fn get_kind(&self, id: &ObjectId) -> ObjectKind {
+        self.kinds.get(id).copied().unwrap_or(ObjectKind::Table)
     }
 }
 
@@ -518,7 +516,7 @@ mod tests {
                 comment: None,
             },
         );
-        tables.insert("app.ingest.orders".to_string(), order_cols);
+        tables.insert("app.ingest.orders".parse::<ObjectId>().unwrap(), order_cols);
 
         let mut user_cols = BTreeMap::new();
         user_cols.insert(
@@ -539,11 +537,17 @@ mod tests {
                 comment: None,
             },
         );
-        tables.insert("app.ingest.users".to_string(), user_cols);
+        tables.insert("app.ingest.users".parse::<ObjectId>().unwrap(), user_cols);
 
         let mut kinds = BTreeMap::new();
-        kinds.insert("app.ingest.orders".to_string(), ObjectKind::Table);
-        kinds.insert("app.ingest.users".to_string(), ObjectKind::Table);
+        kinds.insert(
+            "app.ingest.orders".parse::<ObjectId>().unwrap(),
+            ObjectKind::Table,
+        );
+        kinds.insert(
+            "app.ingest.users".parse::<ObjectId>().unwrap(),
+            ObjectKind::Table,
+        );
 
         let types = Types {
             version: 1,
@@ -574,13 +578,22 @@ mod tests {
                 comment: None,
             },
         );
-        tables.insert("app.ingest.orders".to_string(), cols.clone());
-        tables.insert("app.ingest.order_summary".to_string(), cols);
+        tables.insert(
+            "app.ingest.orders".parse::<ObjectId>().unwrap(),
+            cols.clone(),
+        );
+        tables.insert(
+            "app.ingest.order_summary".parse::<ObjectId>().unwrap(),
+            cols,
+        );
 
         let mut kinds = BTreeMap::new();
-        kinds.insert("app.ingest.orders".to_string(), ObjectKind::Table);
         kinds.insert(
-            "app.ingest.order_summary".to_string(),
+            "app.ingest.orders".parse::<ObjectId>().unwrap(),
+            ObjectKind::Table,
+        );
+        kinds.insert(
+            "app.ingest.order_summary".parse::<ObjectId>().unwrap(),
             ObjectKind::MaterializedView,
         );
 
@@ -622,14 +635,17 @@ mod tests {
                 comment: None,
             },
         );
-        tables.insert("app.ingest.orders".to_string(), cols);
+        tables.insert("app.ingest.orders".parse::<ObjectId>().unwrap(), cols);
 
         let mut kinds = BTreeMap::new();
-        kinds.insert("app.ingest.orders".to_string(), ObjectKind::Table);
+        kinds.insert(
+            "app.ingest.orders".parse::<ObjectId>().unwrap(),
+            ObjectKind::Table,
+        );
 
         let mut comments = BTreeMap::new();
         comments.insert(
-            "app.ingest.orders".to_string(),
+            "app.ingest.orders".parse::<ObjectId>().unwrap(),
             "All incoming customer orders".to_string(),
         );
 
@@ -667,7 +683,10 @@ columns = [
         let loaded = load_types_lock(dir.path()).expect("should parse without comments");
         assert_eq!(loaded.tables.len(), 1);
         assert!(loaded.comments.is_empty());
-        let cols = loaded.tables.get("app.ingest.orders").unwrap();
+        let cols = loaded
+            .tables
+            .get(&"app.ingest.orders".parse::<ObjectId>().unwrap())
+            .unwrap();
         assert!(cols.get("id").unwrap().comment.is_none());
     }
 }

@@ -76,7 +76,7 @@ pub(in super::super) fn validate_constraint_enforcement(
 /// lookup: `TypesCache` first, then `types_lock`.
 pub(crate) fn validate_constraint_fk_targets(
     project: &graph::Project,
-    get_kind: impl Fn(&str) -> ObjectKind,
+    get_kind: impl Fn(&ObjectId) -> ObjectKind,
 ) -> Vec<ValidationError> {
     let mut errors = Vec::new();
 
@@ -113,7 +113,7 @@ pub(crate) fn validate_constraint_fk_targets(
                 ref_obj.typed_object.stmt.kind()
             } else {
                 // External object: look up via caller-provided closure
-                get_kind(&ref_id.to_string())
+                get_kind(&ref_id)
             };
 
             let is_valid = match ref_kind {

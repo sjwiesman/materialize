@@ -45,22 +45,18 @@ pub(super) fn find_references(
         None => return Vec::new(),
     };
 
-    let fqn = id.to_string();
     let mut locations = Vec::new();
 
-    // Optionally include the definition itself.
     if include_declaration {
-        if let Some(cached_obj) = project_cache.get_object(&fqn) {
+        if let Some(cached_obj) = project_cache.get_object(&id) {
             if let Some(loc) = file_location(root, &cached_obj.file_path) {
                 locations.push(loc);
             }
         }
     }
 
-    // Find all dependents via the cache.
-    let dependents = project_cache.get_dependents(&fqn);
-    for dep_fqn in &dependents {
-        if let Some(cached_obj) = project_cache.get_object(dep_fqn) {
+    for dep_id in project_cache.get_dependents(&id) {
+        if let Some(cached_obj) = project_cache.get_object(&dep_id) {
             if let Some(loc) = file_location(root, &cached_obj.file_path) {
                 locations.push(loc);
             }

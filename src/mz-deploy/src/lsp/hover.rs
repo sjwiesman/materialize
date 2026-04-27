@@ -102,10 +102,8 @@ pub fn resolve_hover(
     types_lock: &Types,
 ) -> Option<Hover> {
     let id = goto_definition::resolve_object_id(parts, file_uri, root);
-    let fqn = id.as_ref().map(|id| id.to_string());
 
-    // Try resolving as a project object first
-    let cached_obj = fqn.as_ref().and_then(|fqn| project_cache.get_object(fqn));
+    let cached_obj = id.as_ref().and_then(|id| project_cache.get_object(id));
 
     // If not a project object, try function lookup (single unqualified name)
     if cached_obj.is_none() {
@@ -115,16 +113,17 @@ pub fn resolve_hover(
         return None;
     }
 
-    let fqn = fqn.unwrap();
+    let id = id.unwrap();
     let cached_obj = cached_obj.unwrap();
     let kind = cached_obj.kind;
+    let fqn = id.to_string();
 
     let comments = &cached_obj.comments;
     let description = comments
         .iter()
         .find(|c| c.target_column.is_none())
         .map(|c| c.text.clone())
-        .or_else(|| types_lock.comments.get(&fqn).cloned());
+        .or_else(|| types_lock.comments.get(&id).cloned());
     let comments = &cached_obj.comments;
     let mut column_comments: BTreeMap<_, _> = comments
         .iter()
@@ -135,8 +134,8 @@ pub fn resolve_hover(
         })
         .collect();
     let columns = project_cache
-        .get_columns(&fqn)
-        .or_else(|| types_lock.get_table(&fqn).cloned());
+        .get_columns(&id)
+        .or_else(|| types_lock.get_table(&id).cloned());
 
     // Fall back to types.lock column comments when no project cache comments exist
     if column_comments.is_empty() {
@@ -265,6 +264,7 @@ fn resolve_function_hover(parts: &[String]) -> Option<Hover> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::ir::object_id::ObjectId;
     use crate::project_cache::ProjectCache;
     use crate::types::ColumnType;
     use std::collections::BTreeMap;
@@ -569,9 +569,9 @@ mod tests {
         );
         types_lock
             .tables
-            .insert("mydb.public.foo".to_string(), columns);
+            .insert("mydb.public.foo".parse::<ObjectId>().unwrap(), columns);
         types_lock.comments.insert(
-            "mydb.public.foo".to_string(),
+            "mydb.public.foo".parse::<ObjectId>().unwrap(),
             "External orders table".to_string(),
         );
 
@@ -657,7 +657,7 @@ mod tests {
         );
         types_lock
             .tables
-            .insert("mydb.public.foo".to_string(), columns);
+            .insert("mydb.public.foo".parse::<ObjectId>().unwrap(), columns);
 
         (root, cache, types_lock)
     }
@@ -698,7 +698,7 @@ mod tests {
         );
         types_lock
             .tables
-            .insert("mydb.public.foo".to_string(), columns);
+            .insert("mydb.public.foo".parse::<ObjectId>().unwrap(), columns);
 
         (root, cache, types_lock)
     }
@@ -745,7 +745,7 @@ mod tests {
         );
         types_lock
             .tables
-            .insert("mydb.public.foo".to_string(), columns);
+            .insert("mydb.public.foo".parse::<ObjectId>().unwrap(), columns);
 
         (root, cache, types_lock)
     }
@@ -796,7 +796,7 @@ mod tests {
         );
         types_lock
             .tables
-            .insert("mydb.public.orders".to_string(), columns);
+            .insert("mydb.public.orders".parse::<ObjectId>().unwrap(), columns);
 
         (root, cache, types_lock)
     }

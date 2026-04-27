@@ -226,26 +226,17 @@ fn run_inner(
             .ok()
             .flatten();
 
-            let constraint_fqns = collect_constraint_fqns(&planned_project);
+            let constraint_ids = collect_constraint_fqns(&planned_project);
             let mut column_map = tc
                 .as_ref()
-                .map(|cache| {
-                    cache.get_column_names(
-                        &constraint_fqns
-                            .iter()
-                            .map(|s| s.as_str())
-                            .collect::<Vec<_>>(),
-                    )
-                })
+                .map(|cache| cache.get_column_names(&constraint_ids.iter().collect::<Vec<_>>()))
                 .unwrap_or_default();
-            // Add types_lock columns for any FQNs not in the cache
-            for fqn in &constraint_fqns {
-                if !column_map.contains_key(&fqn.to_lowercase()) {
-                    if let Some(cols) = types_lock.get_table(fqn) {
-                        column_map.insert(
-                            fqn.to_lowercase(),
-                            cols.keys().map(|c| c.to_lowercase()).collect(),
-                        );
+            // Add types_lock columns for any objects not in the cache
+            for id in &constraint_ids {
+                let key = id.to_string().to_lowercase();
+                if !column_map.contains_key(&key) {
+                    if let Some(cols) = types_lock.get_table(id) {
+                        column_map.insert(key, cols.keys().map(|c| c.to_lowercase()).collect());
                     }
                 }
             }
@@ -312,10 +303,10 @@ fn validate_constraints_with_types(
     types_lock: &crate::types::Types,
     types_cache: Option<&crate::project_cache::ProjectCache>,
 ) -> Result<(), CliError> {
-    let get_kind = |fqn: &str| -> crate::types::ObjectKind {
+    let get_kind = |id: &ObjectId| -> crate::types::ObjectKind {
         types_cache
-            .and_then(|tc| tc.get_kind(fqn))
-            .or_else(|| types_lock.kinds.get(fqn).copied())
+            .and_then(|tc| tc.get_kind(id))
+            .or_else(|| types_lock.kinds.get(id).copied())
             .unwrap_or(crate::types::ObjectKind::Table)
     };
     let fk_errors = project::compiler::validate_constraint_fk_targets(planned_project, get_kind);
@@ -331,9 +322,9 @@ fn validate_constraints_with_types(
         types_lock
             .tables
             .iter()
-            .map(|(fqn, columns)| {
+            .map(|(id, columns)| {
                 let col_names = columns.keys().map(|c| c.to_lowercase()).collect();
-                (fqn.to_lowercase(), col_names)
+                (id.to_string().to_lowercase(), col_names)
             })
             .collect();
     let col_errors = project::compiler::validate_constraint_columns(planned_project, &column_map);
@@ -347,29 +338,30 @@ fn validate_constraints_with_types(
     Ok(())
 }
 
-/// Collect all FQNs referenced by constraints in the project.
+/// Collect all object IDs referenced by constraints in the project.
 ///
-/// Returns FQNs for both parent objects (that have constraints) and FK
+/// Returns IDs for both parent objects (that have constraints) and FK
 /// reference targets, enabling targeted column validation.
-fn collect_constraint_fqns(planned_project: &Project) -> Vec<String> {
-    let mut fqns = std::collections::BTreeSet::new();
+fn collect_constraint_fqns(planned_project: &Project) -> Vec<ObjectId> {
+    let mut ids = std::collections::BTreeSet::new();
     for obj in planned_project.iter_objects() {
         if !obj.typed_object.constraints.is_empty() {
-            fqns.insert(obj.id.to_string());
+            ids.insert(obj.id.clone());
         }
         for constraint in &obj.typed_object.constraints {
             if let Some(refs) = &constraint.references {
                 let ref_name = refs.object.name();
                 if ref_name.0.len() == 3 {
-                    fqns.insert(format!(
-                        "{}.{}.{}",
-                        ref_name.0[0], ref_name.0[1], ref_name.0[2]
+                    ids.insert(ObjectId::new(
+                        ref_name.0[0].to_string(),
+                        ref_name.0[1].to_string(),
+                        ref_name.0[2].to_string(),
                     ));
                 }
             }
         }
     }
-    fqns.into_iter().collect()
+    ids.into_iter().collect()
 }
 
 /// Print verbose details about the project (only shown with VERBOSE env var)
