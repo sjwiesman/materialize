@@ -37,6 +37,7 @@ thiserror = { workspace = true }
 time = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 clap_complete = { workspace = true }
+crossbeam-channel = { workspace = true }
 crossterm = { workspace = true }
 owo-colors = { workspace = true, features = ["supports-colors"] }
 tokio = { workspace = true }
