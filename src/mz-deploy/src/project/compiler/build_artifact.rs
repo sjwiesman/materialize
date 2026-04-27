@@ -604,12 +604,7 @@ impl BuildArtifact {
     /// replaced (no partial updates).
     pub(crate) fn upsert_typecheck_results(
         &mut self,
-        rows: &[(
-            String,
-            String,
-            String,
-            &BTreeMap<String, ColumnType>,
-        )],
+        rows: &[(String, String, String, &BTreeMap<String, ColumnType>)],
     ) -> Result<(), BuildArtifactError> {
         let tx = self.conn.transaction().map_err(|source| {
             BuildArtifactError::DatabaseOperationFailed {
@@ -683,7 +678,6 @@ impl BuildArtifact {
                 source,
             })
     }
-
 
     /// Remove stale typecheck artifacts for objects no longer in the current
     /// project.

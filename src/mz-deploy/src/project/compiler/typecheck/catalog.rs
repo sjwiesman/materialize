@@ -16,8 +16,8 @@ use crate::project::ast::Statement as ProjectStatement;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::object_id::ObjectId;
 use crate::project::resolve::normalize::NormalizingVisitor;
-use crate::types::ColumnType;
 use crate::timing;
+use crate::types::ColumnType;
 use chrono::Utc;
 use mz_build_info::DUMMY_BUILD_INFO;
 use mz_catalog::builtin::{BUILTINS, Builtin, BuiltinType};
@@ -87,7 +87,11 @@ impl CatalogRuntime {
 
     /// Ensure all database/schema namespaces referenced by the project and
     /// external types exist in the catalog before validation begins.
-    pub(super) fn bootstrap_namespaces(&mut self, project: &super::Project, external_types: &super::Types) {
+    pub(super) fn bootstrap_namespaces(
+        &mut self,
+        project: &super::Project,
+        external_types: &super::Types,
+    ) {
         let start = Instant::now();
         let mut namespaces = BTreeSet::new();
         for object in project.iter_objects() {
@@ -1802,7 +1806,10 @@ fn create_stub_table_sql(object_id: &ObjectId, columns: &BTreeMap<String, Column
 }
 
 /// Transform a compiled statement into SQL for the private catalog workspace.
-pub(super) fn create_catalog_item_sql(stmt: &ProjectStatement, fqn: &FullyQualifiedName) -> Option<String> {
+pub(super) fn create_catalog_item_sql(
+    stmt: &ProjectStatement,
+    fqn: &FullyQualifiedName,
+) -> Option<String> {
     create_catalog_item_statement(stmt, fqn).map(|stmt| stmt.to_string())
 }
 

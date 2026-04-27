@@ -6,12 +6,8 @@
 //! connections) from their compiled SQL. Returns the catalog wrapped in `Arc`
 //! plus a map of column metadata for the registered non-typechecked objects.
 
-use super::catalog::{
-    create_catalog_item_sql, relation_desc_to_columns, CatalogRuntime,
-};
-use super::{
-    requires_typecheck, ObjectTypeCheckError, TypeCheckError, TypeCheckErrors,
-};
+use super::catalog::{CatalogRuntime, create_catalog_item_sql, relation_desc_to_columns};
+use super::{ObjectTypeCheckError, TypeCheckError, TypeCheckErrors, requires_typecheck};
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;

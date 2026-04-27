@@ -334,10 +334,8 @@ async fn analyze_project_changes<'a>(
         });
     }
 
-    let new_snapshot =
-        deployment_snapshot::build_snapshot_from_planned(planned_project)?;
-    let production_snapshot =
-        deployment_snapshot::load_from_database(client, None).await?;
+    let new_snapshot = deployment_snapshot::build_snapshot_from_planned(planned_project)?;
+    let production_snapshot = deployment_snapshot::load_from_database(client, None).await?;
 
     let change_set = if production_snapshot.objects.is_empty() {
         None
@@ -580,8 +578,7 @@ async fn record_stage_metadata(
     let metadata_start = Instant::now();
     let metadata = executor::collect_deployment_metadata(client, directory).await;
 
-    let mut staging_snapshot =
-        DeploymentSnapshot::default();
+    let mut staging_snapshot = DeploymentSnapshot::default();
 
     for (object_id, typed_obj) in objects {
         let hash = deployment_snapshot::compute_typed_hash(typed_obj);
@@ -968,10 +965,7 @@ async fn deploy_objects_to_staging<'a>(
         .collect();
 
     // Transform cluster names in external indexes for staging
-    normalize::transform_cluster_names_for_staging(
-        &mut external_indexes,
-        staging_suffix,
-    );
+    normalize::transform_cluster_names_for_staging(&mut external_indexes, staging_suffix);
     for index in external_indexes {
         verbose!("Creating external index {}", index);
         executor.execute_sql(&index).await?;
@@ -1065,10 +1059,7 @@ async fn deploy_objects_to_staging<'a>(
 ///
 /// # Returns
 /// Number of schemas and clusters that were cleaned up (for summary message)
-async fn rollback_staging_resources(
-    client: &Client,
-    environment: &str,
-) -> (usize, usize) {
+async fn rollback_staging_resources(client: &Client, environment: &str) -> (usize, usize) {
     let staging_schemas = best_effort_fetch(
         client
             .introspection()
@@ -1321,12 +1312,9 @@ mod tests {
     }
 
     /// Build a graph::Project from a list of (database, schema, object_name, typed_obj) tuples.
-    fn make_planned_project(
-        objects: Vec<(&str, &str, &str, DatabaseObject)>,
-    ) -> Project {
+    fn make_planned_project(objects: Vec<(&str, &str, &str, DatabaseObject)>) -> Project {
         // Group into databases -> schemas -> objects
-        let mut db_map: BTreeMap<String, BTreeMap<String, Vec<DatabaseObject>>> =
-            BTreeMap::new();
+        let mut db_map: BTreeMap<String, BTreeMap<String, Vec<DatabaseObject>>> = BTreeMap::new();
 
         for (database, schema, _name, typed_obj) in objects {
             db_map
@@ -1525,8 +1513,7 @@ mod tests {
         let new_snapshot = build_snapshot_from_planned(&planned_project).unwrap();
 
         // Build old snapshot: same hashes for everything EXCEPT the view
-        let mut old_snapshot =
-            DeploymentSnapshot::default();
+        let mut old_snapshot = DeploymentSnapshot::default();
         for (object_id, hash) in &new_snapshot.objects {
             if object_id.object == "my_view" {
                 // Different hash to simulate the view having changed
@@ -1613,8 +1600,7 @@ mod tests {
         let new_snapshot = build_snapshot_from_planned(&planned_project).unwrap();
 
         // Build old snapshot: same hashes except the view
-        let mut old_snapshot =
-            DeploymentSnapshot::default();
+        let mut old_snapshot = DeploymentSnapshot::default();
         for (object_id, hash) in &new_snapshot.objects {
             if object_id.object == "my_view" {
                 old_snapshot
@@ -1683,7 +1669,6 @@ mod tests {
             "Should NOT stage source_cluster"
         );
     }
-
 
     fn make_empty_change_set() -> ChangeSet {
         ChangeSet {
@@ -1821,13 +1806,11 @@ mod tests {
         assert!(validate_no_new_objects_in_existing_stable_schemas(&cs, &snapshot).is_ok());
     }
 
-
     fn make_planned_project_with_replacement_schemas(
         objects: Vec<(&str, &str, &str, DatabaseObject)>,
         replacement_schemas: BTreeSet<SchemaQualifier>,
     ) -> Project {
-        let mut db_map: BTreeMap<String, BTreeMap<String, Vec<DatabaseObject>>> =
-            BTreeMap::new();
+        let mut db_map: BTreeMap<String, BTreeMap<String, Vec<DatabaseObject>>> = BTreeMap::new();
 
         for (database, schema, _name, typed_obj) in objects {
             db_map
@@ -1861,7 +1844,6 @@ mod tests {
 
         Project::from(typed_project)
     }
-
 
     #[test]
     fn test_build_snapshot_replacement_schema_kind() {
@@ -1950,8 +1932,7 @@ mod tests {
         replacement_schemas.insert(SchemaQualifier::new("db".into(), "stable".into()));
 
         // Simulate what record_stage_metadata does (without DB calls)
-        let mut staging_snapshot =
-            DeploymentSnapshot::default();
+        let mut staging_snapshot = DeploymentSnapshot::default();
 
         for (object_id, typed_obj) in &objects {
             let hash = deployment_snapshot::compute_typed_hash(typed_obj);
@@ -2018,8 +1999,7 @@ mod tests {
         let replacement_schemas =
             BTreeSet::from([SchemaQualifier::new("db".into(), "nonexistent".into())]);
 
-        let mut staging_snapshot =
-            DeploymentSnapshot::default();
+        let mut staging_snapshot = DeploymentSnapshot::default();
 
         // Apply the replacement_schemas override
         for sq in &replacement_schemas {

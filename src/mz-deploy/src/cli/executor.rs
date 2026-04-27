@@ -334,10 +334,7 @@ impl fmt::Display for ApplyPlan {
 /// This function retrieves the current database user and git commit hash
 /// for recording deployment provenance. If the current user cannot be
 /// determined, it defaults to "unknown".
-pub async fn collect_deployment_metadata(
-    client: &Client,
-    directory: &Path,
-) -> DeploymentMetadata {
+pub async fn collect_deployment_metadata(client: &Client, directory: &Path) -> DeploymentMetadata {
     let deployed_by = client
         .introspection()
         .get_current_user()

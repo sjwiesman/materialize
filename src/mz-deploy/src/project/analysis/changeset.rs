@@ -710,7 +710,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_replacement_mv_does_not_dirty_its_schema() {
         // A changed replacement MV should NOT make its schema dirty.
@@ -1092,7 +1091,6 @@ mod tests {
             "analytics schema should NOT be dirty - only replacement MVs are there"
         );
     }
-
 
     /// Helper to parse a CREATE MATERIALIZED VIEW statement.
     fn parse_materialized_view(sql: &str) -> Statement {

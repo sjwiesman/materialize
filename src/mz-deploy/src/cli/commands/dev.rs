@@ -125,11 +125,8 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
         return Ok(());
     }
 
-    let new_snapshot = deployment_snapshot::build_snapshot_from_planned(
-        &planned_project,
-    )?;
-    let production_snapshot =
-        deployment_snapshot::load_from_database(&client, None).await?;
+    let new_snapshot = deployment_snapshot::build_snapshot_from_planned(&planned_project)?;
+    let production_snapshot = deployment_snapshot::load_from_database(&client, None).await?;
 
     // Empty production → full overlay (first-run semantics matching stage).
     let change_set = if production_snapshot.objects.is_empty() {

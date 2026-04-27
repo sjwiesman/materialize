@@ -9,9 +9,12 @@ Show the EXPLAIN plan for a materialized view or index.
 
 ## Description
 
-The explain command compiles the project, stages the target object's
-dependencies in a temporary schema on the live Materialize instance, creates
-the target object, and runs `EXPLAIN` to show the query plan.
+The explain command compiles the project, spins up an ephemeral Materialize
+Docker container, stages the target object's dependencies in a temporary
+schema, creates the target object, and runs `EXPLAIN` to show the query plan.
+
+Because explanations run against a local Docker container, no live Materialize
+connection is required. Docker must be installed and running.
 
 This is useful for inspecting how Materialize will plan a materialized view
 or index before deploying it to production.

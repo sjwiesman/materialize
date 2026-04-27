@@ -46,11 +46,11 @@ use std::time::{Duration, Instant};
 ///
 /// # Errors
 /// Returns `CliError::Project` if compilation or validation fails
-pub async fn run(
-    settings: &Settings,
-    show_progress: bool,
-) -> Result<Project, CliError> {
-    run_inner(settings, show_progress, false).await
+pub async fn run(settings: &Settings, show_progress: bool) -> Result<Project, CliError> {
+    let settings = settings.clone();
+    mz_ore::task::spawn_blocking(|| "compile-run", move || {
+        run_inner(&settings, show_progress, false)
+    }).await
 }
 
 /// Compile the project without type checking.
@@ -63,10 +63,13 @@ pub async fn run_without_typecheck(
     settings: &Settings,
     show_progress: bool,
 ) -> Result<Project, CliError> {
-    run_inner(settings, show_progress, true).await
+    let settings = settings.clone();
+    mz_ore::task::spawn_blocking(|| "compile-run", move || {
+        run_inner(&settings, show_progress, false)
+    }).await
 }
 
-async fn run_inner(
+fn run_inner(
     settings: &Settings,
     show_progress: bool,
     skip_typecheck: bool,
@@ -78,22 +81,20 @@ async fn run_inner(
         progress::info(&format!("Loading project from: {}", directory.display()));
     }
 
-    // Stage 1: Parse and validate SQL files
     if show_progress {
         progress::stage_start("Parsing SQL files");
     }
     let parse_start = Instant::now();
-    let planned_project = project::plan(
+    let planned_project = project::plan_sync(
         directory.clone(),
-        settings.profile_name.clone(),
-        settings.profile_suffix().map(|s| s.to_owned()),
-        settings.variables().clone(),
-    )
-    .await?;
+        settings.profile_name.clone().as_str(),
+        settings.profile_suffix(),
+        settings.variables(),
+    )?;
+
     let parse_duration = parse_start.elapsed();
     timing!("project::plan", parse_duration);
 
-    // Count objects and schemas
     let object_count: usize = planned_project
         .databases
         .iter()
@@ -113,13 +114,11 @@ async fn run_inner(
         );
     }
 
-    // Stage 2: Validate project structure
     if show_progress {
         progress::stage_start("Validating project structure");
     }
     let validate_start = Instant::now();
 
-    // Topological sort validates the project (detects cycles)
     let sorted = planned_project.topological_sort()?;
     let validate_duration = validate_start.elapsed();
     timing!("topological_sort", validate_duration);
@@ -131,13 +130,11 @@ async fn run_inner(
         );
     }
 
-    // Stage 3: Build dependency graph
     if show_progress {
         progress::stage_start("Building dependency graph");
     }
     let deps_start = Instant::now();
 
-    // Count internal dependencies (excluding external)
     let internal_dep_count: usize = planned_project
         .dependency_graph
         .values()
@@ -155,7 +152,6 @@ async fn run_inner(
             deps_duration,
         );
 
-        // Show additional info
         if !planned_project.external_dependencies.is_empty() {
             progress::info(&format!(
                 "{} external dependencies detected",
@@ -170,7 +166,6 @@ async fn run_inner(
         }
     }
 
-    // Stage 3b: Validate declared dependencies
     let validation = project::analysis::deps::validate_dependencies(
         &settings.dependencies,
         &planned_project.external_dependencies,
@@ -207,7 +202,6 @@ async fn run_inner(
 
     validate_constraints_with_types(&planned_project, &types_lock, tc.as_ref())?;
 
-    // Type checking (skipped for apply-only compilation)
     if !skip_typecheck {
         let typecheck_duration = typecheck_project(settings, &planned_project, show_progress)?;
 
@@ -262,12 +256,10 @@ async fn run_inner(
         }
     }
 
-    // Show verbose details if requested
     if show_progress && crate::log::verbose_enabled() {
         print_verbose_details(&planned_project, &sorted);
     }
 
-    // Final summary
     if show_progress {
         let total_duration = start_time.elapsed();
         progress::summary("Project successfully compiled", total_duration);
@@ -290,13 +282,7 @@ fn typecheck_project(
     }
     let typecheck_start = Instant::now();
 
-    let external_types = crate::types::load_types_lock(directory).unwrap_or_else(|_| {
-        if show_progress {
-            progress::info("No types.lock found, assuming no external dependencies");
-            progress::info("See SET api = stable for more information");
-        }
-        crate::types::Types::default()
-    });
+    let external_types = crate::types::load_types_lock(directory).unwrap_or_default();
 
     typecheck::run(
         directory,
@@ -330,10 +316,10 @@ fn validate_constraints_with_types(
     };
     let fk_errors = project::compiler::validate_constraint_fk_targets(planned_project, get_kind);
     if !fk_errors.is_empty() {
-        return Err(project::error::ProjectError::from(
-            project::error::ValidationErrors::new(fk_errors),
-        )
-        .into());
+        return Err(
+            project::error::ProjectError::from(project::error::ValidationErrors::new(fk_errors))
+                .into(),
+        );
     }
 
     // Pre-typecheck column validation uses types_lock only
@@ -348,10 +334,10 @@ fn validate_constraints_with_types(
             .collect();
     let col_errors = project::compiler::validate_constraint_columns(planned_project, &column_map);
     if !col_errors.is_empty() {
-        return Err(project::error::ProjectError::from(
-            project::error::ValidationErrors::new(col_errors),
-        )
-        .into());
+        return Err(
+            project::error::ProjectError::from(project::error::ValidationErrors::new(col_errors))
+                .into(),
+        );
     }
 
     Ok(())

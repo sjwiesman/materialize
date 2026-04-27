@@ -322,16 +322,11 @@ pub async fn run(
     filter: Option<&str>,
     junit_xml: Option<&Path>,
 ) -> Result<(), CliError> {
-    let directory = &settings.directory;
-    info!(
-        "{}",
-        format!("Running tests from {}:", directory.display()).bold()
-    );
     let results = run_tests(settings, filter).await?;
     let test_results = match results {
         Some(results) => results,
         None => {
-            progress::info(&format!("No tests found in {}", directory.display()));
+            progress::info("No tests found");
             return Ok(());
         }
     };
