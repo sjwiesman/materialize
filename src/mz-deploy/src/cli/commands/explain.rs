@@ -33,7 +33,7 @@ use crate::client::Client;
 use crate::client::quote_identifier;
 use crate::config::Settings;
 use crate::project::ast::Statement;
-use crate::project::ir::compiled::{DatabaseObject, FullyQualifiedName};
+use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::graph;
 use crate::project::ir::object_id::ObjectId;
 use crate::project::resolve::normalize::NormalizingVisitor;
@@ -465,7 +465,7 @@ async fn execute_explain(
     explain_schema: &str,
     actions: &[StagingAction],
     target: &ExplainTarget,
-    target_typed_obj: &DatabaseObject,
+    target_typed_obj: &crate::project::ir::compiled::DatabaseObject,
     target_cluster: &str,
 ) -> Result<String, CliError> {
     // Create the explain schema
@@ -566,7 +566,7 @@ async fn create_target(
     explain_db: &str,
     explain_schema: &str,
     target: &ExplainTarget,
-    typed_obj: &DatabaseObject,
+    typed_obj: &crate::project::ir::compiled::DatabaseObject,
 ) -> Result<(), CliError> {
     let fqn: FullyQualifiedName = target.object_id.clone().into();
     let mut visitor =

@@ -89,20 +89,6 @@ pub(crate) struct StoredObjectRow {
     pub payload: Vec<u8>,
 }
 
-/// A cached typecheck artifact read from the relational `typecheck_objects` /
-/// `typecheck_columns` tables (schema v3).
-#[derive(Debug, Clone)]
-pub(crate) struct StoredTypecheckArtifact {
-    /// Hash of the compiled object's SQL definition.
-    pub semantic_fingerprint: String,
-    /// Hash of the object's output column schema.
-    pub output_fingerprint: String,
-    /// The object kind (e.g. "view", "materialized-view").
-    pub object_kind: String,
-    /// Column schemas produced by typechecking.
-    pub columns: BTreeMap<String, ColumnType>,
-}
-
 /// Compute the path to the build artifact database file for a given project and profile.
 pub(crate) fn build_artifact_path(
     root: &Path,
@@ -698,88 +684,6 @@ impl BuildArtifact {
             })
     }
 
-    /// Load all cached typecheck artifacts from the relational
-    /// `typecheck_objects` / `typecheck_columns` tables.
-    pub(crate) fn load_typecheck_artifacts(
-        &self,
-    ) -> Result<BTreeMap<String, StoredTypecheckArtifact>, BuildArtifactError> {
-        let mut obj_stmt = self
-            .conn
-            .prepare(
-                "SELECT object_key, semantic_fingerprint, output_fingerprint, object_kind
-                 FROM typecheck_objects",
-            )
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
-        let obj_rows = obj_stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    StoredTypecheckArtifact {
-                        semantic_fingerprint: row.get(1)?,
-                        output_fingerprint: row.get(2)?,
-                        object_kind: row.get(3)?,
-                        columns: BTreeMap::new(),
-                    },
-                ))
-            })
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
-
-        let mut result: BTreeMap<String, StoredTypecheckArtifact> = BTreeMap::new();
-        for row in obj_rows {
-            let (key, artifact) =
-                row.map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
-            result.insert(key, artifact);
-        }
-
-        let mut col_stmt = self
-            .conn
-            .prepare(
-                "SELECT object_key, column_name, column_type, nullable, position
-                 FROM typecheck_columns",
-            )
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
-        let col_rows = col_stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    ColumnType {
-                        r#type: row.get(2)?,
-                        nullable: row.get::<_, i32>(3)? != 0,
-                        position: usize::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                        comment: None,
-                    },
-                ))
-            })
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
-        for row in col_rows {
-            let (key, col_name, col_type) =
-                row.map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
-            if let Some(artifact) = result.get_mut(&key) {
-                artifact.columns.insert(col_name, col_type);
-            }
-        }
-
-        Ok(result)
-    }
 
     /// Remove stale typecheck artifacts for objects no longer in the current
     /// project.
