@@ -3,8 +3,8 @@
 use crate::cli::CliError;
 use crate::client::{Client, SERVER_CLUSTER_NAME};
 use crate::config::Settings;
+use crate::docker_runtime::{DockerRuntime, DockerStatus};
 use crate::log;
-use crate::project::compiler::typecheck::{DockerRuntime, DockerStatus};
 use owo_colors::OwoColorize;
 use std::fmt;
 

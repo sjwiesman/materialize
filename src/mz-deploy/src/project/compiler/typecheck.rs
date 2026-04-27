@@ -50,21 +50,13 @@
 //!   added object); validate its transitive dependencies first, then validate
 //!   it from its compiled definition.
 //!
-//! ## Backends
+//! ## Backend
 //!
-//! Two execution backends are available, selected by the
-//! `MZ_DEPLOY_TYPECHECK_BACKEND` environment variable (default: `catalog`):
-//!
-//! - [`docker`] — validates against a Materialize container using temporary
-//!   objects with flattened names (via [`NormalizingVisitor::flattening`])
-//! - [`catalog`] — validates against an `mz-deploy` in-memory catalog using
-//!   `mz-sql` directly
-//!
-//! [`NormalizingVisitor::flattening`]: crate::project::resolve::normalize::NormalizingVisitor::flattening
+//! Validation runs against an `mz-deploy` in-memory catalog using `mz-sql`
+//! directly (see [`catalog`]).
 
 use super::build_artifact::BuildArtifact;
 use crate::project::ast::Statement;
-use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
 use crate::types::{ColumnType, ObjectKind, Types, TypesError};
@@ -79,65 +71,10 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 mod catalog;
-mod docker;
-pub(crate) mod docker_runtime;
-pub(crate) use docker_runtime::{DockerRuntime, DockerStatus};
-
-pub(crate) const TYPECHECK_BACKEND_ENV: &str = "MZ_DEPLOY_TYPECHECK_BACKEND";
-
-/// Which execution backend to use for runtime validation.
-///
-/// Defaults to [`Catalog`](Self::Catalog) when the environment variable is unset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TypecheckBackend {
-    Docker,
-    Catalog,
-}
-
-/// Error returned when [`TYPECHECK_BACKEND_ENV`] contains an unrecognized value.
-#[derive(Debug, Error)]
-#[error("invalid value for {env_var}: '{value}' (expected one of: docker, catalog)")]
-pub(crate) struct TypecheckBackendParseError {
-    env_var: &'static str,
-    value: String,
-}
-
-impl TypecheckBackend {
-    /// Read the backend selection from [`TYPECHECK_BACKEND_ENV`].
-    ///
-    /// Returns [`Catalog`](Self::Catalog) when the variable is unset.
-    pub(crate) fn from_env() -> Result<Self, TypecheckBackendParseError> {
-        match std::env::var(TYPECHECK_BACKEND_ENV) {
-            Ok(value) => Self::parse(&value),
-            Err(std::env::VarError::NotPresent) => Ok(Self::Catalog),
-            Err(std::env::VarError::NotUnicode(value)) => Err(TypecheckBackendParseError {
-                env_var: TYPECHECK_BACKEND_ENV,
-                value: value.to_string_lossy().into_owned(),
-            }),
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self, TypecheckBackendParseError> {
-        match value {
-            "docker" => Ok(Self::Docker),
-            "catalog" => Ok(Self::Catalog),
-            _ => Err(TypecheckBackendParseError {
-                env_var: TYPECHECK_BACKEND_ENV,
-                value: value.to_string(),
-            }),
-        }
-    }
-}
 
 /// Errors that can occur during runtime typechecking.
 #[derive(Debug, Error)]
 pub enum TypeCheckError {
-    #[error("failed to start Materialize container: {0}")]
-    ContainerStartFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
-
-    #[error("failed to connect to Materialize: {0}")]
-    ConnectionFailed(#[from] crate::client::ConnectionError),
-
     #[error(transparent)]
     TypeCheckFailed(#[from] ObjectTypeCheckError),
 
@@ -151,7 +88,7 @@ pub enum TypeCheckError {
     SortError(#[from] crate::project::error::DependencyError),
 
     #[error("failed to write types cache: {0}")]
-    TypesCacheWriteFailed(#[from] crate::types::TypesError),
+    TypesCacheWriteFailed(#[from] TypesError),
 }
 
 /// A single typecheck error for a specific object, rendered in rustc style.
@@ -397,60 +334,32 @@ pub(crate) fn plan(
     })
 }
 
-/// Execute the typecheck plan using the configured backend.
+/// Execute the typecheck plan against the in-process catalog backend.
 ///
-/// If no objects are dirty (`plan.state` is `None`), returns immediately
-/// without starting any backend.
-pub(crate) async fn execute(
+/// If no objects are dirty (`plan.state` is `None`), returns immediately.
+pub(crate) fn execute(
     project: &Project,
     project_root: &Path,
     profile: &str,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
-    docker_image: Option<&str>,
     plan: TypecheckPlan,
 ) -> Result<TypecheckPlan, TypeCheckError> {
     let Some(state) = plan.state else {
         return Ok(plan);
     };
 
-    let backend = TypecheckBackend::from_env()
-        .map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))?;
-    verbose!("Typecheck backend: {:?}", backend);
-
-    match backend {
-        TypecheckBackend::Docker => {
-            let runtime = match docker_image {
-                Some(image) => DockerRuntime::new().with_image(image),
-                None => DockerRuntime::new(),
-            };
-            let client = runtime.get_client().await?;
-            docker::execute(
-                &client,
-                project,
-                project_root,
-                profile,
-                profile_suffix,
-                variables,
-                state,
-                &plan.cached_types,
-                &plan.external_types,
-                plan.current_fingerprints,
-            )
-            .await
-        }
-        TypecheckBackend::Catalog => catalog::execute(
-            project,
-            project_root,
-            profile,
-            profile_suffix,
-            variables,
-            state,
-            &plan.cached_types,
-            &plan.external_types,
-            plan.current_fingerprints,
-        ),
-    }
+    catalog::execute(
+        project,
+        project_root,
+        profile,
+        profile_suffix,
+        variables,
+        state,
+        &plan.cached_types,
+        &plan.external_types,
+        plan.current_fingerprints,
+    )
 }
 
 /// Persist updated typecheck artifacts to the build artifact database and prune
@@ -615,8 +524,6 @@ struct DepContext<'a> {
     external_types: &'a Types,
     object_map: &'a BTreeMap<ObjectId, &'a crate::project::ir::compiled::DatabaseObject>,
     dependency_graph: &'a BTreeMap<ObjectId, BTreeSet<ObjectId>>,
-    object_paths: &'a BTreeMap<ObjectId, PathBuf>,
-    project_root: &'a Path,
 }
 
 /// A planned action to create a dependency object in the backend.
@@ -730,61 +637,6 @@ fn plan_deps_dfs(
     }
 }
 
-fn build_object_paths(project: &Project, project_root: &Path) -> BTreeMap<ObjectId, PathBuf> {
-    let mut paths = BTreeMap::new();
-    for obj in project.iter_objects() {
-        let path = project_root
-            .join(&obj.id.database)
-            .join(&obj.id.schema)
-            .join(format!("{}.sql", obj.id.object));
-        paths.insert(obj.id.clone(), path);
-    }
-    paths
-}
-
-fn fqn_from_object_id(object_id: &ObjectId) -> FullyQualifiedName {
-    FullyQualifiedName::from_object_id(object_id.clone())
-}
-
-fn build_typecheck_error(
-    object_id: &ObjectId,
-    sql: &str,
-    e: &crate::client::ConnectionError,
-    object_paths: &BTreeMap<ObjectId, PathBuf>,
-    project_root: &Path,
-) -> ObjectTypeCheckError {
-    let (error_message, detail, hint) = match e {
-        crate::client::ConnectionError::Query(pg_err) => {
-            if let Some(db_err) = pg_err.as_db_error() {
-                (
-                    db_err.message().to_string(),
-                    db_err.detail().map(|s| s.to_string()),
-                    db_err.hint().map(|s| s.to_string()),
-                )
-            } else {
-                (pg_err.to_string(), None, None)
-            }
-        }
-        _ => (e.to_string(), None, None),
-    };
-
-    let path = object_paths.get(object_id).cloned().unwrap_or_else(|| {
-        project_root
-            .join(&object_id.database)
-            .join(&object_id.schema)
-            .join(format!("{}.sql", object_id.object))
-    });
-
-    ObjectTypeCheckError {
-        object_id: object_id.clone(),
-        file_path: path,
-        sql_statement: sql.to_string(),
-        error_message,
-        detail,
-        hint,
-    }
-}
-
 fn requires_typecheck(stmt: &Statement) -> bool {
     matches!(
         stmt,
@@ -889,50 +741,4 @@ fn fmt_idents(idents: &[Ident]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(",")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{TYPECHECK_BACKEND_ENV, TypecheckBackend};
-
-    #[test]
-    fn typecheck_backend_accepts_docker() {
-        assert_eq!(
-            TypecheckBackend::parse("docker").unwrap(),
-            TypecheckBackend::Docker
-        );
-    }
-
-    #[test]
-    fn typecheck_backend_accepts_catalog() {
-        assert_eq!(
-            TypecheckBackend::parse("catalog").unwrap(),
-            TypecheckBackend::Catalog
-        );
-    }
-
-    #[test]
-    fn typecheck_backend_rejects_invalid_values() {
-        let error = TypecheckBackend::parse("bad").unwrap_err();
-        assert!(error.to_string().contains("docker, catalog"));
-    }
-
-    #[test]
-    fn typecheck_backend_defaults_to_catalog() {
-        let previous = std::env::var_os(TYPECHECK_BACKEND_ENV);
-        unsafe {
-            std::env::remove_var(TYPECHECK_BACKEND_ENV);
-        }
-
-        let backend = TypecheckBackend::from_env().unwrap();
-
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var(TYPECHECK_BACKEND_ENV, value),
-                None => std::env::remove_var(TYPECHECK_BACKEND_ENV),
-            }
-        }
-
-        assert_eq!(backend, TypecheckBackend::Catalog);
-    }
 }

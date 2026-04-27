@@ -165,7 +165,7 @@ pub async fn run(settings: &Settings, dry_run: bool) -> Result<ApplyPlan, CliErr
     let (planned_project, client) = compile_apply_project_and_connect(settings).await?;
     let mut apply_plan = ApplyPlan::new();
     let executor = DeploymentExecutor::new_dry_run(&client);
-    let phase = self::plan(
+    let phase = plan(
         settings,
         &client,
         &executor,

@@ -4,7 +4,8 @@
 //! to production via [`super::promote`].
 
 use super::ObjectRef;
-use crate::cli::{CliError, executor};
+use crate::cli::CliError;
+use crate::cli::executor::{self, DeploymentExecutor};
 use crate::cli::{git, progress};
 use crate::client::DeploymentMode;
 use crate::client::{
@@ -14,11 +15,13 @@ use crate::config::Settings;
 use crate::log;
 use crate::project::SchemaQualifier;
 use crate::project::analysis::changeset::ChangeSet;
+use crate::project::analysis::deployment_snapshot::{self, DeploymentSnapshot};
 use crate::project::analysis::deps::extract_external_indexes;
 use crate::project::ast::Statement;
-use crate::project::ir::compiled::FullyQualifiedName;
+use crate::project::ir::compiled::{DatabaseObject, FullyQualifiedName};
+use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
-use crate::project::{self, resolve::normalize::NormalizingVisitor};
+use crate::project::resolve::normalize::{self, NormalizingVisitor};
 use crate::verbose;
 use mz_ore::option::OptionExt;
 use std::collections::BTreeSet;
@@ -314,7 +317,7 @@ pub async fn run(
 /// validates table dependencies, and returns resource sets required for execution.
 async fn analyze_project_changes<'a>(
     client: &Client,
-    planned_project: &'a project::ir::graph::Project,
+    planned_project: &'a Project,
     stage_name: &str,
 ) -> Result<Option<StageAnalysis<'a>>, CliError> {
     progress::stage_start("Analyzing project changes");
@@ -332,9 +335,9 @@ async fn analyze_project_changes<'a>(
     }
 
     let new_snapshot =
-        project::analysis::deployment_snapshot::build_snapshot_from_planned(planned_project)?;
+        deployment_snapshot::build_snapshot_from_planned(planned_project)?;
     let production_snapshot =
-        project::analysis::deployment_snapshot::load_from_database(client, None).await?;
+        deployment_snapshot::load_from_database(client, None).await?;
 
     let change_set = if production_snapshot.objects.is_empty() {
         None
@@ -420,7 +423,7 @@ async fn analyze_project_changes<'a>(
 ///
 /// Incremental mode uses the change set; full mode uses all sorted project objects.
 fn select_stage_objects<'a>(
-    planned_project: &'a project::ir::graph::Project,
+    planned_project: &'a Project,
     change_set: Option<&ChangeSet>,
 ) -> Result<Vec<ObjectRef<'a>>, CliError> {
     if let Some(cs) = change_set {
@@ -523,7 +526,7 @@ fn collect_stage_resources(
 /// This is intentionally isolated so stage fails before any metadata/resource writes.
 async fn validate_project_for_stage(
     client: &Client,
-    planned_project: &project::ir::graph::Project,
+    planned_project: &Project,
     directory: &Path,
     schema_set: &BTreeSet<SchemaQualifier>,
     cluster_set: &BTreeSet<String>,
@@ -578,10 +581,10 @@ async fn record_stage_metadata(
     let metadata = executor::collect_deployment_metadata(client, directory).await;
 
     let mut staging_snapshot =
-        project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+        DeploymentSnapshot::default();
 
     for (object_id, typed_obj) in objects {
-        let hash = project::analysis::deployment_snapshot::compute_typed_hash(typed_obj);
+        let hash = deployment_snapshot::compute_typed_hash(typed_obj);
         staging_snapshot.objects.insert(object_id.clone(), hash);
         staging_snapshot.schemas.insert(
             SchemaQualifier::new(object_id.database.clone(), object_id.schema.clone()),
@@ -590,7 +593,7 @@ async fn record_stage_metadata(
     }
 
     for (object_id, typed_obj) in sinks {
-        let hash = project::analysis::deployment_snapshot::compute_typed_hash(typed_obj);
+        let hash = deployment_snapshot::compute_typed_hash(typed_obj);
         staging_snapshot.objects.insert(object_id.clone(), hash);
         staging_snapshot
             .schemas
@@ -602,7 +605,7 @@ async fn record_stage_metadata(
     }
 
     for (object_id, typed_obj) in replacement_mvs {
-        let hash = project::analysis::deployment_snapshot::compute_typed_hash(typed_obj);
+        let hash = deployment_snapshot::compute_typed_hash(typed_obj);
         staging_snapshot.objects.insert(object_id.clone(), hash);
         staging_snapshot.schemas.insert(
             SchemaQualifier::new(object_id.database.clone(), object_id.schema.clone()),
@@ -622,7 +625,7 @@ async fn record_stage_metadata(
         }
     }
 
-    project::analysis::deployment_snapshot::write_to_database(
+    deployment_snapshot::write_to_database(
         client,
         &staging_snapshot,
         stage_name,
@@ -637,14 +640,14 @@ async fn record_stage_metadata(
             .iter()
             .enumerate()
             .map(|(idx, (object_id, typed_obj))| {
-                let original_fqn = FullyQualifiedName::from_object_id(object_id.clone());
+                let original_fqn: FullyQualifiedName = object_id.clone().into();
                 let mut visitor = NormalizingVisitor::fully_qualifying(&original_fqn);
                 let stmt = typed_obj
                     .stmt
                     .clone()
                     .normalize_name_with(&visitor, &original_fqn.to_item_name())
                     .normalize_dependencies_with(&mut visitor);
-                let hash = project::analysis::deployment_snapshot::compute_typed_hash(typed_obj);
+                let hash = deployment_snapshot::compute_typed_hash(typed_obj);
                 #[allow(clippy::as_conversions)]
                 PendingStatement {
                     deploy_id: stage_name.to_string(),
@@ -700,18 +703,18 @@ async fn record_stage_metadata(
 /// this invocation unless the `no_rollback` flag is set.
 #[allow(clippy::too_many_arguments)]
 async fn create_resources_with_rollback<'a>(
-    client: &crate::client::Client,
+    client: &Client,
     stage_name: &str,
     staging_suffix: &str,
     schema_set: &BTreeSet<SchemaQualifier>,
     cluster_set: &BTreeSet<String>,
-    planned_project: &'a project::ir::graph::Project,
-    objects: &'a [(ObjectId, &'a project::ir::compiled::DatabaseObject)],
-    replacement_mvs: &'a [(ObjectId, &'a project::ir::compiled::DatabaseObject)],
+    planned_project: &'a Project,
+    objects: &'a [(ObjectId, &'a DatabaseObject)],
+    replacement_mvs: &'a [(ObjectId, &'a DatabaseObject)],
     no_rollback: bool,
     dry_run: bool,
 ) -> Result<usize, CliError> {
-    let executor = executor::DeploymentExecutor::with_dry_run(client, dry_run);
+    let executor = DeploymentExecutor::with_dry_run(client, dry_run);
 
     let result = async {
         create_databases_and_schemas(&executor, planned_project, schema_set, staging_suffix)
@@ -758,8 +761,8 @@ async fn create_resources_with_rollback<'a>(
 /// After this completes, both the suffixed staging schemas (where new objects will be
 /// created) and the production schemas (swap targets) are guaranteed to exist.
 async fn create_databases_and_schemas(
-    executor: &executor::DeploymentExecutor<'_>,
-    planned_project: &project::ir::graph::Project,
+    executor: &DeploymentExecutor<'_>,
+    planned_project: &Project,
     schema_set: &BTreeSet<SchemaQualifier>,
     staging_suffix: &str,
 ) -> Result<(), CliError> {
@@ -807,7 +810,7 @@ async fn create_databases_and_schemas(
 /// Clusters that already exist are skipped. Cluster names are recorded for rollback
 /// tracking before any cluster is created, so partial failures can be cleaned up.
 async fn create_staging_clusters(
-    executor: &executor::DeploymentExecutor<'_>,
+    executor: &DeploymentExecutor<'_>,
     client: &Client,
     stage_name: &str,
     cluster_set: &BTreeSet<String>,
@@ -938,10 +941,10 @@ fn log_cluster_creation(staging_cluster: &str, prod_cluster: &str, config: &Clus
 /// are linked to their production targets via `CREATE REPLACEMENT MATERIALIZED VIEW
 /// ... FOR`. Returns the total number of successfully deployed objects.
 async fn deploy_objects_to_staging<'a>(
-    executor: &executor::DeploymentExecutor<'_>,
-    objects: &'a [(ObjectId, &'a project::ir::compiled::DatabaseObject)],
-    replacement_mvs: &'a [(ObjectId, &'a project::ir::compiled::DatabaseObject)],
-    planned_project: &'a project::ir::graph::Project,
+    executor: &DeploymentExecutor<'_>,
+    objects: &'a [(ObjectId, &'a DatabaseObject)],
+    replacement_mvs: &'a [(ObjectId, &'a DatabaseObject)],
+    planned_project: &'a Project,
     cluster_set: &BTreeSet<String>,
     staging_suffix: &str,
 ) -> Result<usize, CliError> {
@@ -965,7 +968,7 @@ async fn deploy_objects_to_staging<'a>(
         .collect();
 
     // Transform cluster names in external indexes for staging
-    crate::project::resolve::normalize::transform_cluster_names_for_staging(
+    normalize::transform_cluster_names_for_staging(
         &mut external_indexes,
         staging_suffix,
     );
@@ -1063,7 +1066,7 @@ async fn deploy_objects_to_staging<'a>(
 /// # Returns
 /// Number of schemas and clusters that were cleaned up (for summary message)
 async fn rollback_staging_resources(
-    client: &crate::client::Client,
+    client: &Client,
     environment: &str,
 ) -> (usize, usize) {
     let staging_schemas = best_effort_fetch(
@@ -1148,7 +1151,7 @@ async fn rollback_staging_resources(
 ///
 /// Converts query failures into empty results so cleanup can continue and report
 /// as much progress as possible instead of aborting midway.
-fn best_effort_fetch<T, E: std::fmt::Display>(result: Result<Vec<T>, E>, action: &str) -> Vec<T> {
+fn best_effort_fetch<T, E: fmt::Display>(result: Result<Vec<T>, E>, action: &str) -> Vec<T> {
     match result {
         Ok(values) => values,
         Err(e) => {
@@ -1159,7 +1162,7 @@ fn best_effort_fetch<T, E: std::fmt::Display>(result: Result<Vec<T>, E>, action:
 }
 
 /// Best-effort delete wrapper used by rollback metadata cleanup.
-fn best_effort_delete<E: std::fmt::Display>(result: Result<(), E>, action: &str) {
+fn best_effort_delete<E: fmt::Display>(result: Result<(), E>, action: &str) {
     if let Err(e) = result {
         verbose!("Warning: Failed to {}: {}", action, e);
     }
@@ -1176,16 +1179,16 @@ fn best_effort_delete<E: std::fmt::Display>(result: Result<(), E>, action: &str)
 /// unsuffixed (pointing to production). During full deployment the set is
 /// empty, so every reference is suffixed to point at the staging schemas.
 async fn deploy_single_object(
-    executor: &executor::DeploymentExecutor<'_>,
+    executor: &DeploymentExecutor<'_>,
     object_id: &ObjectId,
-    typed_obj: &project::ir::compiled::DatabaseObject,
+    typed_obj: &DatabaseObject,
     staging_suffix: &str,
-    planned_project: &project::ir::graph::Project,
+    planned_project: &Project,
     objects_to_deploy_set: &BTreeSet<ObjectId>,
     replacement_objects: &BTreeSet<ObjectId>,
     transform: impl FnOnce(Statement) -> Statement,
 ) -> Result<(), CliError> {
-    let original_fqn = FullyQualifiedName::from_object_id(object_id.clone());
+    let original_fqn: FullyQualifiedName = object_id.clone().into();
 
     let mut visitor = NormalizingVisitor::staging(
         &original_fqn,
@@ -1234,7 +1237,7 @@ async fn deploy_single_object(
 /// have production objects.
 fn validate_no_new_objects_in_existing_stable_schemas(
     change_set: &ChangeSet,
-    production_snapshot: &project::analysis::deployment_snapshot::DeploymentSnapshot,
+    production_snapshot: &DeploymentSnapshot,
 ) -> Result<(), CliError> {
     let blocked: Vec<_> = change_set
         .new_replacement_objects
@@ -1272,7 +1275,7 @@ mod tests {
     ///
     /// The first CREATE statement becomes the main statement.
     /// Any CREATE INDEX statements become entries in the indexes vec.
-    fn make_typed_object(sqls: &[&str]) -> compiled::DatabaseObject {
+    fn make_typed_object(sqls: &[&str]) -> DatabaseObject {
         let mut stmt = None;
         let mut indexes = Vec::new();
 
@@ -1306,7 +1309,7 @@ mod tests {
             }
         }
 
-        compiled::DatabaseObject {
+        DatabaseObject {
             path: std::path::PathBuf::from("test.sql"),
             stmt: stmt.expect("Expected at least one CREATE statement"),
             indexes,
@@ -1319,10 +1322,10 @@ mod tests {
 
     /// Build a graph::Project from a list of (database, schema, object_name, typed_obj) tuples.
     fn make_planned_project(
-        objects: Vec<(&str, &str, &str, compiled::DatabaseObject)>,
-    ) -> project::ir::graph::Project {
+        objects: Vec<(&str, &str, &str, DatabaseObject)>,
+    ) -> Project {
         // Group into databases -> schemas -> objects
-        let mut db_map: BTreeMap<String, BTreeMap<String, Vec<compiled::DatabaseObject>>> =
+        let mut db_map: BTreeMap<String, BTreeMap<String, Vec<DatabaseObject>>> =
             BTreeMap::new();
 
         for (database, schema, _name, typed_obj) in objects {
@@ -1355,12 +1358,9 @@ mod tests {
             replacement_schemas: BTreeSet::new(),
         };
 
-        project::ir::graph::Project::from(typed_project)
+        Project::from(typed_project)
     }
 
-    // =========================================================================
-    // Test 1: Full deploy, view NOT indexed — mixed schema types
-    // =========================================================================
     #[test]
     fn test_full_deploy_view_not_indexed_mixed_types() {
         let view_obj = make_typed_object(&["CREATE VIEW my_view AS SELECT 1"]);
@@ -1431,9 +1431,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Test 2: Full deploy, view indexed on different cluster than source
-    // =========================================================================
     #[test]
     fn test_full_deploy_view_indexed_different_cluster() {
         let view_obj = make_typed_object(&[
@@ -1504,9 +1501,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Test 3: Incremental deploy, view updated, NOT indexed
-    // =========================================================================
     #[test]
     fn test_incremental_deploy_view_updated_not_indexed() {
         // Build planned project with all object types
@@ -1532,7 +1526,7 @@ mod tests {
 
         // Build old snapshot: same hashes for everything EXCEPT the view
         let mut old_snapshot =
-            project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+            DeploymentSnapshot::default();
         for (object_id, hash) in &new_snapshot.objects {
             if object_id.object == "my_view" {
                 // Different hash to simulate the view having changed
@@ -1592,9 +1586,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Test 4: Incremental deploy, view updated, indexed on different cluster
-    // =========================================================================
     #[test]
     fn test_incremental_deploy_view_updated_indexed_different_cluster() {
         // Build planned project with indexed view and other object types
@@ -1623,7 +1614,7 @@ mod tests {
 
         // Build old snapshot: same hashes except the view
         let mut old_snapshot =
-            project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+            DeploymentSnapshot::default();
         for (object_id, hash) in &new_snapshot.objects {
             if object_id.object == "my_view" {
                 old_snapshot
@@ -1693,9 +1684,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Tests for validate_no_new_objects_in_existing_stable_schemas
-    // =========================================================================
 
     fn make_empty_change_set() -> ChangeSet {
         ChangeSet {
@@ -1711,7 +1699,7 @@ mod tests {
     #[test]
     fn test_validate_no_new_replacement_objects_first_deploy() {
         let cs = make_empty_change_set();
-        let snapshot = project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+        let snapshot = DeploymentSnapshot::default();
         assert!(validate_no_new_objects_in_existing_stable_schemas(&cs, &snapshot).is_ok());
     }
 
@@ -1725,7 +1713,7 @@ mod tests {
         ));
 
         // Production has objects in a *different* schema, not analytics
-        let mut snapshot = project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+        let mut snapshot = DeploymentSnapshot::default();
         snapshot.objects.insert(
             ObjectId::new("db".into(), "public".into(), "existing_mv".into()),
             "hash1".into(),
@@ -1744,7 +1732,7 @@ mod tests {
         ));
 
         // Production already has objects in analytics
-        let mut snapshot = project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+        let mut snapshot = DeploymentSnapshot::default();
         snapshot.objects.insert(
             ObjectId::new("db".into(), "analytics".into(), "existing_mv".into()),
             "hash1".into(),
@@ -1776,7 +1764,7 @@ mod tests {
             "changed_mv".into(),
         ));
 
-        let mut snapshot = project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+        let mut snapshot = DeploymentSnapshot::default();
         snapshot.objects.insert(
             ObjectId::new("db".into(), "analytics".into(), "changed_mv".into()),
             "hash1".into(),
@@ -1802,7 +1790,7 @@ mod tests {
         ));
 
         // Production has objects only in existing_schema
-        let mut snapshot = project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+        let mut snapshot = DeploymentSnapshot::default();
         snapshot.objects.insert(
             ObjectId::new("db".into(), "existing_schema".into(), "changed_mv".into()),
             "hash1".into(),
@@ -1823,7 +1811,7 @@ mod tests {
         ));
 
         // The same object already exists in production (it's transitioning, not new)
-        let mut snapshot = project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+        let mut snapshot = DeploymentSnapshot::default();
         snapshot.objects.insert(
             ObjectId::new("db".into(), "analytics".into(), "existing_mv".into()),
             "hash1".into(),
@@ -1833,15 +1821,12 @@ mod tests {
         assert!(validate_no_new_objects_in_existing_stable_schemas(&cs, &snapshot).is_ok());
     }
 
-    // =========================================================================
-    // Helper: make_planned_project with replacement_schemas
-    // =========================================================================
 
     fn make_planned_project_with_replacement_schemas(
-        objects: Vec<(&str, &str, &str, compiled::DatabaseObject)>,
+        objects: Vec<(&str, &str, &str, DatabaseObject)>,
         replacement_schemas: BTreeSet<SchemaQualifier>,
-    ) -> project::ir::graph::Project {
-        let mut db_map: BTreeMap<String, BTreeMap<String, Vec<compiled::DatabaseObject>>> =
+    ) -> Project {
+        let mut db_map: BTreeMap<String, BTreeMap<String, Vec<DatabaseObject>>> =
             BTreeMap::new();
 
         for (database, schema, _name, typed_obj) in objects {
@@ -1874,12 +1859,9 @@ mod tests {
             replacement_schemas,
         };
 
-        project::ir::graph::Project::from(typed_project)
+        Project::from(typed_project)
     }
 
-    // =========================================================================
-    // Test: build_snapshot_from_planned assigns correct kind for replacement schemas
-    // =========================================================================
 
     #[test]
     fn test_build_snapshot_replacement_schema_kind() {
@@ -1947,11 +1929,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Test: record_stage_metadata overrides kind for replacement schemas
-    // during Objects→Replacement transition
-    // =========================================================================
-
     #[test]
     fn test_record_stage_metadata_transition_override() {
         // During an Objects→Replacement transition, MVs go through the regular
@@ -1974,10 +1951,10 @@ mod tests {
 
         // Simulate what record_stage_metadata does (without DB calls)
         let mut staging_snapshot =
-            project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+            DeploymentSnapshot::default();
 
         for (object_id, typed_obj) in &objects {
-            let hash = project::analysis::deployment_snapshot::compute_typed_hash(typed_obj);
+            let hash = deployment_snapshot::compute_typed_hash(typed_obj);
             staging_snapshot.objects.insert(object_id.clone(), hash);
             staging_snapshot.schemas.insert(
                 SchemaQualifier::new(object_id.database.clone(), object_id.schema.clone()),
@@ -1986,7 +1963,7 @@ mod tests {
         }
 
         for (object_id, typed_obj) in &sinks {
-            let hash = project::analysis::deployment_snapshot::compute_typed_hash(typed_obj);
+            let hash = deployment_snapshot::compute_typed_hash(typed_obj);
             staging_snapshot.objects.insert(object_id.clone(), hash);
             staging_snapshot
                 .schemas
@@ -1998,7 +1975,7 @@ mod tests {
         }
 
         for (object_id, typed_obj) in &replacement_mvs {
-            let hash = project::analysis::deployment_snapshot::compute_typed_hash(typed_obj);
+            let hash = deployment_snapshot::compute_typed_hash(typed_obj);
             staging_snapshot.objects.insert(object_id.clone(), hash);
             staging_snapshot.schemas.insert(
                 SchemaQualifier::new(object_id.database.clone(), object_id.schema.clone()),
@@ -2042,7 +2019,7 @@ mod tests {
             BTreeSet::from([SchemaQualifier::new("db".into(), "nonexistent".into())]);
 
         let mut staging_snapshot =
-            project::analysis::deployment_snapshot::DeploymentSnapshot::default();
+            DeploymentSnapshot::default();
 
         // Apply the replacement_schemas override
         for sq in &replacement_schemas {

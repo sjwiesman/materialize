@@ -25,7 +25,7 @@
 //! last typecheck, validation is skipped entirely. If the typecheck backend
 //! is unavailable, typechecking is silently skipped.
 
-use crate::config::{ProjectSettings, default_docker_image, read_mzprofile};
+use crate::config::{ProjectSettings, read_mzprofile};
 use crate::lsp::{
     code_lens, completion, diagnostics, document_symbol, goto_definition, hover, references,
     semantic_tokens, workspace_symbol,
@@ -339,24 +339,14 @@ impl Backend {
             return;
         }
 
-        let docker_image = self
-            .settings
-            .read()
-            .await
-            .as_ref()
-            .map(|s| s.docker_image())
-            .unwrap_or_else(default_docker_image);
-
         let _ = project::compiler::typecheck::execute(
             &project,
             &root,
             &profile,
             profile_suffix.as_deref(),
             &variables,
-            Some(&docker_image),
             plan,
-        )
-        .await;
+        );
     }
 }
 

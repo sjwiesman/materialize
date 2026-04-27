@@ -710,9 +710,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Replacement MV tests
-    // =========================================================================
 
     #[test]
     fn test_replacement_mv_does_not_dirty_its_schema() {
@@ -1096,9 +1093,6 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Schema kind transition tests (Objects -> Replacement)
-    // =========================================================================
 
     /// Helper to parse a CREATE MATERIALIZED VIEW statement.
     fn parse_materialized_view(sql: &str) -> Statement {

@@ -54,7 +54,7 @@ pub enum ModStatement<'a> {
         /// The database name
         database: &'a str,
         /// The statement to execute
-        statement: &'a mz_sql_parser::ast::Statement<Raw>,
+        statement: &'a Statement<Raw>,
     },
     /// Schema-level statement (from schema.sql file)
     Schema {
@@ -63,7 +63,7 @@ pub enum ModStatement<'a> {
         /// The schema name
         schema: &'a str,
         /// The statement to execute
-        statement: &'a mz_sql_parser::ast::Statement<Raw>,
+        statement: &'a Statement<Raw>,
     },
 }
 
@@ -112,7 +112,7 @@ pub struct Schema {
     pub name: String,
     pub objects: Vec<DatabaseObject>,
     /// Optional module-level statements (from schema.sql file)
-    pub mod_statements: Option<Vec<mz_sql_parser::ast::Statement<Raw>>>,
+    pub mod_statements: Option<Vec<Statement<Raw>>>,
     /// The type of objects in this schema (Storage, Compute, or Empty)
     pub schema_type: SchemaType,
 }
@@ -123,7 +123,7 @@ pub struct Database {
     pub name: String,
     pub schemas: Vec<Schema>,
     /// Optional module-level statements (from database.sql file)
-    pub mod_statements: Option<Vec<mz_sql_parser::ast::Statement<Raw>>>,
+    pub mod_statements: Option<Vec<Statement<Raw>>>,
 }
 
 /// A project graph with full dependency tracking.

@@ -66,7 +66,7 @@ pub async fn run(settings: &Settings, dry_run: bool) -> Result<ApplyPlan, CliErr
     let client = connect_apply_client(settings).await?;
     let executor = DeploymentExecutor::new_dry_run(&client);
     let mut plan_result = ApplyPlan::new();
-    let phase = self::plan(settings, &client, &executor).await?;
+    let phase = plan(settings, &client, &executor).await?;
     plan_result.add_phase(phase);
 
     if !dry_run {

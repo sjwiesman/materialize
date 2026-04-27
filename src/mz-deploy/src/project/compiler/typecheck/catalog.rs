@@ -12,9 +12,8 @@
 
 use super::{
     CompletedState, DepAction, DepContext, IncrementalState, ObjectTypeCheckError, TypeCheckError,
-    TypeCheckErrors, TypecheckPlan, TypecheckedObjectArtifact, build_object_paths,
-    compute_semantic_fingerprint, fqn_from_object_id, object_kind_for_stmt, plan_dep_creation,
-    requires_typecheck, write_typecheck_outputs,
+    TypeCheckErrors, TypecheckPlan, TypecheckedObjectArtifact, compute_semantic_fingerprint,
+    object_kind_for_stmt, plan_dep_creation, requires_typecheck, write_typecheck_outputs,
 };
 use crate::client::quote_identifier;
 use crate::project::ast::Statement as ProjectStatement;
@@ -87,7 +86,6 @@ pub(super) fn execute(
     current_fingerprints: BTreeMap<ObjectId, String>,
 ) -> Result<TypecheckPlan, TypeCheckError> {
     let execute_start = Instant::now();
-    let object_paths = build_object_paths(project, project_root);
     let sorted_objects = project.get_sorted_objects()?;
 
     verbose!(
@@ -98,8 +96,6 @@ pub(super) fn execute(
     let incremental_start = Instant::now();
     let completed_state = typecheck_incremental(
         project,
-        project_root,
-        &object_paths,
         &sorted_objects,
         cached_types,
         external_types,
@@ -136,8 +132,6 @@ pub(super) fn execute(
 /// re-validation to downstream dependents.
 fn typecheck_incremental(
     project: &super::Project,
-    project_root: &Path,
-    object_paths: &BTreeMap<ObjectId, PathBuf>,
     sorted_objects: &[(ObjectId, &crate::project::ir::compiled::DatabaseObject)],
     cached_types: &super::Types,
     external_types: &super::Types,
@@ -169,8 +163,6 @@ fn typecheck_incremental(
         external_types,
         object_map: &object_map,
         dependency_graph: &project.dependency_graph,
-        object_paths,
-        project_root,
     };
 
     let open_start = Instant::now();
@@ -202,7 +194,7 @@ fn typecheck_incremental(
 
         verbose!("Type checking (dirty, catalog): {}", object_id);
 
-        let fqn = fqn_from_object_id(object_id);
+        let fqn = object_id.clone().into();
         let sql_start = Instant::now();
         let Some(sql) = create_catalog_item_sql(&typed_object.stmt, &fqn) else {
             timing!(
@@ -345,7 +337,7 @@ fn ensure_dep_exists(
                     .object_map
                     .get(&id)
                     .expect("CreateFromAst only emitted when object exists");
-                let fqn = fqn_from_object_id(&id);
+                let fqn = id.clone().into();
                 if let Some(sql) = create_catalog_item_sql(&typed_object.stmt, &fqn) {
                     runtime.create_or_replace_item(&id, &sql).map(|_| ())?;
                 }

@@ -503,11 +503,12 @@ mod tests {
 
     #[test]
     fn overlay_factory_produces_working_visitor() {
-        let fqn = FullyQualifiedName::from_object_id(ObjectId::new(
+        let fqn: FullyQualifiedName = ObjectId::new(
             "app".to_string(),
             "public".to_string(),
             "my_view".to_string(),
-        ));
+        )
+        .into();
         let in_project: BTreeSet<String> = ["app".to_string()].into_iter().collect();
         let dirty: BTreeSet<SchemaQualifier> = [SchemaQualifier::new(
             "app".to_string(),

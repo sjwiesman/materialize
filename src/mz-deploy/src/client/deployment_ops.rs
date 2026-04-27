@@ -1034,9 +1034,6 @@ pub(super) async fn get_deployment_hydration_status(
     Ok(results)
 }
 
-// =============================================================================
-// Apply State Management
-// =============================================================================
 
 /// Create apply state schemas with comments for tracking apply progress.
 ///
@@ -1166,9 +1163,6 @@ pub(super) async fn delete_apply_state_schemas(
     Ok(())
 }
 
-// =============================================================================
-// Pending Statements Management
-// =============================================================================
 
 /// Insert pending statements for deferred execution (e.g., sinks).
 pub(super) async fn insert_pending_statements(

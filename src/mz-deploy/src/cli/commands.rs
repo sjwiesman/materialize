@@ -35,16 +35,14 @@
 //! - [`ObjectRef`] — A `(ObjectId, &DatabaseObject)` pair used as the canonical
 //!   unit of work when iterating over objects in dependency order.
 
-use crate::project;
+use crate::project::ir::compiled::DatabaseObject;
+use crate::project::ir::object_id::ObjectId;
 
 /// Fully-qualified object identity paired with its typed SQL representation.
 ///
 /// Used across command modules as the canonical unit of work when iterating
 /// over objects in dependency order.
-pub type ObjectRef<'a> = (
-    project::ir::object_id::ObjectId,
-    &'a project::ir::compiled::DatabaseObject,
-);
+pub type ObjectRef<'a> = (ObjectId, &'a DatabaseObject);
 
 pub mod abort;
 pub mod apply_all;

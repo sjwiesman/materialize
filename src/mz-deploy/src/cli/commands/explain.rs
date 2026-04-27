@@ -33,7 +33,7 @@ use crate::client::Client;
 use crate::client::quote_identifier;
 use crate::config::Settings;
 use crate::project::ast::Statement;
-use crate::project::ir::compiled::FullyQualifiedName;
+use crate::project::ir::compiled::{DatabaseObject, FullyQualifiedName};
 use crate::project::ir::graph;
 use crate::project::ir::object_id::ObjectId;
 use crate::project::resolve::normalize::NormalizingVisitor;
@@ -465,7 +465,7 @@ async fn execute_explain(
     explain_schema: &str,
     actions: &[StagingAction],
     target: &ExplainTarget,
-    target_typed_obj: &crate::project::ir::compiled::DatabaseObject,
+    target_typed_obj: &DatabaseObject,
     target_cluster: &str,
 ) -> Result<String, CliError> {
     // Create the explain schema
@@ -566,9 +566,9 @@ async fn create_target(
     explain_db: &str,
     explain_schema: &str,
     target: &ExplainTarget,
-    typed_obj: &crate::project::ir::compiled::DatabaseObject,
+    typed_obj: &DatabaseObject,
 ) -> Result<(), CliError> {
-    let fqn = fqn_from_object_id(&target.object_id);
+    let fqn: FullyQualifiedName = target.object_id.clone().into();
     let mut visitor =
         NormalizingVisitor::explain(&fqn, explain_db.to_string(), explain_schema.to_string());
 
@@ -660,7 +660,7 @@ fn build_index_sql(
     explain_db: &str,
     explain_schema: &str,
 ) -> String {
-    let fqn = fqn_from_object_id(on_object);
+    let fqn: FullyQualifiedName = on_object.clone().into();
     let visitor =
         NormalizingVisitor::explain(&fqn, explain_db.to_string(), explain_schema.to_string());
 
@@ -677,7 +677,7 @@ fn build_view_sql(
     explain_db: &str,
     explain_schema: &str,
 ) -> String {
-    let fqn = fqn_from_object_id(object_id);
+    let fqn: FullyQualifiedName = object_id.clone().into();
     let mut visitor =
         NormalizingVisitor::explain(&fqn, explain_db.to_string(), explain_schema.to_string());
 
@@ -715,11 +715,6 @@ fn build_explain_sql(target: &ExplainTarget, explain_db: &str, explain_schema: &
             format!("EXPLAIN INDEX {}", qualified_index)
         }
     }
-}
-
-/// Build a FullyQualifiedName from an ObjectId.
-fn fqn_from_object_id(object_id: &ObjectId) -> FullyQualifiedName {
-    FullyQualifiedName::from_object_id(object_id.clone())
 }
 
 /// Extract raw text lines from `SimpleQueryMessage` results.

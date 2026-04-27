@@ -596,7 +596,7 @@ fn normalize_fqn(fqn: &str, target_id: &ObjectId) -> String {
 /// Returns (extra_columns, missing_columns_with_types, type_mismatches).
 fn compare_columns(
     test_columns: &[(String, String)],
-    actual_columns: &std::collections::BTreeMap<String, crate::types::ColumnType>,
+    actual_columns: &BTreeMap<String, ColumnType>,
 ) -> (
     Vec<String>,
     Vec<(String, String)>,
@@ -1024,9 +1024,6 @@ mod tests {
         assert!(sql.contains("AS OF '2024-01-15 10:00:00'::mz_timestamp"));
     }
 
-    // =========================================================================
-    // Validation Tests
-    // =========================================================================
 
     fn make_test_types() -> Types {
         let mut objects = BTreeMap::new();
@@ -1560,9 +1557,6 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // FQN Normalization Tests
-    // =========================================================================
 
     #[test]
     fn test_normalize_fqn_unqualified() {
@@ -1600,9 +1594,6 @@ mod tests {
         assert_eq!(normalized, "other_db.other_schema.users");
     }
 
-    // =========================================================================
-    // Type Normalization Tests (based on https://materialize.com/docs/sql/types/)
-    // =========================================================================
 
     #[test]
     fn test_normalize_type_integer_aliases() {
@@ -1788,9 +1779,6 @@ mod tests {
         assert_eq!(normalize_type("json"), normalize_type("JSON"));
     }
 
-    // =========================================================================
-    // Column Comparison Tests
-    // =========================================================================
 
     #[test]
     fn test_compare_columns_exact_match() {
@@ -1932,9 +1920,6 @@ mod tests {
         assert_eq!(type_mismatches[0].2, "bigint");
     }
 
-    // =========================================================================
-    // Partial FQN Mock Resolution Tests
-    // =========================================================================
 
     #[test]
     fn test_validate_with_unqualified_mock_name() {
@@ -2059,9 +2044,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // =========================================================================
-    // Container Type Normalization Tests
-    // =========================================================================
 
     #[test]
     fn test_normalize_type_list() {

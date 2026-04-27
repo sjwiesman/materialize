@@ -159,7 +159,7 @@ impl Client {
         // parameterized over different TLS stream types that can't unify. We box
         // both to a common `dyn Future` so there's a single spawn site below.
         type BoxConnection =
-            Box<dyn std::future::Future<Output = Result<(), tokio_postgres::Error>> + Send + Unpin>;
+            Box<dyn Future<Output = Result<(), tokio_postgres::Error>> + Send + Unpin>;
         let (client, connection): (PgClient, BoxConnection) = match connector {
             Connector::NoTls => {
                 let (client, connection) = config

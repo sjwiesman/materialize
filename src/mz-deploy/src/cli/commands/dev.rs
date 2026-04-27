@@ -14,6 +14,7 @@ use crate::client::{Client, quote_identifier};
 use crate::config::Settings;
 use crate::project::SchemaQualifier;
 use crate::project::analysis::changeset::ChangeSet;
+use crate::project::analysis::deployment_snapshot;
 use crate::project::ast::Statement;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::resolve::normalize::NormalizingVisitor;
@@ -124,11 +125,11 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
         return Ok(());
     }
 
-    let new_snapshot = crate::project::analysis::deployment_snapshot::build_snapshot_from_planned(
+    let new_snapshot = deployment_snapshot::build_snapshot_from_planned(
         &planned_project,
     )?;
     let production_snapshot =
-        crate::project::analysis::deployment_snapshot::load_from_database(&client, None).await?;
+        deployment_snapshot::load_from_database(&client, None).await?;
 
     // Empty production → full overlay (first-run semantics matching stage).
     let change_set = if production_snapshot.objects.is_empty() {
@@ -303,7 +304,7 @@ pub(crate) async fn create_phase(
     }
 
     for (object_id, typed_object) in overlay_objects {
-        let original_fqn = FullyQualifiedName::from_object_id(object_id.clone());
+        let original_fqn: FullyQualifiedName = object_id.clone().into();
         let mut visitor = NormalizingVisitor::overlay(
             &original_fqn,
             profile_name,

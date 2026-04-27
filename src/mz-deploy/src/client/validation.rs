@@ -316,11 +316,11 @@ async fn find_missing_databases(
 async fn find_missing_schemas(
     client: &Client,
     external_schemas: &BTreeSet<(String, String)>,
-) -> Result<Vec<crate::project::SchemaQualifier>, DatabaseValidationError> {
+) -> Result<Vec<SchemaQualifier>, DatabaseValidationError> {
     let existing = query_existing_schema_pairs(client, external_schemas).await?;
     Ok(external_schemas
         .difference(&existing)
-        .map(|(db, schema)| crate::project::SchemaQualifier::new(db.clone(), schema.clone()))
+        .map(|(db, schema)| SchemaQualifier::new(db.clone(), schema.clone()))
         .collect())
 }
 

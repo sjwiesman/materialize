@@ -40,7 +40,7 @@ fn comment_object_type_name(obj: &CommentObjectType<Raw>) -> &'static str {
 pub(crate) fn validate_database_mod_statements(
     database_name: &str,
     database_path: &std::path::Path,
-    statements: &[mz_sql_parser::ast::Statement<Raw>],
+    statements: &[Statement<Raw>],
     errors: &mut Vec<ValidationError>,
 ) {
     use mz_sql_parser::ast::Statement as MzStatement;
@@ -201,7 +201,7 @@ pub(crate) fn validate_schema_mod_statements(
     database_name: &str,
     schema_name: &str,
     schema_path: &std::path::Path,
-    statements: &mut [mz_sql_parser::ast::Statement<Raw>],
+    statements: &mut [Statement<Raw>],
     errors: &mut Vec<ValidationError>,
 ) {
     use mz_sql_parser::ast::Statement as MzStatement;
@@ -323,19 +323,19 @@ pub(crate) fn validate_schema_mod_statements(
                 if set_stmt.variable.as_str().eq_ignore_ascii_case("api") {
                     // SET api = stable is a valid schema mod directive
                     let is_valid = match &set_stmt.to {
-                        mz_sql_parser::ast::SetVariableTo::Values(values) => {
+                        SetVariableTo::Values(values) => {
                             values.len() == 1
                                 && match &values[0] {
-                                    mz_sql_parser::ast::SetVariableValue::Ident(ident) => {
+                                    SetVariableValue::Ident(ident) => {
                                         ident.as_str().eq_ignore_ascii_case("stable")
                                     }
-                                    mz_sql_parser::ast::SetVariableValue::Literal(
-                                        mz_sql_parser::ast::Value::String(s),
+                                    SetVariableValue::Literal(
+                                        Value::String(s),
                                     ) => s.eq_ignore_ascii_case("stable"),
-                                    mz_sql_parser::ast::SetVariableValue::Literal(_) => false,
+                                    SetVariableValue::Literal(_) => false,
                                 }
                         }
-                        mz_sql_parser::ast::SetVariableTo::Default => false,
+                        SetVariableTo::Default => false,
                     };
 
                     if !is_valid {

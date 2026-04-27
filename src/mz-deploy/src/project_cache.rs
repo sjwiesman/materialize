@@ -665,7 +665,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     /// Create a test SQLite DB with typecheck + project schemas.
-    fn create_test_db(path: &std::path::Path) -> Connection {
+    fn create_test_db(path: &Path) -> Connection {
         let conn = Connection::open(path).unwrap();
         conn.execute_batch(
             "
@@ -786,7 +786,7 @@ mod tests {
         conn
     }
 
-    fn open_cache(path: &std::path::Path) -> ProjectCache {
+    fn open_cache(path: &Path) -> ProjectCache {
         ProjectCache {
             conn: Connection::open_with_flags(
                 path,
