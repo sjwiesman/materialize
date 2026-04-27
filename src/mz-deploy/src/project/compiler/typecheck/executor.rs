@@ -92,7 +92,7 @@ where
 
     // Seed the queue with nodes that already have zero remaining deps.
     for (node_id, bk) in bookkeeping.iter() {
-        if bk.remaining_deps.load(Ordering::Acquire) == 0 {
+        if bk.remaining_deps.load(Ordering::Relaxed) == 0 {
             tx.send(node_id.clone()).expect("channel open");
         }
     }
@@ -124,9 +124,7 @@ where
             .expect("every node's result must be set before run() returns")
         {
             Ok(value) => NodeOutcome::Ok(Arc::clone(value)),
-            Err(NodeFailure::Failed(err)) => {
-                NodeOutcome::Err(NodeFailure::Failed(clone_typecheck_error(err)))
-            }
+            Err(NodeFailure::Failed(err)) => NodeOutcome::Err(NodeFailure::Failed(err.clone())),
             Err(NodeFailure::Blocked(id)) => NodeOutcome::Err(NodeFailure::Blocked(id.clone())),
         };
         outcomes.insert(node_id, outcome);
@@ -189,11 +187,11 @@ fn worker_loop<T, F>(
             }
         };
 
-        bk.result
-            .set(outcome)
-            .ok()
-            .expect("result slot is filled exactly once");
-        completed.fetch_add(1, Ordering::AcqRel);
+        if bk.result.set(outcome).is_err() {
+            panic!(
+                "result slot is filled exactly once. Each node is enqueued exactly once via the prev == 1 transition, so set() runs at most once per slot."
+            );
+        }
 
         for dependent_id in &bk.dependents {
             let dep_bk = bookkeeping
@@ -205,22 +203,13 @@ fn worker_loop<T, F>(
                 tx.send(dependent_id.clone()).expect("channel open");
             }
         }
+        // Bump after fan-out so any worker observing `completed == total`
+        // has transitively observed every node's fan-out writes (Release/Acquire pair
+        // with the loop predicate's load).
+        completed.fetch_add(1, Ordering::Release);
     }
 }
 
-/// `ObjectTypeCheckError` does not implement `Clone`, but the executor needs to
-/// re-emit the typecheck error in its outcome map for the original node. We
-/// shallow-copy the public fields, which is enough for downstream rendering.
-fn clone_typecheck_error(err: &ObjectTypeCheckError) -> ObjectTypeCheckError {
-    ObjectTypeCheckError {
-        object_id: err.object_id.clone(),
-        file_path: err.file_path.clone(),
-        sql_statement: err.sql_statement.clone(),
-        error_message: err.error_message.clone(),
-        detail: err.detail.clone(),
-        hint: err.hint.clone(),
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -93,7 +93,7 @@ pub enum TypeCheckError {
 }
 
 /// A single typecheck error for a specific object, rendered in rustc style.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ObjectTypeCheckError {
     pub object_id: ObjectId,
     pub file_path: PathBuf,
