@@ -271,4 +271,43 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn linear_chain_threads_results() {
+        // a -> b -> c
+        let a = id("a");
+        let b = id("b");
+        let c = id("c");
+        let nodes = vec![a.clone(), b.clone(), c.clone()];
+        let direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
+            (a.clone(), vec![]),
+            (b.clone(), vec![a.clone()]),
+            (c.clone(), vec![b.clone()]),
+        ]
+        .into_iter()
+        .collect();
+        let dependents: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
+            (a.clone(), vec![b.clone()]),
+            (b.clone(), vec![c.clone()]),
+            (c.clone(), vec![]),
+        ]
+        .into_iter()
+        .collect();
+
+        let outcomes = run::<u64, _>(nodes, direct_deps, dependents, |_id, deps| {
+            // Each node returns 1 + sum of dep values; chain produces 1, 2, 3.
+            let upstream: u64 = deps.values().map(|v| **v).sum();
+            Ok(1 + upstream)
+        });
+
+        let unwrap_ok = |id: &ObjectId| -> u64 {
+            match outcomes.get(id).expect("outcome for id") {
+                NodeOutcome::Ok(v) => **v,
+                NodeOutcome::Err(e) => panic!("unexpected err for {id:?}: {e:?}"),
+            }
+        };
+        assert_eq!(unwrap_ok(&a), 1);
+        assert_eq!(unwrap_ok(&b), 2);
+        assert_eq!(unwrap_ok(&c), 3);
+    }
 }
