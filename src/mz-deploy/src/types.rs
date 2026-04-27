@@ -35,7 +35,6 @@
 //!   `COMMENT ON COLUMN` description.
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
@@ -480,22 +479,6 @@ impl Types {
     pub fn get_kind(&self, fqn: &str) -> ObjectKind {
         self.kinds.get(fqn).copied().unwrap_or(ObjectKind::Table)
     }
-}
-
-/// Compute a deterministic hash of a column schema map.
-///
-/// Since `BTreeMap` iterates in sorted key order, the hash is stable across runs.
-/// Each `(column_name, type, nullable)` triple is fed into SHA-256 in order.
-/// The output format matches `compute_typed_hash`: `sha256:<hex>`.
-pub(crate) fn type_hash(columns: &BTreeMap<String, ColumnType>) -> String {
-    let mut hasher = Sha256::new();
-    for (name, col_type) in columns {
-        hasher.update(name.as_bytes());
-        hasher.update(col_type.r#type.as_bytes());
-        hasher.update(if col_type.nullable { b"1" } else { b"0" });
-    }
-    let result = hasher.finalize();
-    format!("sha256:{:x}", result)
 }
 
 #[cfg(test)]
