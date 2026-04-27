@@ -161,8 +161,8 @@ struct NodeBookkeeping<'a> {
 }
 
 enum NodeFailure {
-    TypecheckError(ObjectTypeCheckError),
-    BlockedBy(ObjectId),
+    Failed(ObjectTypeCheckError),
+    Blocked(ObjectId),
 }
 ```
 
@@ -205,17 +205,17 @@ Per-node task body:
    ordering plus the counter discipline guarantees the value is set by the
    time we run.
 2. If any dep result is `Err(_)`: write
-   `Done(Err(BlockedBy(first_failed_dep)))` into our `OnceLock`, log a verbose
+   `Done(Err(Blocked(first_failed_dep)))` into our `OnceLock`, log a verbose
    line, return without running validation. The completion counter and
    dependents-decrement still happen exactly once. Downstream nodes will see
-   our `Err` and propagate `BlockedBy` further.
+   our `Err` and propagate `Blocked` further.
 3. Otherwise: `let mut cat = (*base_catalog).clone();` (relies on the existing
    `Clone` derives on `LocalCatalog` and its sub-types).
 4. For each `(dep_id, columns)` from step 1, call
    `cat.create_stub_table(dep_id, &columns)`.
 5. `cat.create_or_replace_item(node_id, &sql)` → `RelationDesc` →
    `relation_desc_to_columns()`.
-6. Write `Done(Ok(columns))` or `Done(Err(TypecheckError(e)))` into our
+6. Write `Done(Ok(columns))` or `Done(Err(Failed(e)))` into our
    `OnceLock`.
 
 Failure-propagation note: a failed node still participates in the
@@ -257,8 +257,8 @@ fn persist_outcomes(
 4. Build merged `Types` = `cached_view_mv_columns ∪ base_columns ∪
    external_types`. Object kinds populated from the artifact map and from
    `object_kind_for_stmt` over `base_columns` entries.
-5. Aggregate `NodeFailure::TypecheckError(...)` outcomes from phase 2 into
-   `TypeCheckError::Multiple(...)` and return as `Err` if any. `BlockedBy`
+5. Aggregate `NodeFailure::Failed(...)` outcomes from phase 2 into
+   `TypeCheckError::Multiple(...)` and return as `Err` if any. `Blocked`
    outcomes do not contribute errors — only the original failure is reported,
    matching the "skip dependents" decision.
 
@@ -284,8 +284,8 @@ unaffected.
 | Source | Outcome |
 |---|---|
 | Phase 1 table/source/etc. fails | All phase 1 errors aggregated, `run()` returns `TypeCheckError::Multiple`. Phase 2 is not entered. |
-| Phase 2 view/MV typecheck fails | Stored as `NodeFailure::TypecheckError`. Old SQLite row preserved (not pruned, not updated). |
-| Phase 2 view/MV blocked by upstream failure | Stored as `NodeFailure::BlockedBy(<id>)`. Verbose log line emitted. Old SQLite row preserved. No error contribution to the public result. |
+| Phase 2 view/MV typecheck fails | Stored as `NodeFailure::Failed`. Old SQLite row preserved (not pruned, not updated). |
+| Phase 2 view/MV blocked by upstream failure | Stored as `NodeFailure::Blocked(<id>)`. Verbose log line emitted. Old SQLite row preserved. No error contribution to the public result. |
 | Object removed from project | Pruned from SQLite at end of phase 3. |
 | Object added to project | First successful run populates its SQLite row. |
 
@@ -300,7 +300,7 @@ Unit tests in `executor.rs`:
   from both stubbed before `d` validates.
 - Independent leaves: 4 nodes with no deps run in parallel.
 - Failure propagation: `a` fails → direct dependents recorded as
-  `BlockedBy(a)`, transitive dependents recorded as `BlockedBy(<direct dep>)`.
+  `Blocked(a)`, transitive dependents recorded as `Blocked(<direct dep>)`.
 - Failure isolation: `a` fails on one branch; a disjoint chain `x → y`
   succeeds and is persisted normally.
 - Empty graph: zero view/MV nodes → executor returns immediately with empty
