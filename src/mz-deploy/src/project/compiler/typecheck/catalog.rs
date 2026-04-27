@@ -358,13 +358,13 @@ fn ensure_dep_exists(
 /// Wraps the in-memory catalog and provides high-level operations for
 /// dependency setup and object validation.
 #[derive(Debug)]
-struct CatalogRuntime {
+pub(super) struct CatalogRuntime {
     catalog: LocalCatalog,
 }
 
 impl CatalogRuntime {
     /// Initialize a fresh catalog for one typecheck run.
-    fn open() -> Result<Self, TypeCheckError> {
+    pub(super) fn open() -> Result<Self, TypeCheckError> {
         let start = Instant::now();
         let catalog =
             LocalCatalog::new().map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))?;
@@ -374,7 +374,7 @@ impl CatalogRuntime {
 
     /// Ensure all database/schema namespaces referenced by the project and
     /// external types exist in the catalog before validation begins.
-    fn bootstrap_namespaces(&mut self, project: &super::Project, external_types: &super::Types) {
+    pub(super) fn bootstrap_namespaces(&mut self, project: &super::Project, external_types: &super::Types) {
         let start = Instant::now();
         let mut namespaces = BTreeSet::new();
         for object in project.iter_objects() {
@@ -403,7 +403,7 @@ impl CatalogRuntime {
 
     /// Create a placeholder table with the given column schema, representing
     /// a cached or external dependency during validation.
-    fn create_stub_table(
+    pub(super) fn create_stub_table(
         &mut self,
         object_id: &ObjectId,
         columns: &BTreeMap<String, ColumnType>,
@@ -435,7 +435,7 @@ impl CatalogRuntime {
     ///
     /// On success, inserts the resulting item into the catalog and returns
     /// its output column schema.
-    fn create_or_replace_item(
+    pub(super) fn create_or_replace_item(
         &mut self,
         object_id: &ObjectId,
         sql: &str,
@@ -2091,7 +2091,7 @@ fn create_stub_table_sql(object_id: &ObjectId, columns: &BTreeMap<String, Column
 }
 
 /// Transform a compiled statement into SQL for the private catalog workspace.
-fn create_catalog_item_sql(stmt: &ProjectStatement, fqn: &FullyQualifiedName) -> Option<String> {
+pub(super) fn create_catalog_item_sql(stmt: &ProjectStatement, fqn: &FullyQualifiedName) -> Option<String> {
     create_catalog_item_statement(stmt, fqn).map(|stmt| stmt.to_string())
 }
 
@@ -2152,7 +2152,7 @@ fn create_catalog_item_statement(
 }
 
 /// Convert a relation description into the column map stored in the build artifact database.
-fn relation_desc_to_columns(desc: &RelationDesc) -> BTreeMap<String, ColumnType> {
+pub(super) fn relation_desc_to_columns(desc: &RelationDesc) -> BTreeMap<String, ColumnType> {
     desc.iter()
         .enumerate()
         .map(|(position, (name, col_type))| {
