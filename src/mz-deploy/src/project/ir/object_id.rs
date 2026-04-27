@@ -25,6 +25,7 @@
 //!   → ObjectId { database: "other_db", schema: "staging", object: "events" }
 //! ```
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::path::Path;
 use std::str::FromStr;
 use tower_lsp::lsp_types::Url;
@@ -35,7 +36,7 @@ use mz_sql_parser::ast::{Ident, RawItemName, UnresolvedItemName};
 ///
 /// Used to uniquely identify database objects across the project.
 /// Format: `database.schema.object`
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ObjectId {
     pub database: String,
     pub schema: String,
@@ -187,5 +188,39 @@ impl FromStr for ObjectId {
 impl std::fmt::Display for ObjectId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}.{}.{}", self.database, self.schema, self.object)
+    }
+}
+
+impl Serialize for ObjectId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ObjectIdVisitor;
+
+        impl<'de> de::Visitor<'de> for ObjectIdVisitor {
+            type Value = ObjectId;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an object ID")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<ObjectId, E>
+            where
+                E: de::Error,
+            {
+                ObjectId::from_str(value).map_err(de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_str(ObjectIdVisitor)
     }
 }
