@@ -66,6 +66,58 @@ use uuid::Uuid;
 const DEFAULT_CLUSTER_NAME: &str = "mz_deploy";
 const FIRST_USER_OID: u32 = 50_000;
 
+/// Counters for the catalog's various identifier namespaces.
+#[derive(Debug, Clone)]
+struct IdAllocator {
+    database: u64,
+    schema: u64,
+    item: u64,
+    global: u64,
+    oid: u32,
+}
+
+impl IdAllocator {
+    fn new() -> Self {
+        Self {
+            database: 1,
+            schema: 1,
+            item: 1,
+            global: 1,
+            oid: FIRST_USER_OID,
+        }
+    }
+
+    fn allocate_database(&mut self) -> u64 {
+        let id = self.database;
+        self.database += 1;
+        id
+    }
+
+    fn allocate_schema(&mut self) -> u64 {
+        let id = self.schema;
+        self.schema += 1;
+        id
+    }
+
+    fn allocate_item(&mut self) -> u64 {
+        let id = self.item;
+        self.item += 1;
+        id
+    }
+
+    fn allocate_global(&mut self) -> u64 {
+        let id = self.global;
+        self.global += 1;
+        id
+    }
+
+    fn allocate_oid(&mut self) -> Result<u32, CatalogError> {
+        let oid = self.oid;
+        self.oid = self.oid.checked_add(1).ok_or(CatalogError::OidExhaustion)?;
+        Ok(oid)
+    }
+}
+
 /// User database — created on demand by `bootstrap_namespaces`.
 #[derive(Debug, Clone)]
 struct LocalDatabase {
@@ -438,11 +490,7 @@ pub(super) struct CatalogRuntime {
     cluster: LocalCluster,
     config: CatalogConfig,
     system_vars: SystemVars,
-    next_database_id: u64,
-    next_schema_id: u64,
-    next_item_id: u64,
-    next_global_id: u64,
-    next_oid: u32,
+    ids: IdAllocator,
     mz_internal_schema_id: SchemaId,
     mz_unsafe_schema_id: SchemaId,
 }
@@ -499,11 +547,7 @@ impl CatalogRuntime {
             cluster,
             config,
             system_vars: SystemVars::new(),
-            next_database_id: 1,
-            next_schema_id: 1,
-            next_item_id: 1,
-            next_global_id: 1,
-            next_oid: FIRST_USER_OID,
+            ids: IdAllocator::new(),
             mz_internal_schema_id: SchemaId::System(0),
             mz_unsafe_schema_id: SchemaId::System(0),
         };
@@ -665,7 +709,7 @@ impl CatalogRuntime {
             schemas.insert(builtin.schema().to_string());
         }
         for schema in schemas {
-            let schema_id = SchemaId::System(self.allocate_schema_id());
+            let schema_id = SchemaId::System(self.ids.allocate_schema());
             if schema == "mz_internal" {
                 self.mz_internal_schema_id = schema_id;
             }
@@ -794,24 +838,15 @@ impl CatalogRuntime {
             ),
         };
 
-        let item_id = CatalogItemId::System(self.next_item_id);
-        self.next_item_id += 1;
-        let global_id = GlobalId::System(self.next_global_id);
-        self.next_global_id += 1;
+        let item_id = CatalogItemId::System(self.ids.allocate_item());
+        let global_id = GlobalId::System(self.ids.allocate_global());
         let oid = match builtin {
             Builtin::Log(log) => log.oid,
             Builtin::Table(table) => table.oid,
             Builtin::View(view) => view.oid,
             Builtin::MaterializedView(mv) => mv.oid,
             Builtin::Type(typ) => typ.oid,
-            Builtin::Func(_) => {
-                let oid = self.next_oid;
-                self.next_oid = self
-                    .next_oid
-                    .checked_add(1)
-                    .ok_or(CatalogError::OidExhaustion)?;
-                oid
-            }
+            Builtin::Func(_) => self.ids.allocate_oid()?,
             Builtin::Source(source) => source.oid,
             Builtin::ContinualTask(ct) => ct.oid,
             Builtin::Index(index) => index.oid,
@@ -964,7 +999,7 @@ impl CatalogRuntime {
         let database_id = match self.databases_by_name.get(database_name).copied() {
             Some(id) => id,
             None => {
-                let id = mz_sql::names::DatabaseId::User(self.allocate_database_id());
+                let id = mz_sql::names::DatabaseId::User(self.ids.allocate_database());
                 self.databases_by_name.insert(database_name.into(), id);
                 self.databases_by_id.insert(
                     id,
@@ -990,7 +1025,7 @@ impl CatalogRuntime {
             self.refresh_search_path();
             return;
         }
-        let schema_id = SchemaId::User(self.allocate_schema_id());
+        let schema_id = SchemaId::User(self.ids.allocate_schema());
         let schema_spec = SchemaSpecifier::Id(schema_id);
         let qualified = QualifiedSchemaName {
             database: database_spec,
@@ -1054,15 +1089,9 @@ impl CatalogRuntime {
         plan: Plan,
         resolved_ids: ResolvedIds,
     ) -> Result<RelationDesc, CatalogError> {
-        let item_id = CatalogItemId::User(self.next_item_id);
-        self.next_item_id += 1;
-        let global_id = GlobalId::User(self.next_global_id);
-        self.next_global_id += 1;
-        let oid = self.next_oid;
-        self.next_oid = self
-            .next_oid
-            .checked_add(1)
-            .ok_or(CatalogError::OidExhaustion)?;
+        let item_id = CatalogItemId::User(self.ids.allocate_item());
+        let global_id = GlobalId::User(self.ids.allocate_global());
+        let oid = self.ids.allocate_oid()?;
 
         let (name, item_type, desc, uses, cluster_id) = match plan {
             Plan::CreateTable(plan) => (
@@ -1160,15 +1189,9 @@ impl CatalogRuntime {
             .ok_or_else(|| CatalogError::UnknownSchema(object_id.schema.clone()))?;
         let schema_spec = schema.id.clone();
 
-        let item_id = CatalogItemId::User(self.next_item_id);
-        self.next_item_id += 1;
-        let global_id = GlobalId::User(self.next_global_id);
-        self.next_global_id += 1;
-        let oid = self.next_oid;
-        self.next_oid = self
-            .next_oid
-            .checked_add(1)
-            .ok_or(CatalogError::OidExhaustion)?;
+        let item_id = CatalogItemId::User(self.ids.allocate_item());
+        let global_id = GlobalId::User(self.ids.allocate_global());
+        let oid = self.ids.allocate_oid()?;
 
         let item = LocalItem {
             name: QualifiedItemName {
@@ -1196,18 +1219,6 @@ impl CatalogRuntime {
         };
         self.insert_item(item);
         Ok(())
-    }
-
-    fn allocate_database_id(&mut self) -> u64 {
-        let id = self.next_database_id;
-        self.next_database_id += 1;
-        id
-    }
-
-    fn allocate_schema_id(&mut self) -> u64 {
-        let id = self.next_schema_id;
-        self.next_schema_id += 1;
-        id
     }
 
     fn schema_name(
