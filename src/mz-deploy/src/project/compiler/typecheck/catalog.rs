@@ -112,6 +112,18 @@ impl CatalogRuntime {
         timing!("    catalog: bootstrap_namespaces", start.elapsed());
     }
 
+    /// Insert a stub table directly from a [`RelationDesc`], bypassing the
+    /// SQL parse + plan pipeline.
+    pub(super) fn insert_stub_table_with_desc(
+        &mut self,
+        object_id: &ObjectId,
+        desc: RelationDesc,
+    ) -> Result<(), TypeCheckError> {
+        self.catalog
+            .insert_stub_table_with_desc(object_id, desc)
+            .map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))
+    }
+
     /// Create a placeholder table with the given column schema, representing
     /// a cached or external dependency during validation.
     pub(super) fn create_stub_table(
@@ -1155,6 +1167,66 @@ impl LocalCatalog {
         };
         self.insert_item(item);
         Ok(desc)
+    }
+
+    /// Insert a stub Table item directly from a [`RelationDesc`], skipping
+    /// parse, name resolution, and SQL planning entirely.
+    ///
+    /// Used by the parallel typechecker to materialize an upstream view's
+    /// schema in a downstream task's catalog without re-running the
+    /// resolve+plan pipeline for every (consumer, dep) pair.
+    fn insert_stub_table_with_desc(
+        &mut self,
+        object_id: &ObjectId,
+        desc: RelationDesc,
+    ) -> Result<(), CatalogError> {
+        let database_id = *self
+            .databases_by_name
+            .get(&object_id.database)
+            .ok_or_else(|| CatalogError::UnknownDatabase(object_id.database.clone()))?;
+        let database_spec = ResolvedDatabaseSpecifier::Id(database_id);
+        let schema = self
+            .schemas_by_key
+            .get(&(database_spec, object_id.schema.clone()))
+            .ok_or_else(|| CatalogError::UnknownSchema(object_id.schema.clone()))?;
+        let schema_spec = schema.id.clone();
+
+        let item_id = CatalogItemId::User(self.next_item_id);
+        self.next_item_id += 1;
+        let global_id = GlobalId::User(self.next_global_id);
+        self.next_global_id += 1;
+        let oid = self.next_oid;
+        self.next_oid = self
+            .next_oid
+            .checked_add(1)
+            .ok_or(CatalogError::OidExhaustion)?;
+
+        let item = LocalItem {
+            name: QualifiedItemName {
+                qualifiers: ItemQualifiers {
+                    database_spec,
+                    schema_spec,
+                },
+                item: object_id.object.clone(),
+            },
+            id: item_id,
+            global_id,
+            oid,
+            item_type: CatalogItemType::Table,
+            create_sql: String::new(),
+            references: ResolvedIds::empty(),
+            uses: BTreeSet::new(),
+            referenced_by: Vec::new(),
+            used_by: Vec::new(),
+            relation_desc: Some(desc),
+            func: None,
+            type_details: None,
+            owner_id: MZ_SYSTEM_ROLE_ID,
+            privileges: PrivilegeMap::default(),
+            cluster_id: None,
+        };
+        self.insert_item(item);
+        Ok(())
     }
 
     fn allocate_database_id(&mut self) -> u64 {
