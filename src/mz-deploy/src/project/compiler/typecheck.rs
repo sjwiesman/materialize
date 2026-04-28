@@ -243,15 +243,15 @@ pub(crate) fn run(
                         })?;
                 }
                 let fqn: crate::project::ir::compiled::FullyQualifiedName = node_id.clone().into();
-                let sql =
-                    catalog::create_catalog_item_sql(&db_obj.stmt, &fqn).ok_or_else(|| {
+                let ast =
+                    catalog::create_catalog_item_ast(&db_obj.stmt, &fqn).ok_or_else(|| {
                         ObjectTypeCheckError::internal(
                             node_id.clone(),
                             db_obj.path.clone(),
-                            "internal: failed to render catalog SQL".into(),
+                            "internal: failed to build catalog AST".into(),
                         )
                     })?;
-                let desc = runtime.create_or_replace_item(node_id, &sql)?;
+                let desc = runtime.create_or_replace_item_from_ast(node_id, ast)?;
                 Ok(catalog::relation_desc_to_columns(&desc))
             },
         )

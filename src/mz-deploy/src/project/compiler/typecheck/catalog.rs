@@ -151,17 +151,40 @@ impl CatalogRuntime {
         object_id: &ObjectId,
         sql: &str,
     ) -> Result<RelationDesc, ObjectTypeCheckError> {
-        let start = Instant::now();
         let parsed = mz_sql_parser::parser::parse_statements(sql)
             .map_err(|e| self.build_error(object_id, sql, e))?
             .into_iter()
             .next()
             .ok_or_else(|| self.build_error(object_id, sql, "empty statement"))?
             .ast;
+        self.resolve_plan_and_insert(object_id, parsed, sql)
+    }
+
+    /// Resolve and type-check an already-parsed SQL statement against the
+    /// catalog, skipping the parse step.
+    ///
+    /// On success, inserts the resulting item into the catalog and returns
+    /// its output column schema.
+    pub(super) fn create_or_replace_item_from_ast(
+        &mut self,
+        object_id: &ObjectId,
+        ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
+    ) -> Result<RelationDesc, ObjectTypeCheckError> {
+        let create_sql = ast.to_string();
+        self.resolve_plan_and_insert(object_id, ast, &create_sql)
+    }
+
+    fn resolve_plan_and_insert(
+        &mut self,
+        object_id: &ObjectId,
+        ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
+        create_sql: &str,
+    ) -> Result<RelationDesc, ObjectTypeCheckError> {
+        let start = Instant::now();
 
         let resolve_start = Instant::now();
-        let (resolved, resolved_ids) = mz_sql::names::resolve(&self.catalog, parsed)
-            .map_err(|e| self.build_error(object_id, sql, e))?;
+        let (resolved, resolved_ids) = mz_sql::names::resolve(&self.catalog, ast)
+            .map_err(|e| self.build_error(object_id, create_sql, e))?;
         timing!(
             &format!("      catalog: resolve {}", object_id),
             resolve_start.elapsed()
@@ -176,7 +199,7 @@ impl CatalogRuntime {
             &Params::empty(),
             &resolved_ids,
         )
-        .map_err(|e| self.build_error(object_id, sql, e))?;
+        .map_err(|e| self.build_error(object_id, create_sql, e))?;
         timing!(
             &format!("      catalog: plan {}", object_id),
             plan_start.elapsed()
@@ -185,8 +208,8 @@ impl CatalogRuntime {
         let insert_start = Instant::now();
         let desc = self
             .catalog
-            .insert_planned_item(object_id, sql, plan, resolved_ids)
-            .map_err(|e| self.build_error(object_id, sql, e))?;
+            .insert_planned_item(object_id, create_sql, plan, resolved_ids)
+            .map_err(|e| self.build_error(object_id, create_sql, e))?;
         timing!(
             &format!("      catalog: insert_item {}", object_id),
             insert_start.elapsed()
@@ -1807,6 +1830,15 @@ pub(super) fn create_catalog_item_sql(
     fqn: &FullyQualifiedName,
 ) -> Option<String> {
     create_catalog_item_statement(stmt, fqn).map(|stmt| stmt.to_string())
+}
+
+/// Transform a compiled statement into a parser AST for the private catalog
+/// workspace, skipping the SQL render+reparse round-trip.
+pub(super) fn create_catalog_item_ast(
+    stmt: &ProjectStatement,
+    fqn: &FullyQualifiedName,
+) -> Option<mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>> {
+    create_catalog_item_statement(stmt, fqn).map(|s| s.into_parser_statement())
 }
 
 /// Normalize a compiled SQL statement for the in-memory catalog.
