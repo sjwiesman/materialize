@@ -1,3 +1,12 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Ready-queue DAG executor for parallel typechecking.
 //!
 //! Each node carries an `OnceLock<Result<Arc<T>, NodeFailure>>`. Workers pull
@@ -313,12 +322,8 @@ mod tests {
         // a -> {b, c} -> d. b and c each rendezvous on a 2-party barrier
         // before completing — they can only progress if both are running
         // concurrently, proving the executor dispatches them in parallel.
-        let (nodes, direct_deps, dependents) = dag(&[
-            ("a", "b"),
-            ("a", "c"),
-            ("b", "d"),
-            ("c", "d"),
-        ]);
+        let (nodes, direct_deps, dependents) =
+            dag(&[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]);
         let barrier = Arc::new(Barrier::new(2));
 
         let outcomes = run::<u64, _>(nodes, direct_deps, dependents, move |obj_id, _deps| {
@@ -351,8 +356,7 @@ mod tests {
     fn failure_propagates_to_dependents_and_isolates_other_branches() {
         // Failing branch:  a (FAIL) -> b -> c
         // Healthy branch:  x -> y
-        let (nodes, direct_deps, dependents) =
-            dag(&[("a", "b"), ("b", "c"), ("x", "y")]);
+        let (nodes, direct_deps, dependents) = dag(&[("a", "b"), ("b", "c"), ("x", "y")]);
 
         let a = id("a");
         let a_for_closure = a.clone();

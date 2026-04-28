@@ -1,10 +1,19 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Cluster validation for object statements.
 //!
 //! Validates that indexes, materialized views, sinks, and sources specify
 //! which cluster they run on using the `IN CLUSTER` clause.
 
-use super::super::super::ast::Statement;
 use super::identifiers::validate_cluster_name;
+use crate::project::ast::Statement;
 use crate::project::error::{ValidationError, ValidationErrorKind};
 use crate::project::ir::compiled::FullyQualifiedName;
 use mz_sql_parser::ast::*;
@@ -25,7 +34,7 @@ use mz_sql_parser::ast::*;
 /// ```sql
 /// CREATE INDEX idx ON table (col);  -- missing cluster
 /// ```
-pub(in super::super) fn validate_index_clusters(
+pub(super) fn validate_index_clusters(
     fqn: &FullyQualifiedName,
     indexes: &[CreateIndexStatement<Raw>],
     offsets: &[usize],
@@ -64,7 +73,7 @@ pub(in super::super) fn validate_index_clusters(
 ///
 /// - **Enforced constraints** (`enforced: true`): `in_cluster` is **required**. Validate format.
 /// - **Not-enforced constraints** (`enforced: false`): `in_cluster` must **not** be set.
-pub(in super::super) fn validate_constraint_clusters(
+pub(super) fn validate_constraint_clusters(
     fqn: &FullyQualifiedName,
     constraints: &[CreateConstraintStatement<Raw>],
     offsets: &[usize],
@@ -128,7 +137,7 @@ pub(in super::super) fn validate_constraint_clusters(
 /// ```sql
 /// CREATE MATERIALIZED VIEW mv AS SELECT ...;  -- missing cluster
 /// ```
-pub(in super::super) fn validate_mv_cluster(
+pub(super) fn validate_mv_cluster(
     fqn: &FullyQualifiedName,
     stmt: &Statement,
     main_offset: usize,
@@ -174,7 +183,7 @@ pub(in super::super) fn validate_mv_cluster(
 /// ```sql
 /// CREATE SINK sink FROM table INTO ...;  -- missing cluster
 /// ```
-pub(in super::super) fn validate_sink_cluster(
+pub(super) fn validate_sink_cluster(
     fqn: &FullyQualifiedName,
     stmt: &Statement,
     main_offset: usize,
@@ -209,7 +218,7 @@ pub(in super::super) fn validate_sink_cluster(
 }
 
 /// Validates that a CREATE SOURCE statement has a required IN CLUSTER clause.
-pub(in super::super) fn validate_source_cluster(
+pub(super) fn validate_source_cluster(
     fqn: &FullyQualifiedName,
     stmt: &Statement,
     main_offset: usize,

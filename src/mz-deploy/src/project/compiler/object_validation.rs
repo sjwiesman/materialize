@@ -1,3 +1,12 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Object validation and compiled-project assembly.
 //!
 //! This module turns source-owned objects into validated compiled objects and
@@ -32,13 +41,25 @@
 //! then only the active variant (matching profile or default) is fully
 //! validated. Views and materialized views do not allow profile overrides.
 
-use super::super::ast::Statement;
-use super::validation::{
-    validate_comment_references, validate_constraint_clusters, validate_constraint_enforcement,
-    validate_constraint_references, validate_fqn_identifiers, validate_grant_references,
-    validate_ident, validate_index_clusters, validate_index_references, validate_mv_cluster,
-    validate_no_storage_and_computation_in_schema, validate_sink_cluster, validate_source_cluster,
+mod clusters;
+mod constraint_enforcement;
+mod identifiers;
+mod references;
+mod schema_constraints;
+
+use clusters::{
+    validate_constraint_clusters, validate_index_clusters, validate_mv_cluster,
+    validate_sink_cluster, validate_source_cluster,
 };
+use constraint_enforcement::validate_constraint_enforcement;
+use identifiers::{validate_fqn_identifiers, validate_ident};
+use references::{
+    validate_comment_references, validate_constraint_references, validate_grant_references,
+    validate_index_references,
+};
+use schema_constraints::validate_no_storage_and_computation_in_schema;
+
+use super::super::ast::Statement;
 use crate::project::SchemaQualifier;
 use crate::project::error::{ValidationError, ValidationErrorKind, ValidationErrors};
 use crate::project::ir::compiled::{Database, DatabaseObject, FullyQualifiedName, Project, Schema};

@@ -1,3 +1,12 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Incremental project compiler.
 //!
 //! This module is the canonical implementation of `project::plan_sync()`'s
@@ -72,10 +81,11 @@
 
 pub(crate) mod build_artifact;
 mod cache_io;
+mod constraints;
+mod mod_statements;
 mod object_validation;
 pub(crate) mod typecheck;
-mod validation;
-pub(crate) use validation::{validate_constraint_columns, validate_constraint_fk_targets};
+pub(crate) use constraints::{validate_constraint_columns, validate_constraint_fk_targets};
 
 use super::error::{LoadError, ProjectError, ValidationError, ValidationErrors};
 use crate::project::ir::{compiled, graph};
@@ -542,7 +552,7 @@ fn discover_project(
             db,
         )?;
         if let Some(ref stmts) = db_mod_statements {
-            validation::validate_database_mod_statements(
+            mod_statements::validate_database_mod_statements(
                 &db_name,
                 &db_mod_path,
                 stmts,
@@ -577,7 +587,7 @@ fn discover_project(
                 db,
             )?;
             if let Some(ref mut stmts) = schema_mod_statements {
-                validation::validate_schema_mod_statements(
+                mod_statements::validate_schema_mod_statements(
                     &db_name,
                     &schema_name,
                     &schema_mod_path,
