@@ -236,7 +236,7 @@ pub(crate) fn run(
                             "internal: failed to build catalog AST".into(),
                         )
                     })?;
-                runtime.create_or_replace_item_from_ast(node_id, ast)
+                runtime.create_item_from_ast(node_id, ast)
             },
         )
     };
