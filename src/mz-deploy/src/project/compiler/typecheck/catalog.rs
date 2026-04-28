@@ -66,192 +66,6 @@ use uuid::Uuid;
 const DEFAULT_CLUSTER_NAME: &str = "mz_deploy";
 const FIRST_USER_OID: u32 = 50_000;
 
-/// Runtime state for a single catalog-based typecheck run.
-///
-/// Wraps the in-memory catalog and provides high-level operations for
-/// dependency setup and object validation.
-#[derive(Debug, Clone)]
-pub(super) struct CatalogRuntime {
-    catalog: LocalCatalog,
-}
-
-impl CatalogRuntime {
-    /// Initialize a fresh catalog for one typecheck run.
-    pub(super) fn open() -> Result<Self, TypeCheckError> {
-        let start = Instant::now();
-        let catalog =
-            LocalCatalog::new().map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))?;
-        timing!("    catalog: new", start.elapsed());
-        Ok(Self { catalog })
-    }
-
-    /// Ensure all database/schema namespaces referenced by the project and
-    /// external types exist in the catalog before validation begins.
-    pub(super) fn bootstrap_namespaces(
-        &mut self,
-        project: &super::Project,
-        external_types: &super::Types,
-    ) {
-        let start = Instant::now();
-        let mut namespaces = BTreeSet::new();
-        for object in project.iter_objects() {
-            namespaces.insert((object.id.database.clone(), object.id.schema.clone()));
-        }
-        for id in external_types.tables.keys() {
-            namespaces.insert((id.database.clone(), id.schema.clone()));
-        }
-
-        for (database, schema) in namespaces {
-            let namespace_start = Instant::now();
-            self.catalog.ensure_user_schema(&database, &schema);
-            timing!(
-                &format!("      catalog: ensure_namespace {}.{}", database, schema),
-                namespace_start.elapsed()
-            );
-        }
-        timing!("    catalog: bootstrap_namespaces", start.elapsed());
-    }
-
-    /// Insert a stub table directly from a [`RelationDesc`], bypassing the
-    /// SQL parse + plan pipeline.
-    pub(super) fn insert_stub_table_with_desc(
-        &mut self,
-        object_id: &ObjectId,
-        desc: RelationDesc,
-    ) -> Result<(), TypeCheckError> {
-        self.catalog
-            .insert_stub_table_with_desc(object_id, desc)
-            .map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))
-    }
-
-    /// Create a placeholder table with the given column schema, representing
-    /// a cached or external dependency during validation.
-    pub(super) fn create_stub_table(
-        &mut self,
-        object_id: &ObjectId,
-        columns: &BTreeMap<String, ColumnType>,
-    ) -> Result<(), TypeCheckError> {
-        let build_sql_start = Instant::now();
-        let sql = create_stub_table_sql(object_id, columns);
-        timing!(
-            &format!("        catalog: build_stub_sql {}", object_id),
-            build_sql_start.elapsed()
-        );
-        let create_start = Instant::now();
-        self.create_or_replace_item(object_id, &sql)
-            .map(|_| {
-                timing!(
-                    &format!("        catalog: create_stub_table {}", object_id),
-                    create_start.elapsed()
-                );
-            })
-            .map_err(|e| {
-                timing!(
-                    &format!("        catalog: create_stub_table {}", object_id),
-                    create_start.elapsed()
-                );
-                TypeCheckError::TypeCheckFailed(e)
-            })
-    }
-
-    /// Parse, resolve, and type-check a SQL statement against the catalog.
-    ///
-    /// On success, inserts the resulting item into the catalog and returns
-    /// its output column schema.
-    pub(super) fn create_or_replace_item(
-        &mut self,
-        object_id: &ObjectId,
-        sql: &str,
-    ) -> Result<RelationDesc, ObjectTypeCheckError> {
-        let parsed = mz_sql_parser::parser::parse_statements(sql)
-            .map_err(|e| self.build_error(object_id, sql, e))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| self.build_error(object_id, sql, "empty statement"))?
-            .ast;
-        self.resolve_plan_and_insert(object_id, parsed, sql)
-    }
-
-    /// Resolve and type-check an already-parsed SQL statement against the
-    /// catalog, skipping the parse step.
-    ///
-    /// On success, inserts the resulting item into the catalog and returns
-    /// its output column schema.
-    pub(super) fn create_or_replace_item_from_ast(
-        &mut self,
-        object_id: &ObjectId,
-        ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
-    ) -> Result<RelationDesc, ObjectTypeCheckError> {
-        let create_sql = ast.to_string();
-        self.resolve_plan_and_insert(object_id, ast, &create_sql)
-    }
-
-    fn resolve_plan_and_insert(
-        &mut self,
-        object_id: &ObjectId,
-        ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
-        create_sql: &str,
-    ) -> Result<RelationDesc, ObjectTypeCheckError> {
-        let start = Instant::now();
-
-        let resolve_start = Instant::now();
-        let (resolved, resolved_ids) = mz_sql::names::resolve(&self.catalog, ast)
-            .map_err(|e| self.build_error(object_id, create_sql, e))?;
-        timing!(
-            &format!("      catalog: resolve {}", object_id),
-            resolve_start.elapsed()
-        );
-
-        let plan_start = Instant::now();
-        let pcx = PlanContext::new(Utc::now());
-        let plan = mz_sql::plan::plan(
-            Some(&pcx),
-            &self.catalog,
-            resolved,
-            &Params::empty(),
-            &resolved_ids,
-        )
-        .map_err(|e| self.build_error(object_id, create_sql, e))?;
-        timing!(
-            &format!("      catalog: plan {}", object_id),
-            plan_start.elapsed()
-        );
-
-        let insert_start = Instant::now();
-        let desc = self
-            .catalog
-            .insert_planned_item(object_id, create_sql, plan, resolved_ids)
-            .map_err(|e| self.build_error(object_id, create_sql, e))?;
-        timing!(
-            &format!("      catalog: insert_item {}", object_id),
-            insert_start.elapsed()
-        );
-        timing!(
-            &format!("    catalog: create_or_replace_item {}", object_id),
-            start.elapsed()
-        );
-        Ok(desc)
-    }
-
-    /// Construct a typecheck error with the object's inferred file path.
-    fn build_error<E>(&self, object_id: &ObjectId, sql: &str, error: E) -> ObjectTypeCheckError
-    where
-        E: std::fmt::Display,
-    {
-        ObjectTypeCheckError {
-            object_id: object_id.clone(),
-            file_path: PathBuf::from(format!(
-                "{}/{}/{}.sql",
-                object_id.database, object_id.schema, object_id.object
-            )),
-            sql_statement: sql.to_string(),
-            error_message: error.to_string(),
-            detail: None,
-            hint: None,
-        }
-    }
-}
-
 /// User database — created on demand by `bootstrap_namespaces`.
 #[derive(Debug, Clone)]
 struct LocalDatabase {
@@ -604,7 +418,7 @@ impl mz_sql::catalog::CatalogCollectionItem for LocalItem {
 /// objects during validation. Each instance is scoped to a single typecheck
 /// run to avoid state leakage between validations.
 #[derive(Debug, Clone)]
-struct LocalCatalog {
+pub(super) struct CatalogRuntime {
     active_role: LocalRole,
     active_database: Option<mz_sql::names::DatabaseId>,
     active_cluster_name: String,
@@ -633,7 +447,7 @@ struct LocalCatalog {
     mz_unsafe_schema_id: SchemaId,
 }
 
-impl LocalCatalog {
+impl CatalogRuntime {
     /// Create a catalog pre-populated with system schemas (pg_catalog,
     /// mz_catalog, etc.) and all builtin types, functions, and system objects.
     fn new() -> Result<Self, CatalogError> {
@@ -697,6 +511,151 @@ impl LocalCatalog {
         catalog.seed_builtins()?;
         catalog.refresh_search_path();
         Ok(catalog)
+    }
+
+    /// Initialize a fresh catalog for one typecheck run.
+    pub(super) fn open() -> Result<Self, TypeCheckError> {
+        let start = Instant::now();
+        let catalog =
+            Self::new().map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))?;
+        timing!("    catalog: new", start.elapsed());
+        Ok(catalog)
+    }
+
+    /// Ensure all database/schema namespaces referenced by the project and
+    /// external types exist in the catalog before validation begins.
+    pub(super) fn bootstrap_namespaces(
+        &mut self,
+        project: &super::Project,
+        external_types: &super::Types,
+    ) {
+        let start = Instant::now();
+        let mut namespaces = BTreeSet::new();
+        for object in project.iter_objects() {
+            namespaces.insert((object.id.database.clone(), object.id.schema.clone()));
+        }
+        for id in external_types.tables.keys() {
+            namespaces.insert((id.database.clone(), id.schema.clone()));
+        }
+
+        for (database, schema) in namespaces {
+            let namespace_start = Instant::now();
+            self.ensure_user_schema(&database, &schema);
+            timing!(
+                &format!("      catalog: ensure_namespace {}.{}", database, schema),
+                namespace_start.elapsed()
+            );
+        }
+        timing!("    catalog: bootstrap_namespaces", start.elapsed());
+    }
+
+    /// Create a placeholder table with the given column schema, representing
+    /// a cached or external dependency during validation.
+    pub(super) fn create_stub_table(
+        &mut self,
+        object_id: &ObjectId,
+        columns: &BTreeMap<String, ColumnType>,
+    ) -> Result<(), TypeCheckError> {
+        let build_sql_start = Instant::now();
+        let sql = create_stub_table_sql(object_id, columns);
+        timing!(
+            &format!("        catalog: build_stub_sql {}", object_id),
+            build_sql_start.elapsed()
+        );
+        let create_start = Instant::now();
+        let result = self
+            .create_or_replace_item(object_id, &sql)
+            .map(|_| ())
+            .map_err(TypeCheckError::TypeCheckFailed);
+        timing!(
+            &format!("        catalog: create_stub_table {}", object_id),
+            create_start.elapsed()
+        );
+        result
+    }
+
+    /// Parse, resolve, and type-check a SQL statement against the catalog.
+    /// On success, inserts the resulting item and returns its column schema.
+    pub(super) fn create_or_replace_item(
+        &mut self,
+        object_id: &ObjectId,
+        sql: &str,
+    ) -> Result<RelationDesc, ObjectTypeCheckError> {
+        let parsed = mz_sql_parser::parser::parse_statements(sql)
+            .map_err(|e| self.build_error(object_id, sql, e))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| self.build_error(object_id, sql, "empty statement"))?
+            .ast;
+        self.resolve_plan_and_insert(object_id, parsed, sql)
+    }
+
+    /// Resolve and type-check an already-parsed SQL statement, skipping parse.
+    pub(super) fn create_or_replace_item_from_ast(
+        &mut self,
+        object_id: &ObjectId,
+        ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
+    ) -> Result<RelationDesc, ObjectTypeCheckError> {
+        let create_sql = ast.to_string();
+        self.resolve_plan_and_insert(object_id, ast, &create_sql)
+    }
+
+    fn resolve_plan_and_insert(
+        &mut self,
+        object_id: &ObjectId,
+        ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
+        create_sql: &str,
+    ) -> Result<RelationDesc, ObjectTypeCheckError> {
+        let start = Instant::now();
+
+        let resolve_start = Instant::now();
+        let (resolved, resolved_ids) =
+            mz_sql::names::resolve(&*self, ast).map_err(|e| self.build_error(object_id, create_sql, e))?;
+        timing!(
+            &format!("      catalog: resolve {}", object_id),
+            resolve_start.elapsed()
+        );
+
+        let plan_start = Instant::now();
+        let pcx = PlanContext::new(Utc::now());
+        let plan = mz_sql::plan::plan(Some(&pcx), &*self, resolved, &Params::empty(), &resolved_ids)
+            .map_err(|e| self.build_error(object_id, create_sql, e))?;
+        timing!(
+            &format!("      catalog: plan {}", object_id),
+            plan_start.elapsed()
+        );
+
+        let insert_start = Instant::now();
+        let desc = self
+            .insert_planned_item(object_id, create_sql, plan, resolved_ids)
+            .map_err(|e| self.build_error(object_id, create_sql, e))?;
+        timing!(
+            &format!("      catalog: insert_item {}", object_id),
+            insert_start.elapsed()
+        );
+        timing!(
+            &format!("    catalog: create_or_replace_item {}", object_id),
+            start.elapsed()
+        );
+        Ok(desc)
+    }
+
+    /// Construct a typecheck error with the object's inferred file path.
+    fn build_error<E>(&self, object_id: &ObjectId, sql: &str, error: E) -> ObjectTypeCheckError
+    where
+        E: std::fmt::Display,
+    {
+        ObjectTypeCheckError {
+            object_id: object_id.clone(),
+            file_path: PathBuf::from(format!(
+                "{}/{}/{}.sql",
+                object_id.database, object_id.schema, object_id.object
+            )),
+            sql_statement: sql.to_string(),
+            error_message: error.to_string(),
+            detail: None,
+            hint: None,
+        }
     }
 
     /// Register all system schemas discovered from the builtin catalog.
@@ -1176,7 +1135,16 @@ impl LocalCatalog {
     /// Used by the parallel typechecker to materialize an upstream view's
     /// schema in a downstream task's catalog without re-running the
     /// resolve+plan pipeline for every (consumer, dep) pair.
-    fn insert_stub_table_with_desc(
+    pub(super) fn insert_stub_table_with_desc(
+        &mut self,
+        object_id: &ObjectId,
+        desc: RelationDesc,
+    ) -> Result<(), TypeCheckError> {
+        self.insert_stub_table_with_desc_inner(object_id, desc)
+            .map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))
+    }
+
+    fn insert_stub_table_with_desc_inner(
         &mut self,
         object_id: &ObjectId,
         desc: RelationDesc,
@@ -1326,7 +1294,7 @@ impl LocalCatalog {
 
 /// Provides human-readable names for expression display. Maps `GlobalId`s
 /// to qualified item names and column names.
-impl ExprHumanizer for LocalCatalog {
+impl ExprHumanizer for CatalogRuntime {
     fn humanize_id(&self, id: GlobalId) -> Option<String> {
         self.items_by_global_id
             .get(&id)
@@ -1387,7 +1355,7 @@ impl ExprHumanizer for LocalCatalog {
 }
 
 /// Inline connection resolution isn't part of project SQL — never reached during typecheck.
-impl ConnectionResolver for LocalCatalog {
+impl ConnectionResolver for CatalogRuntime {
     fn resolve_connection(&self, id: CatalogItemId) -> Connection<InlinedConnection> {
         unreachable!("catalog backend cannot resolve connection {id}")
     }
@@ -1398,7 +1366,7 @@ impl ConnectionResolver for LocalCatalog {
 /// unsupported operations (replicas, network policies, connections) return
 /// errors or empty results.
 #[allow(clippy::as_conversions)] // Trait object coercions are unavoidable in this impl
-impl SessionCatalog for LocalCatalog {
+impl SessionCatalog for CatalogRuntime {
     fn active_role_id(&self) -> &RoleId {
         &self.active_role.id
     }
@@ -2066,7 +2034,7 @@ mod tests {
 
     #[mz_ore::test]
     fn test_resolve_builtin_types() {
-        let catalog = LocalCatalog::new().expect("catalog creation should succeed");
+        let catalog = CatalogRuntime::new().expect("catalog creation should succeed");
         let types_to_check = [
             "date",
             "time",
@@ -2101,10 +2069,8 @@ mod tests {
 
     #[mz_ore::test]
     fn test_create_table_with_date_column() {
-        let mut runtime = CatalogRuntime {
-            catalog: LocalCatalog::new().expect("catalog creation should succeed"),
-        };
-        runtime.catalog.ensure_user_schema("test_db", "test_schema");
+        let mut runtime = CatalogRuntime::new().expect("catalog creation should succeed");
+        runtime.ensure_user_schema("test_db", "test_schema");
         let object_id = ObjectId {
             database: "test_db".into(),
             schema: "test_schema".into(),
@@ -2121,10 +2087,8 @@ mod tests {
 
     #[mz_ore::test]
     fn test_stub_table_with_date_column() {
-        let mut runtime = CatalogRuntime {
-            catalog: LocalCatalog::new().expect("catalog creation should succeed"),
-        };
-        runtime.catalog.ensure_user_schema("test_db", "test_schema");
+        let mut runtime = CatalogRuntime::new().expect("catalog creation should succeed");
+        runtime.ensure_user_schema("test_db", "test_schema");
         let object_id = ObjectId {
             database: "test_db".into(),
             schema: "test_schema".into(),
