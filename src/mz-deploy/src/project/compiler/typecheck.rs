@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
 
-mod base;
+mod bootstrap;
 mod catalog;
 mod executor;
 
@@ -159,7 +159,7 @@ pub(crate) fn run(
     project: &Project,
     external_types: Types,
 ) -> Result<Types, TypeCheckError> {
-    let (base_catalog, base_columns) = base::build_base_catalog(project, &external_types)?;
+    let (base_catalog, base_columns) = bootstrap::bootstrap_catalog(project, &external_types)?;
 
     let sorted = project.get_sorted_objects()?;
     let mut node_ids: Vec<ObjectId> = Vec::new();
