@@ -221,7 +221,7 @@ pub(crate) fn run(
     let outcomes = {
         let typed_objects = Arc::clone(&typed_objects);
         let base_catalog = Arc::clone(&base_catalog);
-        executor::run::<BTreeMap<String, ColumnType>, _>(
+        executor::run::<mz_repr::RelationDesc, _>(
             node_ids.clone(),
             direct_deps,
             dependents,
@@ -230,9 +230,9 @@ pub(crate) fn run(
                     .get(node_id)
                     .expect("typed_object exists for every scheduled node");
                 let mut runtime = (*base_catalog).clone();
-                for (dep_id, columns) in dep_results {
+                for (dep_id, desc) in dep_results {
                     runtime
-                        .create_stub_table(dep_id, columns.as_ref())
+                        .insert_stub_table_with_desc(dep_id, (**desc).clone())
                         .map_err(|err| match err {
                             TypeCheckError::TypeCheckFailed(e) => e,
                             other => ObjectTypeCheckError::internal(
@@ -251,8 +251,7 @@ pub(crate) fn run(
                             "internal: failed to build catalog AST".into(),
                         )
                     })?;
-                let desc = runtime.create_or_replace_item_from_ast(node_id, ast)?;
-                Ok(catalog::relation_desc_to_columns(&desc))
+                runtime.create_or_replace_item_from_ast(node_id, ast)
             },
         )
     };
@@ -286,19 +285,20 @@ pub(crate) fn run(
             continue;
         };
         match outcome {
-            executor::NodeOutcome::Ok(columns) => {
+            executor::NodeOutcome::Ok(desc) => {
                 let db_obj = typed_objects
                     .get(node_id)
                     .expect("typed_object exists for outcome");
                 let kind = object_kind_for_stmt(&db_obj.stmt);
                 let semantic_fingerprint = compute_semantic_fingerprint(db_obj);
-                merged_tables.insert(node_id.clone(), columns.as_ref().clone());
+                let columns = catalog::relation_desc_to_columns(desc);
+                merged_tables.insert(node_id.clone(), columns.clone());
                 merged_kinds.insert(node_id.clone(), kind);
                 upsert_rows.push((
                     node_id.to_string(),
                     semantic_fingerprint,
                     kind.as_str().to_string(),
-                    columns.as_ref().clone(),
+                    columns,
                 ));
             }
             executor::NodeOutcome::Err(executor::NodeFailure::Failed(err)) => {
