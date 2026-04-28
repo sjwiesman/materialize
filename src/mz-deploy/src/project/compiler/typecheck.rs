@@ -279,10 +279,10 @@ pub(crate) fn run(
                 merged_kinds.insert(node_id.clone(), kind);
                 upsert_rows.push((node_id.to_string(), kind.as_str().to_string(), columns));
             }
-            executor::NodeOutcome::Err(executor::NodeFailure::Failed(err)) => {
+            executor::NodeOutcome::Failed(err) => {
                 errors.push(err.clone());
             }
-            executor::NodeOutcome::Err(executor::NodeFailure::Blocked(blocker)) => {
+            executor::NodeOutcome::Blocked(blocker) => {
                 verbose!(
                     "Skipping {}: blocked by upstream error in {}",
                     node_id,
