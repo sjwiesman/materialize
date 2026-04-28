@@ -7,7 +7,8 @@
 //! plus a map of column metadata for the registered non-typechecked objects.
 
 use super::catalog::{CatalogRuntime, create_catalog_item_sql, relation_desc_to_columns};
-use super::{ObjectTypeCheckError, TypeCheckError, TypeCheckErrors, requires_typecheck};
+use super::{ObjectTypeCheckError, TypeCheckError};
+use crate::project::ast::Statement;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
@@ -15,22 +16,19 @@ use crate::types::{ColumnType, Types};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Result of phase 1.
-pub(super) struct BaseCatalog {
-    pub(super) catalog: Arc<CatalogRuntime>,
-    /// Column maps for objects that don't undergo typechecking but whose
-    /// schemas downstream views depend on (tables, sources, etc., plus
-    /// external `types.lock` entries).
-    pub(super) base_columns: BTreeMap<ObjectId, BTreeMap<String, ColumnType>>,
-}
-
 /// Build the base catalog. Errors from registering non-typechecked objects are
 /// accumulated; if any are present after this phase, the caller should abort
 /// before running phase 2.
 pub(super) fn build_base_catalog(
     project: &Project,
     external_types: &Types,
-) -> Result<BaseCatalog, TypeCheckError> {
+) -> Result<
+    (
+        Arc<CatalogRuntime>,
+        BTreeMap<ObjectId, BTreeMap<String, ColumnType>>,
+    ),
+    TypeCheckError,
+> {
     let mut runtime = CatalogRuntime::open()?;
     runtime.bootstrap_namespaces(project, external_types);
 
@@ -38,11 +36,13 @@ pub(super) fn build_base_catalog(
         runtime.create_stub_table(id, columns)?;
     }
 
-    // Register every non-typechecked project object.
     let mut base_columns: BTreeMap<ObjectId, BTreeMap<String, ColumnType>> = BTreeMap::new();
     let mut errors: Vec<ObjectTypeCheckError> = Vec::new();
     for db_obj in project.iter_objects() {
-        if requires_typecheck(&db_obj.typed_object.stmt) {
+        if matches!(
+            db_obj.typed_object.stmt,
+            Statement::CreateView(_) | Statement::CreateMaterializedView(_)
+        ) {
             continue;
         }
         let object_id = ObjectId {
@@ -63,11 +63,8 @@ pub(super) fn build_base_catalog(
     }
 
     if !errors.is_empty() {
-        return Err(TypeCheckError::Multiple(TypeCheckErrors { errors }));
+        return Err(TypeCheckError::Multiple(errors));
     }
 
-    Ok(BaseCatalog {
-        catalog: Arc::new(runtime),
-        base_columns,
-    })
+    Ok((Arc::new(runtime), base_columns))
 }
