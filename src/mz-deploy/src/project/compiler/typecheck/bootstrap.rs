@@ -1,10 +1,11 @@
-//! Phase 1 of typechecking: build the base catalog.
+//! Bootstrap the shared catalog used by every per-task typecheck.
 //!
 //! Seeds builtins (via [`CatalogRuntime::open`]), bootstraps namespaces,
 //! registers external `types.lock` entries as stub tables, and registers all
 //! non-typechecked project objects (tables, sources, sinks, secrets,
 //! connections) from their compiled SQL. Returns the catalog wrapped in `Arc`
 //! plus a map of column metadata for the registered non-typechecked objects.
+//! The parallel executor forks per-task catalogs from this baseline.
 
 use super::catalog::{CatalogRuntime, create_catalog_item_sql, relation_desc_to_columns};
 use super::{ObjectTypeCheckError, TypeCheckError};
@@ -16,10 +17,10 @@ use crate::types::{ColumnType, Types};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Build the base catalog. Errors from registering non-typechecked objects are
-/// accumulated; if any are present after this phase, the caller should abort
-/// before running phase 2.
-pub(super) fn build_base_catalog(
+/// Build the shared catalog used by every per-task typecheck. Errors from
+/// registering non-typechecked objects are accumulated; if any are present
+/// after this phase, the caller should abort before running phase 2.
+pub(super) fn bootstrap_catalog(
     project: &Project,
     external_types: &Types,
 ) -> Result<
