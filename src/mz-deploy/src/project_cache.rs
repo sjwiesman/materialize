@@ -689,8 +689,6 @@ mod tests {
             "
             CREATE TABLE IF NOT EXISTS typecheck_objects (
                 object_key TEXT PRIMARY KEY,
-                semantic_fingerprint TEXT NOT NULL,
-                output_fingerprint TEXT NOT NULL,
                 object_kind TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS typecheck_columns (
@@ -828,9 +826,8 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let conn = create_test_db(&db_path);
         conn.execute(
-            "INSERT INTO typecheck_objects (object_key, semantic_fingerprint, output_fingerprint, object_kind) \
-             VALUES (?1, ?2, ?3, ?4)",
-            params!["db.schema.my_view", "abc", "def", "view"],
+            "INSERT INTO typecheck_objects (object_key, object_kind) VALUES (?1, ?2)",
+            params!["db.schema.my_view", "view"],
         )
         .unwrap();
         conn.execute(
@@ -896,9 +893,8 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let conn = create_test_db(&db_path);
         conn.execute(
-            "INSERT INTO typecheck_objects (object_key, semantic_fingerprint, output_fingerprint, object_kind) \
-             VALUES (?1, ?2, ?3, ?4)",
-            params!["db.schema.my_mv", "abc", "def", "materialized-view"],
+            "INSERT INTO typecheck_objects (object_key, object_kind) VALUES (?1, ?2)",
+            params!["db.schema.my_mv", "materialized-view"],
         )
         .unwrap();
         drop(conn);
@@ -944,15 +940,13 @@ mod tests {
 
         // Insert two objects with columns
         conn.execute(
-            "INSERT INTO typecheck_objects (object_key, semantic_fingerprint, output_fingerprint, object_kind) \
-             VALUES (?1, ?2, ?3, ?4)",
-            params!["db.schema.obj_a", "a1", "a2", "view"],
+            "INSERT INTO typecheck_objects (object_key, object_kind) VALUES (?1, ?2)",
+            params!["db.schema.obj_a", "view"],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO typecheck_objects (object_key, semantic_fingerprint, output_fingerprint, object_kind) \
-             VALUES (?1, ?2, ?3, ?4)",
-            params!["db.schema.obj_b", "b1", "b2", "table"],
+            "INSERT INTO typecheck_objects (object_key, object_kind) VALUES (?1, ?2)",
+            params!["db.schema.obj_b", "table"],
         )
         .unwrap();
         conn.execute(

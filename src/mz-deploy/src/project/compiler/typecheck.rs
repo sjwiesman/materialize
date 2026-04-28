@@ -9,12 +9,9 @@ use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
 use crate::types::{ColumnType, ObjectKind, Types, TypesError};
 use crate::verbose;
-use mz_sql_parser::ast::{Ident, Raw};
 use owo_colors::OwoColorize;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
@@ -172,7 +169,6 @@ pub(crate) fn run(
     project: &Project,
     external_types: Types,
 ) -> Result<Types, TypeCheckError> {
-    // Phase 1.
     let base::BaseCatalog {
         catalog: base_catalog,
         base_columns,
@@ -215,7 +211,6 @@ pub(crate) fn run(
         dependents.insert(node_id.clone(), node_dependents);
     }
 
-    // Phase 2.
     let typed_objects = Arc::new(typed_objects);
     let base_columns_arc = Arc::new(base_columns);
     let outcomes = {
@@ -256,9 +251,8 @@ pub(crate) fn run(
         )
     };
 
-    // Phase 3.
     let mut errors: Vec<ObjectTypeCheckError> = Vec::new();
-    let mut upsert_rows: Vec<(String, String, String, BTreeMap<String, ColumnType>)> = Vec::new();
+    let mut upsert_rows: Vec<(String, String, BTreeMap<String, ColumnType>)> = Vec::new();
     let mut merged_tables: BTreeMap<ObjectId, BTreeMap<String, ColumnType>> = BTreeMap::new();
     let mut merged_kinds: BTreeMap<ObjectId, ObjectKind> = BTreeMap::new();
 
@@ -290,16 +284,10 @@ pub(crate) fn run(
                     .get(node_id)
                     .expect("typed_object exists for outcome");
                 let kind = object_kind_for_stmt(&db_obj.stmt);
-                let semantic_fingerprint = compute_semantic_fingerprint(db_obj);
                 let columns = catalog::relation_desc_to_columns(desc);
                 merged_tables.insert(node_id.clone(), columns.clone());
                 merged_kinds.insert(node_id.clone(), kind);
-                upsert_rows.push((
-                    node_id.to_string(),
-                    semantic_fingerprint,
-                    kind.as_str().to_string(),
-                    columns,
-                ));
+                upsert_rows.push((node_id.to_string(), kind.as_str().to_string(), columns));
             }
             executor::NodeOutcome::Err(executor::NodeFailure::Failed(err)) => {
                 errors.push(err.clone());
@@ -354,93 +342,6 @@ fn object_kind_for_stmt(stmt: &Statement) -> ObjectKind {
         Statement::CreateSecret(_) => ObjectKind::Secret,
         Statement::CreateConnection(_) => ObjectKind::Connection,
     }
-}
-
-struct Sha256Hasher {
-    digest: Sha256,
-}
-
-impl Sha256Hasher {
-    fn new() -> Self {
-        Self {
-            digest: Sha256::new(),
-        }
-    }
-
-    fn finalize(self) -> String {
-        format!("sha256:{:x}", self.digest.finalize())
-    }
-}
-
-impl Hasher for Sha256Hasher {
-    fn write(&mut self, bytes: &[u8]) {
-        self.digest.update(bytes);
-    }
-
-    fn finish(&self) -> u64 {
-        panic!("Sha256Hasher::finish() should not be called")
-    }
-}
-
-/// Compute the semantic fingerprint for a compiled database object.
-///
-/// The fingerprint is a SHA-256 hash of:
-/// 1. The compiled SQL statement
-/// 2. All indexes, sorted by (cluster, on_name, name, key_parts)
-/// 3. All constraints, sorted by (kind, on_name, name, columns)
-///
-/// Sorting ensures the fingerprint is deterministic regardless of declaration
-/// order. Any change to the statement, its indexes, or its constraints
-/// produces a different fingerprint, marking the object dirty.
-fn compute_semantic_fingerprint(db_obj: &crate::project::ir::compiled::DatabaseObject) -> String {
-    let mut hasher = Sha256Hasher::new();
-    db_obj.stmt.hash(&mut hasher);
-
-    let mut indexes = db_obj.indexes.clone();
-    indexes.sort_by(|a, b| {
-        a.in_cluster
-            .cmp(&b.in_cluster)
-            .then(a.on_name.cmp(&b.on_name))
-            .then(a.name.cmp(&b.name))
-            .then_with(|| {
-                fmt_sql_exprs(a.key_parts.as_deref()).cmp(&fmt_sql_exprs(b.key_parts.as_deref()))
-            })
-    });
-    for index in &indexes {
-        index.hash(&mut hasher);
-    }
-
-    let mut constraints = db_obj.constraints.clone();
-    constraints.sort_by(|a, b| {
-        a.kind
-            .to_string()
-            .cmp(&b.kind.to_string())
-            .then(a.on_name.cmp(&b.on_name))
-            .then(a.name.cmp(&b.name))
-            .then(fmt_idents(&a.columns).cmp(&fmt_idents(&b.columns)))
-    });
-    for constraint in &constraints {
-        constraint.hash(&mut hasher);
-    }
-
-    hasher.finalize()
-}
-
-fn fmt_sql_exprs(exprs: Option<&[mz_sql_parser::ast::Expr<Raw>]>) -> String {
-    exprs
-        .unwrap_or(&[])
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn fmt_idents(idents: &[Ident]) -> String {
-    idents
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 #[cfg(test)]

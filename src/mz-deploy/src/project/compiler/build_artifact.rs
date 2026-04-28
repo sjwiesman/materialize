@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const DB_FILE: &str = "build_artifact.db";
 const OBJECT_STATE_TABLE: &str = "object_state";
 const TYPECHECK_OBJECTS_TABLE: &str = "typecheck_objects";
@@ -240,15 +240,8 @@ impl BuildArtifact {
                     fingerprint TEXT NOT NULL,
                     payload BLOB NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS typecheck_state (
-                    object_key TEXT PRIMARY KEY,
-                    semantic_fingerprint TEXT NOT NULL,
-                    output_fingerprint TEXT NOT NULL,
-                    payload BLOB NOT NULL
-                );
                 CREATE TABLE IF NOT EXISTS typecheck_objects (
                     object_key TEXT PRIMARY KEY,
-                    semantic_fingerprint TEXT NOT NULL,
                     object_kind TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS typecheck_columns (
@@ -599,12 +592,10 @@ impl BuildArtifact {
 
     /// Persist or update typecheck artifacts for a batch of objects.
     ///
-    /// For each object, stores its semantic fingerprint, output fingerprint,
-    /// kind, and column definitions. Column records for an object are fully
-    /// replaced (no partial updates).
+    /// Column records for an object are fully replaced (no partial updates).
     pub(crate) fn upsert_typecheck_results(
         &mut self,
-        rows: &[(String, String, String, BTreeMap<String, ColumnType>)],
+        rows: &[(String, String, BTreeMap<String, ColumnType>)],
     ) -> Result<(), BuildArtifactError> {
         let tx = self.conn.transaction().map_err(|source| {
             BuildArtifactError::DatabaseOperationFailed {
@@ -616,10 +607,9 @@ impl BuildArtifact {
             let mut upsert_obj = tx
                 .prepare(
                     "
-                    INSERT INTO typecheck_objects(object_key, semantic_fingerprint, object_kind)
-                    VALUES(?1, ?2, ?3)
+                    INSERT INTO typecheck_objects(object_key, object_kind)
+                    VALUES(?1, ?2)
                     ON CONFLICT(object_key) DO UPDATE SET
-                        semantic_fingerprint = excluded.semantic_fingerprint,
                         object_kind = excluded.object_kind
                     ",
                 )
@@ -643,9 +633,9 @@ impl BuildArtifact {
                     source,
                 })?;
 
-            for (key, semantic_fp, kind, columns) in rows {
+            for (key, kind, columns) in rows {
                 upsert_obj
-                    .execute(params![key, semantic_fp, kind])
+                    .execute(params![key, kind])
                     .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
                         path: self.path.clone(),
                         source,
@@ -1386,18 +1376,8 @@ mod tests {
         ])
         .unwrap();
         db.upsert_typecheck_results(&[
-            (
-                "db.public.keep".into(),
-                "sem".into(),
-                "view".into(),
-                BTreeMap::new(),
-            ),
-            (
-                "db.public.drop".into(),
-                "sem".into(),
-                "view".into(),
-                BTreeMap::new(),
-            ),
+            ("db.public.keep".into(), "view".into(), BTreeMap::new()),
+            ("db.public.drop".into(), "view".into(), BTreeMap::new()),
         ])
         .unwrap();
 
