@@ -1,3 +1,12 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Bootstrap the shared catalog used by every per-task typecheck.
 //!
 //! Seeds builtins (via [`CatalogRuntime::open`]), bootstraps namespaces,
@@ -15,7 +24,7 @@ use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
 use crate::types::{ColumnType, Types};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Build the shared catalog used by every per-task typecheck. Errors from
@@ -34,12 +43,9 @@ pub(super) fn bootstrap_catalog(
     let mut runtime = CatalogRuntime::open()?;
     runtime.bootstrap_namespaces(project, external_types);
 
-    for (id, columns) in &external_types.tables {
-        runtime.create_stub_table(id, columns)?;
-    }
-
     let mut base_columns: BTreeMap<ObjectId, BTreeMap<String, ColumnType>> = BTreeMap::new();
     let mut errors: Vec<ObjectTypeCheckError> = Vec::new();
+    let mut registered_from_create: BTreeSet<ObjectId> = BTreeSet::new();
     for db_obj in project.iter_objects() {
         if matches!(
             db_obj.typed_object.stmt,
@@ -58,10 +64,18 @@ pub(super) fn bootstrap_catalog(
         };
         match runtime.create_item(&object_id, &sql) {
             Ok(desc) => {
-                base_columns.insert(object_id, relation_desc_to_columns(&desc));
+                base_columns.insert(object_id.clone(), relation_desc_to_columns(&desc));
+                registered_from_create.insert(object_id);
             }
             Err(err) => errors.push(err),
         }
+    }
+
+    for (id, columns) in &external_types.tables {
+        if registered_from_create.contains(id) {
+            continue;
+        }
+        runtime.create_stub_table(id, columns)?;
     }
 
     if !errors.is_empty() {

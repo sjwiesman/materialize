@@ -1,3 +1,12 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Persistence layer for the incremental compiler.
 //!
 //! Stores advisory build state scoped to one profile namespace. The database
@@ -634,12 +643,12 @@ impl BuildArtifact {
                 })?;
 
             for (key, kind, columns) in rows {
-                upsert_obj
-                    .execute(params![key, kind])
-                    .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                upsert_obj.execute(params![key, kind]).map_err(|source| {
+                    BuildArtifactError::DatabaseOperationFailed {
                         path: self.path.clone(),
                         source,
-                    })?;
+                    }
+                })?;
                 delete_cols.execute([key]).map_err(|source| {
                     BuildArtifactError::DatabaseOperationFailed {
                         path: self.path.clone(),

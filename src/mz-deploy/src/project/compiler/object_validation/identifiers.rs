@@ -1,16 +1,26 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Identifier validation for database objects.
 //!
 //! Validates that identifiers (database, schema, object, and cluster names)
 //! follow Materialize's naming rules: lowercase letters, digits, underscores,
 //! and dollar signs, starting with a letter or underscore.
 
+use crate::project::ast::Statement;
 use crate::project::error::{ValidationError, ValidationErrorKind};
 use crate::project::ir::compiled::FullyQualifiedName;
 use std::path::PathBuf;
 
 /// The type of identifier being validated (for error messages).
 #[derive(Debug, Clone, Copy)]
-pub(super) enum IdentifierKind {
+enum IdentifierKind {
     Database,
     Schema,
     Object,
@@ -60,7 +70,7 @@ impl std::fmt::Display for IdentifierKind {
 ///   my-table (contains hyphen)
 ///   MY_TABLE (uppercase)
 /// ```
-pub(super) fn validate_identifier_format(name: &str, kind: IdentifierKind) -> Result<(), String> {
+fn validate_identifier_format(name: &str, kind: IdentifierKind) -> Result<(), String> {
     if name.is_empty() {
         return Err(format!("{} name cannot be empty", kind));
     }
@@ -129,7 +139,7 @@ pub(super) fn validate_identifier_format(name: &str, kind: IdentifierKind) -> Re
 /// * `fqn` - The fully qualified name to validate
 /// * `main_offset` - Byte offset of the CREATE statement being validated
 /// * `errors` - Vector to collect validation errors
-pub(crate) fn validate_fqn_identifiers(
+pub(super) fn validate_fqn_identifiers(
     fqn: &FullyQualifiedName,
     main_offset: usize,
     errors: &mut Vec<ValidationError>,
@@ -225,8 +235,8 @@ pub(super) fn validate_cluster_name(
 /// materialize/public/users.sql  ->  CREATE TABLE private.users (...)  X schema mismatch
 /// materialize/public/users.sql  ->  CREATE TABLE other.public.users (...)  X database mismatch
 /// ```
-pub(in super::super) fn validate_ident(
-    stmt: &super::super::super::ast::Statement,
+pub(super) fn validate_ident(
+    stmt: &Statement,
     fqn: &FullyQualifiedName,
     main_offset: usize,
     errors: &mut Vec<ValidationError>,

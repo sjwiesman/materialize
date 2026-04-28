@@ -1,3 +1,12 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Catalog-backed runtime typechecking.
 //!
 //! Validates objects against an in-memory catalog built from `mz-sql`,
@@ -554,8 +563,7 @@ impl CatalogRuntime {
     /// Initialize a fresh catalog for one typecheck run.
     pub(super) fn open() -> Result<Self, TypeCheckError> {
         let start = Instant::now();
-        let catalog =
-            Self::new().map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))?;
+        let catalog = Self::new().map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))?;
         timing!("    catalog: new", start.elapsed());
         Ok(catalog)
     }
@@ -647,8 +655,8 @@ impl CatalogRuntime {
         let start = Instant::now();
 
         let resolve_start = Instant::now();
-        let (resolved, resolved_ids) =
-            mz_sql::names::resolve(&*self, ast).map_err(|e| self.build_error(object_id, create_sql, e))?;
+        let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast)
+            .map_err(|e| self.build_error(object_id, create_sql, e))?;
         timing!(
             &format!("      catalog: resolve {}", object_id),
             resolve_start.elapsed()
@@ -656,8 +664,14 @@ impl CatalogRuntime {
 
         let plan_start = Instant::now();
         let pcx = PlanContext::new(Utc::now());
-        let plan = mz_sql::plan::plan(Some(&pcx), &*self, resolved, &Params::empty(), &resolved_ids)
-            .map_err(|e| self.build_error(object_id, create_sql, e))?;
+        let plan = mz_sql::plan::plan(
+            Some(&pcx),
+            &*self,
+            resolved,
+            &Params::empty(),
+            &resolved_ids,
+        )
+        .map_err(|e| self.build_error(object_id, create_sql, e))?;
         timing!(
             &format!("      catalog: plan {}", object_id),
             plan_start.elapsed()

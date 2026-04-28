@@ -1,9 +1,18 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Reference validation for supporting statements.
 //!
 //! Validates that indexes, grants, and comments reference the main object
 //! defined in the same file, ensuring each file is self-contained.
 
-use super::super::super::ast::DatabaseIdent;
+use crate::project::ast::DatabaseIdent;
 use crate::project::error::{ValidationError, ValidationErrorKind};
 use crate::project::ir::compiled::FullyQualifiedName;
 use mz_sql_parser::ast::*;
@@ -27,7 +36,7 @@ use mz_sql_parser::ast::*;
 /// CREATE TABLE users (id INT, name TEXT);
 /// CREATE INDEX orders_id_idx ON orders (id);  -- wrong object
 /// ```
-pub(in super::super) fn validate_index_references(
+pub(super) fn validate_index_references(
     fqn: &FullyQualifiedName,
     indexes: &[CreateIndexStatement<Raw>],
     offsets: &[usize],
@@ -55,7 +64,7 @@ pub(in super::super) fn validate_index_references(
 ///
 /// Ensures that every constraint defined in the file is created on the object
 /// defined in the same file.
-pub(in super::super) fn validate_constraint_references(
+pub(super) fn validate_constraint_references(
     fqn: &FullyQualifiedName,
     constraints: &[CreateConstraintStatement<Raw>],
     offsets: &[usize],
@@ -112,7 +121,7 @@ pub(in super::super) fn validate_constraint_references(
 /// CREATE TABLE users (...);
 /// GRANT SELECT ON orders TO analyst_role;  -- wrong object
 /// ```
-pub(in super::super) fn validate_grant_references(
+pub(super) fn validate_grant_references(
     fqn: &FullyQualifiedName,
     grants: &[GrantPrivilegesStatement<Raw>],
     offsets: &[usize],
@@ -332,7 +341,7 @@ fn comment_object_to_target(obj: &CommentObjectType<Raw>) -> Option<(&RawItemNam
 /// - A comment references a different object
 /// - The comment type doesn't match the object type
 /// - An unsupported comment type is used
-pub(in super::super) fn validate_comment_references(
+pub(super) fn validate_comment_references(
     fqn: &FullyQualifiedName,
     comments: &[CommentStatement<Raw>],
     offsets: &[usize],

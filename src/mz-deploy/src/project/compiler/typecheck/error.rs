@@ -1,3 +1,12 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Error types surfaced by the typechecker.
 
 use crate::project::ir::object_id::ObjectId;
@@ -113,11 +122,7 @@ impl std::error::Error for ObjectTypeCheckError {}
 
 impl ObjectTypeCheckError {
     /// Build an internal-error variant with no SQL snippet, detail, or hint.
-    pub(super) fn internal(
-        object_id: ObjectId,
-        file_path: PathBuf,
-        error_message: String,
-    ) -> Self {
+    pub(super) fn internal(object_id: ObjectId, file_path: PathBuf, error_message: String) -> Self {
         Self {
             object_id,
             file_path,

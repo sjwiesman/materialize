@@ -30,6 +30,9 @@ copyright_files=$(grep -vE \
     -e '^\.cargo/config$' \
     -e '^.devcontainer/.*' \
     -e '(^|/)Cargo\.lock$' \
+    -e '(^|/)types\.lock$' \
+    -e '(^|/)\.mzprofile$' \
+    -e '^src/mz-deploy/src/cli/scaffold/gitignore$' \
     -e '^about\.toml$' \
     -e '^deny\.toml$' \
     -e '(^|/)Gemfile\.lock$' \

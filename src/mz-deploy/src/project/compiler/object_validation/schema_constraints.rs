@@ -1,9 +1,18 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Schema-level constraint validation.
 //!
 //! Validates structural constraints across objects within a schema, such as
 //! ensuring storage and computation objects are not mixed in the same schema.
 
-use super::super::super::ast::Statement;
+use crate::project::ast::Statement;
 use crate::project::error::{ValidationError, ValidationErrorKind};
 use crate::project::ir::compiled::DatabaseObject;
 use std::path::PathBuf;
@@ -42,7 +51,7 @@ use std::path::PathBuf;
 /// * `schema_name` - The name of the schema being validated
 /// * `objects` - All database objects in the schema
 /// * `errors` - Vector to collect validation errors
-pub(crate) fn validate_no_storage_and_computation_in_schema(
+pub(super) fn validate_no_storage_and_computation_in_schema(
     schema_name: &str,
     objects: &[DatabaseObject],
     errors: &mut Vec<ValidationError>,

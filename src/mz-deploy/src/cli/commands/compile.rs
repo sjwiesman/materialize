@@ -1,3 +1,12 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
 //! Compile command — validate project and show deployment plan.
 //!
 //! Compiles the project through a multi-stage pipeline:
@@ -17,6 +26,7 @@
 //! are validated after typechecking (stage 5) once complete column metadata is
 //! available.
 
+use std::fs::canonicalize;
 use crate::cli::CliError;
 use crate::cli::progress;
 use crate::config::Settings;
@@ -82,12 +92,10 @@ fn run_inner(
     let directory = &settings.directory;
 
     if show_progress {
-        progress::info(&format!("Loading project from: {}", directory.display()));
+        let path = canonicalize(settings.directory.as_path())?;
+        progress::stage_start(&format!("Loading project from: {}", path.display()));
     }
 
-    if show_progress {
-        progress::stage_start("Parsing SQL files");
-    }
     let parse_start = Instant::now();
     let planned_project = project::plan_sync(
         directory.clone(),
@@ -136,26 +144,6 @@ fn run_inner(
 
     if show_progress {
         progress::stage_start("Building dependency graph");
-    }
-    let deps_start = Instant::now();
-
-    let internal_dep_count: usize = planned_project
-        .dependency_graph
-        .values()
-        .map(|deps| {
-            deps.iter()
-                .filter(|dep| !planned_project.external_dependencies.contains(dep))
-                .count()
-        })
-        .sum();
-
-    let deps_duration = deps_start.elapsed();
-    if show_progress {
-        progress::stage_success(
-            &format!("Resolved {} dependencies", internal_dep_count),
-            deps_duration,
-        );
-
         if !planned_project.external_dependencies.is_empty() {
             progress::info(&format!(
                 "{} external dependencies detected",
@@ -192,7 +180,6 @@ fn run_inner(
         return Err(CliError::UndeclaredDependencies { undeclared });
     }
 
-    // Pre-typecheck constraint validation (FK target types + partial column check)
     let types_lock = crate::types::load_types_lock(directory).unwrap_or_default();
 
     let tc = crate::project_cache::ProjectCache::open(
