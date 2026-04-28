@@ -195,7 +195,7 @@ impl CatalogSchema for LocalSchema {
 
 /// Stub role for the single-role typecheck context — only `MZ_SYSTEM_ROLE_ID` is ever active.
 #[derive(Debug, Clone)]
-struct LocalRole {
+struct StubRole {
     name: String,
     id: RoleId,
     membership: BTreeMap<RoleId, RoleId>,
@@ -203,7 +203,7 @@ struct LocalRole {
     vars: BTreeMap<String, OwnedVarInput>,
 }
 
-impl CatalogRole for LocalRole {
+impl CatalogRole for StubRole {
     fn name(&self) -> &str {
         &self.name
     }
@@ -227,7 +227,7 @@ impl CatalogRole for LocalRole {
 
 /// Stub cluster — typecheck only needs one (the implicit `quickstart`-equivalent).
 #[derive(Debug, Clone)]
-struct LocalCluster {
+struct StubCluster {
     name: String,
     id: ClusterId,
     bound_objects: BTreeSet<CatalogItemId>,
@@ -236,7 +236,7 @@ struct LocalCluster {
     privileges: PrivilegeMap,
 }
 
-impl<'a> CatalogCluster<'a> for LocalCluster {
+impl<'a> CatalogCluster<'a> for StubCluster {
     fn name(&self) -> &str {
         &self.name
     }
@@ -465,7 +465,7 @@ impl mz_sql::catalog::CatalogCollectionItem for LocalItem {
 /// run to avoid state leakage between validations.
 #[derive(Debug, Clone)]
 pub(super) struct CatalogRuntime {
-    active_role: LocalRole,
+    active_role: StubRole,
     active_database: Option<mz_sql::names::DatabaseId>,
     active_cluster_name: String,
     search_path: Vec<(ResolvedDatabaseSpecifier, SchemaSpecifier)>,
@@ -481,7 +481,7 @@ pub(super) struct CatalogRuntime {
     /// `pg_catalog.date` is both a type and a cast function). Lookups filter by
     /// item kind via a predicate.
     items_by_name: HashMap<QualifiedItemName, Vec<CatalogItemId>>,
-    cluster: LocalCluster,
+    cluster: StubCluster,
     config: CatalogConfig,
     system_vars: SystemVars,
     ids: IdAllocator,
@@ -493,14 +493,14 @@ impl CatalogRuntime {
     /// Create a catalog pre-populated with system schemas (pg_catalog,
     /// mz_catalog, etc.) and all builtin types, functions, and system objects.
     fn new() -> Result<Self, CatalogError> {
-        let active_role = LocalRole {
+        let active_role = StubRole {
             name: "mz_system".into(),
             id: MZ_SYSTEM_ROLE_ID,
             membership: BTreeMap::new(),
             attributes: RoleAttributes::new(),
             vars: BTreeMap::new(),
         };
-        let cluster = LocalCluster {
+        let cluster = StubCluster {
             name: DEFAULT_CLUSTER_NAME.into(),
             id: ClusterId::User(1),
             bound_objects: BTreeSet::new(),
