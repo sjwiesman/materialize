@@ -608,7 +608,7 @@ impl CatalogRuntime {
         );
         let create_start = Instant::now();
         let result = self
-            .create_or_replace_item(object_id, &sql)
+            .create_item(object_id, &sql)
             .map(|_| ())
             .map_err(TypeCheckError::TypeCheckFailed);
         timing!(
@@ -620,7 +620,7 @@ impl CatalogRuntime {
 
     /// Parse, resolve, and type-check a SQL statement against the catalog.
     /// On success, inserts the resulting item and returns its column schema.
-    pub(super) fn create_or_replace_item(
+    pub(super) fn create_item(
         &mut self,
         object_id: &ObjectId,
         sql: &str,
@@ -635,7 +635,7 @@ impl CatalogRuntime {
     }
 
     /// Resolve and type-check an already-parsed SQL statement, skipping parse.
-    pub(super) fn create_or_replace_item_from_ast(
+    pub(super) fn create_item_from_ast(
         &mut self,
         object_id: &ObjectId,
         ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
@@ -671,14 +671,14 @@ impl CatalogRuntime {
 
         let insert_start = Instant::now();
         let desc = self
-            .insert_planned_item(object_id, create_sql, plan, resolved_ids)
+            .insert_item_from_plan(object_id, create_sql, plan, resolved_ids)
             .map_err(|e| self.build_error(object_id, create_sql, e))?;
         timing!(
             &format!("      catalog: insert_item {}", object_id),
             insert_start.elapsed()
         );
         timing!(
-            &format!("    catalog: create_or_replace_item {}", object_id),
+            &format!("    catalog: create_item {}", object_id),
             start.elapsed()
         );
         Ok(desc)
@@ -1082,7 +1082,7 @@ impl CatalogRuntime {
     /// Insert a SQL-planned item (table, view, or materialized view) into the
     /// catalog, extracting its column schema and dependency references. Returns
     /// the item's output column description.
-    fn insert_planned_item(
+    fn insert_item_from_plan(
         &mut self,
         object_id: &ObjectId,
         sql: &str,
@@ -2088,7 +2088,7 @@ mod tests {
             object: "test_table".into(),
         };
         let sql = r#"CREATE TABLE "test_db"."test_schema"."test_table" ("col_date" date, "col_ts" timestamptz, "col_bool" bool NOT NULL)"#;
-        let result = runtime.create_or_replace_item(&object_id, sql);
+        let result = runtime.create_item(&object_id, sql);
         assert!(
             result.is_ok(),
             "CREATE TABLE with date column failed: {:?}",

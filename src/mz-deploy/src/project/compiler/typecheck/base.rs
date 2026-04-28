@@ -54,7 +54,7 @@ pub(super) fn build_base_catalog(
         let Some(sql) = create_catalog_item_sql(&db_obj.typed_object.stmt, &fqn) else {
             continue;
         };
-        match runtime.create_or_replace_item(&object_id, &sql) {
+        match runtime.create_item(&object_id, &sql) {
             Ok(desc) => {
                 base_columns.insert(object_id, relation_desc_to_columns(&desc));
             }
