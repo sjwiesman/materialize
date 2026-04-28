@@ -252,7 +252,7 @@ impl CatalogRuntime {
     }
 }
 
-/// In-memory database entry satisfying the [`CatalogDatabase`] trait.
+/// User database — created on demand by `bootstrap_namespaces`.
 #[derive(Debug, Clone)]
 struct LocalDatabase {
     name: String,
@@ -292,7 +292,7 @@ impl CatalogDatabase for LocalDatabase {
     }
 }
 
-/// In-memory schema entry satisfying the [`CatalogSchema`] trait.
+/// Schema (system or user). `item_ids` is mutated as items are inserted.
 #[derive(Debug, Clone)]
 struct LocalSchema {
     database: ResolvedDatabaseSpecifier,
@@ -333,7 +333,7 @@ impl CatalogSchema for LocalSchema {
     }
 }
 
-/// In-memory role entry satisfying the [`CatalogRole`] trait.
+/// Stub role for the single-role typecheck context — only `MZ_SYSTEM_ROLE_ID` is ever active.
 #[derive(Debug, Clone)]
 struct LocalRole {
     name: String,
@@ -365,7 +365,7 @@ impl CatalogRole for LocalRole {
     }
 }
 
-/// In-memory cluster entry satisfying the [`CatalogCluster`] trait.
+/// Stub cluster — typecheck only needs one (the implicit `quickstart`-equivalent).
 #[derive(Debug, Clone)]
 struct LocalCluster {
     name: String,
@@ -398,7 +398,8 @@ impl<'a> CatalogCluster<'a> for LocalCluster {
     }
 
     fn replica(&self, _id: ReplicaId) -> &dyn CatalogClusterReplica<'_> {
-        panic!("catalog backend has no cluster replicas")
+        // Cluster replicas aren't part of project SQL — never reached during typecheck.
+        unreachable!("catalog backend has no cluster replicas")
     }
 
     fn owner_id(&self) -> RoleId {
@@ -1385,10 +1386,10 @@ impl ExprHumanizer for LocalCatalog {
     }
 }
 
-/// Stub — connection resolution is not supported in the in-memory catalog.
+/// Inline connection resolution isn't part of project SQL — never reached during typecheck.
 impl ConnectionResolver for LocalCatalog {
     fn resolve_connection(&self, id: CatalogItemId) -> Connection<InlinedConnection> {
-        panic!("catalog backend cannot resolve connection {id}")
+        unreachable!("catalog backend cannot resolve connection {id}")
     }
 }
 
@@ -1545,7 +1546,8 @@ impl SessionCatalog for LocalCatalog {
     }
 
     fn get_network_policy(&self, _id: &NetworkPolicyId) -> &dyn CatalogNetworkPolicy {
-        panic!("catalog backend has no network policies")
+        // Network policies aren't part of project SQL — never reached during typecheck.
+        unreachable!("catalog backend has no network policies")
     }
 
     fn get_network_policies(&self) -> Vec<&dyn CatalogNetworkPolicy> {
@@ -1700,7 +1702,8 @@ impl SessionCatalog for LocalCatalog {
         _cluster_id: ClusterId,
         _replica_id: ReplicaId,
     ) -> &dyn CatalogClusterReplica<'_> {
-        panic!("catalog backend has no replicas")
+        // Cluster replicas aren't part of project SQL — never reached during typecheck.
+        unreachable!("catalog backend has no replicas")
     }
 
     fn get_cluster_replicas(&self) -> Vec<&dyn CatalogClusterReplica<'_>> {

@@ -26,8 +26,8 @@ pub enum TypeCheckError {
     #[error(transparent)]
     TypeCheckFailed(#[from] ObjectTypeCheckError),
 
-    #[error(transparent)]
-    Multiple(#[from] TypeCheckErrors),
+    #[error("{}", format_multiple(.0))]
+    Multiple(Vec<ObjectTypeCheckError>),
 
     #[error("database error during setup: {0}")]
     DatabaseSetupError(String),
@@ -37,6 +37,25 @@ pub enum TypeCheckError {
 
     #[error("failed to write types cache: {0}")]
     TypesCacheWriteFailed(#[from] TypesError),
+}
+
+fn format_multiple(errors: &[ObjectTypeCheckError]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for (idx, error) in errors.iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        let _ = write!(&mut out, "{}", error);
+    }
+    let _ = writeln!(&mut out);
+    let _ = writeln!(
+        &mut out,
+        "could not type check due to {} previous error{}",
+        errors.len(),
+        if errors.len() == 1 { "" } else { "s" }
+    );
+    out
 }
 
 /// A single typecheck error for a specific object, rendered in rustc style.
@@ -119,35 +138,6 @@ impl ObjectTypeCheckError {
     }
 }
 
-/// Collection of typecheck errors, rendered as a numbered error summary.
-#[derive(Debug)]
-pub struct TypeCheckErrors {
-    pub errors: Vec<ObjectTypeCheckError>,
-}
-
-impl fmt::Display for TypeCheckErrors {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (idx, error) in self.errors.iter().enumerate() {
-            if idx > 0 {
-                writeln!(f)?;
-            }
-            write!(f, "{}", error)?;
-        }
-
-        writeln!(f)?;
-        writeln!(
-            f,
-            "could not type check due to {} previous error{}",
-            self.errors.len(),
-            if self.errors.len() == 1 { "" } else { "s" }
-        )?;
-
-        Ok(())
-    }
-}
-
-impl std::error::Error for TypeCheckErrors {}
-
 /// Full-typecheck entrypoint.
 ///
 /// Runs three phases:
@@ -169,17 +159,17 @@ pub(crate) fn run(
     project: &Project,
     external_types: Types,
 ) -> Result<Types, TypeCheckError> {
-    let base::BaseCatalog {
-        catalog: base_catalog,
-        base_columns,
-    } = base::build_base_catalog(project, &external_types)?;
+    let (base_catalog, base_columns) = base::build_base_catalog(project, &external_types)?;
 
     let sorted = project.get_sorted_objects()?;
     let mut node_ids: Vec<ObjectId> = Vec::new();
     let mut typed_objects: BTreeMap<ObjectId, &crate::project::ir::compiled::DatabaseObject> =
         BTreeMap::new();
     for (object_id, db_obj) in &sorted {
-        if !requires_typecheck(&db_obj.stmt) {
+        if !matches!(
+            db_obj.stmt,
+            Statement::CreateView(_) | Statement::CreateMaterializedView(_)
+        ) {
             continue;
         }
         node_ids.push(object_id.clone());
@@ -264,7 +254,7 @@ pub(crate) fn run(
     for (id, columns) in base_columns_arc.iter() {
         merged_tables.insert(id.clone(), columns.clone());
         if let Some(typed_obj) = project_objects_by_id.get(id) {
-            merged_kinds.insert(id.clone(), object_kind_for_stmt(&typed_obj.stmt));
+            merged_kinds.insert(id.clone(), typed_obj.stmt.kind());
         }
     }
     for (id, columns) in &external_types.tables {
@@ -283,7 +273,7 @@ pub(crate) fn run(
                 let db_obj = typed_objects
                     .get(node_id)
                     .expect("typed_object exists for outcome");
-                let kind = object_kind_for_stmt(&db_obj.stmt);
+                let kind = db_obj.stmt.kind();
                 let columns = catalog::relation_desc_to_columns(desc);
                 merged_tables.insert(node_id.clone(), columns.clone());
                 merged_kinds.insert(node_id.clone(), kind);
@@ -314,7 +304,7 @@ pub(crate) fn run(
         .map_err(TypesError::from)?;
 
     if !errors.is_empty() {
-        return Err(TypeCheckError::Multiple(TypeCheckErrors { errors }));
+        return Err(TypeCheckError::Multiple(errors));
     }
 
     Ok(Types {
@@ -323,25 +313,6 @@ pub(crate) fn run(
         kinds: merged_kinds,
         comments: BTreeMap::new(),
     })
-}
-
-pub(super) fn requires_typecheck(stmt: &Statement) -> bool {
-    matches!(
-        stmt,
-        Statement::CreateView(_) | Statement::CreateMaterializedView(_)
-    )
-}
-
-fn object_kind_for_stmt(stmt: &Statement) -> ObjectKind {
-    match stmt {
-        Statement::CreateView(_) => ObjectKind::View,
-        Statement::CreateMaterializedView(_) => ObjectKind::MaterializedView,
-        Statement::CreateTable(_) | Statement::CreateTableFromSource(_) => ObjectKind::Table,
-        Statement::CreateSource(_) => ObjectKind::Source,
-        Statement::CreateSink(_) => ObjectKind::Sink,
-        Statement::CreateSecret(_) => ObjectKind::Secret,
-        Statement::CreateConnection(_) => ObjectKind::Connection,
-    }
 }
 
 #[cfg(test)]
