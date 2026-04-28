@@ -7,7 +7,8 @@
 //! plus a map of column metadata for the registered non-typechecked objects.
 //! The parallel executor forks per-task catalogs from this baseline.
 
-use super::catalog::{CatalogRuntime, create_catalog_item_sql, relation_desc_to_columns};
+use super::catalog::CatalogRuntime;
+use super::convert::{create_catalog_item_sql, relation_desc_to_columns};
 use super::{ObjectTypeCheckError, TypeCheckError};
 use crate::project::ast::Statement;
 use crate::project::ir::compiled::FullyQualifiedName;

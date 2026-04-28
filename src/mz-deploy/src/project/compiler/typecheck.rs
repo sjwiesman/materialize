@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 mod bootstrap;
 mod catalog;
+mod convert;
 mod error;
 mod executor;
 
@@ -111,7 +112,7 @@ pub(crate) fn run(
                 }
                 let fqn: crate::project::ir::compiled::FullyQualifiedName = node_id.clone().into();
                 let ast =
-                    catalog::create_catalog_item_ast(&db_obj.stmt, &fqn).ok_or_else(|| {
+                    convert::create_catalog_item_ast(&db_obj.stmt, &fqn).ok_or_else(|| {
                         ObjectTypeCheckError::internal(
                             node_id.clone(),
                             db_obj.path.clone(),
@@ -156,7 +157,7 @@ pub(crate) fn run(
                     .get(node_id)
                     .expect("typed_object exists for outcome");
                 let kind = db_obj.stmt.kind();
-                let columns = catalog::relation_desc_to_columns(desc);
+                let columns = convert::relation_desc_to_columns(desc);
                 merged_tables.insert(node_id.clone(), columns.clone());
                 merged_kinds.insert(node_id.clone(), kind);
                 upsert_rows.push((node_id.to_string(), kind.as_str().to_string(), columns));
