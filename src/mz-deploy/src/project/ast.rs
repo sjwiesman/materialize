@@ -164,6 +164,21 @@ impl Statement {
         }
     }
 
+    /// Convert into the parser's `Statement<Raw>` enum without re-parsing.
+    pub fn into_parser_statement(self) -> mz_sql_parser::ast::Statement<Raw> {
+        use mz_sql_parser::ast::Statement as Parser;
+        match self {
+            Statement::CreateSink(s) => Parser::CreateSink(s),
+            Statement::CreateView(s) => Parser::CreateView(s),
+            Statement::CreateMaterializedView(s) => Parser::CreateMaterializedView(s),
+            Statement::CreateTable(s) => Parser::CreateTable(s),
+            Statement::CreateTableFromSource(s) => Parser::CreateTableFromSource(s),
+            Statement::CreateSource(s) => Parser::CreateSource(s),
+            Statement::CreateSecret(s) => Parser::CreateSecret(s),
+            Statement::CreateConnection(s) => Parser::CreateConnection(s),
+        }
+    }
+
     /// Extracts the database identifier from the statement.
     ///
     /// Returns the object name (potentially qualified with schema/database)
