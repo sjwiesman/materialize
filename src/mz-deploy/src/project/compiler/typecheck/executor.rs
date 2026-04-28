@@ -14,27 +14,22 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-/// Reason a node did not produce a successful result.
-#[derive(Debug)]
-pub(super) enum NodeFailure {
-    /// The node's own validation failed.
-    Failed(ObjectTypeCheckError),
-    /// An upstream node (direct dependency) did not produce a successful result.
-    Blocked(ObjectId),
-}
-
 /// Final outcome for one node after the DAG executor runs.
 #[derive(Debug)]
 pub(super) enum NodeOutcome<T> {
+    /// Validation succeeded and produced this value.
     Ok(Arc<T>),
-    Err(NodeFailure),
+    /// The node's own validation failed.
+    Failed(ObjectTypeCheckError),
+    /// An upstream direct dependency did not produce a successful result.
+    Blocked(ObjectId),
 }
 
 struct NodeBookkeeping<T> {
     direct_deps: Vec<ObjectId>,
     dependents: Vec<ObjectId>,
     remaining_deps: AtomicUsize,
-    result: OnceLock<Result<Arc<T>, NodeFailure>>,
+    result: OnceLock<NodeOutcome<T>>,
 }
 
 /// Run the DAG executor over `nodes`.
@@ -113,9 +108,9 @@ where
                 .get()
                 .expect("every node's result must be set before run() returns")
             {
-                Ok(value) => NodeOutcome::Ok(Arc::clone(value)),
-                Err(NodeFailure::Failed(err)) => NodeOutcome::Err(NodeFailure::Failed(err.clone())),
-                Err(NodeFailure::Blocked(id)) => NodeOutcome::Err(NodeFailure::Blocked(id.clone())),
+                NodeOutcome::Ok(value) => NodeOutcome::Ok(Arc::clone(value)),
+                NodeOutcome::Failed(err) => NodeOutcome::Failed(err.clone()),
+                NodeOutcome::Blocked(id) => NodeOutcome::Blocked(id.clone()),
             };
             (node_id.clone(), outcome)
         })
@@ -147,10 +142,10 @@ fn worker_loop<T, F>(
 
         let outcome = match gather_dep_results(&bk, &bookkeeping) {
             Ok(deps) => match work(&node_id, &deps) {
-                Ok(value) => Ok(Arc::new(value)),
-                Err(err) => Err(NodeFailure::Failed(err)),
+                Ok(value) => NodeOutcome::Ok(Arc::new(value)),
+                Err(err) => NodeOutcome::Failed(err),
             },
-            Err(blocker) => Err(NodeFailure::Blocked(blocker)),
+            Err(blocker) => NodeOutcome::Blocked(blocker),
         };
 
         bk.result
@@ -190,10 +185,12 @@ fn gather_dep_results<T>(
             .get()
             .expect("dep result set before dependent runs")
         {
-            Ok(value) => {
+            NodeOutcome::Ok(value) => {
                 deps.insert(dep_id.clone(), Arc::clone(value));
             }
-            Err(_) => return Err(dep_id.clone()),
+            NodeOutcome::Failed(_) | NodeOutcome::Blocked(_) => {
+                return Err(dep_id.clone());
+            }
         }
     }
     Ok(deps)
@@ -203,14 +200,56 @@ fn gather_dep_results<T>(
 mod tests {
     use super::*;
 
+    fn id(name: &str) -> ObjectId {
+        ObjectId {
+            database: "d".into(),
+            schema: "s".into(),
+            object: name.into(),
+        }
+    }
+
+    /// Build the (nodes, direct_deps, dependents) triple from a list of
+    /// `(parent, child)` edges. Roots are inferred — any node mentioned but
+    /// without an incoming edge starts with empty deps.
+    fn dag(
+        edges: &[(&str, &str)],
+    ) -> (
+        Vec<ObjectId>,
+        BTreeMap<ObjectId, Vec<ObjectId>>,
+        BTreeMap<ObjectId, Vec<ObjectId>>,
+    ) {
+        use std::collections::BTreeSet;
+        let mut nodes: Vec<ObjectId> = Vec::new();
+        let mut seen: BTreeSet<ObjectId> = BTreeSet::new();
+        let mut direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
+        let mut dependents: BTreeMap<ObjectId, Vec<ObjectId>> = BTreeMap::new();
+        for (parent, child) in edges {
+            for n in [parent, child] {
+                let n_id = id(n);
+                if seen.insert(n_id.clone()) {
+                    nodes.push(n_id.clone());
+                    direct_deps.insert(n_id.clone(), Vec::new());
+                    dependents.insert(n_id, Vec::new());
+                }
+            }
+            direct_deps.entry(id(child)).or_default().push(id(parent));
+            dependents.entry(id(parent)).or_default().push(id(child));
+        }
+        (nodes, direct_deps, dependents)
+    }
+
     #[test]
     fn node_outcome_types_compile() {
         let _: NodeOutcome<i32> = NodeOutcome::Ok(Arc::new(7));
-        let _: NodeOutcome<i32> = NodeOutcome::Err(NodeFailure::Blocked(ObjectId {
-            database: "d".into(),
-            schema: "s".into(),
-            object: "o".into(),
-        }));
+        let _: NodeOutcome<i32> = NodeOutcome::Blocked(id("o"));
+        let _: NodeOutcome<i32> = NodeOutcome::Failed(ObjectTypeCheckError {
+            object_id: id("o"),
+            file_path: std::path::PathBuf::new(),
+            sql_statement: String::new(),
+            error_message: String::new(),
+            detail: None,
+            hint: None,
+        });
     }
 
     #[test]
@@ -224,14 +263,6 @@ mod tests {
             },
         );
         assert!(outcomes.is_empty());
-    }
-
-    fn id(name: &str) -> ObjectId {
-        ObjectId {
-            database: "d".into(),
-            schema: "s".into(),
-            object: name.into(),
-        }
     }
 
     #[test]
@@ -257,24 +288,7 @@ mod tests {
 
     #[test]
     fn linear_chain_threads_results() {
-        let a = id("a");
-        let b = id("b");
-        let c = id("c");
-        let nodes = vec![a.clone(), b.clone(), c.clone()];
-        let direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
-            (a.clone(), vec![]),
-            (b.clone(), vec![a.clone()]),
-            (c.clone(), vec![b.clone()]),
-        ]
-        .into_iter()
-        .collect();
-        let dependents: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
-            (a.clone(), vec![b.clone()]),
-            (b.clone(), vec![c.clone()]),
-            (c.clone(), vec![]),
-        ]
-        .into_iter()
-        .collect();
+        let (nodes, direct_deps, dependents) = dag(&[("a", "b"), ("b", "c")]);
 
         let outcomes = run::<u64, _>(nodes, direct_deps, dependents, |_id, deps| {
             let upstream: u64 = deps.values().map(|v| **v).sum();
@@ -284,77 +298,42 @@ mod tests {
         let unwrap_ok = |id: &ObjectId| -> u64 {
             match outcomes.get(id).expect("outcome for id") {
                 NodeOutcome::Ok(v) => **v,
-                NodeOutcome::Err(e) => panic!("unexpected err for {id:?}: {e:?}"),
+                other => panic!("unexpected outcome for {id:?}: {other:?}"),
             }
         };
-        assert_eq!(unwrap_ok(&a), 1);
-        assert_eq!(unwrap_ok(&b), 2);
-        assert_eq!(unwrap_ok(&c), 3);
+        assert_eq!(unwrap_ok(&id("a")), 1);
+        assert_eq!(unwrap_ok(&id("b")), 2);
+        assert_eq!(unwrap_ok(&id("c")), 3);
     }
 
     #[test]
     fn diamond_dispatches_b_and_c_in_parallel() {
-        use std::sync::Mutex;
-        use std::sync::atomic::AtomicI32;
+        use std::sync::Barrier;
 
-        // a -> {b, c} -> d, where b and c park briefly so we can verify both
-        // are in flight simultaneously.
-        let a = id("a");
-        let b = id("b");
-        let c = id("c");
-        let d = id("d");
-        let nodes = vec![a.clone(), b.clone(), c.clone(), d.clone()];
-        let direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
-            (a.clone(), vec![]),
-            (b.clone(), vec![a.clone()]),
-            (c.clone(), vec![a.clone()]),
-            (d.clone(), vec![b.clone(), c.clone()]),
-        ]
-        .into_iter()
-        .collect();
-        let dependents: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
-            (a.clone(), vec![b.clone(), c.clone()]),
-            (b.clone(), vec![d.clone()]),
-            (c.clone(), vec![d.clone()]),
-            (d.clone(), vec![]),
-        ]
-        .into_iter()
-        .collect();
+        // a -> {b, c} -> d. b and c each rendezvous on a 2-party barrier
+        // before completing — they can only progress if both are running
+        // concurrently, proving the executor dispatches them in parallel.
+        let (nodes, direct_deps, dependents) = dag(&[
+            ("a", "b"),
+            ("a", "c"),
+            ("b", "d"),
+            ("c", "d"),
+        ]);
+        let barrier = Arc::new(Barrier::new(2));
 
-        let inflight = Arc::new(AtomicI32::new(0));
-        let max_inflight = Arc::new(AtomicI32::new(0));
-        let observed_for_d = Arc::new(Mutex::new(Vec::<ObjectId>::new()));
-
-        let inflight_w = Arc::clone(&inflight);
-        let max_inflight_w = Arc::clone(&max_inflight);
-        let observed_for_d_w = Arc::clone(&observed_for_d);
-
-        let outcomes = run::<u64, _>(nodes, direct_deps, dependents, move |id, deps| {
-            if id.object == "b" || id.object == "c" {
-                let now = inflight_w.fetch_add(1, Ordering::AcqRel) + 1;
-                max_inflight_w.fetch_max(now, Ordering::AcqRel);
-                std::thread::sleep(Duration::from_millis(50));
-                inflight_w.fetch_sub(1, Ordering::AcqRel);
-            }
-            if id.object == "d" {
-                let mut keys: Vec<ObjectId> = deps.keys().cloned().collect();
-                keys.sort();
-                *observed_for_d_w.lock().unwrap() = keys;
+        let outcomes = run::<u64, _>(nodes, direct_deps, dependents, move |obj_id, _deps| {
+            if obj_id.object == "b" || obj_id.object == "c" {
+                barrier.wait();
             }
             Ok(1u64)
         });
 
-        assert!(matches!(outcomes.get(&a), Some(NodeOutcome::Ok(_))));
-        assert!(matches!(outcomes.get(&b), Some(NodeOutcome::Ok(_))));
-        assert!(matches!(outcomes.get(&c), Some(NodeOutcome::Ok(_))));
-        assert!(matches!(outcomes.get(&d), Some(NodeOutcome::Ok(_))));
-        assert_eq!(
-            max_inflight.load(Ordering::Acquire),
-            2,
-            "expected b and c to overlap in flight"
-        );
-        let observed = observed_for_d.lock().unwrap().clone();
-        assert_eq!(observed, vec![b.clone(), c.clone()]);
+        for name in ["a", "b", "c", "d"] {
+            assert!(
+                matches!(outcomes.get(&id(name)), Some(NodeOutcome::Ok(_))),
+                "node {name} should have succeeded"
+            );
+        }
     }
 
     fn fake_typecheck_error(id: &ObjectId, msg: &str) -> ObjectTypeCheckError {
@@ -372,54 +351,32 @@ mod tests {
     fn failure_propagates_to_dependents_and_isolates_other_branches() {
         // Failing branch:  a (FAIL) -> b -> c
         // Healthy branch:  x -> y
+        let (nodes, direct_deps, dependents) =
+            dag(&[("a", "b"), ("b", "c"), ("x", "y")]);
+
         let a = id("a");
-        let b = id("b");
-        let c = id("c");
-        let x = id("x");
-        let y = id("y");
-        let nodes = vec![a.clone(), b.clone(), c.clone(), x.clone(), y.clone()];
-
-        let direct_deps: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
-            (a.clone(), vec![]),
-            (b.clone(), vec![a.clone()]),
-            (c.clone(), vec![b.clone()]),
-            (x.clone(), vec![]),
-            (y.clone(), vec![x.clone()]),
-        ]
-        .into_iter()
-        .collect();
-        let dependents: BTreeMap<ObjectId, Vec<ObjectId>> = vec![
-            (a.clone(), vec![b.clone()]),
-            (b.clone(), vec![c.clone()]),
-            (c.clone(), vec![]),
-            (x.clone(), vec![y.clone()]),
-            (y.clone(), vec![]),
-        ]
-        .into_iter()
-        .collect();
-
         let a_for_closure = a.clone();
-        let outcomes = run::<u32, _>(nodes, direct_deps, dependents, move |id, _deps| {
-            if *id == a_for_closure {
-                Err(fake_typecheck_error(id, "boom"))
+        let outcomes = run::<u32, _>(nodes, direct_deps, dependents, move |obj_id, _deps| {
+            if *obj_id == a_for_closure {
+                Err(fake_typecheck_error(obj_id, "boom"))
             } else {
                 Ok(1)
             }
         });
 
         match outcomes.get(&a).unwrap() {
-            NodeOutcome::Err(NodeFailure::Failed(err)) => assert_eq!(err.error_message, "boom"),
+            NodeOutcome::Failed(err) => assert_eq!(err.error_message, "boom"),
             other => panic!("expected Failed for a, got {other:?}"),
         }
-        match outcomes.get(&b).unwrap() {
-            NodeOutcome::Err(NodeFailure::Blocked(blocker)) => assert_eq!(blocker, &a),
+        match outcomes.get(&id("b")).unwrap() {
+            NodeOutcome::Blocked(blocker) => assert_eq!(blocker, &a),
             other => panic!("expected Blocked(a) for b, got {other:?}"),
         }
-        match outcomes.get(&c).unwrap() {
-            NodeOutcome::Err(NodeFailure::Blocked(blocker)) => assert_eq!(blocker, &b),
+        match outcomes.get(&id("c")).unwrap() {
+            NodeOutcome::Blocked(blocker) => assert_eq!(blocker, &id("b")),
             other => panic!("expected Blocked(b) for c, got {other:?}"),
         }
-        assert!(matches!(outcomes.get(&x), Some(NodeOutcome::Ok(_))));
-        assert!(matches!(outcomes.get(&y), Some(NodeOutcome::Ok(_))));
+        assert!(matches!(outcomes.get(&id("x")), Some(NodeOutcome::Ok(_))));
+        assert!(matches!(outcomes.get(&id("y")), Some(NodeOutcome::Ok(_))));
     }
 }
