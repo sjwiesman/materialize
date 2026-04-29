@@ -19,6 +19,7 @@
 //! with its dependencies, then discarded. This avoids state leaking between
 //! validation of unrelated objects.
 
+use super::error::ObjectTypeCheckErrorKind;
 use super::{ObjectTypeCheckError, TypeCheckError};
 use crate::project::ir::object_id::ObjectId;
 use crate::timing;
@@ -628,10 +629,16 @@ impl CatalogRuntime {
         sql: &str,
     ) -> Result<RelationDesc, ObjectTypeCheckError> {
         let parsed = mz_sql_parser::parser::parse_statements(sql)
-            .map_err(|e| self.build_error(object_id, sql, e))?
+            .map_err(|e| self.build_error(object_id, sql, ObjectTypeCheckErrorKind::Parser(e)))?
             .into_iter()
             .next()
-            .ok_or_else(|| self.build_error(object_id, sql, "empty statement"))?
+            .ok_or_else(|| {
+                self.build_error(
+                    object_id,
+                    sql,
+                    ObjectTypeCheckErrorKind::Internal("empty statement".into()),
+                )
+            })?
             .ast;
         self.resolve_plan_and_insert(object_id, parsed, sql)
     }
@@ -655,8 +662,13 @@ impl CatalogRuntime {
         let start = Instant::now();
 
         let resolve_start = Instant::now();
-        let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast)
-            .map_err(|e| self.build_error(object_id, create_sql, e))?;
+        let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast).map_err(|e| {
+            self.build_error(
+                object_id,
+                create_sql,
+                ObjectTypeCheckErrorKind::Plan(Arc::new(e)),
+            )
+        })?;
         timing!(
             &format!("      catalog: resolve {}", object_id),
             resolve_start.elapsed()
@@ -671,7 +683,13 @@ impl CatalogRuntime {
             &Params::empty(),
             &resolved_ids,
         )
-        .map_err(|e| self.build_error(object_id, create_sql, e))?;
+        .map_err(|e| {
+            self.build_error(
+                object_id,
+                create_sql,
+                ObjectTypeCheckErrorKind::Plan(Arc::new(e)),
+            )
+        })?;
         timing!(
             &format!("      catalog: plan {}", object_id),
             plan_start.elapsed()
@@ -680,7 +698,9 @@ impl CatalogRuntime {
         let insert_start = Instant::now();
         let desc = self
             .insert_item_from_plan(object_id, create_sql, plan, resolved_ids)
-            .map_err(|e| self.build_error(object_id, create_sql, e))?;
+            .map_err(|e| {
+                self.build_error(object_id, create_sql, ObjectTypeCheckErrorKind::Catalog(e))
+            })?;
         timing!(
             &format!("      catalog: insert_item {}", object_id),
             insert_start.elapsed()
@@ -693,10 +713,14 @@ impl CatalogRuntime {
     }
 
     /// Construct a typecheck error with the object's inferred file path.
-    fn build_error<E>(&self, object_id: &ObjectId, sql: &str, error: E) -> ObjectTypeCheckError
-    where
-        E: std::fmt::Display,
-    {
+    /// The placeholder file path is rewritten to the real on-disk path by
+    /// the caller in `typecheck::run`.
+    fn build_error(
+        &self,
+        object_id: &ObjectId,
+        sql: &str,
+        kind: ObjectTypeCheckErrorKind,
+    ) -> ObjectTypeCheckError {
         ObjectTypeCheckError {
             object_id: object_id.clone(),
             file_path: PathBuf::from(format!(
@@ -704,9 +728,7 @@ impl CatalogRuntime {
                 object_id.database, object_id.schema, object_id.object
             )),
             sql_statement: sql.to_string(),
-            error_message: error.to_string(),
-            detail: None,
-            hint: None,
+            kind,
         }
     }
 

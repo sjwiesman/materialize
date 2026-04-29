@@ -251,14 +251,11 @@ mod tests {
     fn node_outcome_types_compile() {
         let _: NodeOutcome<i32> = NodeOutcome::Ok(Arc::new(7));
         let _: NodeOutcome<i32> = NodeOutcome::Blocked(id("o"));
-        let _: NodeOutcome<i32> = NodeOutcome::Failed(ObjectTypeCheckError {
-            object_id: id("o"),
-            file_path: std::path::PathBuf::new(),
-            sql_statement: String::new(),
-            error_message: String::new(),
-            detail: None,
-            hint: None,
-        });
+        let _: NodeOutcome<i32> = NodeOutcome::Failed(ObjectTypeCheckError::internal(
+            id("o"),
+            std::path::PathBuf::new(),
+            String::new(),
+        ));
     }
 
     #[test]
@@ -342,14 +339,7 @@ mod tests {
     }
 
     fn fake_typecheck_error(id: &ObjectId, msg: &str) -> ObjectTypeCheckError {
-        ObjectTypeCheckError {
-            object_id: id.clone(),
-            file_path: std::path::PathBuf::from("test"),
-            sql_statement: String::new(),
-            error_message: msg.into(),
-            detail: None,
-            hint: None,
-        }
+        ObjectTypeCheckError::internal(id.clone(), std::path::PathBuf::from("test"), msg.into())
     }
 
     #[test]
@@ -369,7 +359,7 @@ mod tests {
         });
 
         match outcomes.get(&a).unwrap() {
-            NodeOutcome::Failed(err) => assert_eq!(err.error_message, "boom"),
+            NodeOutcome::Failed(err) => assert_eq!(err.error_message(), "boom"),
             other => panic!("expected Failed for a, got {other:?}"),
         }
         match outcomes.get(&id("b")).unwrap() {

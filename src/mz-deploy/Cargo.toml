@@ -12,7 +12,6 @@ workspace = true
 [dependencies]
 async-stream = { workspace = true }
 bincode = { workspace = true }
-aws-config = { workspace = true }
 aws-sdk-secretsmanager = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

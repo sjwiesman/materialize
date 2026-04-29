@@ -26,13 +26,13 @@
 //! are validated after typechecking (stage 5) once complete column metadata is
 //! available.
 
-use std::fs::canonicalize;
 use crate::cli::CliError;
 use crate::cli::progress;
 use crate::config::Settings;
 use crate::project::ir::graph::{ModStatement, Project};
 use crate::project::ir::object_id::ObjectId;
 use crate::{project, timing, verbose};
+use std::fs::canonicalize;
 use std::time::{Duration, Instant};
 
 /// Compile and validate the project, showing the deployment plan.

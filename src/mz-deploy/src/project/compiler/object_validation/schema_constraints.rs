@@ -63,7 +63,6 @@ pub(super) fn validate_no_storage_and_computation_in_schema(
 
     for obj in objects {
         match &obj.stmt {
-            // Storage objects (persist data)
             Statement::CreateTable(_)
             | Statement::CreateTableFromSource(_)
             | Statement::CreateSource(_)
@@ -74,7 +73,6 @@ pub(super) fn validate_no_storage_and_computation_in_schema(
                 let ident = obj.stmt.ident();
                 storage_names.push(ident.object.clone());
             }
-            // Computation objects (transform data)
             Statement::CreateView(_) | Statement::CreateMaterializedView(_) => {
                 has_computation = true;
                 let ident = obj.stmt.ident();

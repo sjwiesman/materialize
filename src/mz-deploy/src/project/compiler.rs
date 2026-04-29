@@ -442,7 +442,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
     // Persist the compiled project to SQLite for LSP consumption.
     // Advisory — failure is logged but doesn't block compilation.
     if let Err(e) = db.write_project(&project, root) {
-        crate::verbose!("Failed to persist project to SQLite: {}", e);
+        verbose!("Failed to persist project to SQLite: {}", e);
     }
 
     Ok((project, stats))

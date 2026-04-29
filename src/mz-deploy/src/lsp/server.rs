@@ -19,20 +19,26 @@
 //!   `didChange`.
 //! - **`project_cache`** — Compiled project metadata. Opened lazily on the
 //!   first successful build; the same handle is reused across rebuilds.
-//! - **`project_diagnostic_uris`** — Tracks which files currently have
-//!   project-level validation diagnostics. On each rebuild, diagnostics are
-//!   diffed via [`compute_diagnostic_actions`]: old URIs not in the new set
-//!   are cleared, new diagnostics are published.
+//! - **`parse_diagnostics`** — Per-keystroke parse-level diagnostics, keyed by
+//!   URI. Updated on every `didOpen` / `didChange`.
+//! - **`project_diagnostics`** — Project-level (validation + typecheck)
+//!   diagnostics, keyed by URI. Updated on every `rebuild_project`.
 //! - **`root`** — The workspace root directory.
 //! - **`settings`** / **`variables`** — Project and profile configuration,
 //!   reloaded at startup and on every save.
 //!
-//! ## Typecheck on Save
+//! ## Diagnostic Publishing
 //!
-//! After every `rebuild_project()`, the server runs [`run_typecheck()`] which
-//! performs incremental typechecking. If definitions are unchanged since the
-//! last typecheck, validation is skipped entirely. If the typecheck backend
-//! is unavailable, typechecking is silently skipped.
+//! LSP `publishDiagnostics` is full-replacement per URI, so the two sources
+//! must be merged before publishing or one will overwrite the other. Both
+//! diagnostic flows route through [`Backend::publish_merged`], which reads
+//! both maps and emits the union.
+//!
+//! [`rebuild_project()`] runs validation and (on a successful build)
+//! typechecking inline. Both are merged into the new project-diagnostic map;
+//! every URI that was previously tracked or is newly tracked is republished
+//! through [`Backend::publish_merged`] so stale project diagnostics clear
+//! while parse diagnostics for open documents survive.
 
 use crate::config::{ProjectSettings, read_mzprofile};
 use crate::lsp::{
@@ -40,12 +46,13 @@ use crate::lsp::{
     semantic_tokens, workspace_symbol,
 };
 use crate::project;
+use crate::project::compiler::typecheck::TypeCheckError;
 use crate::project::error::{ProjectError, ValidationErrors};
 use crate::project::ir::graph;
 use crate::project_cache::ProjectCache;
 use crate::types;
 use ropey::Rope;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -53,28 +60,6 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 
-/// Actions to take after a project rebuild, expressed as pure data.
-///
-/// Separates the *decision* of which diagnostics to publish/clear from the
-/// *execution* of those actions (which requires async I/O via the LSP client).
-/// The [`compute_diagnostic_actions`] function produces this from validation
-/// diagnostics and the set of previously tracked diagnostic URIs.
-struct DiagnosticActions {
-    /// New diagnostics to publish, keyed by file URI.
-    diagnostics_to_publish: Vec<(Url, Vec<Diagnostic>)>,
-    /// URIs that had diagnostics before but should now be cleared.
-    uris_to_clear: Vec<Url>,
-    /// The new set of URIs that have diagnostics (replaces `project_diagnostic_uris`).
-    new_tracked_uris: Vec<Url>,
-}
-
-/// Compute which diagnostics to publish and which URIs to clear.
-///
-/// `new_diagnostics` is the set of validation diagnostics from the current
-/// build (empty on success or non-validation errors). `old_diagnostic_uris`
-/// is the set of URIs that had diagnostics before this build.
-///
-/// URIs in the old set that are not in the new set are scheduled for clearing.
 /// Resolve the default profile name for LSP operations.
 ///
 /// The language server has no CLI flags; it reads the project root's
@@ -86,33 +71,6 @@ fn resolve_lsp_profile_name(project_root: &Path) -> String {
         .ok()
         .flatten()
         .unwrap_or_else(|| "default".to_string())
-}
-
-fn compute_diagnostic_actions(
-    new_diagnostics: BTreeMap<PathBuf, Vec<Diagnostic>>,
-    old_diagnostic_uris: &[Url],
-) -> DiagnosticActions {
-    let new_uris: Vec<Url> = new_diagnostics
-        .keys()
-        .filter_map(|path| Url::from_file_path(path).ok())
-        .collect();
-
-    let uris_to_clear: Vec<Url> = old_diagnostic_uris
-        .iter()
-        .filter(|uri| !new_uris.contains(uri))
-        .cloned()
-        .collect();
-
-    let diagnostics_to_publish: Vec<(Url, Vec<Diagnostic>)> = new_diagnostics
-        .into_iter()
-        .filter_map(|(path, diags)| Url::from_file_path(path).ok().map(|uri| (uri, diags)))
-        .collect();
-
-    DiagnosticActions {
-        diagnostics_to_publish,
-        uris_to_clear,
-        new_tracked_uris: new_uris,
-    }
 }
 
 /// Try to open a long-lived [`ProjectCache`] (read-only SQLite connection).
@@ -137,8 +95,10 @@ pub(super) struct Backend {
     documents: Mutex<BTreeMap<Url, Rope>>,
     /// Compiled project metadata for go-to-definition, hover, completion, and code lens.
     project_cache: Mutex<Option<ProjectCache>>,
-    /// File URIs that currently have project-level validation diagnostics.
-    project_diagnostic_uris: Mutex<Vec<Url>>,
+    /// Latest per-keystroke parse-level diagnostics, keyed by URI.
+    parse_diagnostics: Mutex<BTreeMap<Url, Vec<Diagnostic>>>,
+    /// Latest project-level (validation + typecheck) diagnostics, keyed by URI.
+    project_diagnostics: Mutex<BTreeMap<Url, Vec<Diagnostic>>>,
     /// Project root directory.
     root: RwLock<PathBuf>,
     /// Cached project settings loaded from `project.toml`.
@@ -156,7 +116,8 @@ impl Backend {
             client,
             documents: Mutex::new(BTreeMap::new()),
             project_cache: Mutex::new(None),
-            project_diagnostic_uris: Mutex::new(Vec::new()),
+            parse_diagnostics: Mutex::new(BTreeMap::new()),
+            project_diagnostics: Mutex::new(BTreeMap::new()),
             root: RwLock::new(root),
             settings: RwLock::new(None),
             variables: RwLock::new(BTreeMap::new()),
@@ -188,6 +149,10 @@ impl Backend {
     }
 
     /// Publish parse diagnostics for a single document.
+    ///
+    /// Updates the parse-diagnostic cache for `uri` and republishes the
+    /// merged set (parse + project) so prior project-level diagnostics for
+    /// this URI survive the per-keystroke refresh.
     async fn publish_diagnostics(&self, uri: Url, text: &str) {
         let rope = Rope::from_str(text);
         let variables = self.variables.read().await.clone();
@@ -199,7 +164,37 @@ impl Backend {
         docs.insert(uri.clone(), rope);
         drop(docs); // release before .await on client
 
-        self.client.publish_diagnostics(uri, diags, None).await;
+        self.parse_diagnostics
+            .lock()
+            .await
+            .insert(uri.clone(), diags);
+        self.publish_merged(uri).await;
+    }
+
+    /// Publish the union of parse and project diagnostics for `uri`.
+    ///
+    /// LSP `publishDiagnostics` is a full-replacement per URI, so we have to
+    /// resend both streams together every time either changes. Empty union →
+    /// publish an empty list (which clears any stale diagnostics on the
+    /// client).
+    async fn publish_merged(&self, uri: Url) {
+        let parse = self
+            .parse_diagnostics
+            .lock()
+            .await
+            .get(&uri)
+            .cloned()
+            .unwrap_or_default();
+        let project = self
+            .project_diagnostics
+            .lock()
+            .await
+            .get(&uri)
+            .cloned()
+            .unwrap_or_default();
+        let mut merged = parse;
+        merged.extend(project);
+        self.client.publish_diagnostics(uri, merged, None).await;
     }
 
     /// Snapshot document text and cursor context for a given position.
@@ -228,14 +223,14 @@ impl Backend {
 
     /// Rebuild the project model and types cache from disk.
     ///
-    /// Delegates to [`compute_diagnostic_actions`] for the pure diagnostic
-    /// diffing logic, then applies the resulting actions via the LSP client.
-    /// Opens the [`ProjectCache`] lazily on the first successful build.
-    ///
-    /// Returns the compiled project on success for use by [`run_typecheck`].
-    /// The project is not stored on `self` — it is only needed transiently
-    /// for typecheck planning.
-    async fn rebuild_project(&self) -> Option<Arc<graph::Project>> {
+    /// Runs validation and (on success) typechecking, merges their diagnostics,
+    /// and applies the resulting publish/clear actions via the LSP client.
+    /// Opens the [`ProjectCache`] lazily on the first rebuild where the
+    /// SQLite DB file exists, regardless of whether the build itself
+    /// succeeded — this keeps hover/goto/find-references usable against the
+    /// last-known-good state even while the user has a temporary error in
+    /// their working tree.
+    async fn rebuild_project(&self) {
         self.load_settings().await;
         let root = self.root.read().await.clone();
         let (profile, profile_suffix, variables) = {
@@ -258,88 +253,112 @@ impl Backend {
             project::plan_sync(&root, &profile, profile_suffix.as_deref(), &variables);
 
         // Extract validation diagnostics from the build result (pure).
-        let new_diagnostics = match &build_result {
+        let mut new_diagnostics = match &build_result {
             Err(ProjectError::Validation(ValidationErrors { errors })) => {
                 diagnostics::validation_diagnostics(errors)
             }
             _ => BTreeMap::new(),
         };
 
-        // Compute diagnostic actions (pure).
-        let old_uris = self.project_diagnostic_uris.lock().await.clone();
-        let actions = compute_diagnostic_actions(new_diagnostics, &old_uris);
-
-        // Return the project on success, log and discard the error on failure.
         let project = match build_result {
             Ok(p) => Some(Arc::new(p)),
             Err(ref e) => {
-                self.client
-                    .log_message(MessageType::ERROR, format!("Project build failed: {e}"))
-                    .await;
+                // Validation errors already flow through `new_diagnostics`;
+                // surface non-validation build failures as a client log.
+                if !matches!(e, ProjectError::Validation(_)) {
+                    self.client
+                        .log_message(MessageType::ERROR, format!("Project build failed: {e}"))
+                        .await;
+                }
                 None
             }
         };
 
-        // Apply diagnostic actions (I/O).
-        for uri in &actions.uris_to_clear {
-            self.client
-                .publish_diagnostics(uri.clone(), Vec::new(), None)
-                .await;
+        // Run typecheck only when the project compiled. Merge typecheck errors
+        // into the diagnostic map so they flow through the same publish/clear
+        // pipeline as validation errors.
+        if let Some(ref project) = project {
+            if let Some(tc_err) = self
+                .run_typecheck(
+                    Arc::clone(project),
+                    &profile,
+                    profile_suffix.as_deref(),
+                    &variables,
+                )
+                .await
+            {
+                let tc_diags = diagnostics::typecheck_diagnostics(&tc_err);
+                if tc_diags.is_empty() {
+                    self.client
+                        .log_message(MessageType::ERROR, format!("Typecheck failed: {tc_err}"))
+                        .await;
+                } else {
+                    for (path, diags) in tc_diags {
+                        new_diagnostics.entry(path).or_default().extend(diags);
+                    }
+                }
+            }
         }
-        for (uri, diags) in actions.diagnostics_to_publish {
-            self.client.publish_diagnostics(uri, diags, None).await;
-        }
-        *self.project_diagnostic_uris.lock().await = actions.new_tracked_uris;
 
-        // Open the long-lived ProjectCache SQLite connection on first successful build.
-        if project.is_some() {
+        // Convert path-keyed map to URI-keyed map; drop entries whose paths
+        // can't be expressed as `file://` URIs (relative paths, etc.).
+        let new_project_diags: BTreeMap<Url, Vec<Diagnostic>> = new_diagnostics
+            .into_iter()
+            .filter_map(|(path, diags)| Url::from_file_path(path).ok().map(|uri| (uri, diags)))
+            .collect();
+
+        // Swap in the new map and compute the union of old ∪ new URIs to
+        // republish: both old-only (so stale project diagnostics clear) and
+        // new (so fresh project diagnostics appear).
+        let to_republish: BTreeSet<Url> = {
+            let mut guard = self.project_diagnostics.lock().await;
+            let union: BTreeSet<Url> = guard.keys().chain(new_project_diags.keys()).cloned().collect();
+            *guard = new_project_diags;
+            union
+        };
+
+        for uri in to_republish {
+            self.publish_merged(uri).await;
+        }
+
+        // Open the long-lived ProjectCache SQLite connection the first time
+        // the DB file is present. `try_open_project_cache` returns `None` when
+        // the file doesn't exist, so it's safe to attempt this even when the
+        // build failed — we still want hover/goto to work against any
+        // previously-written rows.
+        {
             let mut guard = self.project_cache.lock().await;
             if guard.is_none() {
                 *guard =
                     try_open_project_cache(&root, &profile, profile_suffix.as_deref(), &variables);
             }
         }
-
-        project
     }
 
-    /// Run compiler-owned incremental typechecking.
+    /// Run compiler-owned typechecking.
     ///
-    /// The compiler compares the current compiled objects to persisted
-    /// typecheck artifacts, validates only the dirty runtime frontier, and
-    /// lazily stages both internal and external dependencies as temp tables.
-    /// On success, it writes the refreshed internal types cache.
-    ///
-    /// Silently returns on any failure — the next successful typecheck will
-    /// catch up.
-    async fn run_typecheck(&self, project: Arc<graph::Project>) {
+    /// Returns `Some(err)` on typecheck failure so the caller can convert it
+    /// into LSP diagnostics, `None` on success.
+    async fn run_typecheck(
+        &self,
+        project: Arc<graph::Project>,
+        profile: &str,
+        profile_suffix: Option<&str>,
+        variables: &BTreeMap<String, String>,
+    ) -> Option<TypeCheckError> {
         let root = self.root.read().await.clone();
-
-        let (profile, profile_suffix, variables) = {
-            let settings_guard = self.settings.read().await;
-            match settings_guard.as_ref() {
-                Some(ps) => {
-                    let profile = resolve_lsp_profile_name(&root);
-                    let config = ps.config_for_profile(&profile);
-                    (
-                        profile,
-                        config.profile_suffix.clone(),
-                        config.variables.clone(),
-                    )
-                }
-                None => ("default".to_string(), None, BTreeMap::new()),
-            }
-        };
-
         let types_lock = types::load_types_lock(&root).unwrap_or_default();
-        let _ = project::compiler::typecheck::run(
+        match project::compiler::typecheck::run(
             &root,
-            &profile,
-            profile_suffix.as_deref(),
-            &variables,
+            profile,
+            profile_suffix,
+            variables,
             &project,
             types_lock,
-        );
+        ) {
+            Ok(_) => None,
+            Err(e) => Some(e),
+        }
     }
 }
 
@@ -393,11 +412,7 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.load_settings().await;
-        let project = self.rebuild_project().await;
-        if let Some(project) = project {
-            self.run_typecheck(project).await;
-        }
+        self.rebuild_project().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -417,17 +432,11 @@ impl LanguageServer for Backend {
     }
 
     async fn did_save(&self, _params: DidSaveTextDocumentParams) {
-        let project = self.rebuild_project().await;
-        if let Some(project) = project {
-            self.run_typecheck(project).await;
-        }
+        self.rebuild_project().await;
     }
 
     async fn did_change_watched_files(&self, _params: DidChangeWatchedFilesParams) {
-        let project = self.rebuild_project().await;
-        if let Some(project) = project {
-            self.run_typecheck(project).await;
-        }
+        self.rebuild_project().await;
     }
 
     async fn goto_definition(
@@ -637,58 +646,6 @@ impl LanguageServer for Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn file_url(path: &str) -> Url {
-        Url::from_file_path(path).unwrap()
-    }
-
-    fn make_diagnostic(msg: &str) -> Diagnostic {
-        Diagnostic {
-            message: msg.to_string(),
-            severity: Some(DiagnosticSeverity::ERROR),
-            source: Some("mz-deploy".to_string()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn diagnostic_actions_success_clears_all() {
-        let old = vec![file_url("/a.sql"), file_url("/b.sql")];
-        let actions = compute_diagnostic_actions(BTreeMap::new(), &old);
-
-        assert!(actions.diagnostics_to_publish.is_empty());
-        assert_eq!(actions.uris_to_clear.len(), 2);
-        assert!(actions.new_tracked_uris.is_empty());
-    }
-
-    #[test]
-    fn diagnostic_actions_validation_errors() {
-        let old = vec![file_url("/a.sql"), file_url("/b.sql")];
-        let mut new_diags = BTreeMap::new();
-        new_diags.insert(PathBuf::from("/b.sql"), vec![make_diagnostic("error in b")]);
-        new_diags.insert(PathBuf::from("/c.sql"), vec![make_diagnostic("error in c")]);
-
-        let actions = compute_diagnostic_actions(new_diags, &old);
-
-        // /a.sql should be cleared (was in old, not in new).
-        assert_eq!(actions.uris_to_clear, vec![file_url("/a.sql")]);
-        // /b.sql and /c.sql should be published.
-        assert_eq!(actions.diagnostics_to_publish.len(), 2);
-        // Tracked URIs should be the new set.
-        assert_eq!(actions.new_tracked_uris.len(), 2);
-    }
-
-    #[test]
-    fn diagnostic_actions_no_previous() {
-        let mut new_diags = BTreeMap::new();
-        new_diags.insert(PathBuf::from("/a.sql"), vec![make_diagnostic("error")]);
-
-        let actions = compute_diagnostic_actions(new_diags, &[]);
-
-        assert!(actions.uris_to_clear.is_empty());
-        assert_eq!(actions.diagnostics_to_publish.len(), 1);
-        assert_eq!(actions.new_tracked_uris.len(), 1);
-    }
 
     #[test]
     fn try_open_project_cache_returns_none_for_missing_db() {

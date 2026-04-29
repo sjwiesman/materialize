@@ -11,9 +11,13 @@
 
 use crate::project::ir::object_id::ObjectId;
 use crate::types::TypesError;
+use mz_sql::catalog::CatalogError;
+use mz_sql::plan::PlanError;
+use mz_sql_parser::parser::ParserStatementError;
 use owo_colors::OwoColorize;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Errors that can occur during runtime typechecking.
@@ -60,9 +64,70 @@ pub struct ObjectTypeCheckError {
     pub object_id: ObjectId,
     pub file_path: PathBuf,
     pub sql_statement: String,
-    pub error_message: String,
-    pub detail: Option<String>,
-    pub hint: Option<String>,
+    pub kind: ObjectTypeCheckErrorKind,
+}
+
+/// Underlying error from one of the typecheck pipeline stages.
+///
+/// Holding the structured upstream error (rather than its string rendering)
+/// lets the LSP pull out identifiers and offsets to underline the offending
+/// token in the source file.
+#[derive(Debug, Clone)]
+pub enum ObjectTypeCheckErrorKind {
+    /// Parser failure from `mz_sql_parser::parser::parse_statements`. Carries
+    /// a byte offset (`error.error.pos`) into the SQL string.
+    Parser(ParserStatementError),
+    /// Resolution or planning failure from `mz_sql::names::resolve` or
+    /// `mz_sql::plan::plan`. Wrapped in `Arc` because `PlanError` does not
+    /// implement `Clone`.
+    Plan(Arc<PlanError>),
+    /// Catalog failure from `insert_item_from_plan`.
+    Catalog(CatalogError),
+    /// Internal/synthetic error (empty-statement check, AST-conversion
+    /// failure, dependency-stub failure). No locatable position.
+    Internal(String),
+}
+
+impl ObjectTypeCheckError {
+    /// Build an internal-error variant with no SQL snippet attached.
+    pub(super) fn internal(object_id: ObjectId, file_path: PathBuf, error_message: String) -> Self {
+        Self {
+            object_id,
+            file_path,
+            sql_statement: String::new(),
+            kind: ObjectTypeCheckErrorKind::Internal(error_message),
+        }
+    }
+
+    /// The primary error message, rendered from the underlying error's
+    /// `Display` impl (or the inner string for `Internal`).
+    pub fn error_message(&self) -> String {
+        match &self.kind {
+            ObjectTypeCheckErrorKind::Parser(e) => e.to_string(),
+            ObjectTypeCheckErrorKind::Plan(e) => e.to_string(),
+            ObjectTypeCheckErrorKind::Catalog(e) => e.to_string(),
+            ObjectTypeCheckErrorKind::Internal(msg) => msg.clone(),
+        }
+    }
+
+    /// Optional `detail:` line, populated for `PlanError` variants that
+    /// expose extra context.
+    pub fn detail(&self) -> Option<String> {
+        match &self.kind {
+            ObjectTypeCheckErrorKind::Plan(e) => e.detail(),
+            _ => None,
+        }
+    }
+
+    /// Optional `hint:` line, populated for `PlanError` and `CatalogError`
+    /// variants that suggest a fix.
+    pub fn hint(&self) -> Option<String> {
+        match &self.kind {
+            ObjectTypeCheckErrorKind::Plan(e) => e.hint(),
+            ObjectTypeCheckErrorKind::Catalog(e) => e.hint(),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ObjectTypeCheckError {
@@ -100,12 +165,12 @@ impl fmt::Display for ObjectTypeCheckError {
         }
         writeln!(f, "  {}", "|".bright_blue().bold())?;
         writeln!(f)?;
-        writeln!(f, "  {}", self.error_message)?;
+        writeln!(f, "  {}", self.error_message())?;
 
-        if let Some(ref detail) = self.detail {
+        if let Some(detail) = self.detail() {
             writeln!(f, "  {}: {}", "detail".bright_cyan().bold(), detail)?;
         }
-        if let Some(ref hint) = self.hint {
+        if let Some(hint) = self.hint() {
             writeln!(
                 f,
                 "  {} {}",
@@ -119,17 +184,3 @@ impl fmt::Display for ObjectTypeCheckError {
 }
 
 impl std::error::Error for ObjectTypeCheckError {}
-
-impl ObjectTypeCheckError {
-    /// Build an internal-error variant with no SQL snippet, detail, or hint.
-    pub(super) fn internal(object_id: ObjectId, file_path: PathBuf, error_message: String) -> Self {
-        Self {
-            object_id,
-            file_path,
-            sql_statement: String::new(),
-            error_message,
-            detail: None,
-            hint: None,
-        }
-    }
-}
