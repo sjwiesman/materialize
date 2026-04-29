@@ -97,7 +97,9 @@ fn run_inner(
     }
 
     let parse_start = Instant::now();
+    let fs = crate::fs::FileSystem::new();
     let planned_project = project::plan_sync(
+        &fs,
         directory.clone(),
         settings.profile_name.clone().as_str(),
         settings.profile_suffix(),

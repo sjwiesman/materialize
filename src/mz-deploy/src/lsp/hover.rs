@@ -632,8 +632,14 @@ mod tests {
         .unwrap();
         write_project_toml(root.path());
 
-        let _project = crate::project::plan_sync(root.path(), "default", None, &Default::default())
-            .expect("project should compile");
+        let _project = crate::project::plan_sync(
+            &crate::fs::FileSystem::new(),
+            root.path(),
+            "default",
+            None,
+            &Default::default(),
+        )
+        .expect("project should compile");
         let cache = ProjectCache::open(root.path(), "default", None, &Default::default())
             .expect("cache should open")
             .expect("cache DB should exist");
@@ -688,8 +694,14 @@ mod tests {
         .unwrap();
         write_project_toml(root.path());
 
-        let _project = crate::project::plan_sync(root.path(), "default", None, &Default::default())
-            .expect("project should compile");
+        let _project = crate::project::plan_sync(
+            &crate::fs::FileSystem::new(),
+            root.path(),
+            "default",
+            None,
+            &Default::default(),
+        )
+        .expect("project should compile");
         let cache = ProjectCache::open(root.path(), "default", None, &Default::default())
             .expect("cache should open")
             .expect("cache DB should exist");
@@ -726,8 +738,14 @@ mod tests {
         .unwrap();
         write_project_toml(root.path());
 
-        let _project = crate::project::plan_sync(root.path(), "default", None, &Default::default())
-            .expect("project should compile");
+        let _project = crate::project::plan_sync(
+            &crate::fs::FileSystem::new(),
+            root.path(),
+            "default",
+            None,
+            &Default::default(),
+        )
+        .expect("project should compile");
         let cache = ProjectCache::open(root.path(), "default", None, &Default::default())
             .expect("cache should open")
             .expect("cache DB should exist");
@@ -777,8 +795,14 @@ mod tests {
         .unwrap();
         write_project_toml(root.path());
 
-        let _project = crate::project::plan_sync(root.path(), "default", None, &Default::default())
-            .expect("project should compile");
+        let _project = crate::project::plan_sync(
+            &crate::fs::FileSystem::new(),
+            root.path(),
+            "default",
+            None,
+            &Default::default(),
+        )
+        .expect("project should compile");
         let cache = ProjectCache::open(root.path(), "default", None, &Default::default())
             .expect("cache should open")
             .expect("cache DB should exist");

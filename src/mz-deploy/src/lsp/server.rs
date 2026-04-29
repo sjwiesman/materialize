@@ -53,12 +53,20 @@ use crate::project_cache::ProjectCache;
 use crate::types;
 use ropey::Rope;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
+
+/// How long to wait after the last keystroke before kicking off an idle
+/// rebuild. Long enough that rapid typing doesn't run repeated rebuilds,
+/// short enough that the user sees diagnostics promptly after pausing.
+const IDLE_REBUILD_DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// Resolve the default profile name for LSP operations.
 ///
@@ -88,7 +96,17 @@ fn try_open_project_cache(
 }
 
 /// LSP backend holding session state.
+///
+/// `Backend` is a cheap-to-clone handle around an [`Arc<BackendInner>`].
+/// Cloning is the standard way to capture state in spawned tokio tasks (e.g.
+/// the debounced rebuild scheduler). Field access goes through `Deref` so
+/// existing `self.documents.lock()` patterns work unchanged.
+#[derive(Clone)]
 pub(super) struct Backend {
+    inner: Arc<BackendInner>,
+}
+
+pub(super) struct BackendInner {
     /// Client handle for sending notifications (e.g., diagnostics).
     client: Client,
     /// Per-file text ropes, keyed by document URI.
@@ -107,21 +125,41 @@ pub(super) struct Backend {
     variables: RwLock<BTreeMap<String, String>>,
     /// Name of the active profile (for hover display).
     profile_name: RwLock<String>,
+    /// Monotonic edit version. Bumps on every signal that should cause a
+    /// rebuild (didChange, didSave, didChangeWatchedFiles, initialized).
+    edit_version: AtomicU64,
+    /// Highest edit version a published rebuild was based on. A rebuild only
+    /// runs if `edit_version > rebuilt_through`.
+    rebuilt_through: AtomicU64,
+    /// Serializes rebuild execution: at most one rebuild runs at a time.
+    rebuild_lock: Mutex<()>,
+}
+
+impl Deref for Backend {
+    type Target = BackendInner;
+    fn deref(&self) -> &BackendInner {
+        &self.inner
+    }
 }
 
 impl Backend {
     /// Create a new backend with the given LSP client handle and project root.
     pub(super) fn new_with_root(client: Client, root: PathBuf) -> Self {
         Self {
-            client,
-            documents: Mutex::new(BTreeMap::new()),
-            project_cache: Mutex::new(None),
-            parse_diagnostics: Mutex::new(BTreeMap::new()),
-            project_diagnostics: Mutex::new(BTreeMap::new()),
-            root: RwLock::new(root),
-            settings: RwLock::new(None),
-            variables: RwLock::new(BTreeMap::new()),
-            profile_name: RwLock::new("default".to_string()),
+            inner: Arc::new(BackendInner {
+                client,
+                documents: Mutex::new(BTreeMap::new()),
+                project_cache: Mutex::new(None),
+                parse_diagnostics: Mutex::new(BTreeMap::new()),
+                project_diagnostics: Mutex::new(BTreeMap::new()),
+                root: RwLock::new(root),
+                settings: RwLock::new(None),
+                variables: RwLock::new(BTreeMap::new()),
+                profile_name: RwLock::new("default".to_string()),
+                edit_version: AtomicU64::new(0),
+                rebuilt_through: AtomicU64::new(0),
+                rebuild_lock: Mutex::new(()),
+            }),
         }
     }
 
@@ -197,6 +235,26 @@ impl Backend {
         self.client.publish_diagnostics(uri, merged, None).await;
     }
 
+    /// Snapshot the open-document map into a [`FileSystem`] overlay.
+    ///
+    /// Each open document's URI is converted to an absolute filesystem path
+    /// and its rope is stringified into the overlay. URIs that don't resolve
+    /// to a `file://` path (e.g. `untitled:`) are skipped.
+    ///
+    /// At save time the overlay matches disk byte-for-byte (the save just
+    /// flushed). With idle rebuilds (Phase 3), the overlay carries unsaved
+    /// edits forward into the compiler.
+    async fn build_overlay(&self) -> crate::fs::FileSystem {
+        let docs = self.documents.lock().await;
+        let mut overlay = BTreeMap::new();
+        for (uri, rope) in docs.iter() {
+            if let Ok(path) = uri.to_file_path() {
+                overlay.insert(path, rope.to_string());
+            }
+        }
+        crate::fs::FileSystem::with_overlay(overlay)
+    }
+
     /// Snapshot document text and cursor context for a given position.
     ///
     /// Acquires the documents lock once and returns the full document text,
@@ -221,7 +279,38 @@ impl Backend {
         Some((text, byte_offset, parts))
     }
 
-    /// Rebuild the project model and types cache from disk.
+    /// Schedule a debounced rebuild after the next idle window.
+    ///
+    /// Each call bumps `edit_version` and spawns a task that, after
+    /// [`IDLE_REBUILD_DEBOUNCE`], calls [`maybe_rebuild`](Self::maybe_rebuild)
+    /// only if its captured version is still the latest — i.e. the user has
+    /// stopped typing. Sibling tasks from earlier keystrokes self-bail.
+    fn schedule_rebuild_after_idle(&self) {
+        let target = self.edit_version.fetch_add(1, Ordering::SeqCst) + 1;
+        let backend = self.clone();
+        mz_ore::task::spawn(|| "debounce", async move {
+            tokio::time::sleep(IDLE_REBUILD_DEBOUNCE).await;
+            if backend.edit_version.load(Ordering::SeqCst) != target {
+                // A newer keystroke has scheduled (or will schedule) its own task.
+                return;
+            }
+            backend.maybe_rebuild().await;
+        });
+    }
+
+    /// Run a rebuild if the buffer has moved past the last published version,
+    /// serializing concurrent triggers through `rebuild_lock`.
+    ///
+    /// Concurrency invariants:
+    /// - At most one rebuild executes at a time (mutex).
+    /// - Each rebuild captures `edit_version` under the lock, so its overlay
+    ///   snapshot is consistent with `started_against`.
+    /// - If the buffer changes during the rebuild, the publish step is
+    ///   skipped and `rebuilt_through` is *not* advanced — the next trigger
+    ///   will rebuild against the newer version.
+    /// - Redundant triggers (no edits since the last published rebuild)
+    ///   skip the pipeline via the `started_against <= rebuilt_through`
+    ///   check.
     ///
     /// Runs validation and (on success) typechecking, merges their diagnostics,
     /// and applies the resulting publish/clear actions via the LSP client.
@@ -230,7 +319,17 @@ impl Backend {
     /// succeeded — this keeps hover/goto/find-references usable against the
     /// last-known-good state even while the user has a temporary error in
     /// their working tree.
-    async fn rebuild_project(&self) {
+    async fn maybe_rebuild(&self) {
+        if self.edit_version.load(Ordering::SeqCst) <= self.rebuilt_through.load(Ordering::SeqCst) {
+            return;
+        }
+        let _guard = self.rebuild_lock.lock().await;
+        let started_against = self.edit_version.load(Ordering::SeqCst);
+        if started_against <= self.rebuilt_through.load(Ordering::SeqCst) {
+            // Another rebuild covered this version while we waited for the lock.
+            return;
+        }
+
         self.load_settings().await;
         let root = self.root.read().await.clone();
         let (profile, profile_suffix, variables) = {
@@ -249,13 +348,14 @@ impl Backend {
             }
         };
 
+        let fs = self.build_overlay().await;
         let build_result =
-            project::plan_sync(&root, &profile, profile_suffix.as_deref(), &variables);
+            project::plan_sync(&fs, &root, &profile, profile_suffix.as_deref(), &variables);
 
         // Extract validation diagnostics from the build result (pure).
         let mut new_diagnostics = match &build_result {
             Err(ProjectError::Validation(ValidationErrors { errors })) => {
-                diagnostics::validation_diagnostics(errors)
+                diagnostics::validation_diagnostics(&fs, errors)
             }
             _ => BTreeMap::new(),
         };
@@ -287,7 +387,7 @@ impl Backend {
                 )
                 .await
             {
-                let tc_diags = diagnostics::typecheck_diagnostics(&tc_err);
+                let tc_diags = diagnostics::typecheck_diagnostics(&fs, &tc_err);
                 if tc_diags.is_empty() {
                     self.client
                         .log_message(MessageType::ERROR, format!("Typecheck failed: {tc_err}"))
@@ -298,6 +398,27 @@ impl Backend {
                     }
                 }
             }
+        }
+
+        // Open the long-lived ProjectCache SQLite connection the first time
+        // the DB file is present. `try_open_project_cache` returns `None` when
+        // the file doesn't exist, so it's safe to attempt this even when the
+        // build failed — we still want hover/goto to work against any
+        // previously-written rows. Done unconditionally because it's
+        // idempotent and useful even for stale rebuilds.
+        {
+            let mut guard = self.project_cache.lock().await;
+            if guard.is_none() {
+                *guard =
+                    try_open_project_cache(&root, &profile, profile_suffix.as_deref(), &variables);
+            }
+        }
+
+        // Generation guard: drop stale results if the buffer changed during
+        // the rebuild. The next trigger will rebuild against the newer
+        // version; do not advance `rebuilt_through`.
+        if self.edit_version.load(Ordering::SeqCst) != started_against {
+            return;
         }
 
         // Convert path-keyed map to URI-keyed map; drop entries whose paths
@@ -312,7 +433,11 @@ impl Backend {
         // new (so fresh project diagnostics appear).
         let to_republish: BTreeSet<Url> = {
             let mut guard = self.project_diagnostics.lock().await;
-            let union: BTreeSet<Url> = guard.keys().chain(new_project_diags.keys()).cloned().collect();
+            let union: BTreeSet<Url> = guard
+                .keys()
+                .chain(new_project_diags.keys())
+                .cloned()
+                .collect();
             *guard = new_project_diags;
             union
         };
@@ -321,18 +446,8 @@ impl Backend {
             self.publish_merged(uri).await;
         }
 
-        // Open the long-lived ProjectCache SQLite connection the first time
-        // the DB file is present. `try_open_project_cache` returns `None` when
-        // the file doesn't exist, so it's safe to attempt this even when the
-        // build failed — we still want hover/goto to work against any
-        // previously-written rows.
-        {
-            let mut guard = self.project_cache.lock().await;
-            if guard.is_none() {
-                *guard =
-                    try_open_project_cache(&root, &profile, profile_suffix.as_deref(), &variables);
-            }
-        }
+        self.rebuilt_through
+            .store(started_against, Ordering::SeqCst);
     }
 
     /// Run compiler-owned typechecking.
@@ -412,7 +527,8 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.rebuild_project().await;
+        self.edit_version.fetch_add(1, Ordering::SeqCst);
+        self.maybe_rebuild().await;
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -428,15 +544,25 @@ impl LanguageServer for Backend {
         if let Some(change) = params.content_changes.into_iter().last() {
             self.publish_diagnostics(params.text_document.uri, &change.text)
                 .await;
+            self.schedule_rebuild_after_idle();
         }
     }
 
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let uri = params.text_document.uri;
+        self.documents.lock().await.remove(&uri);
+        self.parse_diagnostics.lock().await.remove(&uri);
+        self.publish_merged(uri).await;
+    }
+
     async fn did_save(&self, _params: DidSaveTextDocumentParams) {
-        self.rebuild_project().await;
+        self.edit_version.fetch_add(1, Ordering::SeqCst);
+        self.maybe_rebuild().await;
     }
 
     async fn did_change_watched_files(&self, _params: DidChangeWatchedFilesParams) {
-        self.rebuild_project().await;
+        self.edit_version.fetch_add(1, Ordering::SeqCst);
+        self.maybe_rebuild().await;
     }
 
     async fn goto_definition(
@@ -708,7 +834,7 @@ mod tests {
             )
             .await;
         });
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
             let _ = tokio::join!(t1, t2);
         })
         .await;

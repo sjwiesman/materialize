@@ -246,7 +246,8 @@ mod run_tests {
             "CREATE VIEW v1 AS SELECT a FROM materialize.storage.t1",
         );
 
-        let project = compile_sync(root, "default", None, &BTreeMap::new()).unwrap();
+        let fs = crate::fs::FileSystem::new();
+        let project = compile_sync(&fs, root, "default", None, &BTreeMap::new()).unwrap();
         let merged = run(
             root,
             "default",

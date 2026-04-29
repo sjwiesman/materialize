@@ -266,12 +266,14 @@ enum ObjectPlanResult {
 /// See [`compile_sync_with_stats`] for the detailed pipeline and cache
 /// behavior.
 pub(crate) fn compile_sync<P: AsRef<Path>>(
+    fs: &crate::fs::FileSystem,
     root: P,
     profile: &str,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
 ) -> Result<graph::Project, ProjectError> {
-    compile_sync_with_stats(root, profile, profile_suffix, variables).map(|(project, _)| project)
+    compile_sync_with_stats(fs, root, profile, profile_suffix, variables)
+        .map(|(project, _)| project)
 }
 
 /// Internal entry point that returns compile statistics alongside the project.
@@ -291,6 +293,7 @@ pub(crate) fn compile_sync<P: AsRef<Path>>(
 /// 5. **Build graph** — run cross-object validation, dependency extraction,
 ///    and topological analysis to produce the final [`graph::Project`].
 fn compile_sync_with_stats<P: AsRef<Path>>(
+    fs: &crate::fs::FileSystem,
     root: P,
     profile: &str,
     profile_suffix: Option<&str>,
@@ -299,7 +302,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
     let root = root.as_ref();
     let mut db =
         BuildArtifact::open(root, profile, profile_suffix, variables).map_err(LoadError::from)?;
-    let discovery = discover_project(root, profile_suffix, variables, &mut db)?;
+    let discovery = discover_project(fs, root, profile_suffix, variables, &mut db)?;
 
     let variant_paths: BTreeSet<PathBuf> = discovery
         .object_descriptors
@@ -312,7 +315,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
         })
         .collect();
     let file_hashes: BTreeMap<PathBuf, String> = db
-        .load_file_entries(&variant_paths, false)
+        .load_file_entries(fs, &variant_paths, false)
         .map_err(LoadError::from)?
         .into_iter()
         .map(|(path, entry)| (path, entry.content_hash))
@@ -374,7 +377,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
             })
             .collect();
         let miss_file_entries = db
-            .load_file_entries(&miss_paths, true)
+            .load_file_entries(fs, &miss_paths, true)
             .map_err(LoadError::from)?;
         let results: Vec<ObjectCompileResult> = misses
             .into_par_iter()
@@ -493,6 +496,7 @@ fn build_cluster_name_map(
 ///
 /// Returns a [`Discovery`] or fails with accumulated validation errors.
 fn discover_project(
+    fs: &crate::fs::FileSystem,
     root: &Path,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
@@ -545,6 +549,7 @@ fn discover_project(
 
         let db_mod_path = models_dir.join(format!("{}.sql", original_db_name));
         let db_mod_statements = parse_mod_statements(
+            fs,
             &db_mod_path,
             &original_db_name,
             profile_suffix,
@@ -580,6 +585,7 @@ fn discover_project(
             let schema_name = schema_entry.file_name().to_string_lossy().to_string();
             let schema_mod_path = db_path.join(format!("{}.sql", schema_name));
             let mut schema_mod_statements = parse_mod_statements(
+                fs,
                 &schema_mod_path,
                 &original_db_name,
                 profile_suffix,
@@ -650,6 +656,7 @@ fn discover_project(
 /// This is safer than raw text substitution because it only touches identifier
 /// nodes, not string literals or comments.
 fn parse_mod_statements(
+    fs: &crate::fs::FileSystem,
     path: &Path,
     original_db_name: &str,
     profile_suffix: Option<&str>,
@@ -661,7 +668,7 @@ fn parse_mod_statements(
     }
 
     let mut entries = db
-        .load_file_entries(&BTreeSet::from([path.to_path_buf()]), true)
+        .load_file_entries(fs, &BTreeSet::from([path.to_path_buf()]), true)
         .map_err(LoadError::from)?;
     let sql = entries
         .remove(path)
