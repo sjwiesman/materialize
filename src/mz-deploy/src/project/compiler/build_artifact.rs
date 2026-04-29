@@ -366,13 +366,23 @@ impl BuildArtifact {
                     sql_text TEXT NOT NULL,
                     PRIMARY KEY (database, schema, position)
                 );
-                INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '6');
                 ",
             )
             .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
-            })
+            })?;
+
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
+                params![SCHEMA_VERSION.to_string()],
+            )
+            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?;
+        Ok(())
     }
 
     /// Load file metadata and content hashes for the requested source paths.

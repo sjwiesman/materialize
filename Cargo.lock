@@ -6328,11 +6328,10 @@ dependencies = [
 
 [[package]]
 name = "mz-deploy"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-stream",
  "async-trait",
- "aws-config",
  "aws-sdk-secretsmanager",
  "bincode",
  "chrono",

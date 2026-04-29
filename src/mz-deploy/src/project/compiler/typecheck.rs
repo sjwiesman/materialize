@@ -28,7 +28,7 @@ mod convert;
 mod error;
 mod executor;
 
-pub(crate) use error::{ObjectTypeCheckError, TypeCheckError};
+pub(crate) use error::{ObjectTypeCheckError, ObjectTypeCheckErrorKind, TypeCheckError};
 
 /// Full-typecheck entrypoint.
 ///
@@ -172,7 +172,16 @@ pub(crate) fn run(
                 upsert_rows.push((node_id.to_string(), kind.as_str().to_string(), columns));
             }
             executor::NodeOutcome::Failed(err) => {
-                errors.push(err.clone());
+                // The catalog only sees synthesized object names, not the
+                // real source path, so it stamps a placeholder
+                // `{db}/{schema}/{name}.sql`. Rewrite to the absolute
+                // source path so downstream consumers (LSP diagnostics,
+                // CLI output) can locate the actual file.
+                let mut err = err.clone();
+                if let Some(db_obj) = typed_objects.get(node_id) {
+                    err.file_path = directory.join(&db_obj.path);
+                }
+                errors.push(err);
             }
             executor::NodeOutcome::Blocked(blocker) => {
                 verbose!(
