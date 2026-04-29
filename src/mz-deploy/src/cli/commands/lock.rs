@@ -97,7 +97,9 @@ pub async fn run(settings: &Settings) -> Result<(), CliError> {
 
 /// Discover CREATE TABLE FROM SOURCE tables by compiling the project.
 fn discover_source_tables(settings: &Settings) -> Result<Vec<ObjectId>, CliError> {
+    let fs = crate::fs::FileSystem::new();
     let planned = crate::project::plan_sync(
+        &fs,
         &settings.directory,
         &settings.profile_name,
         settings.profile_suffix(),

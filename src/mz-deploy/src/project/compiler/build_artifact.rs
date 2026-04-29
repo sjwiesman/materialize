@@ -396,6 +396,7 @@ impl BuildArtifact {
     /// during the plan phase.
     pub(crate) fn load_file_entries(
         &mut self,
+        fs: &crate::fs::FileSystem,
         paths: &BTreeSet<PathBuf>,
         include_contents: bool,
     ) -> Result<BTreeMap<PathBuf, FileEntry>, BuildArtifactError> {
@@ -432,6 +433,29 @@ impl BuildArtifact {
 
         let mut results = BTreeMap::new();
         for path in paths {
+            // Overlay-covered paths bypass the disk-keyed content cache:
+            // disk size+mtime are unchanged while the in-memory buffer can
+            // differ, so a cache hit would serve stale disk bytes. Read the
+            // overlay content fresh, recompute its hash, and skip the
+            // upsert (the cache should reflect disk state for next session).
+            if fs.is_overlay(path) {
+                let contents = fs.read_to_string(path).map_err(|source| {
+                    BuildArtifactError::FileReadFailed {
+                        path: path.clone(),
+                        source,
+                    }
+                })?;
+                let content_hash = hex_digest(Sha256::digest(contents.as_bytes()));
+                results.insert(
+                    path.clone(),
+                    FileEntry {
+                        content_hash,
+                        contents: include_contents.then_some(contents),
+                    },
+                );
+                continue;
+            }
+
             let (size, mtime_ns) = file_metadata_signature(path)?;
 
             let row: Option<(i64, i64, String, Option<String>)> = select
@@ -455,7 +479,7 @@ impl BuildArtifact {
                         contents: Some(contents),
                     },
                     (true, None) => {
-                        let contents = fs::read_to_string(path).map_err(|source| {
+                        let contents = fs.read_to_string(path).map_err(|source| {
                             BuildArtifactError::FileReadFailed {
                                 path: path.clone(),
                                 source,
@@ -1349,7 +1373,8 @@ mod tests {
 
         let mut db = open_db(temp.path());
         let paths = BTreeSet::from([file.clone()]);
-        db.load_file_entries(&paths, false).unwrap();
+        let fs = crate::fs::FileSystem::new();
+        db.load_file_entries(&fs, &paths, false).unwrap();
         db.conn
             .execute(
                 "UPDATE file_state SET contents = NULL WHERE path = ?1",
@@ -1357,7 +1382,7 @@ mod tests {
             )
             .unwrap();
 
-        let entries = db.load_file_entries(&paths, true).unwrap();
+        let entries = db.load_file_entries(&fs, &paths, true).unwrap();
         assert_eq!(
             entries
                 .get(&file)

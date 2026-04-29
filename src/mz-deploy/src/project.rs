@@ -88,7 +88,10 @@ pub(crate) async fn plan(
 ) -> Result<ir::graph::Project, error::ProjectError> {
     mz_ore::task::spawn_blocking(
         || "project::plan",
-        move || plan_sync(root, &profile, profile_suffix.as_deref(), &variables),
+        move || {
+            let fs = crate::fs::FileSystem::new();
+            plan_sync(&fs, root, &profile, profile_suffix.as_deref(), &variables)
+        },
     )
     .await
 }
@@ -106,10 +109,11 @@ pub(crate) async fn plan(
 /// configuration, and the compile-time variable bindings. Cached artifacts may
 /// accelerate evaluation, but they do not change the result.
 pub(crate) fn plan_sync<P: AsRef<Path>>(
+    fs: &crate::fs::FileSystem,
     root: P,
     profile: &str,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
 ) -> Result<ir::graph::Project, error::ProjectError> {
-    compiler::compile_sync(root, profile, profile_suffix, variables)
+    compiler::compile_sync(fs, root, profile, profile_suffix, variables)
 }

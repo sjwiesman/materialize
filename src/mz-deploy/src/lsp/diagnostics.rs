@@ -26,6 +26,7 @@
 //!   diagnostic is positioned at the correct line/column. File-level errors
 //!   (e.g., missing CREATE statement) fall back to `(0, 0)`.
 
+use crate::fs::FileSystem;
 use crate::project::compiler::typecheck::{
     ObjectTypeCheckError, ObjectTypeCheckErrorKind, TypeCheckError,
 };
@@ -115,7 +116,10 @@ pub fn diagnose(
 /// Errors without an offset (file-level) fall back to `(0, 0)`.
 ///
 /// Returns an empty map when `errors` is empty.
-pub fn validation_diagnostics(errors: &[ValidationError]) -> BTreeMap<PathBuf, Vec<Diagnostic>> {
+pub(crate) fn validation_diagnostics(
+    fs: &FileSystem,
+    errors: &[ValidationError],
+) -> BTreeMap<PathBuf, Vec<Diagnostic>> {
     let mut map: BTreeMap<PathBuf, Vec<Diagnostic>> = BTreeMap::new();
     // Cache ropes per file so we only read each file once.
     let mut rope_cache: BTreeMap<PathBuf, Option<Rope>> = BTreeMap::new();
@@ -126,7 +130,7 @@ pub fn validation_diagnostics(errors: &[ValidationError]) -> BTreeMap<PathBuf, V
             let rope = rope_cache
                 .entry(error.context.file.clone())
                 .or_insert_with(|| {
-                    std::fs::read_to_string(&error.context.file)
+                    fs.read_to_string(&error.context.file)
                         .ok()
                         .map(|s| Rope::from_str(&s))
                 });
@@ -169,7 +173,10 @@ pub fn validation_diagnostics(errors: &[ValidationError]) -> BTreeMap<PathBuf, V
 /// Non-object variants (`DatabaseSetupError`, `SortError`,
 /// `TypesCacheWriteFailed`) have no per-file context and return an empty map;
 /// callers should log them to the client message stream instead.
-pub fn typecheck_diagnostics(error: &TypeCheckError) -> BTreeMap<PathBuf, Vec<Diagnostic>> {
+pub(crate) fn typecheck_diagnostics(
+    fs: &FileSystem,
+    error: &TypeCheckError,
+) -> BTreeMap<PathBuf, Vec<Diagnostic>> {
     let errors: &[ObjectTypeCheckError] = match error {
         TypeCheckError::TypeCheckFailed(e) => std::slice::from_ref(e),
         TypeCheckError::Multiple(errs) => errs.as_slice(),
@@ -184,7 +191,7 @@ pub fn typecheck_diagnostics(error: &TypeCheckError) -> BTreeMap<PathBuf, Vec<Di
     for e in errors {
         let entry = source_cache
             .entry(e.file_path.clone())
-            .or_insert_with(|| read_source(&e.file_path));
+            .or_insert_with(|| read_source(fs, &e.file_path));
         let range = locate_in_source(&e.kind, entry.as_ref());
 
         let mut message = e.error_message();
@@ -211,8 +218,8 @@ pub fn typecheck_diagnostics(error: &TypeCheckError) -> BTreeMap<PathBuf, Vec<Di
     map
 }
 
-fn read_source(path: &Path) -> Option<(String, Rope)> {
-    let text = std::fs::read_to_string(path).ok()?;
+fn read_source(fs: &FileSystem, path: &Path) -> Option<(String, Rope)> {
+    let text = fs.read_to_string(path).ok()?;
     let rope = Rope::from_str(&text);
     Some((text, rope))
 }
@@ -488,11 +495,9 @@ mod tests {
     #[test]
     fn typecheck_single_error_groups_by_file() {
         // Use a path that doesn't exist on disk → source read fails → range is (0,0).
-        let err = TypeCheckError::TypeCheckFailed(obj_err_internal(
-            "/nonexistent/proj/a.sql",
-            "boom",
-        ));
-        let map = typecheck_diagnostics(&err);
+        let err =
+            TypeCheckError::TypeCheckFailed(obj_err_internal("/nonexistent/proj/a.sql", "boom"));
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         assert_eq!(map.len(), 1);
         let diags = map.get(&PathBuf::from("/nonexistent/proj/a.sql")).unwrap();
         assert_eq!(diags.len(), 1);
@@ -509,16 +514,22 @@ mod tests {
             obj_err_internal("/nonexistent/b.sql", "second"),
             obj_err_internal("/nonexistent/a.sql", "third"),
         ]);
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get(&PathBuf::from("/nonexistent/a.sql")).unwrap().len(), 2);
-        assert_eq!(map.get(&PathBuf::from("/nonexistent/b.sql")).unwrap().len(), 1);
+        assert_eq!(
+            map.get(&PathBuf::from("/nonexistent/a.sql")).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            map.get(&PathBuf::from("/nonexistent/b.sql")).unwrap().len(),
+            1
+        );
     }
 
     #[test]
     fn typecheck_non_object_variants_return_empty() {
         let err = TypeCheckError::DatabaseSetupError("oops".into());
-        assert!(typecheck_diagnostics(&err).is_empty());
+        assert!(typecheck_diagnostics(&FileSystem::new(), &err).is_empty());
     }
 
     #[test]
@@ -534,7 +545,7 @@ mod tests {
             similar: Box::new([]),
         }));
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         let diag = &map.get(&path).unwrap()[0];
         // 'bogus' starts at byte 24, ends at 29.
         assert_eq!(diag.range.start, Position::new(0, 24));
@@ -544,15 +555,12 @@ mod tests {
     #[test]
     fn ambiguous_column_underlines_column() {
         let dir = tempdir().unwrap();
-        let path = write_fixture(
-            dir.path().join("v.sql"),
-            "SELECT shared FROM a, b",
-        );
+        let path = write_fixture(dir.path().join("v.sql"), "SELECT shared FROM a, b");
         let kind = ObjectTypeCheckErrorKind::Plan(Arc::new(PlanError::AmbiguousColumn(
             ColumnName::from("shared"),
         )));
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         let diag = &map.get(&path).unwrap()[0];
         // 'shared' starts at byte 7.
         assert_eq!(diag.range.start, Position::new(0, 7));
@@ -571,7 +579,7 @@ mod tests {
             arg_types: vec!["int4".to_string()],
         }));
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         let diag = &map.get(&path).unwrap()[0];
         // 'bogus_fn' starts at byte 24.
         assert_eq!(diag.range.start, Position::new(0, 24));
@@ -585,11 +593,10 @@ mod tests {
             dir.path().join("v.sql"),
             "CREATE VIEW v AS SELECT * FROM bogus_table",
         );
-        let kind = ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownItem(
-            "bogus_table".to_string(),
-        ));
+        let kind =
+            ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownItem("bogus_table".to_string()));
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         let diag = &map.get(&path).unwrap()[0];
         // 'bogus_table' starts at byte 31.
         assert_eq!(diag.range.start, Position::new(0, 31));
@@ -607,12 +614,15 @@ mod tests {
         let expected_pos = parser_err.error.pos as u32;
         let kind = ObjectTypeCheckErrorKind::Parser(parser_err);
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         let diag = &map.get(&path).unwrap()[0];
         // The diagnostic should land at the parser's reported byte offset.
         // Whatever offset the parser chose, it must be > 0 (the error is
         // not at the start of the input) and reflected in the diagnostic.
-        assert!(expected_pos > 0, "parser pos should be > 0, got {expected_pos}");
+        assert!(
+            expected_pos > 0,
+            "parser pos should be > 0, got {expected_pos}"
+        );
         assert_eq!(diag.range.start, Position::new(0, expected_pos));
     }
 
@@ -624,7 +634,7 @@ mod tests {
             "something happened".to_string(),
         )));
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         let diag = &map.get(&path).unwrap()[0];
         assert_eq!(diag.range.start, Position::new(0, 0));
         assert_eq!(diag.range.end, Position::new(0, 0));
@@ -633,17 +643,14 @@ mod tests {
     #[test]
     fn identifier_not_in_source_falls_back_to_zero() {
         let dir = tempdir().unwrap();
-        let path = write_fixture(
-            dir.path().join("v.sql"),
-            "CREATE VIEW v AS SELECT 1",
-        );
+        let path = write_fixture(dir.path().join("v.sql"), "CREATE VIEW v AS SELECT 1");
         let kind = ObjectTypeCheckErrorKind::Plan(Arc::new(PlanError::UnknownColumn {
             table: None,
             column: ColumnName::from("not_in_source"),
             similar: Box::new([]),
         }));
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         let diag = &map.get(&path).unwrap()[0];
         assert_eq!(diag.range.start, Position::new(0, 0));
     }
@@ -663,7 +670,7 @@ mod tests {
             similar: Box::new([]),
         }));
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         let diag = &map.get(&path).unwrap()[0];
         // 'id' as a standalone identifier is at byte 37 (after 'customer_id, ').
         assert_eq!(diag.range.start, Position::new(0, 37));
@@ -680,16 +687,13 @@ mod tests {
     #[test]
     fn message_includes_hint_from_catalog_error() {
         let dir = tempdir().unwrap();
-        let path = write_fixture(
-            dir.path().join("v.sql"),
-            "SELECT bogus_fn() FROM t",
-        );
+        let path = write_fixture(dir.path().join("v.sql"), "SELECT bogus_fn() FROM t");
         let kind = ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownFunction {
             name: "bogus_fn".to_string(),
             alternative: Some("real_fn".to_string()),
         });
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
-        let map = typecheck_diagnostics(&err);
+        let map = typecheck_diagnostics(&FileSystem::new(), &err);
         let diag = &map.get(&path).unwrap()[0];
         assert!(
             diag.message.contains("hint: Try using real_fn"),
