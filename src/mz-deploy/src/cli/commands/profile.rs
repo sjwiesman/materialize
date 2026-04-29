@@ -27,9 +27,46 @@
 
 use crate::cli::CliError;
 use crate::config::{ProfilesConfig, read_mzprofile, write_mzprofile};
-use crate::info;
+use crate::{info, log};
 use owo_colors::OwoColorize;
+use serde::Serialize;
+use std::fmt;
 use std::path::Path;
+
+/// Renderable result for `profile list`.
+#[derive(Serialize)]
+struct ProfileListing {
+    profiles: Vec<ProfileEntry>,
+
+    source: String,
+}
+
+#[derive(Serialize)]
+struct ProfileEntry {
+    name: String,
+    active: bool,
+}
+
+impl fmt::Display for ProfileListing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.profiles.is_empty() {
+            return write!(f, "No profiles found in {}", self.source);
+        }
+        let mut first = true;
+        for entry in &self.profiles {
+            if !first {
+                writeln!(f)?;
+            }
+            first = false;
+            if entry.active {
+                write!(f, "  {}  {}", entry.name.green(), "(active)".dimmed())?;
+            } else {
+                write!(f, "  {}", entry.name)?;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// List every profile defined in `profiles.toml` and mark the active one.
 pub fn list(
@@ -41,22 +78,18 @@ pub fn list(
     let active = resolve_active(directory, cli_profile)?;
     let names = profiles_config.profile_names();
 
-    if names.is_empty() {
-        info!(
-            "No profiles found in {}",
-            profiles_config.source_path().display()
-        );
-        return Ok(());
-    }
+    let profiles = names
+        .iter()
+        .map(|name| ProfileEntry {
+            name: (*name).to_string(),
+            active: active.as_deref() == Some(*name),
+        })
+        .collect();
 
-    for name in &names {
-        if active.as_deref() == Some(*name) {
-            info!("  {}  {}", name.green(), "(active)".dimmed());
-        } else {
-            info!("  {name}");
-        }
-    }
-
+    log::output(&ProfileListing {
+        profiles,
+        source: profiles_config.source_path().display().to_string(),
+    });
     Ok(())
 }
 
