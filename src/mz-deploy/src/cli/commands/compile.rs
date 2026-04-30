@@ -26,13 +26,13 @@
 //! are validated after typechecking (stage 5) once complete column metadata is
 //! available.
 
+use std::collections::{BTreeMap, BTreeSet};
 use crate::cli::CliError;
 use crate::cli::progress;
 use crate::config::Settings;
 use crate::project::ir::graph::{ModStatement, Project};
 use crate::project::ir::object_id::ObjectId;
 use crate::{project, timing, verbose};
-use std::fs::canonicalize;
 use std::time::{Duration, Instant};
 
 /// Compile and validate the project, showing the deployment plan.
@@ -91,11 +91,6 @@ fn run_inner(
     let start_time = Instant::now();
     let directory = &settings.directory;
 
-    if show_progress {
-        let path = canonicalize(settings.directory.as_path())?;
-        progress::stage_start(&format!("Loading project from: {}", path.display()));
-    }
-
     let parse_start = Instant::now();
     let fs = crate::fs::FileSystem::new();
     let planned_project = project::plan_sync(
@@ -109,56 +104,10 @@ fn run_inner(
     let parse_duration = parse_start.elapsed();
     timing!("project::plan", parse_duration);
 
-    let object_count: usize = planned_project
-        .databases
-        .iter()
-        .flat_map(|db| &db.schemas)
-        .map(|schema| schema.objects.len())
-        .sum();
-    let schema_count: usize = planned_project
-        .databases
-        .iter()
-        .map(|db| db.schemas.len())
-        .sum();
-
-    if show_progress {
-        progress::stage_success(
-            &format!("Found {} objects in {} schemas", object_count, schema_count),
-            parse_duration,
-        );
-    }
-
-    if show_progress {
-        progress::stage_start("Validating project structure");
-    }
     let validate_start = Instant::now();
-
     let sorted = planned_project.topological_sort()?;
     let validate_duration = validate_start.elapsed();
     timing!("topological_sort", validate_duration);
-
-    if show_progress {
-        progress::stage_success(
-            &format!("All {} objects validated", sorted.len()),
-            validate_duration,
-        );
-    }
-
-    if show_progress {
-        progress::stage_start("Building dependency graph");
-        if !planned_project.external_dependencies.is_empty() {
-            progress::info(&format!(
-                "{} external dependencies detected",
-                planned_project.external_dependencies.len()
-            ));
-        }
-        if !planned_project.cluster_dependencies.is_empty() {
-            progress::info(&format!(
-                "{} clusters required",
-                planned_project.cluster_dependencies.len()
-            ));
-        }
-    }
 
     let validation = project::analysis::deps::validate_dependencies(
         &settings.dependencies,
@@ -196,13 +145,7 @@ fn run_inner(
     validate_constraints_with_types(&planned_project, &types_lock, tc.as_ref())?;
 
     if !skip_typecheck {
-        let typecheck_duration = typecheck_project(settings, &planned_project, show_progress)?;
-
-        if show_progress {
-            if let Some(duration) = typecheck_duration {
-                progress::stage_success(&format!("{} objects passed", object_count), duration);
-            }
-        }
+        let _ = typecheck_project(settings, &planned_project)?;
 
         // Post-typecheck column validation: two-tier lookup (TypesCache then types_lock)
         {
@@ -256,14 +199,10 @@ fn run_inner(
 fn typecheck_project(
     settings: &Settings,
     planned_project: &Project,
-    show_progress: bool,
 ) -> Result<Option<Duration>, CliError> {
     let directory = &settings.directory;
     use crate::project::compiler::typecheck;
 
-    if show_progress {
-        progress::stage_start("Type checking");
-    }
     let typecheck_start = Instant::now();
 
     let external_types = crate::types::load_types_lock(directory).unwrap_or_default();
@@ -307,7 +246,7 @@ fn validate_constraints_with_types(
     }
 
     // Pre-typecheck column validation uses types_lock only
-    let column_map: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+    let column_map: BTreeMap<String, BTreeSet<String>> =
         types_lock
             .tables
             .iter()
@@ -332,7 +271,7 @@ fn validate_constraints_with_types(
 /// Returns IDs for both parent objects (that have constraints) and FK
 /// reference targets, enabling targeted column validation.
 fn collect_constraint_fqns(planned_project: &Project) -> Vec<ObjectId> {
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids = BTreeSet::new();
     for obj in planned_project.iter_objects() {
         if !obj.typed_object.constraints.is_empty() {
             ids.insert(obj.id.clone());

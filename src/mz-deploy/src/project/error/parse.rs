@@ -13,7 +13,6 @@
 //! from project files.
 
 use crate::project::syntax::variables::VariableError;
-use owo_colors::OwoColorize;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -43,69 +42,19 @@ pub enum ParseError {
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ParseError::SqlParseFailed { path, sql, source } => {
-                // Extract database/schema/file for path display
-                let path_components: Vec<_> = path.components().collect();
-                let len = path_components.len();
-
-                let relative_path = if len >= 3 {
-                    format!(
-                        "{}/{}/{}",
-                        path_components[len - 3].as_os_str().to_string_lossy(),
-                        path_components[len - 2].as_os_str().to_string_lossy(),
-                        path_components[len - 1].as_os_str().to_string_lossy()
-                    )
-                } else {
-                    path.display().to_string()
-                };
-
-                writeln!(f, "{}", source.error)?;
-
-                // Show file location: --> path
-                writeln!(f, " {} {}", "-->".bright_blue().bold(), relative_path)?;
-
-                // Show SQL content
-                writeln!(f, "  {}", "|".bright_blue().bold())?;
-                for line in sql.lines() {
-                    writeln!(f, "  {} {}", "|".bright_blue().bold(), line)?;
-                }
-                writeln!(f, "  {}", "|".bright_blue().bold())?;
-
-                Ok(())
-            }
-            ParseError::StatementsParseFailed { message } => {
-                write!(f, "{}", message)
-            }
+            ParseError::SqlParseFailed { source, .. } => write!(f, "{}", source.error),
+            ParseError::StatementsParseFailed { message } => write!(f, "{}", message),
             ParseError::UnresolvedVariables(inner) => {
-                writeln!(f, "unresolved variables in {}", inner.path.display())?;
-                let formatted: Vec<String> = inner
+                let names: Vec<String> = inner
                     .unresolved
                     .iter()
                     .map(|v| format!(":{}", v.name))
                     .collect();
-                writeln!(
-                    f,
-                    "  {}: {}",
-                    "undefined".bright_red(),
-                    formatted.join(", ")
-                )?;
-                if inner.profile_set {
-                    writeln!(
-                        f,
-                        "  {}: define these in [profiles.<name>.variables] in project.toml",
-                        "hint".bright_blue()
-                    )?;
-                } else {
-                    writeln!(
-                        f,
-                        "  {}: no profile is selected; run `mz-deploy profile set <name>` and define these in [profiles.<name>.variables] in project.toml",
-                        "hint".bright_blue()
-                    )?;
-                }
                 write!(
                     f,
-                    "  {}: if these are not variables, add -- PRAGMA WARN_ON_MISSING_VARIABLES; as the first line",
-                    "hint".bright_blue()
+                    "unresolved variables in {}: {}",
+                    inner.path.display(),
+                    names.join(", ")
                 )
             }
         }

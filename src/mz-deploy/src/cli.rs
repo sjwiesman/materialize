@@ -31,18 +31,28 @@ pub mod executor;
 pub mod extended_help;
 pub mod git;
 pub mod progress;
+mod render;
 
 pub use error::CliError;
 
 /// Display a CLI error and exit with status code 1.
 ///
-/// Formats the error using colored output with rustc-style formatting,
-/// including any hints provided by the error's `hint()` method.
+/// For errors that carry source positions (parse, validation, typecheck),
+/// emits rustc-style output with a caret under the offending token via
+/// [`annotate_snippets`]. Other errors fall back to plain `Display`. The
+/// optional [`CliError::hint`] is appended in either path.
 #[allow(clippy::print_stderr)]
 pub fn display_error(error: &CliError) {
     use owo_colors::OwoColorize;
 
-    eprintln!("{}: {}", "error".bright_red().bold(), error);
+    let positional = render::to_positional(error);
+    if positional.is_empty() {
+        eprintln!("{}: {}", "error".bright_red().bold(), error);
+    } else {
+        for pd in &positional {
+            eprintln!("{}", render::render(pd));
+        }
+    }
 
     if let Some(hint) = error.hint() {
         eprintln!(

@@ -14,8 +14,6 @@
 //! and constraint violations. Errors carry rich contextual information
 //! (file path, SQL statement) for user-friendly diagnostics.
 
-use owo_colors::OwoColorize;
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -51,46 +49,7 @@ pub struct ValidationError {
 
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Extract database/schema/file for path display
-        let path_components: Vec<_> = self.context.file.components().collect();
-        let len = path_components.len();
-
-        let relative_path = if len >= 3 {
-            format!(
-                "{}/{}/{}",
-                path_components[len - 3].as_os_str().to_string_lossy(),
-                path_components[len - 2].as_os_str().to_string_lossy(),
-                path_components[len - 1].as_os_str().to_string_lossy()
-            )
-        } else {
-            self.context.file.display().to_string()
-        };
-
-        writeln!(f, "{}", self.kind.message())?;
-
-        // Show file location: --> path
-        writeln!(f, " {} {}", "-->".bright_blue().bold(), relative_path)?;
-
-        // Add SQL statement if available
-        if let Some(ref sql) = self.context.sql_statement {
-            writeln!(f, "  {}", "|".bright_blue().bold())?;
-            for line in sql.lines() {
-                writeln!(f, "  {} {}", "|".bright_blue().bold(), line)?;
-            }
-            writeln!(f, "  {}", "|".bright_blue().bold())?;
-        }
-
-        // Add help text if available
-        if let Some(help) = self.kind.help() {
-            writeln!(
-                f,
-                "  {} {}",
-                "=".bright_blue().bold(),
-                format!("help: {}", help).bold()
-            )?;
-        }
-
-        Ok(())
+        write!(f, "{}", self.kind.message())
     }
 }
 
@@ -1205,73 +1164,17 @@ impl ValidationErrors {
 
 impl fmt::Display for ValidationErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.errors.is_empty() {
-            return Ok(());
-        }
-
-        // Group errors by file path
-        let mut grouped: BTreeMap<PathBuf, Vec<&ValidationError>> = BTreeMap::new();
         for error in &self.errors {
-            grouped
-                .entry(error.context.file.clone())
-                .or_default()
-                .push(error);
+            writeln!(f, "{}", error)?;
         }
-
-        // Display errors grouped by file (like rustc does)
-        for (file_path, errors) in grouped.iter() {
-            // Extract database/schema/file for path display
-            let path_components: Vec<_> = file_path.components().collect();
-            let len = path_components.len();
-
-            let relative_path = if len >= 3 {
-                format!(
-                    "{}/{}/{}",
-                    path_components[len - 3].as_os_str().to_string_lossy(),
-                    path_components[len - 2].as_os_str().to_string_lossy(),
-                    path_components[len - 1].as_os_str().to_string_lossy()
-                )
-            } else {
-                file_path.display().to_string()
-            };
-
-            // Display each error for this file
-            for error in errors {
-                writeln!(f, "{}", error.kind.message())?;
-
-                // Show file location: --> path
-                writeln!(f, " {} {}", "-->".bright_blue().bold(), relative_path)?;
-
-                // Add SQL statement if available
-                if let Some(ref sql) = error.context.sql_statement {
-                    writeln!(f, "  {}", "|".bright_blue().bold())?;
-                    for line in sql.lines() {
-                        writeln!(f, "  {} {}", "|".bright_blue().bold(), line)?;
-                    }
-                    writeln!(f, "  {}", "|".bright_blue().bold())?;
-                }
-
-                // Add help text if available
-                if let Some(help) = error.kind.help() {
-                    writeln!(
-                        f,
-                        "  {} {}",
-                        "=".bright_blue().bold(),
-                        format!("help: {}", help).bold()
-                    )?;
-                }
-
-                writeln!(f)?;
-            }
+        if !self.errors.is_empty() {
+            write!(
+                f,
+                "could not compile due to {} previous error{}",
+                self.errors.len(),
+                if self.errors.len() == 1 { "" } else { "s" }
+            )?;
         }
-
-        writeln!(
-            f,
-            "could not compile due to {} previous error{}",
-            self.errors.len(),
-            if self.errors.len() == 1 { "" } else { "s" }
-        )?;
-
         Ok(())
     }
 }

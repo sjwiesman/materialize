@@ -1,0 +1,251 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
+//! Rich CLI rendering for [`PositionalDiagnostic`]s.
+//!
+//! [`render`] turns one diagnostic into a styled [`annotate_snippets`] string.
+//! [`to_positional`] inspects a [`CliError`] and pulls out any positional
+//! diagnostics it carries so `display_error` can render rustc-quality output
+//! (caret under the offending token, file/line origin, optional help footer).
+//!
+//! Errors that don't carry source positions (configuration errors, network
+//! failures, etc.) return an empty `Vec`; the caller falls back to the plain
+//! [`std::fmt::Display`] path.
+
+use crate::cli::CliError;
+use crate::diagnostics::{PositionalDiagnostic, Severity};
+use crate::project::compiler::typecheck::{ObjectTypeCheckError, TypeCheckError};
+use crate::project::error::{ParseError, ProjectError, ValidationError, ValidationErrors};
+use annotate_snippets::{Level, Renderer, Snippet};
+
+/// Render a single [`PositionalDiagnostic`] to a styled string.
+///
+/// Includes a snippet block (with caret) when `pd.source` is non-empty;
+/// renders message-only otherwise. The optional `help` is shown as a footer.
+pub(crate) fn render(pd: &PositionalDiagnostic) -> String {
+    let level = match pd.severity {
+        Severity::Error => Level::Error,
+        Severity::Warning => Level::Warning,
+    };
+    let origin = origin_string(&pd.file);
+
+    let mut message = level.title(&pd.message);
+    if !pd.source.is_empty() {
+        let snippet = Snippet::source(&pd.source)
+            .origin(&origin)
+            .fold(true)
+            .annotation(level.span(clamped_range(pd)));
+        message = message.snippet(snippet);
+    }
+    if let Some(help) = &pd.help {
+        message = message.footer(Level::Help.title(help));
+    }
+
+    Renderer::styled().render(message).to_string()
+}
+
+/// Render `path` as a snippet origin, dropping redundant `./` components
+/// so paths like `././models/foo.sql` print as `models/foo.sql`.
+fn origin_string(path: &std::path::Path) -> String {
+    let trimmed: std::path::PathBuf = path
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect();
+    if trimmed.as_os_str().is_empty() {
+        path.display().to_string()
+    } else {
+        trimmed.display().to_string()
+    }
+}
+
+/// Clamp the byte range to `[0, source.len()]` so an out-of-bounds offset
+/// (e.g. a parser pos past EOF) doesn't panic inside annotate-snippets.
+fn clamped_range(pd: &PositionalDiagnostic) -> std::ops::Range<usize> {
+    let len = pd.source.len();
+    let start = pd.byte_range.start.min(len);
+    let end = pd.byte_range.end.min(len).max(start);
+    start..end
+}
+
+/// Extract any positional diagnostics carried by `error`.
+///
+/// Returns an empty `Vec` for errors that don't reference SQL source — those
+/// fall back to plain [`std::fmt::Display`] rendering at the call site.
+pub(crate) fn to_positional(error: &CliError) -> Vec<PositionalDiagnostic> {
+    match error {
+        CliError::Project(ProjectError::Parse(pe)) => parse_to_positional(pe),
+        CliError::Project(ProjectError::Validation(ves)) => validation_to_positional(ves),
+        CliError::TypeCheckFailed(tce) => typecheck_to_positional(tce),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_to_positional(error: &ParseError) -> Vec<PositionalDiagnostic> {
+    match error {
+        ParseError::SqlParseFailed { path, sql, source } => vec![PositionalDiagnostic {
+            severity: Severity::Error,
+            file: path.clone(),
+            source: sql.clone(),
+            byte_range: source.error.pos..source.error.pos,
+            message: source.error.message.clone(),
+            help: None,
+        }],
+        ParseError::StatementsParseFailed { .. } | ParseError::UnresolvedVariables(_) => {
+            Vec::new()
+        }
+    }
+}
+
+fn validation_to_positional(errors: &ValidationErrors) -> Vec<PositionalDiagnostic> {
+    errors
+        .errors
+        .iter()
+        .map(validation_error_to_positional)
+        .collect()
+}
+
+fn validation_error_to_positional(error: &ValidationError) -> PositionalDiagnostic {
+    let message = error.kind.message();
+    let help = error.kind.help();
+    let file = error.context.file.clone();
+
+    // Prefer the on-disk file content (so the byte_offset, which is
+    // file-relative, lines up with the rendered snippet). If the read
+    // fails, fall back to the cached sql_statement with a degenerate
+    // range — message and help still surface.
+    if let (Some(offset), Ok(source)) = (
+        error.context.byte_offset,
+        std::fs::read_to_string(&file),
+    ) {
+        return PositionalDiagnostic {
+            severity: Severity::Error,
+            file,
+            source,
+            byte_range: offset..offset,
+            message,
+            help,
+        };
+    }
+
+    PositionalDiagnostic {
+        severity: Severity::Error,
+        file,
+        source: error.context.sql_statement.clone().unwrap_or_default(),
+        byte_range: 0..0,
+        message,
+        help,
+    }
+}
+
+fn typecheck_to_positional(error: &TypeCheckError) -> Vec<PositionalDiagnostic> {
+    let errors: Vec<&ObjectTypeCheckError> = match error {
+        TypeCheckError::Multiple(es) => es.iter().collect(),
+        TypeCheckError::DatabaseSetupError(_)
+        | TypeCheckError::SortError(_)
+        | TypeCheckError::TypesCacheWriteFailed(_) => return Vec::new(),
+    };
+
+    errors.iter().map(|e| object_typecheck_to_positional(e)).collect()
+}
+
+fn object_typecheck_to_positional(error: &ObjectTypeCheckError) -> PositionalDiagnostic {
+    let source = std::fs::read_to_string(&error.file_path).unwrap_or_default();
+    let byte_range = crate::diagnostics::locate_typecheck(&error.kind, &source).unwrap_or(0..0);
+
+    let mut message = error.error_message();
+    if let Some(detail) = error.detail() {
+        message.push_str("\ndetail: ");
+        message.push_str(&detail);
+    }
+
+    PositionalDiagnostic {
+        severity: Severity::Error,
+        file: error.file_path.clone(),
+        source,
+        byte_range,
+        message,
+        help: error.hint(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn pd(source: &str, range: std::ops::Range<usize>, message: &str) -> PositionalDiagnostic {
+        PositionalDiagnostic {
+            severity: Severity::Error,
+            file: PathBuf::from("test.sql"),
+            source: source.to_string(),
+            byte_range: range,
+            message: message.to_string(),
+            help: None,
+        }
+    }
+
+    #[test]
+    fn render_includes_message_and_origin() {
+        let out = render(&pd("SELECT bogus", 7..12, "unknown column"));
+        assert!(out.contains("unknown column"));
+        assert!(out.contains("test.sql"));
+    }
+
+    #[test]
+    fn render_message_only_when_source_empty() {
+        let out = render(&pd("", 0..0, "missing CREATE statement"));
+        assert!(out.contains("missing CREATE statement"));
+        // No snippet block → no origin pointer.
+        assert!(!out.contains("test.sql"));
+    }
+
+    #[test]
+    fn render_with_help_footer() {
+        let mut diag = pd("SELECT 1", 7..8, "type mismatch");
+        diag.help = Some("convert with CAST".to_string());
+        let out = render(&diag);
+        assert!(out.contains("type mismatch"));
+        assert!(out.contains("convert with CAST"));
+    }
+
+    #[test]
+    fn clamped_range_caps_at_source_len() {
+        let diag = pd("abc", 100..200, "out of range");
+        let r = clamped_range(&diag);
+        assert_eq!(r, 3..3);
+    }
+
+    #[test]
+    fn clamped_range_preserves_in_bounds() {
+        let diag = pd("abcdef", 1..4, "ok");
+        let r = clamped_range(&diag);
+        assert_eq!(r, 1..4);
+    }
+
+    #[test]
+    fn origin_string_strips_curdir() {
+        assert_eq!(
+            origin_string(std::path::Path::new("././models/app/foo.sql")),
+            "models/app/foo.sql"
+        );
+    }
+
+    #[test]
+    fn origin_string_preserves_absolute() {
+        assert_eq!(
+            origin_string(std::path::Path::new("/abs/models/foo.sql")),
+            "/abs/models/foo.sql"
+        );
+    }
+
+    #[test]
+    fn origin_string_preserves_bare_curdir() {
+        assert_eq!(origin_string(std::path::Path::new(".")), ".");
+    }
+}
