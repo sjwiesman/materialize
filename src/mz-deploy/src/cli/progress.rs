@@ -83,20 +83,34 @@ pub fn error(message: &str) {
     info!("  {} {}", "✗".red(), message);
 }
 
-/// Print a final summary message with green checkmark and total duration.
+/// Print a cargo-style action line: a 12-column right-aligned bold-green
+/// verb followed by `message`.
 ///
 /// # Example
 /// ```ignore
-/// summary("Project successfully compiled", Duration::from_secs(3));
-/// // Output: ✓ Project successfully compiled in 3.0s
+/// action("Compiling", "/tmp/project");
+/// // Output:    Compiling /tmp/project
 /// ```
-pub fn summary(message: &str, duration: Duration) {
-    let seconds = duration.as_secs_f64();
+pub fn action(verb: &str, message: &str) {
     info!(
-        "{} {} {}",
-        "✓".green().bold(),
-        message,
-        format!("in {}s", format_duration(seconds)).dimmed()
+        "{} {}",
+        format!("{:>12}", verb).bright_green().bold(),
+        message
+    );
+}
+
+/// Print a cargo-style "Finished" line for `action_name` after `duration`.
+///
+/// # Example
+/// ```ignore
+/// finished("compile", Duration::from_millis(80));
+/// // Output:     Finished compile in 0.08s
+/// ```
+pub fn finished(action_name: &str, duration: Duration) {
+    let seconds = duration.as_secs_f64();
+    action(
+        "Finished",
+        &format!("{} in {}s", action_name, format_duration(seconds)),
     );
 }
 

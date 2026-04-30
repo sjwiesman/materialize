@@ -48,7 +48,38 @@ pub(crate) struct PositionalDiagnostic {
     /// for caret-style positions.
     pub byte_range: Range<usize>,
     pub message: String,
-    pub help: Option<String>,
+    /// Plain help lines shown beneath the snippet.
+    pub footers: Vec<String>,
+    /// Structured replacement suggestions. Each renders as its own help
+    /// section with the patch shown inline (rustc-style "did you mean").
+    pub suggestions: Vec<Suggestion>,
+}
+
+/// One or more interchangeable replacements offered under a single help
+/// title. Renders as a rustc-style multi-suggestion block:
+///
+/// ```text
+/// help: did you mean one of these?
+///   |
+/// 4 -     custoser_name,
+/// 4 +     customer_id,
+///   |
+/// 4 -     custoser_name,
+/// 4 +     customer_name,
+///   |
+/// ```
+#[derive(Debug, Clone)]
+pub(crate) struct Suggestion {
+    pub label: String,
+    pub alternatives: Vec<Replacement>,
+}
+
+/// A single replacement: substitute `byte_range` of the source with
+/// `replacement`.
+#[derive(Debug, Clone)]
+pub(crate) struct Replacement {
+    pub byte_range: Range<usize>,
+    pub replacement: String,
 }
 
 /// Locate the byte range a typecheck error points at within `source`.

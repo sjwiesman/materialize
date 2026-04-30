@@ -110,7 +110,8 @@ fn parse_positional(
             source: text.to_string(),
             byte_range: uv.byte_offset..(uv.byte_offset + uv.byte_len),
             message,
-            help: None,
+            footers: Vec::new(),
+            suggestions: Vec::new(),
         });
     }
 
@@ -122,7 +123,8 @@ fn parse_positional(
             source: text.to_string(),
             byte_range: original_offset..original_offset,
             message: e.error.message.clone(),
-            help: None,
+            footers: Vec::new(),
+            suggestions: Vec::new(),
         });
     }
 
@@ -157,7 +159,8 @@ pub(crate) fn validation_diagnostics(
                     source: source.clone(),
                     byte_range: offset..offset,
                     message: error.kind.message(),
-                    help: None,
+                    footers: Vec::new(),
+                    suggestions: Vec::new(),
                 };
                 to_lsp(&pd, rope)
             }
@@ -227,7 +230,8 @@ pub(crate) fn typecheck_diagnostics(
                     source: source.clone(),
                     byte_range,
                     message,
-                    help: None,
+                    footers: Vec::new(),
+                    suggestions: Vec::new(),
                 };
                 to_lsp(&pd, rope)
             }
