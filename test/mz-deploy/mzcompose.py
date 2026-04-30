@@ -74,6 +74,7 @@ def run_mz_deploy(
     project_name: str,
     *args: str,
     check: bool = True,
+    set_default_profile: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     create_profiles(c)
     binary = MZ_ROOT / "target" / "debug" / "mz-deploy"
@@ -82,10 +83,15 @@ def run_mz_deploy(
     # Seed the per-project default-profile pointer (equivalent of
     # `mz-deploy profile set default`). Tests that want a non-default profile
     # still pass `--profile <name>` in `args`, which takes precedence over
-    # the file.
+    # the file. Tests exercising the no-profile code path pass
+    # `set_default_profile=False` and ensure `.mzprofile` is absent.
     mzprofile = project_dir / ".mzprofile"
-    if not mzprofile.exists():
+    if set_default_profile and not mzprofile.exists():
         mzprofile.write_text("default\n")
+
+    # MZ_DEPLOY_PROFILE in the parent env would defeat the no-profile path.
+    env = os.environ.copy()
+    env.pop("MZ_DEPLOY_PROFILE", None)
 
     cmd = [
         str(binary),
@@ -95,7 +101,7 @@ def run_mz_deploy(
         str(PROJECTS_DIR),
         *args,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if result.returncode != 0:
         print(f"mz-deploy stdout: {result.stdout}", file=sys.stderr)
         print(f"mz-deploy stderr: {result.stderr}", file=sys.stderr)
@@ -869,6 +875,76 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert (
             "undefined_var" in combined
         ), f"Expected error to mention 'undefined_var', got: {combined}"
+
+    with c.test_case("mz-deploy-compile-no-profile"):
+        # `compile` works without an active profile when the project doesn't
+        # reference any psql-style variables. No `.mzprofile`, no `--profile`,
+        # no MZ_DEPLOY_PROFILE — just compile.
+        result = run_mz_deploy(c, "no-profile/v1", "compile", set_default_profile=False)
+        assert (
+            result.returncode == 0
+        ), f"Expected compile without profile to succeed, got rc={result.returncode} stderr={result.stderr}"
+
+    with c.test_case("mz-deploy-explain-no-profile"):
+        # `explain` similarly works without a profile.  It still rejects views
+        # (only materialized views are explainable), so we just check that
+        # profile resolution itself doesn't block the command.
+        result = run_mz_deploy(
+            c,
+            "no-profile/v1",
+            "explain",
+            "app.views.foo",
+            check=False,
+            set_default_profile=False,
+        )
+        combined = result.stdout + result.stderr
+        assert (
+            "no profile selected" not in combined
+        ), f"Expected explain to bypass profile resolution, got: {combined}"
+
+    with c.test_case("mz-deploy-no-profile-with-variable"):
+        # When a project references a variable and no profile is selected,
+        # compile fails with a hint pointing the user at `mz-deploy profile set`
+        # rather than the generic [profiles.<name>.variables] hint.
+        result = run_mz_deploy(
+            c,
+            "no-profile-var/v1",
+            "compile",
+            check=False,
+            set_default_profile=False,
+        )
+        assert (
+            result.returncode != 0
+        ), f"Expected compile to fail when variable is unresolved, got rc={result.returncode}"
+        combined = result.stdout + result.stderr
+        assert (
+            "env_id" in combined
+        ), f"Expected error to mention ':env_id', got: {combined}"
+        assert (
+            "no profile is selected" in combined
+        ), f"Expected 'no profile is selected' hint, got: {combined}"
+        assert (
+            "mz-deploy profile set" in combined
+        ), f"Expected hint to suggest `mz-deploy profile set`, got: {combined}"
+
+    with c.test_case("mz-deploy-connection-cmd-still-requires-profile"):
+        # Connection-requiring commands must still hard-error when no profile
+        # is set.  `lock` is the simplest such command that doesn't depend on
+        # prior `apply` state.
+        result = run_mz_deploy(
+            c,
+            "no-profile/v1",
+            "lock",
+            check=False,
+            set_default_profile=False,
+        )
+        assert (
+            result.returncode != 0
+        ), f"Expected lock to fail without a profile, got rc={result.returncode}"
+        combined = result.stdout + result.stderr
+        assert (
+            "no profile selected" in combined
+        ), f"Expected 'no profile selected' error, got: {combined}"
 
     with c.test_case("mz-deploy-constraints"):
         # ════════════════════════════════════════════════════════════
