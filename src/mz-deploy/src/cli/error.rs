@@ -525,10 +525,7 @@ impl CliError {
                  Run 'mz-deploy compile' to regenerate the type cache if needed"
                     .to_string(),
             ),
-            Self::TypeCheckFailed(_) => Some(
-                "review the type checking errors above and fix any SQL syntax or dependency issues"
-                    .to_string(),
-            ),
+            Self::TypeCheckFailed(_) => None,
             Self::ReadyTimeout { .. } => Some(
                 "deployment is taking longer than expected to hydrate. You can:\n  \
                  - Increase timeout with --timeout flag\n  \

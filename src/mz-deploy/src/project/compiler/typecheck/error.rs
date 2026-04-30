@@ -14,7 +14,6 @@ use crate::types::TypesError;
 use mz_sql::catalog::CatalogError;
 use mz_sql::plan::PlanError;
 use mz_sql_parser::parser::ParserStatementError;
-use owo_colors::OwoColorize;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,8 +22,6 @@ use thiserror::Error;
 /// Errors that can occur during runtime typechecking.
 #[derive(Debug, Error)]
 pub enum TypeCheckError {
-    #[error(transparent)]
-    TypeCheckFailed(#[from] ObjectTypeCheckError),
 
     #[error("{}", format_multiple(.0))]
     Multiple(Vec<ObjectTypeCheckError>),
@@ -63,7 +60,6 @@ fn format_multiple(errors: &[ObjectTypeCheckError]) -> String {
 pub struct ObjectTypeCheckError {
     pub object_id: ObjectId,
     pub file_path: PathBuf,
-    pub sql_statement: String,
     pub kind: ObjectTypeCheckErrorKind,
 }
 
@@ -94,7 +90,6 @@ impl ObjectTypeCheckError {
         Self {
             object_id,
             file_path,
-            sql_statement: String::new(),
             kind: ObjectTypeCheckErrorKind::Internal(error_message),
         }
     }
@@ -132,54 +127,7 @@ impl ObjectTypeCheckError {
 
 impl fmt::Display for ObjectTypeCheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let path_components: Vec<_> = self.file_path.components().collect();
-        let len = path_components.len();
-        let relative_path = if len >= 3 {
-            format!(
-                "{}/{}/{}",
-                path_components[len - 3].as_os_str().to_string_lossy(),
-                path_components[len - 2].as_os_str().to_string_lossy(),
-                path_components[len - 1].as_os_str().to_string_lossy()
-            )
-        } else {
-            self.file_path.display().to_string()
-        };
-
-        writeln!(f, "type check failed for '{}'", self.object_id)?;
-        writeln!(f, " {} {}", "-->".bright_blue().bold(), relative_path)?;
-        writeln!(f)?;
-
-        let lines: Vec<_> = self.sql_statement.lines().collect();
-        writeln!(f, "  {}", "|".bright_blue().bold())?;
-        for (idx, line) in lines.iter().take(10).enumerate() {
-            writeln!(f, "  {} {}", "|".bright_blue().bold(), line)?;
-            if idx == 9 && lines.len() > 10 {
-                writeln!(
-                    f,
-                    "  {} ... ({} more lines)",
-                    "|".bright_blue().bold(),
-                    lines.len() - 10
-                )?;
-                break;
-            }
-        }
-        writeln!(f, "  {}", "|".bright_blue().bold())?;
-        writeln!(f)?;
-        writeln!(f, "  {}", self.error_message())?;
-
-        if let Some(detail) = self.detail() {
-            writeln!(f, "  {}: {}", "detail".bright_cyan().bold(), detail)?;
-        }
-        if let Some(hint) = self.hint() {
-            writeln!(
-                f,
-                "  {} {}",
-                "=".bright_blue().bold(),
-                format!("hint: {}", hint).bold()
-            )?;
-        }
-
-        Ok(())
+        write!(f, "type check failed for '{}': {}", self.object_id, self.error_message())
     }
 }
 

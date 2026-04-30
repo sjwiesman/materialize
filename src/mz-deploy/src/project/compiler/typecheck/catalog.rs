@@ -613,7 +613,7 @@ impl CatalogRuntime {
         let result = self
             .create_item(object_id, &sql)
             .map(|_| ())
-            .map_err(TypeCheckError::TypeCheckFailed);
+            .map_err(|e| TypeCheckError::Multiple(vec![e]));
         timing!(
             &format!("        catalog: create_stub_table {}", object_id),
             create_start.elapsed()
@@ -629,13 +629,12 @@ impl CatalogRuntime {
         sql: &str,
     ) -> Result<RelationDesc, ObjectTypeCheckError> {
         let parsed = mz_sql_parser::parser::parse_statements(sql)
-            .map_err(|e| self.build_error(object_id, sql, ObjectTypeCheckErrorKind::Parser(e)))?
+            .map_err(|e| self.build_error(object_id, ObjectTypeCheckErrorKind::Parser(e)))?
             .into_iter()
             .next()
             .ok_or_else(|| {
                 self.build_error(
                     object_id,
-                    sql,
                     ObjectTypeCheckErrorKind::Internal("empty statement".into()),
                 )
             })?
@@ -665,7 +664,6 @@ impl CatalogRuntime {
         let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast).map_err(|e| {
             self.build_error(
                 object_id,
-                create_sql,
                 ObjectTypeCheckErrorKind::Plan(Arc::new(e)),
             )
         })?;
@@ -686,7 +684,6 @@ impl CatalogRuntime {
         .map_err(|e| {
             self.build_error(
                 object_id,
-                create_sql,
                 ObjectTypeCheckErrorKind::Plan(Arc::new(e)),
             )
         })?;
@@ -699,7 +696,7 @@ impl CatalogRuntime {
         let desc = self
             .insert_item_from_plan(object_id, create_sql, plan, resolved_ids)
             .map_err(|e| {
-                self.build_error(object_id, create_sql, ObjectTypeCheckErrorKind::Catalog(e))
+                self.build_error(object_id, ObjectTypeCheckErrorKind::Catalog(e))
             })?;
         timing!(
             &format!("      catalog: insert_item {}", object_id),
@@ -718,7 +715,6 @@ impl CatalogRuntime {
     fn build_error(
         &self,
         object_id: &ObjectId,
-        sql: &str,
         kind: ObjectTypeCheckErrorKind,
     ) -> ObjectTypeCheckError {
         ObjectTypeCheckError {
@@ -727,7 +723,6 @@ impl CatalogRuntime {
                 "{}/{}/{}.sql",
                 object_id.database, object_id.schema, object_id.object
             )),
-            sql_statement: sql.to_string(),
             kind,
         }
     }

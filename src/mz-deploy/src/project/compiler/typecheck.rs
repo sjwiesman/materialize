@@ -110,14 +110,12 @@ pub(crate) fn run(
                 for (dep_id, desc) in dep_results {
                     runtime
                         .insert_stub_table_with_desc(dep_id, (**desc).clone())
-                        .map_err(|err| match err {
-                            TypeCheckError::TypeCheckFailed(e) => e,
-                            other => ObjectTypeCheckError::internal(
+                        .map_err(|err| ObjectTypeCheckError::internal(
                                 dep_id.clone(),
                                 db_obj.path.clone(),
-                                format!("failed to stub dependency: {other}"),
-                            ),
-                        })?;
+                                format!("failed to stub dependency: {err}"),
+                            )
+                        )?;
                 }
                 let fqn: crate::project::ir::compiled::FullyQualifiedName = node_id.clone().into();
                 let ast =

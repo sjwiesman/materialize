@@ -25,7 +25,7 @@ use std::time::Duration;
 /// // Output: → Parsing SQL files...
 /// ```
 pub fn stage_start(name: &str) {
-    info!("\n{} {}...", "→".yellow(), name);
+    info!("{} {}...", "→".yellow(), name);
 }
 
 /// Print a stage completion message with green checkmark and duration.
@@ -93,7 +93,7 @@ pub fn error(message: &str) {
 pub fn summary(message: &str, duration: Duration) {
     let seconds = duration.as_secs_f64();
     info!(
-        "\n{} {} {}",
+        "{} {} {}",
         "✓".green().bold(),
         message,
         format!("in {}s", format_duration(seconds)).dimmed()

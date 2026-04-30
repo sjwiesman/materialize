@@ -37,10 +37,6 @@ pub(crate) enum Severity {
 ///
 /// Output-format-neutral: the LSP wraps it into `tower_lsp::Diagnostic`,
 /// the CLI wraps it into an `annotate_snippets` snippet.
-//
-// `file`, `source`, and `help` are populated by producers but unused by the
-// current LSP-only consumer; the CLI renderer (Phase 2) reads them.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct PositionalDiagnostic {
     pub severity: Severity,
