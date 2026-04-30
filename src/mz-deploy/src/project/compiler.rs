@@ -340,6 +340,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
     let mut validated_objects = Vec::new();
     let mut stats = CompileStats::default();
     let mut current_keys = BTreeSet::new();
+    let mut miss_keys: BTreeSet<String> = BTreeSet::new();
     let mut misses = Vec::new();
 
     for plan in plans {
@@ -366,6 +367,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
                 descriptor,
             } => {
                 current_keys.insert(object_key.clone());
+                miss_keys.insert(object_key.clone());
                 misses.push((object_key, fingerprint, descriptor));
             }
             ObjectPlanResult::ProjectErr(err) => return Err(err),
@@ -447,7 +449,11 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
         }
     }
 
-    let project = graph::Project::from(compiled_project);
+    let mut project = graph::Project::from(compiled_project);
+    project.compile_dirty = miss_keys
+        .into_iter()
+        .filter_map(|k| k.parse().ok())
+        .collect();
 
     // Persist the compiled project to SQLite for LSP consumption.
     // Advisory — failure is logged but doesn't block compilation.

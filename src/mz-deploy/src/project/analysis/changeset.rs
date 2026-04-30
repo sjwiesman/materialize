@@ -1157,6 +1157,7 @@ mod tests {
             cluster_dependencies: BTreeSet::new(),
             tests: vec![],
             replacement_schemas,
+            compile_dirty: BTreeSet::new(),
         }
     }
 

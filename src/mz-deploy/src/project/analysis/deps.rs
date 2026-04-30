@@ -353,6 +353,7 @@ impl From<compiled::Project> for Project {
             cluster_dependencies,
             tests,
             replacement_schemas: compiled_project.replacement_schemas,
+            compile_dirty: BTreeSet::new(),
         }
     }
 }
