@@ -150,4 +150,9 @@ pub struct Project {
     /// Schemas that use replacement materialized views, derived from
     /// `SET api = stable` statements.
     pub replacement_schemas: BTreeSet<SchemaQualifier>,
+    /// Objects whose compiled artifact was a cache miss in this run.
+    /// Drives incremental typechecking: a miss means the file content
+    /// changed (or never compiled before), so the object's typecheck
+    /// result must be recomputed.
+    pub compile_dirty: BTreeSet<ObjectId>,
 }

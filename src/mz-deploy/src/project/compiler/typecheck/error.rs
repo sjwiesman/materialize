@@ -22,7 +22,6 @@ use thiserror::Error;
 /// Errors that can occur during runtime typechecking.
 #[derive(Debug, Error)]
 pub enum TypeCheckError {
-
     #[error("{}", format_multiple(.0))]
     Multiple(Vec<ObjectTypeCheckError>),
 
@@ -127,7 +126,12 @@ impl ObjectTypeCheckError {
 
 impl fmt::Display for ObjectTypeCheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "type check failed for '{}': {}", self.object_id, self.error_message())
+        write!(
+            f,
+            "type check failed for '{}': {}",
+            self.object_id,
+            self.error_message()
+        )
     }
 }
 

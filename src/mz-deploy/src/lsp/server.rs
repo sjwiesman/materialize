@@ -500,7 +500,7 @@ impl Backend {
             &project,
             types_lock,
         ) {
-            Ok(_) => None,
+            Ok((_, _stats)) => None,
             Err(e) => Some(e),
         }
     }

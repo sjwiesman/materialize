@@ -26,13 +26,13 @@
 //! are validated after typechecking (stage 5) once complete column metadata is
 //! available.
 
-use std::collections::{BTreeMap, BTreeSet};
 use crate::cli::CliError;
 use crate::cli::progress;
 use crate::config::Settings;
-use crate::project::ir::graph::{ModStatement, Project};
+use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
 use crate::{project, timing, verbose};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 /// Compile and validate the project, showing the deployment plan.
@@ -111,7 +111,6 @@ fn run_inner(
     timing!("project::plan", parse_duration);
 
     let validate_start = Instant::now();
-    let sorted = planned_project.topological_sort()?;
     let validate_duration = validate_start.elapsed();
     timing!("topological_sort", validate_duration);
 
@@ -190,7 +189,7 @@ fn run_inner(
     }
 
     if show_progress && crate::log::verbose_enabled() {
-        print_verbose_details(&planned_project, &sorted);
+        print_verbose_details(&planned_project);
     }
 
     if show_progress {
@@ -213,7 +212,7 @@ fn typecheck_project(
 
     let external_types = crate::types::load_types_lock(directory).unwrap_or_default();
 
-    typecheck::run(
+    let (_, stats) = typecheck::run(
         directory,
         settings.profile_name().unwrap_or(""),
         settings.profile_suffix(),
@@ -222,6 +221,13 @@ fn typecheck_project(
         external_types,
     )?;
     timing!("typecheck", typecheck_start.elapsed());
+    crate::verbose!(
+        "typecheck: ran={} skipped={} schema_stable={} schema_changed={}",
+        stats.ran,
+        stats.skipped,
+        stats.schema_stable,
+        stats.schema_changed,
+    );
 
     Ok(Some(typecheck_start.elapsed()))
 }
@@ -252,15 +258,14 @@ fn validate_constraints_with_types(
     }
 
     // Pre-typecheck column validation uses types_lock only
-    let column_map: BTreeMap<String, BTreeSet<String>> =
-        types_lock
-            .tables
-            .iter()
-            .map(|(id, columns)| {
-                let col_names = columns.keys().map(|c| c.to_lowercase()).collect();
-                (id.to_string().to_lowercase(), col_names)
-            })
-            .collect();
+    let column_map: BTreeMap<String, BTreeSet<String>> = types_lock
+        .tables
+        .iter()
+        .map(|(id, columns)| {
+            let col_names = columns.keys().map(|c| c.to_lowercase()).collect();
+            (id.to_string().to_lowercase(), col_names)
+        })
+        .collect();
     let col_errors = project::compiler::validate_constraint_columns(planned_project, &column_map);
     if !col_errors.is_empty() {
         return Err(
@@ -299,15 +304,10 @@ fn collect_constraint_fqns(planned_project: &Project) -> Vec<ObjectId> {
 }
 
 /// Print verbose details about the project (only shown with VERBOSE env var)
-fn print_verbose_details(planned_project: &Project, sorted: &[ObjectId]) {
-    let mod_stmts = planned_project.iter_mod_statements();
+fn print_verbose_details(planned_project: &Project) {
     print_external_dependencies(planned_project);
     print_cluster_dependencies(planned_project);
     print_dependency_graph(planned_project);
-    print_deployment_order(sorted);
-    print_module_setup_statements(&mod_stmts);
-    print_full_sql_plan(&mod_stmts);
-    print_sorted_object_sql(planned_project);
 }
 
 /// Prints dependencies that are referenced but not declared in this project tree.
@@ -355,102 +355,6 @@ fn print_dependency_graph(planned_project: &Project) {
             } else {
                 verbose!("    - {}", dep);
             }
-        }
-    }
-}
-
-/// Prints final object deployment order derived from topological sorting.
-fn print_deployment_order(sorted: &[ObjectId]) {
-    verbose!("\nDeployment order:");
-    for (idx, object_id) in sorted.iter().enumerate() {
-        verbose!("  {}. {}", idx + 1, object_id);
-    }
-}
-
-/// Prints module setup statements that run before object SQL.
-///
-/// This section shows database/schema-level setup artifacts separately from
-/// object creation steps, which helps explain side-effect ordering.
-fn print_module_setup_statements(mod_stmts: &[ModStatement]) {
-    if mod_stmts.is_empty() {
-        return;
-    }
-    verbose!("\nModule Setup Statements:");
-    for (idx, mod_stmt) in mod_stmts.iter().enumerate() {
-        match mod_stmt {
-            ModStatement::Database {
-                database,
-                statement,
-            } => {
-                verbose!("  {}. Database {}: {}", idx + 1, database, statement);
-            }
-            ModStatement::Schema {
-                database,
-                schema,
-                statement,
-            } => {
-                verbose!(
-                    "  {}. Schema {}.{}: {}",
-                    idx + 1,
-                    database,
-                    schema,
-                    statement
-                );
-            }
-        }
-    }
-}
-
-/// Prints executable SQL for module setup statements in run order.
-fn print_full_sql_plan(mod_stmts: &[ModStatement]) {
-    verbose!("\nSQL Deployment Plan (fully qualified)");
-    for (idx, mod_stmt) in mod_stmts.iter().enumerate() {
-        match mod_stmt {
-            ModStatement::Database {
-                database,
-                statement,
-            } => {
-                verbose!("-- Module Setup {}: Database {}", idx + 1, database);
-                verbose!("{};", statement);
-                verbose!();
-            }
-            ModStatement::Schema {
-                database,
-                schema,
-                statement,
-            } => {
-                verbose!(
-                    "-- Module Setup {}: Schema {}.{}",
-                    idx + 1,
-                    database,
-                    schema
-                );
-                verbose!("{};", statement);
-                verbose!();
-            }
-        }
-    }
-}
-
-/// Prints full SQL payload for each object deployment step.
-///
-/// Includes statement SQL and attached indexes/grants/comments so verbose output
-/// reflects what the deploy command would execute end-to-end.
-fn print_sorted_object_sql(planned_project: &Project) {
-    if let Ok(objects) = planned_project.get_sorted_objects() {
-        for (idx, (object_id, typed_obj)) in objects.iter().enumerate() {
-            verbose!("-- Step {}: {}", idx + 1, object_id);
-            verbose!("{};", typed_obj.stmt);
-            for index in &typed_obj.indexes {
-                verbose!("{};", index);
-            }
-            for grant in &typed_obj.grants {
-                verbose!("{};", grant);
-            }
-            for comment in &typed_obj.comments {
-                verbose!("{};", comment);
-            }
-            verbose!();
         }
     }
 }

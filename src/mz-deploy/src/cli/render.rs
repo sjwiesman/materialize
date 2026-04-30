@@ -56,7 +56,9 @@ pub(crate) fn render(pd: &PositionalDiagnostic) -> String {
     groups.push(primary_group);
 
     for footer in &pd.footers {
-        groups.push(Group::with_title(Level::HELP.secondary_title(footer.as_str())));
+        groups.push(Group::with_title(
+            Level::HELP.secondary_title(footer.as_str()),
+        ));
     }
 
     for s in &pd.suggestions {
@@ -65,14 +67,9 @@ pub(crate) fn render(pd: &PositionalDiagnostic) -> String {
         }
         let mut group = Group::with_title(Level::HELP.secondary_title(s.label.as_str()));
         for alt in &s.alternatives {
-            group = group.element(
-                Snippet::source(&pd.source)
-                    .path(origin.as_str())
-                    .patch(Patch::new(
-                        clamp(&pd.source, &alt.byte_range),
-                        alt.replacement.as_str(),
-                    )),
-            );
+            group = group.element(Snippet::source(&pd.source).path(origin.as_str()).patch(
+                Patch::new(clamp(&pd.source, &alt.byte_range), alt.replacement.as_str()),
+            ));
         }
         groups.push(group);
     }
@@ -131,9 +128,7 @@ fn parse_to_positional(error: &ParseError) -> Vec<PositionalDiagnostic> {
             footers: Vec::new(),
             suggestions: Vec::new(),
         }],
-        ParseError::StatementsParseFailed { .. } | ParseError::UnresolvedVariables(_) => {
-            Vec::new()
-        }
+        ParseError::StatementsParseFailed { .. } | ParseError::UnresolvedVariables(_) => Vec::new(),
     }
 }
 
@@ -150,10 +145,8 @@ fn validation_error_to_positional(error: &ValidationError) -> PositionalDiagnost
     let footers: Vec<String> = error.kind.help().into_iter().collect();
     let file = error.context.file.clone();
 
-    if let (Some(offset), Ok(source)) = (
-        error.context.byte_offset,
-        std::fs::read_to_string(&file),
-    ) {
+    if let (Some(offset), Ok(source)) = (error.context.byte_offset, std::fs::read_to_string(&file))
+    {
         return PositionalDiagnostic {
             severity: Severity::Error,
             file,
@@ -184,7 +177,10 @@ fn typecheck_to_positional(error: &TypeCheckError) -> Vec<PositionalDiagnostic> 
         | TypeCheckError::TypesCacheWriteFailed(_) => return Vec::new(),
     };
 
-    errors.iter().map(|e| object_typecheck_to_positional(e)).collect()
+    errors
+        .iter()
+        .map(|e| object_typecheck_to_positional(e))
+        .collect()
 }
 
 fn object_typecheck_to_positional(error: &ObjectTypeCheckError) -> PositionalDiagnostic {
@@ -234,7 +230,12 @@ fn format_plan(
     source: &str,
     primary_range: &std::ops::Range<usize>,
 ) -> (String, Vec<String>, Vec<Suggestion>) {
-    if let PlanError::UnknownColumn { table, column, similar } = e {
+    if let PlanError::UnknownColumn {
+        table,
+        column,
+        similar,
+    } = e
+    {
         let qualified = column_display(table.as_ref(), column);
         let message = format!("column {qualified} does not exist");
         if similar.is_empty() {
@@ -242,10 +243,7 @@ fn format_plan(
         }
         let span = locate_replacement(source, primary_range, column.as_str());
         let label = match similar.as_ref() {
-            [single] => format!(
-                "did you mean `{}`?",
-                column_display(table.as_ref(), single)
-            ),
+            [single] => format!("did you mean `{}`?", column_display(table.as_ref(), single)),
             _ => "did you mean one of these?".to_string(),
         };
         let alternatives = similar
@@ -255,7 +253,14 @@ fn format_plan(
                 replacement: alt.as_str().to_string(),
             })
             .collect();
-        return (message, Vec::new(), vec![Suggestion { label, alternatives }]);
+        return (
+            message,
+            Vec::new(),
+            vec![Suggestion {
+                label,
+                alternatives,
+            }],
+        );
     }
     fallback_plan(e)
 }

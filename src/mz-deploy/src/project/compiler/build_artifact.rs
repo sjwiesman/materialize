@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 const DB_FILE: &str = "build_artifact.db";
 const OBJECT_STATE_TABLE: &str = "object_state";
 const TYPECHECK_OBJECTS_TABLE: &str = "typecheck_objects";
@@ -202,6 +202,7 @@ impl BuildArtifact {
                     DROP TABLE IF EXISTS typecheck_state;
                     DROP TABLE IF EXISTS typecheck_columns;
                     DROP TABLE IF EXISTS typecheck_objects;
+                    DROP TABLE IF EXISTS external_type_digest;
                     DROP TABLE IF EXISTS project_databases;
                     DROP TABLE IF EXISTS project_schemas;
                     DROP TABLE IF EXISTS project_objects;
@@ -261,6 +262,10 @@ impl BuildArtifact {
                     position INTEGER NOT NULL,
                     PRIMARY KEY (object_key, column_name),
                     FOREIGN KEY (object_key) REFERENCES typecheck_objects(object_key)
+                );
+                CREATE TABLE IF NOT EXISTS external_type_digest (
+                    object_key TEXT PRIMARY KEY,
+                    digest TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS project_databases (
                     name TEXT PRIMARY KEY
@@ -720,6 +725,109 @@ impl BuildArtifact {
     ) -> Result<(), BuildArtifactError> {
         self.prune_rows(TYPECHECK_COLUMNS_TABLE, keep)?;
         self.prune_rows(TYPECHECK_OBJECTS_TABLE, keep)
+    }
+
+    /// Load every cached typecheck column row, grouped by object key.
+    ///
+    /// One round-trip; returns an empty map if the table is empty. Used by
+    /// `typecheck::run` to seed the incremental decision for each node
+    /// without holding a live SQLite connection inside the parallel DAG.
+    pub(crate) fn load_typecheck_columns(
+        &self,
+    ) -> Result<BTreeMap<String, BTreeMap<String, ColumnType>>, BuildArtifactError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT object_key, column_name, column_type, nullable, position \
+                 FROM typecheck_columns",
+            )
+            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    ColumnType {
+                        r#type: row.get(2)?,
+                        nullable: row.get::<_, i32>(3)? != 0,
+                        position: usize::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                        comment: None,
+                    },
+                ))
+            })
+            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?;
+        let mut out: BTreeMap<String, BTreeMap<String, ColumnType>> = BTreeMap::new();
+        for row in rows {
+            let (key, name, ty) =
+                row.map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                    path: self.path.clone(),
+                    source,
+                })?;
+            out.entry(key).or_default().insert(name, ty);
+        }
+        Ok(out)
+    }
+
+    /// Load the digest map for external types (object_key -> digest).
+    pub(crate) fn load_external_type_digests(
+        &self,
+    ) -> Result<BTreeMap<String, String>, BuildArtifactError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT object_key, digest FROM external_type_digest")
+            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?;
+        let mut out = BTreeMap::new();
+        for row in rows {
+            let (key, digest) =
+                row.map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                    path: self.path.clone(),
+                    source,
+                })?;
+            out.insert(key, digest);
+        }
+        Ok(out)
+    }
+
+    /// Replace the cached external-type digest set with the provided rows and
+    /// drop any rows for keys not present.
+    pub(crate) fn replace_external_type_digests(
+        &mut self,
+        digests: &BTreeMap<String, String>,
+    ) -> Result<(), BuildArtifactError> {
+        let db_path = self.path.clone();
+        let db_err = |source: rusqlite::Error| BuildArtifactError::DatabaseOperationFailed {
+            path: db_path.clone(),
+            source,
+        };
+        let tx = self.conn.transaction().map_err(&db_err)?;
+        tx.execute("DELETE FROM external_type_digest", [])
+            .map_err(&db_err)?;
+        {
+            let mut stmt = tx
+                .prepare("INSERT INTO external_type_digest(object_key, digest) VALUES(?1, ?2)")
+                .map_err(&db_err)?;
+            for (key, digest) in digests {
+                stmt.execute(params![key, digest]).map_err(&db_err)?;
+            }
+        }
+        tx.commit().map_err(&db_err)
     }
 
     /// Persist a complete snapshot of the compiled project graph.
@@ -1488,6 +1596,7 @@ mod tests {
             cluster_dependencies: BTreeSet::new(),
             tests: vec![],
             replacement_schemas: BTreeSet::new(),
+            compile_dirty: BTreeSet::new(),
         }
     }
 

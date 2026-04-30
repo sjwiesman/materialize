@@ -27,12 +27,19 @@ use crate::types::{ColumnType, Types};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// Build the shared catalog used by every per-task typecheck. Errors from
-/// registering non-typechecked objects are accumulated; if any are present
-/// after this phase, the caller should abort before running phase 2.
+/// Build the shared catalog used by every per-task typecheck.
+///
+/// `restrict` filters which non-view project objects and external types are
+/// registered. `Some(set)` registers only objects whose `ObjectId` is in the
+/// set (used by incremental typechecking to bootstrap just the deps a dirty
+/// closure transitively needs). `None` registers everything.
+///
+/// Errors from registering non-typechecked objects are accumulated; if any are
+/// present after this phase, the caller should abort before running phase 2.
 pub(super) fn bootstrap_catalog(
     project: &Project,
     external_types: &Types,
+    restrict: Option<&BTreeSet<ObjectId>>,
 ) -> Result<
     (
         Arc<CatalogRuntime>,
@@ -58,6 +65,11 @@ pub(super) fn bootstrap_catalog(
             schema: db_obj.id.schema.clone(),
             object: db_obj.id.object.clone(),
         };
+        if let Some(set) = restrict
+            && !set.contains(&object_id)
+        {
+            continue;
+        }
         let fqn: FullyQualifiedName = object_id.clone().into();
         let Some(sql) = create_catalog_item_sql(&db_obj.typed_object.stmt, &fqn) else {
             continue;
@@ -73,6 +85,11 @@ pub(super) fn bootstrap_catalog(
 
     for (id, columns) in &external_types.tables {
         if registered_from_create.contains(id) {
+            continue;
+        }
+        if let Some(set) = restrict
+            && !set.contains(id)
+        {
             continue;
         }
         runtime.create_stub_table(id, columns)?;

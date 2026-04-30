@@ -662,10 +662,7 @@ impl CatalogRuntime {
 
         let resolve_start = Instant::now();
         let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast).map_err(|e| {
-            self.build_error(
-                object_id,
-                ObjectTypeCheckErrorKind::Plan(Arc::new(e)),
-            )
+            self.build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e)))
         })?;
         timing!(
             &format!("      catalog: resolve {}", object_id),
@@ -681,12 +678,7 @@ impl CatalogRuntime {
             &Params::empty(),
             &resolved_ids,
         )
-        .map_err(|e| {
-            self.build_error(
-                object_id,
-                ObjectTypeCheckErrorKind::Plan(Arc::new(e)),
-            )
-        })?;
+        .map_err(|e| self.build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
         timing!(
             &format!("      catalog: plan {}", object_id),
             plan_start.elapsed()
@@ -695,9 +687,7 @@ impl CatalogRuntime {
         let insert_start = Instant::now();
         let desc = self
             .insert_item_from_plan(object_id, create_sql, plan, resolved_ids)
-            .map_err(|e| {
-                self.build_error(object_id, ObjectTypeCheckErrorKind::Catalog(e))
-            })?;
+            .map_err(|e| self.build_error(object_id, ObjectTypeCheckErrorKind::Catalog(e)))?;
         timing!(
             &format!("      catalog: insert_item {}", object_id),
             insert_start.elapsed()
@@ -1181,69 +1171,6 @@ impl CatalogRuntime {
         };
         self.insert_item(item);
         Ok(desc)
-    }
-
-    /// Insert a stub Table item directly from a [`RelationDesc`], skipping
-    /// parse, name resolution, and SQL planning entirely.
-    ///
-    /// Used by the parallel typechecker to materialize an upstream view's
-    /// schema in a downstream task's catalog without re-running the
-    /// resolve+plan pipeline for every (consumer, dep) pair.
-    pub(super) fn insert_stub_table_with_desc(
-        &mut self,
-        object_id: &ObjectId,
-        desc: RelationDesc,
-    ) -> Result<(), TypeCheckError> {
-        self.insert_stub_table_with_desc_inner(object_id, desc)
-            .map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))
-    }
-
-    fn insert_stub_table_with_desc_inner(
-        &mut self,
-        object_id: &ObjectId,
-        desc: RelationDesc,
-    ) -> Result<(), CatalogError> {
-        let database_id = *self
-            .databases_by_name
-            .get(&object_id.database)
-            .ok_or_else(|| CatalogError::UnknownDatabase(object_id.database.clone()))?;
-        let database_spec = ResolvedDatabaseSpecifier::Id(database_id);
-        let schema = self
-            .schemas_by_key
-            .get(&(database_spec, object_id.schema.clone()))
-            .ok_or_else(|| CatalogError::UnknownSchema(object_id.schema.clone()))?;
-        let schema_spec = schema.id.clone();
-
-        let item_id = CatalogItemId::User(self.ids.allocate_item());
-        let global_id = GlobalId::User(self.ids.allocate_global());
-        let oid = self.ids.allocate_oid()?;
-
-        let item = LocalItem {
-            name: QualifiedItemName {
-                qualifiers: ItemQualifiers {
-                    database_spec,
-                    schema_spec,
-                },
-                item: object_id.object.clone(),
-            },
-            id: item_id,
-            global_id,
-            oid,
-            item_type: CatalogItemType::Table,
-            create_sql: String::new(),
-            references: ResolvedIds::empty(),
-            uses: BTreeSet::new(),
-            referenced_by: Vec::new(),
-            used_by: Vec::new(),
-            relation_desc: Some(desc),
-            func: None,
-            type_details: None,
-            owner_id: MZ_SYSTEM_ROLE_ID,
-            privileges: PrivilegeMap::default(),
-            cluster_id: None,
-        };
-        self.insert_item(item);
-        Ok(())
     }
 
     fn schema_name(
