@@ -42,6 +42,7 @@ pub fn default_docker_image() -> String {
 
 /// Security-related settings for a profile (e.g., AWS credentials for secret resolution).
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     /// AWS profile name for loading secrets from AWS Secrets Manager.
     aws_profile: Option<String>,
@@ -58,6 +59,7 @@ impl SecurityConfig {
 /// Each profile can specify a name suffix, security settings, and psql-style
 /// variables that are resolved in SQL files before parsing.
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     /// Optional suffix to append to database and cluster names for this profile.
     /// For example, `profile_suffix = "_staging"` would rename `materialize` to

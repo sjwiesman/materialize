@@ -110,6 +110,7 @@ mod run;
 mod semantic_tokens;
 mod server;
 mod symbol_kind;
+mod toml_diagnostics;
 mod workspace_symbol;
 
 pub use run::run;
