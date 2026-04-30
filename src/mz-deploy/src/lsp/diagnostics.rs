@@ -7,33 +7,37 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-//! SQL diagnostic conversion for the LSP server.
+//! LSP-specific diagnostic emission.
 //!
-//! Provides two tiers of diagnostics:
+//! Each producer in this module first builds a
+//! [`crate::diagnostics::PositionalDiagnostic`] using the shared locator
+//! helpers, then converts it to a [`tower_lsp::lsp_types::Diagnostic`] via
+//! [`to_lsp`] using a [`Rope`] for byte-offset → line/column conversion.
+//!
+//! Three tiers of diagnostics:
 //!
 //! - **Per-keystroke diagnostics** ([`diagnose()`]) — Resolves psql-style
 //!   variables before parsing. Unresolved variables produce positioned
 //!   diagnostics (ERROR or WARNING depending on the warn pragma). The resolved
 //!   SQL is then parsed with [`mz_sql_parser::parser::parse_statements()`] and
 //!   any parse error positions are mapped back to original-text offsets via
-//!   [`resolved_to_original`]. The [`Rope`] is always built from the original
-//!   text (what the editor shows), since all emitted byte offsets are in
-//!   original-text space.
+//!   [`resolved_to_original`].
 //!
 //! - **On-save validation errors** ([`validation_diagnostics()`]) — Converts
 //!   project-level [`ValidationError`]s into LSP diagnostics grouped by file.
 //!   When an error carries a byte offset (most statement-level errors), the
 //!   diagnostic is positioned at the correct line/column. File-level errors
 //!   (e.g., missing CREATE statement) fall back to `(0, 0)`.
+//!
+//! - **On-save typecheck errors** ([`typecheck_diagnostics()`]) — Inspects
+//!   the structured upstream error to position the diagnostic. See
+//!   [`crate::diagnostics::locate_typecheck`] for the dispatch.
 
+use crate::diagnostics::{PositionalDiagnostic, Severity, locate_typecheck};
 use crate::fs::FileSystem;
-use crate::project::compiler::typecheck::{
-    ObjectTypeCheckError, ObjectTypeCheckErrorKind, TypeCheckError,
-};
+use crate::project::compiler::typecheck::{ObjectTypeCheckError, TypeCheckError};
 use crate::project::error::ValidationError;
 use crate::project::syntax::variables::{resolve_variables, resolved_to_original};
-use mz_sql::catalog::CatalogError;
-use mz_sql::plan::PlanError;
 use ropey::Rope;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -67,20 +71,29 @@ pub fn diagnose(
         return Vec::new();
     }
 
-    let resolved = resolve_variables(text, variables);
-    let mut diags = Vec::new();
+    parse_positional(text, variables, profile_name)
+        .iter()
+        .map(|pd| to_lsp(pd, rope))
+        .collect()
+}
 
-    // Unresolved variable diagnostics — positioned in original text.
+/// Build [`PositionalDiagnostic`]s for parse errors and unresolved variables
+/// in `text`. All positions are in original-text byte space (post-substitution
+/// parser offsets are mapped back via [`resolved_to_original`]).
+fn parse_positional(
+    text: &str,
+    variables: &BTreeMap<String, String>,
+    profile_name: Option<&str>,
+) -> Vec<PositionalDiagnostic> {
+    let resolved = resolve_variables(text, variables);
+    let mut pds = Vec::new();
+
     let var_severity = if resolved.has_warn_pragma {
-        DiagnosticSeverity::WARNING
+        Severity::Warning
     } else {
-        DiagnosticSeverity::ERROR
+        Severity::Error
     };
     for uv in &resolved.unresolved {
-        let position =
-            offset_to_position(uv.byte_offset, rope).unwrap_or_else(|| Position::new(0, 0));
-        let end_position = offset_to_position(uv.byte_offset + uv.byte_len, rope)
-            .unwrap_or_else(|| Position::new(0, 0));
         let message = match profile_name {
             Some(name) => format!(
                 "undefined variable ':{}'  — define in [profiles.{}.variables] in project.toml",
@@ -91,30 +104,29 @@ pub fn diagnose(
                 uv.name
             ),
         };
-        diags.push(Diagnostic {
-            range: Range::new(position, end_position),
-            severity: Some(var_severity),
-            source: Some("mz-deploy".to_string()),
+        pds.push(PositionalDiagnostic {
+            severity: var_severity,
+            file: PathBuf::new(),
+            source: text.to_string(),
+            byte_range: uv.byte_offset..(uv.byte_offset + uv.byte_len),
             message,
-            ..Default::default()
+            help: None,
         });
     }
 
-    // Parse the resolved SQL; map errors back to original-text positions.
     if let Err(e) = mz_sql_parser::parser::parse_statements(&resolved.sql) {
         let original_offset = resolved_to_original(e.error.pos, &resolved.substitutions);
-        let position =
-            offset_to_position(original_offset, rope).unwrap_or_else(|| Position::new(0, 0));
-        diags.push(Diagnostic {
-            range: Range::new(position, position),
-            severity: Some(DiagnosticSeverity::ERROR),
-            source: Some("mz-deploy".to_string()),
+        pds.push(PositionalDiagnostic {
+            severity: Severity::Error,
+            file: PathBuf::new(),
+            source: text.to_string(),
+            byte_range: original_offset..original_offset,
             message: e.error.message.clone(),
-            ..Default::default()
+            help: None,
         });
     }
 
-    diags
+    pds
 }
 
 /// Convert [`ValidationError`]s into LSP diagnostics grouped by file path.
@@ -129,35 +141,38 @@ pub(crate) fn validation_diagnostics(
     errors: &[ValidationError],
 ) -> BTreeMap<PathBuf, Vec<Diagnostic>> {
     let mut map: BTreeMap<PathBuf, Vec<Diagnostic>> = BTreeMap::new();
-    // Cache ropes per file so we only read each file once.
-    let mut rope_cache: BTreeMap<PathBuf, Option<Rope>> = BTreeMap::new();
+    let mut source_cache: BTreeMap<PathBuf, Option<(String, Rope)>> = BTreeMap::new();
     let zero = Position::new(0, 0);
 
     for error in errors {
-        let position = if let Some(offset) = error.context.byte_offset {
-            let rope = rope_cache
-                .entry(error.context.file.clone())
-                .or_insert_with(|| {
-                    fs.read_to_string(&error.context.file)
-                        .ok()
-                        .map(|s| Rope::from_str(&s))
-                });
-            rope.as_ref()
-                .and_then(|r| offset_to_position(offset, r))
-                .unwrap_or(zero)
-        } else {
-            zero
-        };
+        let entry = source_cache
+            .entry(error.context.file.clone())
+            .or_insert_with(|| read_source(fs, &error.context.file));
 
-        map.entry(error.context.file.clone())
-            .or_default()
-            .push(Diagnostic {
-                range: Range::new(position, position),
+        let diag = match (error.context.byte_offset, entry.as_ref()) {
+            (Some(offset), Some((source, rope))) => {
+                let pd = PositionalDiagnostic {
+                    severity: Severity::Error,
+                    file: error.context.file.clone(),
+                    source: source.clone(),
+                    byte_range: offset..offset,
+                    message: error.kind.message(),
+                    help: None,
+                };
+                to_lsp(&pd, rope)
+            }
+            _ => Diagnostic {
+                range: Range::new(zero, zero),
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("mz-deploy".to_string()),
                 message: error.kind.message(),
                 ..Default::default()
-            });
+            },
+        };
+
+        map.entry(error.context.file.clone())
+            .or_default()
+            .push(diag);
     }
 
     map
@@ -166,17 +181,9 @@ pub(crate) fn validation_diagnostics(
 /// Convert a [`TypeCheckError`] into LSP diagnostics grouped by file path.
 ///
 /// Per-object errors (`TypeCheckFailed`, `Multiple`) are positioned by
-/// inspecting the underlying error's structured information:
-///
-/// - `ParserStatementError` → byte offset from `error.error.pos`.
-/// - `PlanError::UnknownColumn`, `AmbiguousColumn`, `UnknownFunction`,
-///   `UnknownOperator`, etc. → first whole-word match of the offending
-///   identifier in the on-disk source file.
-/// - `CatalogError::UnknownItem`, `UnknownDatabase`, etc. → likewise.
-/// - Variants without a locatable identifier fall back to `(0, 0)`.
-///
-/// The on-disk source file is read once per file and cached for the call.
-/// If the read fails, all diagnostics for that file fall back to `(0, 0)`.
+/// inspecting the underlying error via [`locate_typecheck`]. The on-disk
+/// source file is read once per file and cached. If the read fails, all
+/// diagnostics for that file fall back to `(0, 0)`.
 ///
 /// Non-object variants (`DatabaseSetupError`, `SortError`,
 /// `TypesCacheWriteFailed`) have no per-file context and return an empty map;
@@ -195,12 +202,12 @@ pub(crate) fn typecheck_diagnostics(
 
     let mut map: BTreeMap<PathBuf, Vec<Diagnostic>> = BTreeMap::new();
     let mut source_cache: BTreeMap<PathBuf, Option<(String, Rope)>> = BTreeMap::new();
+    let zero = Position::new(0, 0);
 
     for e in errors {
         let entry = source_cache
             .entry(e.file_path.clone())
             .or_insert_with(|| read_source(fs, &e.file_path));
-        let range = locate_in_source(&e.kind, entry.as_ref());
 
         let mut message = e.error_message();
         if let Some(detail) = e.detail() {
@@ -212,15 +219,29 @@ pub(crate) fn typecheck_diagnostics(
             message.push_str(&hint);
         }
 
-        map.entry(e.file_path.clone())
-            .or_default()
-            .push(Diagnostic {
-                range,
+        let diag = match entry.as_ref() {
+            Some((source, rope)) => {
+                let byte_range = locate_typecheck(&e.kind, source).unwrap_or(0..0);
+                let pd = PositionalDiagnostic {
+                    severity: Severity::Error,
+                    file: e.file_path.clone(),
+                    source: source.clone(),
+                    byte_range,
+                    message,
+                    help: None,
+                };
+                to_lsp(&pd, rope)
+            }
+            None => Diagnostic {
+                range: Range::new(zero, zero),
                 severity: Some(DiagnosticSeverity::ERROR),
                 source: Some("mz-deploy".to_string()),
                 message,
                 ..Default::default()
-            });
+            },
+        };
+
+        map.entry(e.file_path.clone()).or_default().push(diag);
     }
 
     map
@@ -232,104 +253,25 @@ fn read_source(fs: &FileSystem, path: &Path) -> Option<(String, Rope)> {
     Some((text, rope))
 }
 
-fn locate_in_source(kind: &ObjectTypeCheckErrorKind, source: Option<&(String, Rope)>) -> Range {
+/// Convert a [`PositionalDiagnostic`] to an LSP [`Diagnostic`].
+///
+/// `rope` must index into `pd.source`; the caller is responsible for that
+/// pairing. Byte offsets that fall outside the rope fall back to `(0, 0)`.
+fn to_lsp(pd: &PositionalDiagnostic, rope: &Rope) -> Diagnostic {
     let zero = Position::new(0, 0);
-    let Some((text, rope)) = source else {
-        return Range::new(zero, zero);
+    let start = offset_to_position(pd.byte_range.start, rope).unwrap_or(zero);
+    let end = offset_to_position(pd.byte_range.end, rope).unwrap_or(start);
+    let severity = match pd.severity {
+        Severity::Error => DiagnosticSeverity::ERROR,
+        Severity::Warning => DiagnosticSeverity::WARNING,
     };
-    let Some((start, end)) = locate_kind(kind, text) else {
-        return Range::new(zero, zero);
-    };
-    let start_pos = offset_to_position(start, rope).unwrap_or(zero);
-    let end_pos = offset_to_position(end, rope).unwrap_or(start_pos);
-    Range::new(start_pos, end_pos)
-}
-
-fn locate_kind(kind: &ObjectTypeCheckErrorKind, source: &str) -> Option<(usize, usize)> {
-    match kind {
-        ObjectTypeCheckErrorKind::Parser(e) => {
-            let pos = e.error.pos;
-            Some((pos, pos))
-        }
-        ObjectTypeCheckErrorKind::Plan(e) => locate_plan(e, source),
-        ObjectTypeCheckErrorKind::Catalog(e) => locate_catalog(e, source),
-        ObjectTypeCheckErrorKind::Internal(_) => None,
+    Diagnostic {
+        range: Range::new(start, end),
+        severity: Some(severity),
+        source: Some("mz-deploy".to_string()),
+        message: pd.message.clone(),
+        ..Default::default()
     }
-}
-
-fn locate_plan(e: &PlanError, source: &str) -> Option<(usize, usize)> {
-    use PlanError::*;
-    match e {
-        UnknownColumn { column, .. }
-        | UngroupedColumn { column, .. }
-        | UnknownColumnInUsingClause { column, .. }
-        | AmbiguousColumnInUsingClause { column, .. }
-        | WrongJoinTypeForLateralColumn { column, .. } => find_identifier(source, column.as_str()),
-        AmbiguousColumn(column) => find_identifier(source, column.as_str()),
-        AmbiguousTable(name) => find_identifier(source, name.item.as_str()),
-        UnknownFunction { name, .. }
-        | IndistinctFunction { name, .. }
-        | UnknownOperator { name, .. }
-        | IndistinctOperator { name, .. } => find_identifier(source, last_component(name)),
-        Parser(p) => Some((p.pos, p.pos)),
-        ParserStatement(p) => Some((p.error.pos, p.error.pos)),
-        Catalog(c) => locate_catalog(c, source),
-        _ => None,
-    }
-}
-
-fn locate_catalog(e: &CatalogError, source: &str) -> Option<(usize, usize)> {
-    use CatalogError::*;
-    match e {
-        UnknownDatabase(name)
-        | UnknownSchema(name)
-        | UnknownRole(name)
-        | UnknownCluster(name)
-        | UnknownClusterReplica(name)
-        | UnknownConnection(name)
-        | UnknownNetworkPolicy(name)
-        | UnknownItem(name) => find_identifier(source, last_component(name)),
-        UnknownFunction { name, .. } | UnknownType { name, .. } => {
-            find_identifier(source, last_component(name))
-        }
-        _ => None,
-    }
-}
-
-/// Strip qualifying prefixes from a dotted identifier, returning the final
-/// component. `schema.table` → `table`; `t` → `t`.
-fn last_component(s: &str) -> &str {
-    s.rsplit_once('.').map(|(_, last)| last).unwrap_or(s)
-}
-
-/// Find the first whole-word occurrence of `name` in `source`, returning the
-/// `[start, end)` byte range of the match. "Whole word" means the bytes
-/// adjacent to the match are not identifier characters (`[A-Za-z0-9_]`).
-fn find_identifier(source: &str, name: &str) -> Option<(usize, usize)> {
-    if name.is_empty() {
-        return None;
-    }
-    let bytes = source.as_bytes();
-    let needle = name.as_bytes();
-    if needle.len() > bytes.len() {
-        return None;
-    }
-    for start in 0..=(bytes.len() - needle.len()) {
-        if &bytes[start..start + needle.len()] != needle {
-            continue;
-        }
-        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
-        let end = start + needle.len();
-        let after_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
-        if before_ok && after_ok {
-            return Some((start, end));
-        }
-    }
-    None
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Convert a byte offset to an LSP [`Position`] (line, column) using a [`Rope`].
@@ -473,8 +415,11 @@ mod tests {
 
     // --- typecheck_diagnostics tests ---
 
+    use crate::project::compiler::typecheck::ObjectTypeCheckErrorKind;
     use crate::project::ir::object_id::ObjectId;
     use mz_repr::ColumnName;
+    use mz_sql::catalog::CatalogError;
+    use mz_sql::plan::PlanError;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -619,7 +564,7 @@ mod tests {
         // Parse a deliberately broken statement to get a real
         // ParserStatementError carrying a non-zero byte offset.
         let parser_err = mz_sql_parser::parser::parse_statements(sql).unwrap_err();
-        let expected_pos = parser_err.error.pos as u32;
+        let expected_pos = u32::try_from(parser_err.error.pos).unwrap();
         let kind = ObjectTypeCheckErrorKind::Parser(parser_err);
         let err = TypeCheckError::TypeCheckFailed(obj_err_with_kind(path.clone(), kind));
         let map = typecheck_diagnostics(&FileSystem::new(), &err);
@@ -683,13 +628,6 @@ mod tests {
         // 'id' as a standalone identifier is at byte 37 (after 'customer_id, ').
         assert_eq!(diag.range.start, Position::new(0, 37));
         assert_eq!(diag.range.end, Position::new(0, 39));
-    }
-
-    #[test]
-    fn last_component_strips_qualifier() {
-        assert_eq!(last_component("foo"), "foo");
-        assert_eq!(last_component("schema.table"), "table");
-        assert_eq!(last_component("db.schema.table"), "table");
     }
 
     #[test]

@@ -1,0 +1,273 @@
+// Copyright Materialize, Inc. and contributors. All rights reserved.
+//
+// Use of this software is governed by the Business Source License
+// included in the LICENSE file.
+//
+// As of the Change Date specified in that file, in accordance with
+// the Business Source License, use of this software will be governed
+// by the Apache License, Version 2.0.
+
+//! Source-positioned diagnostics decoupled from any output format.
+//!
+//! [`PositionalDiagnostic`] is the neutral intermediate representation: a
+//! severity, a file path, a source string, and a byte range within that
+//! source. The LSP server wraps it into [`tower_lsp::lsp_types::Diagnostic`]
+//! by converting the byte range to line/column via a [`ropey::Rope`]; the CLI
+//! wraps it into an [`annotate_snippets`] snippet for terminal output.
+//!
+//! Both consumers share the locator helpers in this module
+//! ([`find_identifier`], [`locate_plan`], [`locate_catalog`],
+//! [`locate_typecheck`]) which derive byte ranges from `mz_sql` errors that
+//! carry only an identifier name (no offset).
+
+use mz_sql::catalog::CatalogError;
+use mz_sql::plan::PlanError;
+use std::ops::Range;
+use std::path::PathBuf;
+
+use crate::project::compiler::typecheck::ObjectTypeCheckErrorKind;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Severity {
+    Error,
+    Warning,
+}
+
+/// A diagnostic anchored to a byte range within a single source file.
+///
+/// Output-format-neutral: the LSP wraps it into `tower_lsp::Diagnostic`,
+/// the CLI wraps it into an `annotate_snippets` snippet.
+//
+// `file`, `source`, and `help` are populated by producers but unused by the
+// current LSP-only consumer; the CLI renderer (Phase 2) reads them.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct PositionalDiagnostic {
+    pub severity: Severity,
+    pub file: PathBuf,
+    /// The source text the byte range refers into. Owned so renderers
+    /// don't need separate filesystem access.
+    pub source: String,
+    /// Half-open byte range within `source`. May be empty (`start == end`)
+    /// for caret-style positions.
+    pub byte_range: Range<usize>,
+    pub message: String,
+    pub help: Option<String>,
+}
+
+/// Locate the byte range a typecheck error points at within `source`.
+///
+/// Dispatches to [`locate_plan`] / [`locate_catalog`] for the wrapped
+/// `mz_sql` error, or returns the parser's byte offset directly.
+/// `Internal` variants have no locatable position.
+pub(crate) fn locate_typecheck(
+    kind: &ObjectTypeCheckErrorKind,
+    source: &str,
+) -> Option<Range<usize>> {
+    match kind {
+        ObjectTypeCheckErrorKind::Parser(e) => {
+            let pos = e.error.pos;
+            Some(pos..pos)
+        }
+        ObjectTypeCheckErrorKind::Plan(e) => locate_plan(e, source),
+        ObjectTypeCheckErrorKind::Catalog(e) => locate_catalog(e, source),
+        ObjectTypeCheckErrorKind::Internal(_) => None,
+    }
+}
+
+/// Locate the byte range a [`PlanError`] points at within `source`.
+///
+/// For variants that carry a column or function name, finds the first
+/// whole-word occurrence in `source`. For variants that wrap a
+/// `ParserError`, returns its byte offset directly.
+pub(crate) fn locate_plan(e: &PlanError, source: &str) -> Option<Range<usize>> {
+    use PlanError::*;
+    match e {
+        UnknownColumn { column, .. }
+        | UngroupedColumn { column, .. }
+        | UnknownColumnInUsingClause { column, .. }
+        | AmbiguousColumnInUsingClause { column, .. }
+        | WrongJoinTypeForLateralColumn { column, .. } => find_identifier(source, column.as_str()),
+        AmbiguousColumn(column) => find_identifier(source, column.as_str()),
+        AmbiguousTable(name) => find_identifier(source, name.item.as_str()),
+        UnknownFunction { name, .. }
+        | IndistinctFunction { name, .. }
+        | UnknownOperator { name, .. }
+        | IndistinctOperator { name, .. } => find_identifier(source, last_component(name)),
+        Parser(p) => Some(p.pos..p.pos),
+        ParserStatement(p) => Some(p.error.pos..p.error.pos),
+        Catalog(c) => locate_catalog(c, source),
+        _ => None,
+    }
+}
+
+/// Locate the byte range a [`CatalogError`] points at within `source`.
+pub(crate) fn locate_catalog(e: &CatalogError, source: &str) -> Option<Range<usize>> {
+    use CatalogError::*;
+    match e {
+        UnknownDatabase(name)
+        | UnknownSchema(name)
+        | UnknownRole(name)
+        | UnknownCluster(name)
+        | UnknownClusterReplica(name)
+        | UnknownConnection(name)
+        | UnknownNetworkPolicy(name)
+        | UnknownItem(name) => find_identifier(source, last_component(name)),
+        UnknownFunction { name, .. } | UnknownType { name, .. } => {
+            find_identifier(source, last_component(name))
+        }
+        _ => None,
+    }
+}
+
+/// Strip qualifying prefixes from a dotted identifier, returning the final
+/// component. `schema.table` → `table`; `t` → `t`.
+fn last_component(s: &str) -> &str {
+    s.rsplit_once('.').map(|(_, last)| last).unwrap_or(s)
+}
+
+/// Find the first whole-word occurrence of `name` in `source`.
+///
+/// "Whole word" means the bytes adjacent to the match are not identifier
+/// characters (`[A-Za-z0-9_]`). Returns the half-open byte range of the
+/// match, or `None` if `name` does not appear as a standalone token.
+pub(crate) fn find_identifier(source: &str, name: &str) -> Option<Range<usize>> {
+    if name.is_empty() {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    let needle = name.as_bytes();
+    if needle.len() > bytes.len() {
+        return None;
+    }
+    for start in 0..=(bytes.len() - needle.len()) {
+        if &bytes[start..start + needle.len()] != needle {
+            continue;
+        }
+        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let end = start + needle.len();
+        let after_ok = end == bytes.len() || !is_ident_byte(bytes[end]);
+        if before_ok && after_ok {
+            return Some(start..end);
+        }
+    }
+    None
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mz_repr::ColumnName;
+    use std::sync::Arc;
+
+    #[test]
+    fn find_identifier_skips_substrings() {
+        let source = "SELECT customer_id, id FROM t";
+        let r = find_identifier(source, "id").unwrap();
+        assert_eq!(&source[r.clone()], "id");
+        assert_eq!(r.start, 20);
+    }
+
+    #[test]
+    fn find_identifier_empty_needle() {
+        assert!(find_identifier("anything", "").is_none());
+    }
+
+    #[test]
+    fn find_identifier_absent() {
+        assert!(find_identifier("SELECT 1", "missing").is_none());
+    }
+
+    #[test]
+    fn find_identifier_at_start() {
+        let r = find_identifier("foo bar", "foo").unwrap();
+        assert_eq!(r, 0..3);
+    }
+
+    #[test]
+    fn find_identifier_at_end() {
+        let r = find_identifier("foo bar", "bar").unwrap();
+        assert_eq!(r, 4..7);
+    }
+
+    #[test]
+    fn find_identifier_needle_longer_than_haystack() {
+        assert!(find_identifier("ab", "abcd").is_none());
+    }
+
+    #[test]
+    fn last_component_strips_qualifier() {
+        assert_eq!(last_component("foo"), "foo");
+        assert_eq!(last_component("schema.table"), "table");
+        assert_eq!(last_component("db.schema.table"), "table");
+    }
+
+    #[test]
+    fn locate_plan_unknown_column() {
+        let source = "CREATE VIEW v AS SELECT bogus FROM t";
+        let e = PlanError::UnknownColumn {
+            table: None,
+            column: ColumnName::from("bogus"),
+            similar: Box::new([]),
+        };
+        let r = locate_plan(&e, source).unwrap();
+        assert_eq!(&source[r.clone()], "bogus");
+        assert_eq!(r, 24..29);
+    }
+
+    #[test]
+    fn locate_plan_unknown_function() {
+        let source = "SELECT bogus_fn(1) FROM t";
+        let e = PlanError::UnknownFunction {
+            name: "bogus_fn".to_string(),
+            arg_types: vec!["int4".to_string()],
+        };
+        let r = locate_plan(&e, source).unwrap();
+        assert_eq!(&source[r], "bogus_fn");
+    }
+
+    #[test]
+    fn locate_plan_unhandled_variant_returns_none() {
+        let e = PlanError::Unstructured("anything".into());
+        assert!(locate_plan(&e, "SELECT 1").is_none());
+    }
+
+    #[test]
+    fn locate_catalog_unknown_item_strips_qualifier() {
+        let source = "SELECT * FROM bogus_table";
+        let e = CatalogError::UnknownItem("schema.bogus_table".to_string());
+        let r = locate_catalog(&e, source).unwrap();
+        assert_eq!(&source[r], "bogus_table");
+    }
+
+    #[test]
+    fn locate_typecheck_internal_returns_none() {
+        let kind = ObjectTypeCheckErrorKind::Internal("boom".into());
+        assert!(locate_typecheck(&kind, "anything").is_none());
+    }
+
+    #[test]
+    fn locate_typecheck_dispatches_to_plan() {
+        let source = "CREATE VIEW v AS SELECT bogus FROM t";
+        let kind = ObjectTypeCheckErrorKind::Plan(Arc::new(PlanError::UnknownColumn {
+            table: None,
+            column: ColumnName::from("bogus"),
+            similar: Box::new([]),
+        }));
+        let r = locate_typecheck(&kind, source).unwrap();
+        assert_eq!(&source[r], "bogus");
+    }
+
+    #[test]
+    fn locate_typecheck_dispatches_to_catalog() {
+        let source = "SELECT * FROM bogus_table";
+        let kind =
+            ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownItem("bogus_table".into()));
+        let r = locate_typecheck(&kind, source).unwrap();
+        assert_eq!(&source[r], "bogus_table");
+    }
+}
