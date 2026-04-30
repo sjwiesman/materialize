@@ -15,8 +15,11 @@
 
 use crate::cli::CliError;
 use crate::cli::progress;
-use crate::info;
+use crate::config::{ProfilesConfig, write_mzprofile};
+use crate::{info, info_nonl, log};
+use owo_colors::OwoColorize;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -46,6 +49,7 @@ pub fn run(name: &str, opts: ScaffoldOpts) -> Result<(), CliError> {
 
     scaffold(project_dir, name, &opts)?;
     progress::success(&format!("Created project `{}`", name));
+    prompt_default_profile(project_dir)?;
     print_skill_hint();
     Ok(())
 }
@@ -61,8 +65,94 @@ pub fn init(opts: ScaffoldOpts) -> Result<(), CliError> {
     progress::info("Initializing project in current directory...");
     scaffold(project_dir, &name, &opts)?;
     progress::success(&format!("Initialized project `{}`", name));
+    prompt_default_profile(project_dir)?;
     print_skill_hint();
     Ok(())
+}
+
+/// Interactive nudge to pick a default profile right after scaffolding.
+///
+/// Skipped silently in non-interactive contexts (JSON output, `--quiet`, or a
+/// non-TTY stdin) so this never blocks CI. When skipped, the user can still
+/// run `mz-deploy profile set <name>` later — we don't want to re-explain
+/// that on every script invocation.
+fn prompt_default_profile(project_dir: &Path) -> Result<(), CliError> {
+    if log::json_output_enabled() || log::quiet_enabled() || !io::stdin().is_terminal() {
+        return Ok(());
+    }
+
+    info!("");
+
+    let profiles_config = match ProfilesConfig::load(None) {
+        Ok(c) => c,
+        Err(_) => {
+            info!("No profiles configured yet.");
+            info!("  Add one to ~/.mz/profiles.toml, then run:");
+            info!("    {}", "mz-deploy profile set <name>".cyan());
+            print_profile_help_hint();
+            return Ok(());
+        }
+    };
+
+    let names = profiles_config.profile_names();
+    if names.is_empty() {
+        info!("No profiles configured yet.");
+        info!(
+            "  Add one to {}, then run:",
+            profiles_config.source_path().display()
+        );
+        info!("    {}", "mz-deploy profile set <name>".cyan());
+        print_profile_help_hint();
+        return Ok(());
+    }
+
+    info!("Pick a default profile for this project:");
+    for (i, name) in names.iter().enumerate() {
+        info!("  {}. {}", i + 1, name);
+    }
+    info_nonl!("Enter a number, or press Enter to skip: ");
+    io::stderr().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        info!(
+            "Skipped. Set a default later with {}",
+            "mz-deploy profile set <name>".cyan()
+        );
+        print_profile_help_hint();
+        return Ok(());
+    }
+
+    let choice: usize = match trimmed.parse() {
+        Ok(n) if (1..=names.len()).contains(&n) => n,
+        _ => {
+            info!(
+                "Invalid choice. Skipped — set a default later with {}",
+                "mz-deploy profile set <name>".cyan()
+            );
+            print_profile_help_hint();
+            return Ok(());
+        }
+    };
+
+    let name = names[choice - 1];
+    write_mzprofile(project_dir, name)?;
+
+    info!(
+        "  {} default profile set to {}. Update with {}",
+        "✓".green().bold(),
+        name.green(),
+        "mz-deploy profile set <name>".cyan(),
+    );
+    print_profile_help_hint();
+    Ok(())
+}
+
+/// One-line nudge to the help page; appended to every profile-prompt outcome.
+fn print_profile_help_hint() {
+    info!("  Learn more: {}", "mz-deploy help profile".cyan());
 }
 
 /// Nudge users toward installing the optional Materialize agent skill.
