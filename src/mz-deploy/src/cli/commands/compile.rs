@@ -91,6 +91,12 @@ fn run_inner(
     let start_time = Instant::now();
     let directory = &settings.directory;
 
+    if show_progress {
+        let canonical = directory.canonicalize();
+        let shown = canonical.as_deref().unwrap_or(directory);
+        progress::action("Compiling", &shown.display().to_string());
+    }
+
     let parse_start = Instant::now();
     let fs = crate::fs::FileSystem::new();
     let planned_project = project::plan_sync(
@@ -189,7 +195,7 @@ fn run_inner(
 
     if show_progress {
         let total_duration = start_time.elapsed();
-        progress::summary("Project successfully compiled", total_duration);
+        progress::finished("compile", total_duration);
     }
 
     Ok(planned_project)
