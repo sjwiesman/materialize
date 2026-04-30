@@ -89,7 +89,11 @@ async fn refuse_if_targets_production_cluster(
 /// * `dry_run` — when `true`, print the plan but issue no DDL.
 pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), CliError> {
     let profile = settings.connection();
-    let profile_name = settings.profile_name.clone();
+    // `dev` always loads with `needs_connection: true`, so a profile must be set.
+    let profile_name = settings
+        .profile_name
+        .clone()
+        .expect("dev requires an active profile");
     let project_name = settings
         .directory
         .file_name()

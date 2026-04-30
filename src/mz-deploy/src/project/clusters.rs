@@ -84,7 +84,7 @@ pub(crate) fn load_clusters(
                 path: path.clone(),
                 source: e,
             })?;
-            let located = parse_statements_with_context(&sql, path.clone(), variables)?;
+            let located = parse_statements_with_context(&sql, path.clone(), variables, true)?;
 
             if let Err(mut errs) = classify_cluster_statements(expected_name, path, located) {
                 errors.append(&mut errs);
@@ -106,7 +106,7 @@ pub(crate) fn load_clusters(
             path: active_path.clone(),
             source: e,
         })?;
-        let located = parse_statements_with_context(&sql, active_path.clone(), variables)?;
+        let located = parse_statements_with_context(&sql, active_path.clone(), variables, true)?;
 
         match classify_cluster_statements(expected_name, &active_path, located) {
             Ok(def) => definitions.push(def),

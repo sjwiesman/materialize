@@ -507,15 +507,22 @@ impl ProfilesConfig {
 /// then passed to every command. Commands extract what they need (`directory`,
 /// `profile_name`, `profile_suffix`, `docker_image`, `connection()`, `profile_config`,
 /// `dependencies`).
+///
+/// `profile_name` is `None` for commands that don't require a connection
+/// (`compile`, `test`, `explain`) when no profile is set. In that mode
+/// `profile_config` is the default (no variables, no suffix), and any SQL
+/// referencing an unresolved variable will fail with a hint to set a profile.
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// Project root directory (from --directory, default ".").
     pub directory: PathBuf,
     /// Resolved profile name (CLI --profile overrides project.toml default).
-    pub profile_name: String,
+    /// `None` when no profile is configured and the command doesn't require one.
+    pub profile_name: Option<String>,
     /// Resolved Docker image for type checking and tests.
     pub docker_image: String,
     /// Per-profile config (security, profile_suffix) — used for SecretResolver.
+    /// Default-constructed (empty variables, no suffix) when `profile_name` is `None`.
     pub profile_config: ProfileConfig,
     /// Validated external dependencies declared in `project.toml`.
     pub dependencies: BTreeSet<ObjectId>,
@@ -527,7 +534,9 @@ impl Settings {
     /// Load settings from CLI args, project.toml, and profiles.toml.
     ///
     /// `needs_connection` controls whether a connection profile is loaded from
-    /// `profiles.toml`. Commands like `compile` and `test` don't need one.
+    /// `profiles.toml`. Commands like `compile` and `test` don't need one and
+    /// will succeed with no profile selected; in that case `profile_name`
+    /// is `None` and `profile_config` is default.
     pub fn load(
         directory: PathBuf,
         cli_profile: Option<&str>,
@@ -539,14 +548,22 @@ impl Settings {
 
         // Resolution order: --profile flag / MZ_DEPLOY_PROFILE env var (both
         // arrive via `cli_profile`), then the project-root pointer written
-        // by `mz-deploy profile set`. Missing all three is a hard error —
-        // no implicit default.
-        let profile_name = match cli_profile {
-            Some(p) => p.to_string(),
-            None => read_mzprofile(&directory)?.ok_or(ConfigError::NoProfileConfigured)?,
+        // by `mz-deploy profile set`. When all three are missing:
+        //   - commands that connect (`needs_connection: true`) hard-error
+        //   - commands that don't connect proceed with `profile_name: None`
+        let profile_name: Option<String> = match cli_profile {
+            Some(p) => Some(p.to_string()),
+            None => match read_mzprofile(&directory)? {
+                Some(p) => Some(p),
+                None if needs_connection => return Err(ConfigError::NoProfileConfigured),
+                None => None,
+            },
         };
 
-        let profile_config = project_settings.config_for_profile(&profile_name);
+        let profile_config = match &profile_name {
+            Some(name) => project_settings.config_for_profile(name),
+            None => ProfileConfig::default(),
+        };
 
         let docker_image = match docker_image_override {
             Some(image) => image.to_string(),
@@ -556,10 +573,11 @@ impl Settings {
         let dependencies = project_settings.validate_dependencies()?;
 
         let connection = if needs_connection {
-            Some(ProfilesConfig::resolve_profile(
-                profiles_dir,
-                &profile_name,
-            )?)
+            // Safe to unwrap: if we got here with needs_connection, profile_name is Some.
+            let name = profile_name
+                .as_deref()
+                .expect("needs_connection requires a profile name");
+            Some(ProfilesConfig::resolve_profile(profiles_dir, name)?)
         } else {
             None
         };
@@ -572,6 +590,11 @@ impl Settings {
             dependencies,
             connection,
         })
+    }
+
+    /// The active profile name, if one is set.
+    pub fn profile_name(&self) -> Option<&str> {
+        self.profile_name.as_deref()
     }
 
     /// Profile suffix applied to both database and cluster names (e.g., `"_staging"`).

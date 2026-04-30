@@ -73,10 +73,14 @@ pub struct LocatedStatement {
 /// Resolves psql-style variables (`:foo`, `:'foo'`, `:"foo"`) before parsing.
 /// Returns each statement together with its byte offset within the resolved SQL
 /// so that downstream validation errors can point to the exact location.
+///
+/// `profile_set` informs the unresolved-variables error display so that the
+/// hint can direct the user to set a profile when none is active.
 pub(crate) fn parse_statements_with_context(
     sql: &str,
     path: PathBuf,
     variables: &BTreeMap<String, String>,
+    profile_set: bool,
 ) -> Result<Vec<LocatedStatement>, ParseError> {
     let resolved = super::variables::resolve_variables(sql, variables);
 
@@ -96,6 +100,7 @@ pub(crate) fn parse_statements_with_context(
             return Err(ParseError::UnresolvedVariables(VariableError {
                 unresolved: resolved.unresolved,
                 path,
+                profile_set,
             }));
         }
     }

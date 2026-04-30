@@ -133,12 +133,12 @@ mod tests {
         let _project = crate::project::plan_sync(
             &crate::fs::FileSystem::new(),
             root.path(),
-            "default",
+            None,
             None,
             &Default::default(),
         )
         .expect("project should compile");
-        let cache = ProjectCache::open(root.path(), "default", None, &Default::default())
+        let cache = ProjectCache::open(root.path(), "", None, &Default::default())
             .expect("cache should open")
             .expect("cache DB should exist");
         (root, cache)

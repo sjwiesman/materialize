@@ -268,7 +268,7 @@ enum ObjectPlanResult {
 pub(crate) fn compile_sync<P: AsRef<Path>>(
     fs: &crate::fs::FileSystem,
     root: P,
-    profile: &str,
+    profile: Option<&str>,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
 ) -> Result<graph::Project, ProjectError> {
@@ -295,14 +295,20 @@ pub(crate) fn compile_sync<P: AsRef<Path>>(
 fn compile_sync_with_stats<P: AsRef<Path>>(
     fs: &crate::fs::FileSystem,
     root: P,
-    profile: &str,
+    profile: Option<&str>,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
 ) -> Result<(graph::Project, CompileStats), ProjectError> {
+    // Internally we keep the profile name as a plain `&str` (empty when no
+    // profile is selected) and carry the "is a profile set?" bit separately
+    // for error display. The empty string can't collide with a real profile
+    // name (validation rejects it) and produces a stable cache namespace.
+    let profile_set = profile.is_some();
+    let profile = profile.unwrap_or("");
     let root = root.as_ref();
     let mut db =
         BuildArtifact::open(root, profile, profile_suffix, variables).map_err(LoadError::from)?;
-    let discovery = discover_project(fs, root, profile_suffix, variables, &mut db)?;
+    let discovery = discover_project(fs, root, profile_suffix, variables, profile_set, &mut db)?;
 
     let variant_paths: BTreeSet<PathBuf> = discovery
         .object_descriptors
@@ -388,6 +394,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
                     fingerprint,
                     profile,
                     variables,
+                    profile_set,
                     &miss_file_entries,
                 )
             })
@@ -500,6 +507,7 @@ fn discover_project(
     root: &Path,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
+    profile_set: bool,
     db: &mut BuildArtifact,
 ) -> Result<Discovery, ProjectError> {
     if !root.exists() {
@@ -554,6 +562,7 @@ fn discover_project(
             &original_db_name,
             profile_suffix,
             variables,
+            profile_set,
             db,
         )?;
         if let Some(ref stmts) = db_mod_statements {
@@ -590,6 +599,7 @@ fn discover_project(
                 &original_db_name,
                 profile_suffix,
                 variables,
+                profile_set,
                 db,
             )?;
             if let Some(ref mut stmts) = schema_mod_statements {
@@ -661,6 +671,7 @@ fn parse_mod_statements(
     original_db_name: &str,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
+    profile_set: bool,
     db: &mut BuildArtifact,
 ) -> Result<Option<Vec<Statement<Raw>>>, ProjectError> {
     if !path.exists() {
@@ -677,7 +688,7 @@ fn parse_mod_statements(
             path: path.to_path_buf(),
         })?;
     let mut statements: Vec<Statement<Raw>> =
-        parse_statements_with_context(&sql, path.to_path_buf(), variables)?
+        parse_statements_with_context(&sql, path.to_path_buf(), variables, profile_set)?
             .into_iter()
             .map(|stmt| stmt.ast)
             .collect();
@@ -804,6 +815,7 @@ fn compile_object_uncached(
     descriptor: ObjectDescriptor,
     profile: &str,
     variables: &BTreeMap<String, String>,
+    profile_set: bool,
     file_entries: &BTreeMap<PathBuf, FileEntry>,
 ) -> Result<Option<CachedTypedObject>, ObjectCompileFailure> {
     let mut variants = Vec::new();
@@ -819,8 +831,9 @@ fn compile_object_uncached(
                     .into(),
                 )
             })?;
-        let statements = parse_statements_with_context(&sql, variant.path.clone(), variables)
-            .map_err(|err| ObjectCompileFailure::Project(err.into()))?;
+        let statements =
+            parse_statements_with_context(&sql, variant.path.clone(), variables, profile_set)
+                .map_err(|err| ObjectCompileFailure::Project(err.into()))?;
         variants.push(input::ObjectVariant {
             path: variant.path,
             profile: variant.profile,
@@ -858,15 +871,17 @@ fn compile_object(
     fingerprint: String,
     profile: &str,
     variables: &BTreeMap<String, String>,
+    profile_set: bool,
     file_entries: &BTreeMap<PathBuf, FileEntry>,
 ) -> ObjectCompileResult {
-    let compiled = match compile_object_uncached(descriptor, profile, variables, file_entries) {
-        Ok(compiled) => compiled,
-        Err(ObjectCompileFailure::Validation(errs)) => {
-            return ObjectCompileResult::ValidationErr(errs);
-        }
-        Err(ObjectCompileFailure::Project(err)) => return ObjectCompileResult::ProjectErr(err),
-    };
+    let compiled =
+        match compile_object_uncached(descriptor, profile, variables, profile_set, file_entries) {
+            Ok(compiled) => compiled,
+            Err(ObjectCompileFailure::Validation(errs)) => {
+                return ObjectCompileResult::ValidationErr(errs);
+            }
+            Err(ObjectCompileFailure::Project(err)) => return ObjectCompileResult::ProjectErr(err),
+        };
 
     let artifact = match &compiled {
         Some(object) => CompiledObjectArtifact::Object(

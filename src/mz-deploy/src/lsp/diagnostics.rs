@@ -50,7 +50,8 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 /// * `rope` — A [`Rope`] built from the same `text`, used for byte-offset to
 ///   line/column conversion.
 /// * `variables` — Variable definitions from the project config.
-/// * `profile_name` — Active profile name, shown in undefined-variable messages.
+/// * `profile_name` — Active profile name (if any), shown in undefined-variable
+///   messages. When `None`, the diagnostic suggests setting a profile.
 ///
 /// # Returns
 /// A (possibly empty) vec of LSP diagnostics. Variable diagnostics are
@@ -60,7 +61,7 @@ pub fn diagnose(
     text: &str,
     rope: &Rope,
     variables: &BTreeMap<String, String>,
-    profile_name: &str,
+    profile_name: Option<&str>,
 ) -> Vec<Diagnostic> {
     if text.trim().is_empty() {
         return Vec::new();
@@ -80,14 +81,21 @@ pub fn diagnose(
             offset_to_position(uv.byte_offset, rope).unwrap_or_else(|| Position::new(0, 0));
         let end_position = offset_to_position(uv.byte_offset + uv.byte_len, rope)
             .unwrap_or_else(|| Position::new(0, 0));
+        let message = match profile_name {
+            Some(name) => format!(
+                "undefined variable ':{}'  — define in [profiles.{}.variables] in project.toml",
+                uv.name, name
+            ),
+            None => format!(
+                "undefined variable ':{}'  — no profile is selected; run `mz-deploy profile set <name>` and define in [profiles.<name>.variables] in project.toml",
+                uv.name
+            ),
+        };
         diags.push(Diagnostic {
             range: Range::new(position, end_position),
             severity: Some(var_severity),
             source: Some("mz-deploy".to_string()),
-            message: format!(
-                "undefined variable ':{}'  — define in [profiles.{}.variables] in project.toml",
-                uv.name, profile_name
-            ),
+            message,
             ..Default::default()
         });
     }
@@ -344,14 +352,14 @@ mod tests {
     fn valid_sql_produces_no_diagnostics() {
         let text = "CREATE VIEW foo AS SELECT 1;";
         let rope = Rope::from_str(text);
-        assert!(diagnose(text, &rope, &BTreeMap::new(), "default").is_empty());
+        assert!(diagnose(text, &rope, &BTreeMap::new(), None).is_empty());
     }
 
     #[test]
     fn syntax_error_produces_diagnostic_at_correct_position() {
         let text = "CREATE VIEW foo AS SELECTT 1;";
         let rope = Rope::from_str(text);
-        let diags = diagnose(text, &rope, &BTreeMap::new(), "default");
+        let diags = diagnose(text, &rope, &BTreeMap::new(), None);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
         // Error should be on line 0 (first line)
@@ -362,7 +370,7 @@ mod tests {
     fn multiline_error_position() {
         let text = "CREATE VIEW foo AS\nSELECT 1;\nCREATE VIEW bar AS SELECTT 2;";
         let rope = Rope::from_str(text);
-        let diags = diagnose(text, &rope, &BTreeMap::new(), "default");
+        let diags = diagnose(text, &rope, &BTreeMap::new(), None);
         assert_eq!(diags.len(), 1);
         // Error should be on line 2 (third line, zero-indexed)
         assert_eq!(diags[0].range.start.line, 2);
@@ -372,14 +380,14 @@ mod tests {
     fn empty_file_produces_no_diagnostics() {
         let text = "";
         let rope = Rope::from_str(text);
-        assert!(diagnose(text, &rope, &BTreeMap::new(), "default").is_empty());
+        assert!(diagnose(text, &rope, &BTreeMap::new(), None).is_empty());
     }
 
     #[test]
     fn whitespace_only_file_produces_no_diagnostics() {
         let text = "   \n  \n  ";
         let rope = Rope::from_str(text);
-        assert!(diagnose(text, &rope, &BTreeMap::new(), "default").is_empty());
+        assert!(diagnose(text, &rope, &BTreeMap::new(), None).is_empty());
     }
 
     // --- Variable-aware diagnose tests ---
@@ -395,7 +403,7 @@ mod tests {
     fn resolved_variable_no_diagnostics() {
         let text = "CREATE MATERIALIZED VIEW mv IN CLUSTER quickstart AS SELECT 1";
         let rope = Rope::from_str(text);
-        let diags = diagnose(text, &rope, &BTreeMap::new(), "default");
+        let diags = diagnose(text, &rope, &BTreeMap::new(), None);
         assert!(diags.is_empty());
     }
 
@@ -404,7 +412,7 @@ mod tests {
         let v = vars(&[("cluster", "quickstart")]);
         let text = "CREATE MATERIALIZED VIEW mv IN CLUSTER :cluster AS SELECT 1";
         let rope = Rope::from_str(text);
-        let diags = diagnose(text, &rope, &v, "default");
+        let diags = diagnose(text, &rope, &v, None);
         assert!(diags.is_empty());
     }
 
@@ -412,7 +420,7 @@ mod tests {
     fn unresolved_variable_produces_error() {
         let text = "CREATE MATERIALIZED VIEW mv IN CLUSTER :cluster AS SELECT 1";
         let rope = Rope::from_str(text);
-        let diags = diagnose(text, &rope, &BTreeMap::new(), "default");
+        let diags = diagnose(text, &rope, &BTreeMap::new(), None);
         // Should have at least the variable error
         let var_diags: Vec<_> = diags
             .iter()
@@ -428,7 +436,7 @@ mod tests {
     fn unresolved_variable_with_pragma_produces_warning() {
         let text = "-- PRAGMA WARN_ON_MISSING_VARIABLES;\nCREATE MATERIALIZED VIEW mv IN CLUSTER :cluster AS SELECT 1";
         let rope = Rope::from_str(text);
-        let diags = diagnose(text, &rope, &BTreeMap::new(), "default");
+        let diags = diagnose(text, &rope, &BTreeMap::new(), None);
         let var_diags: Vec<_> = diags
             .iter()
             .filter(|d| d.message.contains("undefined variable"))
@@ -445,7 +453,7 @@ mod tests {
         // "CREATE VIEW :x AS SELECTT 1" → "CREATE VIEW ab AS SELECTT 1"
         let text = "CREATE VIEW :x AS SELECTT 1";
         let rope = Rope::from_str(text);
-        let diags = diagnose(text, &rope, &v, "default");
+        let diags = diagnose(text, &rope, &v, None);
         // Should have exactly one parse error diagnostic.
         let parse_diags: Vec<_> = diags
             .iter()
@@ -460,7 +468,7 @@ mod tests {
     fn no_variables_unchanged_behavior() {
         let text = "CREATE VIEW foo AS SELECT 1;";
         let rope = Rope::from_str(text);
-        assert!(diagnose(text, &rope, &BTreeMap::new(), "default").is_empty());
+        assert!(diagnose(text, &rope, &BTreeMap::new(), None).is_empty());
     }
 
     // --- typecheck_diagnostics tests ---

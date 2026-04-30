@@ -101,7 +101,7 @@ fn discover_source_tables(settings: &Settings) -> Result<Vec<ObjectId>, CliError
     let planned = crate::project::plan_sync(
         &fs,
         &settings.directory,
-        &settings.profile_name,
+        settings.profile_name(),
         settings.profile_suffix(),
         settings.variables(),
     )?;

@@ -71,16 +71,22 @@ pub fn resolve_variable_hover(
     text: &str,
     offset: usize,
     variables: &BTreeMap<String, String>,
-    profile_name: &str,
+    profile_name: Option<&str>,
 ) -> Option<Hover> {
     let (name, _start, _len) = find_variable_at_position(text, offset)?;
     let value = variables.get(&name)?;
 
-    let markdown = format!(
-        "**variable** `:{name}`\n\n\
-         **Value:** `{value}`\n\
-         **Profile:** `{profile_name}`"
-    );
+    let markdown = match profile_name {
+        Some(p) => format!(
+            "**variable** `:{name}`\n\n\
+             **Value:** `{value}`\n\
+             **Profile:** `{p}`"
+        ),
+        None => format!(
+            "**variable** `:{name}`\n\n\
+             **Value:** `{value}`"
+        ),
+    };
 
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -286,10 +292,10 @@ mod tests {
     }
 
     #[test]
-    fn variable_hover_resolved() {
+    fn variable_hover_resolved_with_profile() {
         let variables = vars(&[("cluster", "analytics")]);
         let sql = "IN CLUSTER :cluster AS";
-        let hover = resolve_variable_hover(sql, 11, &variables, "staging").unwrap();
+        let hover = resolve_variable_hover(sql, 11, &variables, Some("staging")).unwrap();
         let text = extract_markdown(&hover);
         assert!(text.contains("**variable** `:cluster`"));
         assert!(text.contains("**Value:** `analytics`"));
@@ -297,15 +303,26 @@ mod tests {
     }
 
     #[test]
+    fn variable_hover_resolved_without_profile() {
+        let variables = vars(&[("cluster", "analytics")]);
+        let sql = "IN CLUSTER :cluster AS";
+        let hover = resolve_variable_hover(sql, 11, &variables, None).unwrap();
+        let text = extract_markdown(&hover);
+        assert!(text.contains("**variable** `:cluster`"));
+        assert!(text.contains("**Value:** `analytics`"));
+        assert!(!text.contains("**Profile:**"));
+    }
+
+    #[test]
     fn variable_hover_unresolved_returns_none() {
         let sql = "IN CLUSTER :cluster AS";
-        assert!(resolve_variable_hover(sql, 11, &BTreeMap::new(), "staging").is_none());
+        assert!(resolve_variable_hover(sql, 11, &BTreeMap::new(), None).is_none());
     }
 
     #[test]
     fn variable_hover_not_on_variable() {
         let sql = "SELECT 1 FROM t";
-        assert!(resolve_variable_hover(sql, 5, &BTreeMap::new(), "default").is_none());
+        assert!(resolve_variable_hover(sql, 5, &BTreeMap::new(), None).is_none());
     }
 
     #[test]
@@ -635,12 +652,12 @@ mod tests {
         let _project = crate::project::plan_sync(
             &crate::fs::FileSystem::new(),
             root.path(),
-            "default",
+            None,
             None,
             &Default::default(),
         )
         .expect("project should compile");
-        let cache = ProjectCache::open(root.path(), "default", None, &Default::default())
+        let cache = ProjectCache::open(root.path(), "", None, &Default::default())
             .expect("cache should open")
             .expect("cache DB should exist");
         (root, cache)
@@ -697,12 +714,12 @@ mod tests {
         let _project = crate::project::plan_sync(
             &crate::fs::FileSystem::new(),
             root.path(),
-            "default",
+            None,
             None,
             &Default::default(),
         )
         .expect("project should compile");
-        let cache = ProjectCache::open(root.path(), "default", None, &Default::default())
+        let cache = ProjectCache::open(root.path(), "", None, &Default::default())
             .expect("cache should open")
             .expect("cache DB should exist");
 
@@ -741,12 +758,12 @@ mod tests {
         let _project = crate::project::plan_sync(
             &crate::fs::FileSystem::new(),
             root.path(),
-            "default",
+            None,
             None,
             &Default::default(),
         )
         .expect("project should compile");
-        let cache = ProjectCache::open(root.path(), "default", None, &Default::default())
+        let cache = ProjectCache::open(root.path(), "", None, &Default::default())
             .expect("cache should open")
             .expect("cache DB should exist");
 
@@ -798,12 +815,12 @@ mod tests {
         let _project = crate::project::plan_sync(
             &crate::fs::FileSystem::new(),
             root.path(),
-            "default",
+            None,
             None,
             &Default::default(),
         )
         .expect("project should compile");
-        let cache = ProjectCache::open(root.path(), "default", None, &Default::default())
+        let cache = ProjectCache::open(root.path(), "", None, &Default::default())
             .expect("cache should open")
             .expect("cache DB should exist");
 
