@@ -64,6 +64,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("history", "log"),
     ("network-policies", "apply-network-policies"),
     ("deploy", "promote"),
+    ("profile", "profiles"),
     ("ready", "wait"),
     ("roles", "apply-roles"),
     ("secrets", "apply-secrets"),
