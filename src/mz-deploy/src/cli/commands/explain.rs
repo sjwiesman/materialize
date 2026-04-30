@@ -286,7 +286,7 @@ fn load_types_and_cache(settings: &Settings) -> (Types, Option<ProjectCache>) {
     let types_lock = crate::types::load_types_lock(&settings.directory).unwrap_or_default();
     let types_cache = ProjectCache::open(
         &settings.directory,
-        &settings.profile_name,
+        settings.profile_name().unwrap_or(""),
         settings.profile_suffix(),
         settings.variables(),
     )

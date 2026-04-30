@@ -247,7 +247,7 @@ mod run_tests {
         );
 
         let fs = crate::fs::FileSystem::new();
-        let project = compile_sync(&fs, root, "default", None, &BTreeMap::new()).unwrap();
+        let project = compile_sync(&fs, root, None, None, &BTreeMap::new()).unwrap();
         let merged = run(
             root,
             "default",

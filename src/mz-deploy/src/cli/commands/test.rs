@@ -827,7 +827,7 @@ fn load_or_generate_types_cache(
     info!("{}", "Running type check...".yellow());
     typecheck::run(
         directory,
-        &settings.profile_name,
+        settings.profile_name().unwrap_or(""),
         settings.profile_suffix(),
         settings.variables(),
         planned_project,
@@ -837,7 +837,7 @@ fn load_or_generate_types_cache(
 
     ProjectCache::open(
         directory,
-        &settings.profile_name,
+        settings.profile_name().unwrap_or(""),
         settings.profile_suffix(),
         settings.variables(),
     )

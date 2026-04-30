@@ -240,6 +240,11 @@ Variables inside string literals and comments are not resolved.
 If a SQL file references a variable that is not defined for the active
 profile, compilation fails with an error listing all undefined variables.
 
+`compile`, `test`, and `explain` work without an active profile when
+your SQL doesn't reference any `:variables` and you haven't configured
+`profile_suffix`. As soon as a variable is referenced (or a profile is
+explicitly selected), the active profile is required.
+
 ## Per-profile secret configuration
 
 In `project.toml`, you can configure secret resolution settings per profile

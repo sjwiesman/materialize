@@ -89,11 +89,19 @@ impl fmt::Display for ParseError {
                     "undefined".bright_red(),
                     formatted.join(", ")
                 )?;
-                writeln!(
-                    f,
-                    "  {}: define these in [profiles.<name>.variables] in project.toml",
-                    "hint".bright_blue()
-                )?;
+                if inner.profile_set {
+                    writeln!(
+                        f,
+                        "  {}: define these in [profiles.<name>.variables] in project.toml",
+                        "hint".bright_blue()
+                    )?;
+                } else {
+                    writeln!(
+                        f,
+                        "  {}: no profile is selected; run `mz-deploy profile set <name>` and define these in [profiles.<name>.variables] in project.toml",
+                        "hint".bright_blue()
+                    )?;
+                }
                 write!(
                     f,
                     "  {}: if these are not variables, add -- PRAGMA WARN_ON_MISSING_VARIABLES; as the first line",

@@ -79,6 +79,10 @@ pub(crate) struct Substitution {
 pub struct VariableError {
     pub unresolved: Vec<UnresolvedVariable>,
     pub path: PathBuf,
+    /// Whether a profile was active when these variables failed to resolve.
+    /// `false` means no `--profile`, `MZ_DEPLOY_PROFILE`, or `.mzprofile`
+    /// was set; the user should be directed to set one.
+    pub profile_set: bool,
 }
 
 /// Result of resolving psql-style variables in SQL text.

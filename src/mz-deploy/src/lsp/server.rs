@@ -68,17 +68,15 @@ use tower_lsp::{Client, LanguageServer};
 /// short enough that the user sees diagnostics promptly after pausing.
 const IDLE_REBUILD_DEBOUNCE: Duration = Duration::from_millis(100);
 
-/// Resolve the default profile name for LSP operations.
+/// Resolve the active profile for LSP operations.
 ///
 /// The language server has no CLI flags; it reads the project root's
-/// `.mzprofile` and falls back to `"default"` so variable resolution, suffix
-/// lookup, and cluster normalization have *something* to key off even if the
-/// developer hasn't run `mz-deploy profile set` yet.
-fn resolve_lsp_profile_name(project_root: &Path) -> String {
-    read_mzprofile(project_root)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "default".to_string())
+/// `.mzprofile`. Returns `None` if no profile is set — variable resolution,
+/// suffix lookup, and cluster normalization all degrade gracefully (no
+/// variables, no suffix), and SQL with `:variables` will surface
+/// undefined-variable diagnostics as usual.
+fn resolve_lsp_profile_name(project_root: &Path) -> Option<String> {
+    read_mzprofile(project_root).ok().flatten()
 }
 
 /// Try to open a long-lived [`ProjectCache`] (read-only SQLite connection).
@@ -123,8 +121,9 @@ pub(super) struct BackendInner {
     settings: RwLock<Option<ProjectSettings>>,
     /// Cached variables from the active profile config.
     variables: RwLock<BTreeMap<String, String>>,
-    /// Name of the active profile (for hover display).
-    profile_name: RwLock<String>,
+    /// Name of the active profile (for hover display). `None` when no profile
+    /// is set in the project — variable references will surface as undefined.
+    profile_name: RwLock<Option<String>>,
     /// Monotonic edit version. Bumps on every signal that should cause a
     /// rebuild (didChange, didSave, didChangeWatchedFiles, initialized).
     edit_version: AtomicU64,
@@ -155,7 +154,7 @@ impl Backend {
                 root: RwLock::new(root),
                 settings: RwLock::new(None),
                 variables: RwLock::new(BTreeMap::new()),
-                profile_name: RwLock::new("default".to_string()),
+                profile_name: RwLock::new(None),
                 edit_version: AtomicU64::new(0),
                 rebuilt_through: AtomicU64::new(0),
                 rebuild_lock: Mutex::new(()),
@@ -172,7 +171,10 @@ impl Backend {
         match ProjectSettings::load(&root) {
             Ok(ps) => {
                 let name = resolve_lsp_profile_name(&root);
-                let config = ps.config_for_profile(&name);
+                let config = match &name {
+                    Some(n) => ps.config_for_profile(n),
+                    None => Default::default(),
+                };
                 *self.variables.write().await = config.variables.clone();
                 *self.profile_name.write().await = name;
                 *self.settings.write().await = Some(ps);
@@ -181,7 +183,7 @@ impl Backend {
                 // No project.toml or parse error — use defaults.
                 *self.settings.write().await = None;
                 *self.variables.write().await = BTreeMap::new();
-                *self.profile_name.write().await = "default".to_string();
+                *self.profile_name.write().await = None;
             }
         }
     }
@@ -195,7 +197,7 @@ impl Backend {
         let rope = Rope::from_str(text);
         let variables = self.variables.read().await.clone();
         let profile = self.profile_name.read().await.clone();
-        let diags = diagnostics::diagnose(text, &rope, &variables, &profile);
+        let diags = diagnostics::diagnose(text, &rope, &variables, profile.as_deref());
 
         // Store the rope for later offset conversions (go-to-definition).
         let mut docs = self.documents.lock().await;
@@ -337,20 +339,28 @@ impl Backend {
             match settings_guard.as_ref() {
                 Some(ps) => {
                     let profile = resolve_lsp_profile_name(&root);
-                    let config = ps.config_for_profile(&profile);
+                    let config = match &profile {
+                        Some(name) => ps.config_for_profile(name),
+                        None => Default::default(),
+                    };
                     (
                         profile,
                         config.profile_suffix.clone(),
                         config.variables.clone(),
                     )
                 }
-                None => ("default".to_string(), None, BTreeMap::new()),
+                None => (None, None, BTreeMap::new()),
             }
         };
 
         let fs = self.build_overlay().await;
-        let build_result =
-            project::plan_sync(&fs, &root, &profile, profile_suffix.as_deref(), &variables);
+        let build_result = project::plan_sync(
+            &fs,
+            &root,
+            profile.as_deref(),
+            profile_suffix.as_deref(),
+            &variables,
+        );
 
         // Extract validation diagnostics from the build result (pure).
         let mut new_diagnostics = match &build_result {
@@ -381,7 +391,7 @@ impl Backend {
             if let Some(tc_err) = self
                 .run_typecheck(
                     Arc::clone(project),
-                    &profile,
+                    profile.as_deref().unwrap_or(""),
                     profile_suffix.as_deref(),
                     &variables,
                 )
@@ -409,8 +419,12 @@ impl Backend {
         {
             let mut guard = self.project_cache.lock().await;
             if guard.is_none() {
-                *guard =
-                    try_open_project_cache(&root, &profile, profile_suffix.as_deref(), &variables);
+                *guard = try_open_project_cache(
+                    &root,
+                    profile.as_deref().unwrap_or(""),
+                    profile_suffix.as_deref(),
+                    &variables,
+                );
             }
         }
 
@@ -678,7 +692,9 @@ impl LanguageServer for Backend {
         // Try variable hover first (pure).
         let variables = self.variables.read().await;
         let profile = self.profile_name.read().await;
-        if let Some(h) = hover::resolve_variable_hover(&text, byte_offset, &variables, &profile) {
+        if let Some(h) =
+            hover::resolve_variable_hover(&text, byte_offset, &variables, profile.as_deref())
+        {
             return Ok(Some(h));
         }
         drop(variables);

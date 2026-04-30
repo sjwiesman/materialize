@@ -101,7 +101,7 @@ fn run_inner(
     let planned_project = project::plan_sync(
         &fs,
         directory.clone(),
-        settings.profile_name.clone().as_str(),
+        settings.profile_name(),
         settings.profile_suffix(),
         settings.variables(),
     )?;
@@ -186,7 +186,7 @@ fn run_inner(
 
     let tc = crate::project_cache::ProjectCache::open(
         directory,
-        &settings.profile_name,
+        settings.profile_name().unwrap_or(""),
         settings.profile_suffix(),
         settings.variables(),
     )
@@ -208,7 +208,7 @@ fn run_inner(
         {
             let tc = crate::project_cache::ProjectCache::open(
                 directory,
-                &settings.profile_name,
+                settings.profile_name().unwrap_or(""),
                 settings.profile_suffix(),
                 settings.variables(),
             )
@@ -270,7 +270,7 @@ fn typecheck_project(
 
     typecheck::run(
         directory,
-        &settings.profile_name,
+        settings.profile_name().unwrap_or(""),
         settings.profile_suffix(),
         settings.variables(),
         planned_project,

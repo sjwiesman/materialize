@@ -82,7 +82,7 @@ impl SchemaQualifier {
 /// blocking thread pool.
 pub(crate) async fn plan(
     root: PathBuf,
-    profile: String,
+    profile: Option<String>,
     profile_suffix: Option<String>,
     variables: BTreeMap<String, String>,
 ) -> Result<ir::graph::Project, error::ProjectError> {
@@ -90,7 +90,13 @@ pub(crate) async fn plan(
         || "project::plan",
         move || {
             let fs = crate::fs::FileSystem::new();
-            plan_sync(&fs, root, &profile, profile_suffix.as_deref(), &variables)
+            plan_sync(
+                &fs,
+                root,
+                profile.as_deref(),
+                profile_suffix.as_deref(),
+                &variables,
+            )
         },
     )
     .await
@@ -111,7 +117,7 @@ pub(crate) async fn plan(
 pub(crate) fn plan_sync<P: AsRef<Path>>(
     fs: &crate::fs::FileSystem,
     root: P,
-    profile: &str,
+    profile: Option<&str>,
     profile_suffix: Option<&str>,
     variables: &BTreeMap<String, String>,
 ) -> Result<ir::graph::Project, error::ProjectError> {
