@@ -41,6 +41,7 @@
 pub mod cli;
 pub mod client;
 pub mod config;
+pub(crate) mod diagnostics;
 pub(crate) mod docker_runtime;
 pub(crate) mod fs;
 pub mod log;
