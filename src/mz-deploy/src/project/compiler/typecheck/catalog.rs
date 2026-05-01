@@ -499,6 +499,20 @@ pub(super) struct CatalogRuntime {
     mz_unsafe_schema_id: SchemaId,
 }
 
+/// Construct a typecheck error with the object's inferred file path.
+/// The placeholder file path is rewritten to the real on-disk path by
+/// the caller in `typecheck::run`.
+fn build_error(object_id: &ObjectId, kind: ObjectTypeCheckErrorKind) -> ObjectTypeCheckError {
+    ObjectTypeCheckError {
+        object_id: object_id.clone(),
+        file_path: PathBuf::from(format!(
+            "{}/{}/{}.sql",
+            object_id.database, object_id.schema, object_id.object
+        )),
+        kind,
+    }
+}
+
 impl CatalogRuntime {
     /// Create a catalog pre-populated with system schemas (pg_catalog,
     /// mz_catalog, etc.) and all builtin types, functions, and system objects.
@@ -596,8 +610,7 @@ impl CatalogRuntime {
         timing!("    catalog: bootstrap_namespaces", start.elapsed());
     }
 
-    /// Create a placeholder table with the given column schema, representing
-    /// a cached or external dependency during validation.
+    /// Insert a placeholder table with the given column schema.
     pub(super) fn create_stub_table(
         &mut self,
         object_id: &ObjectId,
@@ -629,27 +642,17 @@ impl CatalogRuntime {
         sql: &str,
     ) -> Result<RelationDesc, ObjectTypeCheckError> {
         let parsed = mz_sql_parser::parser::parse_statements(sql)
-            .map_err(|e| self.build_error(object_id, ObjectTypeCheckErrorKind::Parser(e)))?
+            .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Parser(e)))?
             .into_iter()
             .next()
             .ok_or_else(|| {
-                self.build_error(
+                build_error(
                     object_id,
                     ObjectTypeCheckErrorKind::Internal("empty statement".into()),
                 )
             })?
             .ast;
         self.resolve_plan_and_insert(object_id, parsed, sql)
-    }
-
-    /// Resolve and type-check an already-parsed SQL statement, skipping parse.
-    pub(super) fn create_item_from_ast(
-        &mut self,
-        object_id: &ObjectId,
-        ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
-    ) -> Result<RelationDesc, ObjectTypeCheckError> {
-        let create_sql = ast.to_string();
-        self.resolve_plan_and_insert(object_id, ast, &create_sql)
     }
 
     fn resolve_plan_and_insert(
@@ -662,7 +665,7 @@ impl CatalogRuntime {
 
         let resolve_start = Instant::now();
         let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast).map_err(|e| {
-            self.build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e)))
+            build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e)))
         })?;
         timing!(
             &format!("      catalog: resolve {}", object_id),
@@ -678,7 +681,7 @@ impl CatalogRuntime {
             &Params::empty(),
             &resolved_ids,
         )
-        .map_err(|e| self.build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
+        .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
         timing!(
             &format!("      catalog: plan {}", object_id),
             plan_start.elapsed()
@@ -687,7 +690,7 @@ impl CatalogRuntime {
         let insert_start = Instant::now();
         let desc = self
             .insert_item_from_plan(object_id, create_sql, plan, resolved_ids)
-            .map_err(|e| self.build_error(object_id, ObjectTypeCheckErrorKind::Catalog(e)))?;
+            .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Catalog(e)))?;
         timing!(
             &format!("      catalog: insert_item {}", object_id),
             insert_start.elapsed()
@@ -697,24 +700,6 @@ impl CatalogRuntime {
             start.elapsed()
         );
         Ok(desc)
-    }
-
-    /// Construct a typecheck error with the object's inferred file path.
-    /// The placeholder file path is rewritten to the real on-disk path by
-    /// the caller in `typecheck::run`.
-    fn build_error(
-        &self,
-        object_id: &ObjectId,
-        kind: ObjectTypeCheckErrorKind,
-    ) -> ObjectTypeCheckError {
-        ObjectTypeCheckError {
-            object_id: object_id.clone(),
-            file_path: PathBuf::from(format!(
-                "{}/{}/{}.sql",
-                object_id.database, object_id.schema, object_id.object
-            )),
-            kind,
-        }
     }
 
     /// Register all system schemas discovered from the builtin catalog.
@@ -1254,6 +1239,7 @@ impl CatalogRuntime {
         }
     }
 }
+
 
 /// Provides human-readable names for expression display. Maps `GlobalId`s
 /// to qualified item names and column names.
@@ -1805,6 +1791,756 @@ impl SessionCatalog for CatalogRuntime {
 
     fn is_cluster_size_cc(&self, _size: &str) -> bool {
         false
+    }
+}
+
+/// Per-task overlay over a shared, immutable [`CatalogRuntime`]. Each parallel
+/// typecheck worker constructs its own `TaskCatalog` from the same
+/// `Arc<CatalogRuntime>` and writes its stub-table dependencies and the new
+/// item being checked into the overlay maps. Reads consult the overlay first
+/// and fall through to `base` when an item or schema isn't local.
+///
+/// The overlay's `IdAllocator` is forked from base at construction so each
+/// task can mint fresh ids without coordinating.
+#[derive(Debug)]
+pub(super) struct TaskCatalog {
+    base: Arc<CatalogRuntime>,
+    /// Schemas this task has added items to. Lifted from base on first
+    /// mutation per key, so only schemas that actually receive new items
+    /// pay the per-task copy cost.
+    schemas_by_key: BTreeMap<(ResolvedDatabaseSpecifier, String), LocalSchema>,
+    schemas_by_id: BTreeMap<(ResolvedDatabaseSpecifier, SchemaSpecifier), LocalSchema>,
+    items_by_id: BTreeMap<CatalogItemId, Arc<LocalItem>>,
+    items_by_global_id: BTreeMap<GlobalId, CatalogItemId>,
+    items_by_name: HashMap<QualifiedItemName, Vec<CatalogItemId>>,
+    ids: IdAllocator,
+}
+
+impl TaskCatalog {
+    pub(super) fn new(base: Arc<CatalogRuntime>) -> Self {
+        let ids = base.ids.clone();
+        Self {
+            base,
+            schemas_by_key: BTreeMap::new(),
+            schemas_by_id: BTreeMap::new(),
+            items_by_id: BTreeMap::new(),
+            items_by_global_id: BTreeMap::new(),
+            items_by_name: HashMap::new(),
+            ids,
+        }
+    }
+
+    pub(super) fn create_stub_table(
+        &mut self,
+        object_id: &ObjectId,
+        columns: &BTreeMap<String, ColumnType>,
+    ) -> Result<(), TypeCheckError> {
+        let sql = super::convert::create_stub_table_sql(object_id, columns);
+        self.create_item(object_id, &sql)
+            .map(|_| ())
+            .map_err(|e| TypeCheckError::Multiple(vec![e]))
+    }
+
+    pub(super) fn create_item(
+        &mut self,
+        object_id: &ObjectId,
+        sql: &str,
+    ) -> Result<RelationDesc, ObjectTypeCheckError> {
+        let parsed = mz_sql_parser::parser::parse_statements(sql)
+            .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Parser(e)))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                build_error(
+                    object_id,
+                    ObjectTypeCheckErrorKind::Internal("empty statement".into()),
+                )
+            })?
+            .ast;
+        self.resolve_plan_and_insert(object_id, parsed, sql)
+    }
+
+    pub(super) fn create_item_from_ast(
+        &mut self,
+        object_id: &ObjectId,
+        ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
+    ) -> Result<RelationDesc, ObjectTypeCheckError> {
+        let create_sql = ast.to_string();
+        self.resolve_plan_and_insert(object_id, ast, &create_sql)
+    }
+
+    fn resolve_plan_and_insert(
+        &mut self,
+        object_id: &ObjectId,
+        ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
+        create_sql: &str,
+    ) -> Result<RelationDesc, ObjectTypeCheckError> {
+        let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast)
+            .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
+        let pcx = PlanContext::new(Utc::now());
+        let plan = mz_sql::plan::plan(
+            Some(&pcx),
+            &*self,
+            resolved,
+            &Params::empty(),
+            &resolved_ids,
+        )
+        .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
+        self.insert_item_from_plan(object_id, create_sql, plan, resolved_ids)
+            .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Catalog(e)))
+    }
+
+    fn insert_item_from_plan(
+        &mut self,
+        object_id: &ObjectId,
+        sql: &str,
+        plan: Plan,
+        resolved_ids: ResolvedIds,
+    ) -> Result<RelationDesc, CatalogError> {
+        let item_id = CatalogItemId::User(self.ids.allocate_item());
+        let global_id = GlobalId::User(self.ids.allocate_global());
+        let oid = self.ids.allocate_oid()?;
+
+        let (name, item_type, desc, uses, cluster_id) = match plan {
+            Plan::CreateTable(plan) => (
+                plan.name,
+                CatalogItemType::Table,
+                plan.table.desc.latest(),
+                BTreeSet::new(),
+                None,
+            ),
+            Plan::CreateView(plan) => {
+                let desc = RelationDesc::new(
+                    plan.view.expr.top_level_typ(),
+                    plan.view.column_names.clone(),
+                );
+                (
+                    plan.name,
+                    CatalogItemType::View,
+                    desc,
+                    plan.view.dependencies.0,
+                    None,
+                )
+            }
+            Plan::CreateMaterializedView(plan) => {
+                let desc = RelationDesc::new(
+                    plan.materialized_view.expr.top_level_typ(),
+                    plan.materialized_view.column_names.clone(),
+                );
+                (
+                    plan.name,
+                    CatalogItemType::MaterializedView,
+                    desc,
+                    plan.materialized_view.dependencies.0,
+                    Some(plan.materialized_view.cluster_id),
+                )
+            }
+            _ => {
+                return Err(CatalogError::UnexpectedType {
+                    name: object_id.to_string(),
+                    actual_type: CatalogItemType::Source,
+                    expected_type: CatalogItemType::Table,
+                });
+            }
+        };
+
+        let item = LocalItem {
+            name,
+            id: item_id,
+            global_id,
+            oid,
+            item_type,
+            create_sql: sql.into(),
+            references: resolved_ids,
+            uses,
+            referenced_by: Vec::new(),
+            used_by: Vec::new(),
+            relation_desc: Some(desc.clone()),
+            func: None,
+            type_details: None,
+            owner_id: MZ_SYSTEM_ROLE_ID,
+            privileges: PrivilegeMap::default(),
+            cluster_id,
+        };
+        self.insert_item(item);
+        Ok(desc)
+    }
+
+    fn insert_item(&mut self, item: LocalItem) {
+        let schema_key = (
+            item.name.qualifiers.database_spec,
+            self.resolve_full_schema_name(&QualifiedSchemaName {
+                database: item.name.qualifiers.database_spec,
+                schema: self.base.schema_name(
+                    &item.name.qualifiers.database_spec,
+                    &item.name.qualifiers.schema_spec,
+                ),
+            })
+            .schema,
+        );
+        let id_key = (
+            item.name.qualifiers.database_spec,
+            item.name.qualifiers.schema_spec.clone(),
+        );
+
+        // Lift each schema into the overlay on first write so subsequent
+        // inserts and reads see the new item id.
+        if !self.schemas_by_key.contains_key(&schema_key) {
+            if let Some(base_schema) = self.base.schemas_by_key.get(&schema_key) {
+                self.schemas_by_key
+                    .insert(schema_key.clone(), base_schema.clone());
+            }
+        }
+        if let Some(schema) = self.schemas_by_key.get_mut(&schema_key) {
+            schema.item_ids.insert(item.id);
+        }
+
+        if !self.schemas_by_id.contains_key(&id_key) {
+            if let Some(base_schema) = self.base.schemas_by_id.get(&id_key) {
+                self.schemas_by_id.insert(id_key.clone(), base_schema.clone());
+            }
+        }
+        if let Some(schema) = self.schemas_by_id.get_mut(&id_key) {
+            schema.item_ids.insert(item.id);
+        }
+
+        self.items_by_global_id.insert(item.global_id, item.id);
+        self.items_by_name
+            .entry(item.name.clone())
+            .or_default()
+            .push(item.id);
+        self.items_by_id.insert(item.id, Arc::new(item));
+    }
+
+    /// Overlay-aware version of `CatalogRuntime::lookup_item_by_partial_name`.
+    fn lookup_item_by_partial_name(
+        &self,
+        name: &PartialItemName,
+        predicate: impl Fn(&LocalItem) -> bool,
+        unknown: impl Fn(String) -> CatalogError,
+    ) -> Result<&dyn CatalogItem, CatalogError> {
+        let try_qualified = |qualified: &QualifiedItemName| -> Option<&dyn CatalogItem> {
+            if let Some(item_ids) = self.items_by_name.get(qualified) {
+                for item_id in item_ids {
+                    if let Some(item) = self.items_by_id.get(item_id) {
+                        if predicate(item) {
+                            return Some(item.as_ref() as &dyn CatalogItem);
+                        }
+                    }
+                }
+            }
+            // Inline a base lookup with the same predicate.
+            if let Some(item_ids) = self.base.items_by_name.get(qualified) {
+                for item_id in item_ids {
+                    let item = self.base.items_by_id.get(item_id).expect("item exists");
+                    if predicate(item) {
+                        return Some(item.as_ref() as &dyn CatalogItem);
+                    }
+                }
+            }
+            None
+        };
+
+        if let Some(schema_name) = name.schema.as_deref() {
+            let database_spec = if self.base.ambient_schemas_by_name.contains_key(schema_name) {
+                ResolvedDatabaseSpecifier::Ambient
+            } else {
+                let db = match name.database.as_deref() {
+                    Some(database) => *self
+                        .base
+                        .databases_by_name
+                        .get(database)
+                        .ok_or_else(|| CatalogError::UnknownDatabase(database.into()))?,
+                    None => self
+                        .base
+                        .active_database
+                        .ok_or_else(|| CatalogError::UnknownSchema(schema_name.into()))?,
+                };
+                ResolvedDatabaseSpecifier::Id(db)
+            };
+            let schema_spec = self
+                .resolve_schema_in_database(&database_spec, schema_name)?
+                .id()
+                .clone();
+            let qualified = QualifiedItemName {
+                qualifiers: ItemQualifiers {
+                    database_spec,
+                    schema_spec,
+                },
+                item: name.item.clone(),
+            };
+            try_qualified(&qualified).ok_or_else(|| unknown(name.to_string()))
+        } else {
+            for (database_spec, schema_spec) in &self.base.search_path {
+                let qualified = QualifiedItemName {
+                    qualifiers: ItemQualifiers {
+                        database_spec: *database_spec,
+                        schema_spec: schema_spec.clone(),
+                    },
+                    item: name.item.clone(),
+                };
+                if let Some(item) = try_qualified(&qualified) {
+                    return Ok(item);
+                }
+            }
+            Err(unknown(name.to_string()))
+        }
+    }
+}
+
+#[allow(clippy::as_conversions)]
+impl SessionCatalog for TaskCatalog {
+    fn active_role_id(&self) -> &RoleId {
+        self.base.active_role_id()
+    }
+
+    fn active_database(&self) -> Option<&mz_sql::names::DatabaseId> {
+        self.base.active_database()
+    }
+
+    fn active_cluster(&self) -> &str {
+        self.base.active_cluster()
+    }
+
+    fn search_path(&self) -> &[(ResolvedDatabaseSpecifier, SchemaSpecifier)] {
+        self.base.search_path()
+    }
+
+    fn get_prepared_statement_desc(&self, name: &str) -> Option<&StatementDesc> {
+        self.base.get_prepared_statement_desc(name)
+    }
+
+    fn get_portal_desc_unverified(&self, portal_name: &str) -> Option<&StatementDesc> {
+        self.base.get_portal_desc_unverified(portal_name)
+    }
+
+    fn resolve_database(&self, database_name: &str) -> Result<&dyn CatalogDatabase, CatalogError> {
+        self.base.resolve_database(database_name)
+    }
+
+    fn get_database(&self, id: &mz_sql::names::DatabaseId) -> &dyn CatalogDatabase {
+        self.base.get_database(id)
+    }
+
+    fn get_databases(&self) -> Vec<&dyn CatalogDatabase> {
+        self.base.get_databases()
+    }
+
+    fn resolve_schema(
+        &self,
+        database_name: Option<&str>,
+        schema_name: &str,
+    ) -> Result<&dyn CatalogSchema, CatalogError> {
+        self.base.resolve_schema(database_name, schema_name)
+    }
+
+    fn resolve_schema_in_database(
+        &self,
+        database_spec: &ResolvedDatabaseSpecifier,
+        schema_name: &str,
+    ) -> Result<&dyn CatalogSchema, CatalogError> {
+        if let Some(schema) = self
+            .schemas_by_key
+            .get(&(*database_spec, schema_name.into()))
+        {
+            return Ok(schema as &dyn CatalogSchema);
+        }
+        self.base
+            .resolve_schema_in_database(database_spec, schema_name)
+    }
+
+    fn get_schema(
+        &self,
+        database_spec: &ResolvedDatabaseSpecifier,
+        schema_spec: &SchemaSpecifier,
+    ) -> &dyn CatalogSchema {
+        if let Some(schema) = self
+            .schemas_by_id
+            .get(&(*database_spec, schema_spec.clone()))
+        {
+            return schema as &dyn CatalogSchema;
+        }
+        self.base.get_schema(database_spec, schema_spec)
+    }
+
+    fn get_schemas(&self) -> Vec<&dyn CatalogSchema> {
+        let mut schemas: Vec<&dyn CatalogSchema> = Vec::new();
+        for ((db, schema_spec), base_schema) in &self.base.schemas_by_id {
+            if let Some(overlay) = self.schemas_by_id.get(&(*db, schema_spec.clone())) {
+                schemas.push(overlay as &dyn CatalogSchema);
+            } else {
+                schemas.push(base_schema as &dyn CatalogSchema);
+            }
+        }
+        schemas
+    }
+
+    fn get_mz_internal_schema_id(&self) -> SchemaId {
+        self.base.get_mz_internal_schema_id()
+    }
+
+    fn get_mz_unsafe_schema_id(&self) -> SchemaId {
+        self.base.get_mz_unsafe_schema_id()
+    }
+
+    fn is_system_schema_specifier(&self, schema: SchemaSpecifier) -> bool {
+        self.base.is_system_schema_specifier(schema)
+    }
+
+    fn resolve_role(&self, role_name: &str) -> Result<&dyn CatalogRole, CatalogError> {
+        self.base.resolve_role(role_name)
+    }
+
+    fn resolve_network_policy(
+        &self,
+        network_policy_name: &str,
+    ) -> Result<&dyn CatalogNetworkPolicy, CatalogError> {
+        self.base.resolve_network_policy(network_policy_name)
+    }
+
+    fn try_get_role(&self, id: &RoleId) -> Option<&dyn CatalogRole> {
+        self.base.try_get_role(id)
+    }
+
+    fn get_role(&self, id: &RoleId) -> &dyn CatalogRole {
+        self.base.get_role(id)
+    }
+
+    fn get_roles(&self) -> Vec<&dyn CatalogRole> {
+        self.base.get_roles()
+    }
+
+    fn mz_system_role_id(&self) -> RoleId {
+        self.base.mz_system_role_id()
+    }
+
+    fn collect_role_membership(&self, id: &RoleId) -> BTreeSet<RoleId> {
+        self.base.collect_role_membership(id)
+    }
+
+    fn get_network_policy(&self, id: &NetworkPolicyId) -> &dyn CatalogNetworkPolicy {
+        self.base.get_network_policy(id)
+    }
+
+    fn get_network_policies(&self) -> Vec<&dyn CatalogNetworkPolicy> {
+        self.base.get_network_policies()
+    }
+
+    fn resolve_cluster<'a, 'b>(
+        &'a self,
+        cluster_name: Option<&'b str>,
+    ) -> Result<&'a dyn CatalogCluster<'a>, CatalogError> {
+        self.base.resolve_cluster(cluster_name)
+    }
+
+    fn resolve_cluster_replica<'a, 'b>(
+        &'a self,
+        cluster_replica_name: &'b mz_sql_parser::ast::QualifiedReplica,
+    ) -> Result<&'a dyn CatalogClusterReplica<'a>, CatalogError> {
+        self.base.resolve_cluster_replica(cluster_replica_name)
+    }
+
+    fn resolve_item(&self, item_name: &PartialItemName) -> Result<&dyn CatalogItem, CatalogError> {
+        self.lookup_item_by_partial_name(
+            item_name,
+            |item| {
+                item.item_type != CatalogItemType::Func && item.item_type != CatalogItemType::Type
+            },
+            CatalogError::UnknownItem,
+        )
+    }
+
+    fn resolve_function(
+        &self,
+        item_name: &PartialItemName,
+    ) -> Result<&dyn CatalogItem, CatalogError> {
+        self.base.resolve_function(item_name)
+    }
+
+    fn resolve_type(&self, item_name: &PartialItemName) -> Result<&dyn CatalogItem, CatalogError> {
+        self.base.resolve_type(item_name)
+    }
+
+    fn get_system_type(&self, name: &str) -> &dyn CatalogItem {
+        self.base.get_system_type(name)
+    }
+
+    fn try_get_item(&self, id: &CatalogItemId) -> Option<&dyn CatalogItem> {
+        if let Some(item) = self.items_by_id.get(id) {
+            return Some(item.as_ref() as &dyn CatalogItem);
+        }
+        self.base.try_get_item(id)
+    }
+
+    fn try_get_item_by_global_id<'a>(
+        &'a self,
+        id: &GlobalId,
+    ) -> Option<Box<dyn mz_sql::catalog::CatalogCollectionItem + 'a>> {
+        if let Some(item_id) = self.items_by_global_id.get(id) {
+            if let Some(item) = self.items_by_id.get(item_id) {
+                return Some(Box::new(LocalItem::clone(item)));
+            }
+        }
+        self.base.try_get_item_by_global_id(id)
+    }
+
+    fn get_item(&self, id: &CatalogItemId) -> &dyn CatalogItem {
+        if let Some(item) = self.items_by_id.get(id) {
+            return item.as_ref() as &dyn CatalogItem;
+        }
+        self.base.get_item(id)
+    }
+
+    fn get_item_by_global_id<'a>(
+        &'a self,
+        id: &GlobalId,
+    ) -> Box<dyn mz_sql::catalog::CatalogCollectionItem + 'a> {
+        self.try_get_item_by_global_id(id).expect("item exists")
+    }
+
+    fn get_items(&self) -> Vec<&dyn CatalogItem> {
+        let mut items: Vec<&dyn CatalogItem> = Vec::new();
+        items.extend(
+            self.items_by_id
+                .values()
+                .map(|item| item.as_ref() as &dyn CatalogItem),
+        );
+        items.extend(self.base.get_items());
+        items
+    }
+
+    fn get_item_by_name(&self, name: &QualifiedItemName) -> Option<&dyn CatalogItem> {
+        if let Some(item_ids) = self.items_by_name.get(name) {
+            if let Some(item_id) = item_ids.first() {
+                if let Some(item) = self.items_by_id.get(item_id) {
+                    return Some(item.as_ref() as &dyn CatalogItem);
+                }
+            }
+        }
+        self.base.get_item_by_name(name)
+    }
+
+    fn get_type_by_name(&self, name: &QualifiedItemName) -> Option<&dyn CatalogItem> {
+        self.base.get_type_by_name(name)
+    }
+
+    fn get_cluster(&self, id: ClusterId) -> &dyn CatalogCluster<'_> {
+        self.base.get_cluster(id)
+    }
+
+    fn get_clusters(&self) -> Vec<&dyn CatalogCluster<'_>> {
+        self.base.get_clusters()
+    }
+
+    fn get_cluster_replica(
+        &self,
+        cluster_id: ClusterId,
+        replica_id: ReplicaId,
+    ) -> &dyn CatalogClusterReplica<'_> {
+        self.base.get_cluster_replica(cluster_id, replica_id)
+    }
+
+    fn get_cluster_replicas(&self) -> Vec<&dyn CatalogClusterReplica<'_>> {
+        self.base.get_cluster_replicas()
+    }
+
+    fn get_system_privileges(&self) -> &PrivilegeMap {
+        self.base.get_system_privileges()
+    }
+
+    fn get_default_privileges(
+        &self,
+    ) -> Vec<(&DefaultPrivilegeObject, Vec<&DefaultPrivilegeAclItem>)> {
+        self.base.get_default_privileges()
+    }
+
+    fn find_available_name(&self, name: QualifiedItemName) -> QualifiedItemName {
+        self.base.find_available_name(name)
+    }
+
+    fn resolve_full_name(&self, name: &QualifiedItemName) -> FullItemName {
+        self.base.resolve_full_name(name)
+    }
+
+    fn resolve_full_schema_name(&self, name: &QualifiedSchemaName) -> FullSchemaName {
+        self.base.resolve_full_schema_name(name)
+    }
+
+    fn resolve_item_id(&self, global_id: &GlobalId) -> CatalogItemId {
+        if let Some(id) = self.items_by_global_id.get(global_id) {
+            return *id;
+        }
+        self.base.resolve_item_id(global_id)
+    }
+
+    fn resolve_global_id(
+        &self,
+        item_id: &CatalogItemId,
+        version: RelationVersionSelector,
+    ) -> GlobalId {
+        if let Some(item) = self.items_by_id.get(item_id) {
+            return item.global_id;
+        }
+        self.base.resolve_global_id(item_id, version)
+    }
+
+    fn config(&self) -> &CatalogConfig {
+        self.base.config()
+    }
+
+    fn now(&self) -> mz_ore::now::EpochMillis {
+        self.base.now()
+    }
+
+    fn aws_privatelink_availability_zones(&self) -> Option<BTreeSet<String>> {
+        self.base.aws_privatelink_availability_zones()
+    }
+
+    fn system_vars(&self) -> &SystemVars {
+        self.base.system_vars()
+    }
+
+    fn system_vars_mut(&mut self) -> &mut SystemVars {
+        unreachable!("system_vars_mut not supported on per-task overlay")
+    }
+
+    fn get_owner_id(&self, id: &mz_sql::names::ObjectId) -> Option<RoleId> {
+        if let mz_sql::names::ObjectId::Item(item_id) = id {
+            if let Some(item) = self.items_by_id.get(item_id) {
+                return Some(item.owner_id);
+            }
+        }
+        self.base.get_owner_id(id)
+    }
+
+    fn get_privileges(&self, id: &mz_sql::names::SystemObjectId) -> Option<&PrivilegeMap> {
+        self.base.get_privileges(id)
+    }
+
+    fn object_dependents(
+        &self,
+        ids: &Vec<mz_sql::names::ObjectId>,
+    ) -> Vec<mz_sql::names::ObjectId> {
+        self.base.object_dependents(ids)
+    }
+
+    fn item_dependents(&self, id: CatalogItemId) -> Vec<mz_sql::names::ObjectId> {
+        self.base.item_dependents(id)
+    }
+
+    fn all_object_privileges(&self, object_type: SystemObjectType) -> AclMode {
+        self.base.all_object_privileges(object_type)
+    }
+
+    fn get_object_type(&self, object_id: &mz_sql::names::ObjectId) -> SqlObjectType {
+        if let mz_sql::names::ObjectId::Item(item_id) = object_id {
+            if let Some(item) = self.items_by_id.get(item_id) {
+                return item.item_type.into();
+            }
+        }
+        self.base.get_object_type(object_id)
+    }
+
+    fn get_system_object_type(&self, id: &mz_sql::names::SystemObjectId) -> SystemObjectType {
+        match id {
+            mz_sql::names::SystemObjectId::Object(object_id) => {
+                SystemObjectType::Object(self.get_object_type(object_id))
+            }
+            mz_sql::names::SystemObjectId::System => SystemObjectType::System,
+        }
+    }
+
+    fn minimal_qualification(&self, qualified_name: &QualifiedItemName) -> PartialItemName {
+        self.base.minimal_qualification(qualified_name)
+    }
+
+    fn add_notice(&self, notice: mz_sql::plan::PlanNotice) {
+        self.base.add_notice(notice)
+    }
+
+    fn get_item_comments(&self, id: &CatalogItemId) -> Option<&BTreeMap<Option<usize>, String>> {
+        self.base.get_item_comments(id)
+    }
+
+    fn is_cluster_size_cc(&self, size: &str) -> bool {
+        self.base.is_cluster_size_cc(size)
+    }
+}
+
+impl ExprHumanizer for TaskCatalog {
+    fn humanize_id(&self, id: GlobalId) -> Option<String> {
+        if let Some(item_id) = self.items_by_global_id.get(&id) {
+            if let Some(item) = self.items_by_id.get(item_id) {
+                let full = self.resolve_full_name(item.name());
+                return Some(full.to_string());
+            }
+        }
+        self.base.humanize_id(id)
+    }
+
+    fn humanize_id_unqualified(&self, id: GlobalId) -> Option<String> {
+        if let Some(item_id) = self.items_by_global_id.get(&id) {
+            if let Some(item) = self.items_by_id.get(item_id) {
+                return Some(item.name().item.clone());
+            }
+        }
+        self.base.humanize_id_unqualified(id)
+    }
+
+    fn humanize_id_parts(&self, id: GlobalId) -> Option<Vec<String>> {
+        if let Some(item_id) = self.items_by_global_id.get(&id) {
+            if let Some(item) = self.items_by_id.get(item_id) {
+                let full = self.resolve_full_name(item.name());
+                let mut parts = Vec::new();
+                if let RawDatabaseSpecifier::Name(database) = full.database {
+                    parts.push(database);
+                }
+                parts.push(full.schema);
+                parts.push(full.item);
+                return Some(parts);
+            }
+        }
+        self.base.humanize_id_parts(id)
+    }
+
+    fn humanize_sql_scalar_type(&self, ty: &SqlScalarType, postgres_compat: bool) -> String {
+        self.base.humanize_sql_scalar_type(ty, postgres_compat)
+    }
+
+    fn column_names_for_id(&self, id: GlobalId) -> Option<Vec<String>> {
+        if let Some(item_id) = self.items_by_global_id.get(&id) {
+            if let Some(item) = self.items_by_id.get(item_id) {
+                if let Some(desc) = item.relation_desc.as_ref() {
+                    return Some(
+                        desc.iter_names()
+                            .map(|name| name.as_str().to_string())
+                            .collect(),
+                    );
+                }
+            }
+        }
+        self.base.column_names_for_id(id)
+    }
+
+    fn humanize_column(&self, id: GlobalId, column: usize) -> Option<String> {
+        if let Some(item_id) = self.items_by_global_id.get(&id) {
+            if let Some(item) = self.items_by_id.get(item_id) {
+                if let Some(desc) = item.relation_desc.as_ref() {
+                    return Some(desc.get_name(column).to_string());
+                }
+            }
+        }
+        self.base.humanize_column(id, column)
+    }
+
+    fn id_exists(&self, id: GlobalId) -> bool {
+        self.items_by_global_id.contains_key(&id) || self.base.id_exists(id)
+    }
+}
+
+impl ConnectionResolver for TaskCatalog {
+    fn resolve_connection(&self, id: CatalogItemId) -> Connection<InlinedConnection> {
+        self.base.resolve_connection(id)
     }
 }
 

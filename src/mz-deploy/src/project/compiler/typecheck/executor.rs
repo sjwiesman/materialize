@@ -16,12 +16,11 @@
 
 use crate::project::compiler::typecheck::ObjectTypeCheckError;
 use crate::project::ir::object_id::ObjectId;
-use crossbeam_channel::{RecvTimeoutError, unbounded};
+use crossbeam_channel::unbounded;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 /// Final outcome for one node after the DAG executor runs.
 #[derive(Debug)]
@@ -87,11 +86,13 @@ where
 
     let total = bookkeeping.len();
     let completed = Arc::new(AtomicUsize::new(0));
-    let (tx, rx) = unbounded::<ObjectId>();
+    // Channel carries `Some(id)` for real work and `None` as a shutdown
+    // sentinel posted by the worker that completes the last node.
+    let (tx, rx) = unbounded::<Option<ObjectId>>();
 
     for (node_id, bk) in bookkeeping.iter() {
         if bk.remaining_deps.load(Ordering::Relaxed) == 0 {
-            tx.send(node_id.clone()).expect("channel open");
+            tx.send(Some(node_id.clone())).expect("channel open");
         }
     }
 
@@ -104,7 +105,7 @@ where
             let completed = Arc::clone(&completed);
             let work = &work;
             scope.spawn(move |_| {
-                worker_loop(rx, tx, bookkeeping, completed, total, work);
+                worker_loop(rx, tx, bookkeeping, completed, total, worker_count, work);
             });
         }
     });
@@ -127,21 +128,24 @@ where
 }
 
 fn worker_loop<T, F>(
-    rx: crossbeam_channel::Receiver<ObjectId>,
-    tx: crossbeam_channel::Sender<ObjectId>,
+    rx: crossbeam_channel::Receiver<Option<ObjectId>>,
+    tx: crossbeam_channel::Sender<Option<ObjectId>>,
     bookkeeping: Arc<BTreeMap<ObjectId, Arc<NodeBookkeeping<T>>>>,
     completed: Arc<AtomicUsize>,
     total: usize,
+    worker_count: usize,
     work: &F,
 ) where
     T: Send + Sync + 'static,
     F: Fn(&ObjectId, &BTreeMap<ObjectId, Arc<T>>) -> Result<T, ObjectTypeCheckError> + Send + Sync,
 {
-    while completed.load(Ordering::Acquire) < total {
-        let node_id = match rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(id) => id,
-            Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => break,
+    loop {
+        // `recv()` blocks until a message arrives or the channel disconnects;
+        // the worker that completes the last node posts N-1 `None` sentinels
+        // so all other workers wake from this call and exit.
+        let node_id = match rx.recv() {
+            Ok(Some(id)) => id,
+            Ok(None) | Err(_) => return,
         };
         let bk = Arc::clone(
             bookkeeping
@@ -168,13 +172,19 @@ fn worker_loop<T, F>(
             let prev = dep_bk.remaining_deps.fetch_sub(1, Ordering::AcqRel);
             debug_assert!(prev >= 1, "remaining_deps underflow for {dependent_id:?}");
             if prev == 1 {
-                tx.send(dependent_id.clone()).expect("channel open");
+                tx.send(Some(dependent_id.clone()))
+                    .expect("channel open");
             }
         }
-        // Bump after fan-out so a worker that observes `completed == total`
-        // and exits has transitively observed every fan-out write
-        // (Release/Acquire pair with the loop predicate's load).
-        completed.fetch_add(1, Ordering::Release);
+
+        let prev = completed.fetch_add(1, Ordering::Relaxed);
+        if prev + 1 == total {
+            // Last node done. Wake any worker still parked in `rx.recv()`.
+            for _ in 0..worker_count.saturating_sub(1) {
+                tx.send(None).expect("channel open");
+            }
+            return;
+        }
     }
 }
 
