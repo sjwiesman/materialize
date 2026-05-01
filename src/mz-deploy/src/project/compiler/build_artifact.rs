@@ -156,6 +156,10 @@ impl BuildArtifact {
                 "
                 PRAGMA journal_mode=WAL;
                 PRAGMA synchronous=NORMAL;
+                PRAGMA cache_size=-65536;
+                PRAGMA temp_store=MEMORY;
+                PRAGMA mmap_size=268435456;
+                PRAGMA wal_autocheckpoint=10000;
                 ",
             )
             .map_err(|source| BuildArtifactError::DatabaseOperationFailed {

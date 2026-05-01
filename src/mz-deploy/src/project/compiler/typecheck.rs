@@ -14,6 +14,7 @@
 
 use super::build_artifact::BuildArtifact;
 use crate::project::ast::Statement;
+use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
 use crate::types::{ColumnType, ObjectKind, Types, TypesError};
@@ -22,6 +23,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 mod bootstrap;
 mod catalog;
@@ -83,23 +85,20 @@ pub(crate) fn run(
     external_types: Types,
 ) -> Result<(Types, TypecheckStats), TypeCheckError> {
     let sorted = project.get_sorted_objects()?;
-    let mut node_ids: Vec<ObjectId> = Vec::new();
-    let mut typed_objects: BTreeMap<ObjectId, &crate::project::ir::compiled::DatabaseObject> =
-        BTreeMap::new();
-    for (object_id, db_obj) in &sorted {
-        if !matches!(
-            db_obj.stmt,
-            Statement::CreateView(_) | Statement::CreateMaterializedView(_)
-        ) {
-            continue;
-        }
-        node_ids.push(object_id.clone());
-        typed_objects.insert(object_id.clone(), *db_obj);
-    }
+    let typed_objects: BTreeMap<ObjectId, &crate::project::ir::compiled::DatabaseObject> = sorted
+        .iter()
+        .filter(|(_, db_obj)| {
+            matches!(
+                db_obj.stmt,
+                Statement::CreateView(_) | Statement::CreateMaterializedView(_)
+            )
+        })
+        .map(|(id, db_obj)| (id.clone(), *db_obj))
+        .collect();
 
     // Open the build artifact db now so we can use it for incremental reads
     // (cached columns, prior external-type digests) and the final upserts.
-    let db_open_start = std::time::Instant::now();
+    let db_open_start = Instant::now();
     let mut db = BuildArtifact::open(directory, profile, profile_suffix, variables)
         .map_err(TypesError::from)?;
     crate::timing!("typecheck: open_db", db_open_start.elapsed());
@@ -107,7 +106,7 @@ pub(crate) fn run(
     // Snapshot all cached typecheck columns up front. Reading inside the DAG
     // would require a Sync SQLite handle, which rusqlite::Connection isn't.
     // The map is keyed by `ObjectId.to_string()` (matches sqlite layout).
-    let cache_load_start = std::time::Instant::now();
+    let cache_load_start = Instant::now();
     let cached_columns_by_key: BTreeMap<String, BTreeMap<String, ColumnType>> =
         db.load_typecheck_columns().map_err(TypesError::from)?;
     crate::timing!("typecheck: load_cached_columns", cache_load_start.elapsed());
@@ -116,10 +115,7 @@ pub(crate) fn run(
     // object whose `external_dependencies` intersects the changed set is added
     // to the dirty set on top of `project.compile_dirty`.
     let current_ext_digests = compute_external_digests(&external_types);
-    let cached_ext_digests = db
-        .load_external_type_digests()
-        .map_err(TypesError::from)
-        .unwrap_or_default();
+    let cached_ext_digests = db.load_external_type_digests().map_err(TypesError::from)?;
     let changed_externals: BTreeSet<ObjectId> = current_ext_digests
         .iter()
         .filter(|(k, v)| cached_ext_digests.get(*k) != Some(*v))
@@ -132,27 +128,36 @@ pub(crate) fn run(
         )
         .collect();
 
-    let initial_dirty: BTreeSet<ObjectId> = node_ids
-        .iter()
+    let reverse_graph = project.build_reverse_dependency_graph();
+
+    let initial_dirty: BTreeSet<ObjectId> = typed_objects
+        .keys()
         .filter(|id| {
+            // 1. The view's own source changed.
             if project.compile_dirty.contains(id) {
                 return true;
             }
-            // External-dep change → object is dirty. Per-object external
-            // deps are the intersection of the object's full dependency set
-            // with the project-wide external_dependencies set.
+            // 2. The view has no cached typecheck row — it was either never
+            //    validated or its previous run failed. Either way, retry.
+            if !cached_columns_by_key.contains_key(&id.to_string()) {
+                return true;
+            }
+            // 3. A *non-view* direct dep was recompiled, or an external
+            //    `types.lock` entry the view consumes had its schema change.
+            //    View deps are intentionally excluded here: schema-stability
+            //    propagation through the DAG already handles them — a
+            //    recompiled-but-schema-stable upstream view shouldn't dirty
+            //    its dependents.
             let Some(deps) = project.dependency_graph.get(id) else {
                 return false;
             };
-            deps.iter()
-                .filter(|d| project.external_dependencies.contains(d))
-                .any(|ext| changed_externals.contains(ext))
+            deps.iter().any(|d| {
+                changed_externals.contains(d)
+                    || (project.compile_dirty.contains(d) && !typed_objects.contains_key(d))
+            })
         })
         .cloned()
         .collect();
-
-    let node_set: BTreeSet<ObjectId> = node_ids.iter().cloned().collect();
-    let reverse_graph = project.build_reverse_dependency_graph();
 
     // `pessimistic_dirty` = views that might actually typecheck this run:
     // every input-dirty view, plus every transitive dependent of one (since
@@ -167,7 +172,7 @@ pub(crate) fn run(
             }
             if let Some(downs) = reverse_graph.get(&id) {
                 for d in downs {
-                    if node_set.contains(d) && !pessimistic_dirty.contains(d) {
+                    if typed_objects.contains_key(d) && !pessimistic_dirty.contains(d) {
                         stack.push(d.clone());
                     }
                 }
@@ -175,38 +180,31 @@ pub(crate) fn run(
         }
     }
 
-    // DAG = pessimistic_dirty + their *direct* view deps. We need those view
-    // deps in the DAG so dirty consumers can pick up their (cached) columns
-    // through `dep_results`. We do *not* recurse into transitive view deps:
-    // a clean view in the DAG skip-returns its cached columns and never
-    // typechecks, so it doesn't need its own upstream registered anywhere.
+    // Partition the *direct* deps of `pessimistic_dirty` into:
+    //   - view deps → join the DAG so dirty consumers pick up their
+    //     (cached) columns through `dep_results`,
+    //   - non-view deps → join the bootstrap set so the catalog has them
+    //     when a dirty view typechecks.
+    //
+    // Transitive deps aren't expanded: a clean view in the DAG
+    // skip-returns its cached columns without typechecking, so it never
+    // needs its own upstream registered.
     let mut dag_nodes: BTreeSet<ObjectId> = pessimistic_dirty.clone();
-    for id in &pessimistic_dirty {
-        if let Some(deps) = project.dependency_graph.get(id) {
-            for d in deps {
-                if node_set.contains(d) {
-                    dag_nodes.insert(d.clone());
-                }
-            }
-        }
-    }
-
-    // Bootstrap only the *direct non-view* deps of nodes that may actually
-    // typecheck. Nothing else needs to be in the base catalog — direct view
-    // deps come through `dep_results`, transitive deps are unreached. On a
-    // no-op build pessimistic_dirty is empty and bootstrap_set is empty.
     let mut bootstrap_set: BTreeSet<ObjectId> = BTreeSet::new();
     for id in &pessimistic_dirty {
-        if let Some(deps) = project.dependency_graph.get(id) {
-            for d in deps {
-                if !node_set.contains(d) {
-                    bootstrap_set.insert(d.clone());
-                }
+        let Some(deps) = project.dependency_graph.get(id) else {
+            continue;
+        };
+        for d in deps {
+            if typed_objects.contains_key(d) {
+                dag_nodes.insert(d.clone());
+            } else {
+                bootstrap_set.insert(d.clone());
             }
         }
     }
 
-    let bootstrap_start = std::time::Instant::now();
+    let bootstrap_start = Instant::now();
     let (base_catalog, base_columns) =
         bootstrap::bootstrap_catalog(project, &external_types, Some(&bootstrap_set))?;
     crate::timing!("typecheck: bootstrap_catalog", bootstrap_start.elapsed());
@@ -214,8 +212,8 @@ pub(crate) fn run(
     // Build the DAG only over `dag_nodes`. Direct-dep edges are filtered to
     // node IDs actually present in the DAG (other deps are already stubbed
     // into the base catalog above).
-    let dag_node_ids: Vec<ObjectId> = node_ids
-        .iter()
+    let dag_node_ids: Vec<ObjectId> = typed_objects
+        .keys()
         .filter(|id| dag_nodes.contains(id))
         .cloned()
         .collect();
@@ -246,11 +244,11 @@ pub(crate) fn run(
 
     let typed_objects = Arc::new(typed_objects);
     let cached_columns_by_key = Arc::new(cached_columns_by_key);
-    let dag_start = std::time::Instant::now();
+    let dag_start = Instant::now();
     let outcomes = {
         let typed_objects = Arc::clone(&typed_objects);
         let base_catalog = Arc::clone(&base_catalog);
-        let initial_dirty = Arc::new(initial_dirty.clone());
+        let initial_dirty = Arc::new(initial_dirty);
         let cached_columns_by_key = Arc::clone(&cached_columns_by_key);
         let stats_counter = Arc::clone(&stats_counter);
         executor::run::<NodeValue, _>(
@@ -275,58 +273,30 @@ pub(crate) fn run(
                     });
                 }
 
-                let mut runtime = (*base_catalog).clone();
-                for (dep_id, dep_value) in dep_results {
-                    runtime
-                        .create_stub_table(dep_id, &dep_value.columns)
-                        .map_err(|err| {
-                            ObjectTypeCheckError::internal(
-                                dep_id.clone(),
-                                db_obj.path.clone(),
-                                format!("failed to stub dependency: {err}"),
-                            )
-                        })?;
-                }
-                let fqn: crate::project::ir::compiled::FullyQualifiedName = node_id.clone().into();
-                let ast =
-                    convert::create_catalog_item_ast(&db_obj.stmt, &fqn).ok_or_else(|| {
-                        ObjectTypeCheckError::internal(
-                            node_id.clone(),
-                            db_obj.path.clone(),
-                            "internal: failed to build catalog AST".into(),
-                        )
-                    })?;
-                let desc = runtime.create_item_from_ast(node_id, ast)?;
-                let columns = convert::relation_desc_to_columns(&desc);
-                let schema_stable = cached_columns
-                    .as_ref()
-                    .map(|cached| cached == &columns)
-                    .unwrap_or(false);
-                stats_counter.bump_ran(schema_stable);
-                Ok(NodeValue {
-                    columns,
-                    schema_stable,
-                })
+                let value = typecheck_node(
+                    node_id,
+                    db_obj,
+                    &base_catalog,
+                    dep_results,
+                    cached_columns.as_ref(),
+                )?;
+                stats_counter.bump_ran(value.schema_stable);
+                Ok(value)
             },
         )
     };
     crate::timing!("typecheck: dag_executor", dag_start.elapsed());
 
-    let merge_start = std::time::Instant::now();
+    let merge_start = Instant::now();
     let mut errors: Vec<ObjectTypeCheckError> = Vec::new();
     let mut upsert_rows: Vec<(String, String, BTreeMap<String, ColumnType>)> = Vec::new();
     let mut merged_tables: BTreeMap<ObjectId, BTreeMap<String, ColumnType>> = BTreeMap::new();
     let mut merged_kinds: BTreeMap<ObjectId, ObjectKind> = BTreeMap::new();
 
-    let project_objects_by_id: BTreeMap<&ObjectId, &crate::project::ir::compiled::DatabaseObject> =
-        project
-            .iter_objects()
-            .map(|o| (&o.id, &o.typed_object))
-            .collect();
     for (id, columns) in base_columns.iter() {
         merged_tables.insert(id.clone(), columns.clone());
-        if let Some(typed_obj) = project_objects_by_id.get(id) {
-            merged_kinds.insert(id.clone(), typed_obj.stmt.kind());
+        if let Some(obj) = project.iter_objects().find(|o| &o.id == id) {
+            merged_kinds.insert(id.clone(), obj.typed_object.stmt.kind());
         }
     }
     for (id, columns) in &external_types.tables {
@@ -336,7 +306,7 @@ pub(crate) fn run(
         }
     }
 
-    for node_id in &node_ids {
+    for node_id in typed_objects.keys() {
         let Some(outcome) = outcomes.get(node_id) else {
             continue;
         };
@@ -386,10 +356,10 @@ pub(crate) fn run(
     // Failed/blocked nodes keep their last successful row by being absent from
     // upsert_rows. The keep-set retains every typecheck-eligible object so
     // prune only deletes rows for objects no longer in the project.
-    let persist_start = std::time::Instant::now();
+    let persist_start = Instant::now();
     db.upsert_typecheck_results(&upsert_rows)
         .map_err(TypesError::from)?;
-    let keep: BTreeSet<String> = node_ids.iter().map(|id| id.to_string()).collect();
+    let keep: BTreeSet<String> = typed_objects.keys().map(|id| id.to_string()).collect();
     db.prune_typecheck_results(&keep)
         .map_err(TypesError::from)?;
     db.replace_external_type_digests(&current_ext_digests)
@@ -400,8 +370,7 @@ pub(crate) fn run(
         return Err(TypeCheckError::Multiple(errors));
     }
 
-    let mut stats = stats_counter.snapshot();
-    stats.skipped = node_ids.len().saturating_sub(stats.ran);
+    let stats = stats_counter.snapshot(typed_objects.len());
 
     Ok((
         Types {
@@ -416,34 +385,74 @@ pub(crate) fn run(
 
 /// Atomic counter set used to aggregate per-node decisions across the parallel
 /// DAG executor without locking. Snapshotted once after the DAG completes.
+/// `ran` is derived as `schema_stable + schema_changed`.
 #[derive(Default)]
 struct StatsCounter {
-    ran: std::sync::atomic::AtomicUsize,
     schema_stable: std::sync::atomic::AtomicUsize,
     schema_changed: std::sync::atomic::AtomicUsize,
 }
 
 impl StatsCounter {
     fn bump_ran(&self, schema_stable: bool) {
-        self.ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if schema_stable {
-            self.schema_stable
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let counter = if schema_stable {
+            &self.schema_stable
         } else {
-            self.schema_changed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+            &self.schema_changed
+        };
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn snapshot(&self) -> TypecheckStats {
+    fn snapshot(&self, total_nodes: usize) -> TypecheckStats {
         use std::sync::atomic::Ordering::Relaxed;
+        let schema_stable = self.schema_stable.load(Relaxed);
+        let schema_changed = self.schema_changed.load(Relaxed);
+        let ran = schema_stable + schema_changed;
         TypecheckStats {
-            ran: self.ran.load(Relaxed),
-            skipped: 0, // populated by the caller from node_ids.len() - ran
-            schema_stable: self.schema_stable.load(Relaxed),
-            schema_changed: self.schema_changed.load(Relaxed),
+            ran,
+            skipped: total_nodes.saturating_sub(ran),
+            schema_stable,
+            schema_changed,
         }
     }
+}
+
+/// Run a single view/MV through the catalog: clone the base catalog, stub
+/// in this node's dep results, register the AST, convert the result back to
+/// column form, and decide whether the output schema matches the cache.
+fn typecheck_node(
+    node_id: &ObjectId,
+    db_obj: &crate::project::ir::compiled::DatabaseObject,
+    base_catalog: &Arc<catalog::CatalogRuntime>,
+    dep_results: &BTreeMap<ObjectId, Arc<NodeValue>>,
+    cached_columns: Option<&BTreeMap<String, ColumnType>>,
+) -> Result<NodeValue, ObjectTypeCheckError> {
+    let mut runtime = catalog::TaskCatalog::new(Arc::clone(base_catalog));
+    for (dep_id, dep_value) in dep_results {
+        runtime
+            .create_stub_table(dep_id, &dep_value.columns)
+            .map_err(|err| {
+                ObjectTypeCheckError::internal(
+                    dep_id.clone(),
+                    db_obj.path.clone(),
+                    format!("failed to stub dependency: {err}"),
+                )
+            })?;
+    }
+    let fqn: FullyQualifiedName = node_id.clone().into();
+    let ast = convert::create_catalog_item_ast(&db_obj.stmt, &fqn).ok_or_else(|| {
+        ObjectTypeCheckError::internal(
+            node_id.clone(),
+            db_obj.path.clone(),
+            "internal: failed to build catalog AST".into(),
+        )
+    })?;
+    let desc = runtime.create_item_from_ast(node_id, ast)?;
+    let columns = convert::relation_desc_to_columns(&desc);
+    let schema_stable = cached_columns.is_some_and(|cached| cached == &columns);
+    Ok(NodeValue {
+        columns,
+        schema_stable,
+    })
 }
 
 /// SHA-256 digest of a column map, deterministic across runs because the
@@ -790,5 +799,105 @@ mod run_tests {
         assert_eq!(stats.ran, 2, "v1 changed, v2 must re-run");
         assert_eq!(stats.schema_changed, 2);
         assert_eq!(stats.skipped, 0);
+    }
+
+    /// A view whose typecheck failed must be re-run on the next invocation,
+    /// even if no source files changed. Otherwise an unfixed broken project
+    /// would silently start passing on the second compile.
+    #[test]
+    fn previous_typecheck_failure_re_runs_next_invocation() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        write_sql(
+            root,
+            "models/materialize/storage/t1.sql",
+            "CREATE TABLE t1 (a int)",
+        );
+        // v1 references a column that doesn't exist on t1 — typecheck fails.
+        write_sql(
+            root,
+            "models/materialize/public/v1.sql",
+            "CREATE VIEW v1 AS SELECT no_such_column FROM materialize.storage.t1",
+        );
+
+        let fs = crate::fs::FileSystem::new();
+        let project = compile_sync(&fs, root, None, None, &BTreeMap::new()).unwrap();
+        let first = run(
+            root,
+            "default",
+            None,
+            &BTreeMap::new(),
+            &project,
+            Types::default(),
+        );
+        assert!(first.is_err(), "first run should fail typechecking v1");
+
+        // Second run: identical project, identical files. The failed view
+        // must run again and surface the same error — not be skipped.
+        let project = compile_sync(&fs, root, None, None, &BTreeMap::new()).unwrap();
+        let second = run(
+            root,
+            "default",
+            None,
+            &BTreeMap::new(),
+            &project,
+            Types::default(),
+        );
+        assert!(
+            second.is_err(),
+            "second run must also fail — typecheck cache must not mask an unfixed error"
+        );
+    }
+
+    /// Editing a non-view object (e.g. a table) must invalidate dependent
+    /// views' cached typecheck results, because the table's column schema
+    /// flows into the catalog views are validated against.
+    #[test]
+    fn table_edit_dirties_dependent_view() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        write_sql(
+            root,
+            "models/materialize/storage/t1.sql",
+            "CREATE TABLE t1 (a int)",
+        );
+        write_sql(
+            root,
+            "models/materialize/public/v1.sql",
+            "CREATE VIEW v1 AS SELECT a FROM materialize.storage.t1",
+        );
+
+        let fs = crate::fs::FileSystem::new();
+        let project = compile_sync(&fs, root, None, None, &BTreeMap::new()).unwrap();
+        let _ = run(
+            root,
+            "default",
+            None,
+            &BTreeMap::new(),
+            &project,
+            Types::default(),
+        )
+        .unwrap();
+
+        // Edit the table to remove the column the view depends on.
+        write_sql(
+            root,
+            "models/materialize/storage/t1.sql",
+            "CREATE TABLE t1 (b int)",
+        );
+        let project = compile_sync(&fs, root, None, None, &BTreeMap::new()).unwrap();
+        let result = run(
+            root,
+            "default",
+            None,
+            &BTreeMap::new(),
+            &project,
+            Types::default(),
+        );
+        assert!(
+            result.is_err(),
+            "v1 references column `a` which no longer exists on t1; \
+             dependent view must re-typecheck and surface the error"
+        );
     }
 }

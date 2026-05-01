@@ -10,11 +10,15 @@
 //! Bootstrap the shared catalog used by every per-task typecheck.
 //!
 //! Seeds builtins (via [`CatalogRuntime::open`]), bootstraps namespaces,
-//! registers external `types.lock` entries as stub tables, and registers all
+//! registers external `types.lock` entries as stub tables, and registers
 //! non-typechecked project objects (tables, sources, sinks, secrets,
-//! connections) from their compiled SQL. Returns the catalog wrapped in `Arc`
-//! plus a map of column metadata for the registered non-typechecked objects.
-//! The parallel executor forks per-task catalogs from this baseline.
+//! connections) from their compiled SQL. The set of registered objects can
+//! be narrowed via the `restrict` parameter so incremental runs only pay
+//! for the deps the dirty subgraph actually needs.
+//!
+//! Returns the catalog wrapped in `Arc` plus a map of column metadata for
+//! the registered non-typechecked objects. The parallel executor forks
+//! per-task catalogs from this baseline.
 
 use super::catalog::CatalogRuntime;
 use super::convert::{create_catalog_item_sql, relation_desc_to_columns};
@@ -50,6 +54,8 @@ pub(super) fn bootstrap_catalog(
     let mut runtime = CatalogRuntime::open()?;
     runtime.bootstrap_namespaces(project, external_types);
 
+    let included = |id: &ObjectId| restrict.is_none_or(|set| set.contains(id));
+
     let mut base_columns: BTreeMap<ObjectId, BTreeMap<String, ColumnType>> = BTreeMap::new();
     let mut errors: Vec<ObjectTypeCheckError> = Vec::new();
     let mut registered_from_create: BTreeSet<ObjectId> = BTreeSet::new();
@@ -60,14 +66,8 @@ pub(super) fn bootstrap_catalog(
         ) {
             continue;
         }
-        let object_id = ObjectId {
-            database: db_obj.id.database.clone(),
-            schema: db_obj.id.schema.clone(),
-            object: db_obj.id.object.clone(),
-        };
-        if let Some(set) = restrict
-            && !set.contains(&object_id)
-        {
+        let object_id = db_obj.id.clone();
+        if !included(&object_id) {
             continue;
         }
         let fqn: FullyQualifiedName = object_id.clone().into();
@@ -84,12 +84,7 @@ pub(super) fn bootstrap_catalog(
     }
 
     for (id, columns) in &external_types.tables {
-        if registered_from_create.contains(id) {
-            continue;
-        }
-        if let Some(set) = restrict
-            && !set.contains(id)
-        {
+        if registered_from_create.contains(id) || !included(id) {
             continue;
         }
         runtime.create_stub_table(id, columns)?;
