@@ -32,6 +32,7 @@ use mz_sql::names::PartialItemName;
 use mz_sql::plan::PlanError;
 
 use crate::project::compiler::typecheck::ObjectTypeCheckErrorKind;
+use crate::project::error::ValidationErrorKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Severity {
@@ -191,6 +192,18 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Same as [`find_identifier`] but starts the search at `start_byte`.
+/// Returns absolute byte ranges into `source`.
+pub(crate) fn find_identifier_after(
+    source: &str,
+    name: &str,
+    start_byte: usize,
+) -> Option<Range<usize>> {
+    let slice = source.get(start_byte..)?;
+    let local = find_identifier(slice, name)?;
+    Some((start_byte + local.start)..(start_byte + local.end))
+}
+
 /// Build the (message, footers, suggestions) triple for one typecheck kind.
 ///
 /// Variants that carry alternatives (`UnknownColumn::similar`,
@@ -311,6 +324,85 @@ pub(crate) fn locate_replacement(
         return primary_range.clone();
     }
     find_identifier(source, needle).unwrap_or_else(|| primary_range.clone())
+}
+
+/// Locate the byte range of the declared identifier in a *Mismatch
+/// validation error. Returns `None` for variants that don't carry a
+/// `declared` name we can rewrite.
+pub(crate) fn locate_validation(
+    kind: &ValidationErrorKind,
+    source: &str,
+    statement_offset: Option<usize>,
+) -> Option<Range<usize>> {
+    let needle = mismatch_declared(kind)?;
+    find_identifier_after(source, needle, statement_offset.unwrap_or(0))
+}
+
+/// Build the (message, footers, suggestions) triple for a validation kind.
+///
+/// For *Mismatch variants the suggestion is a single replacement that
+/// rewrites the declared identifier to the expected one. Other variants
+/// surface only the message and any upstream `help()` text.
+pub(crate) fn format_validation_kind(
+    kind: &ValidationErrorKind,
+    source: &str,
+    primary_range: &Range<usize>,
+) -> (String, Vec<String>, Vec<Suggestion>) {
+    let message = kind.message();
+    let mut footers: Vec<String> = kind.help().into_iter().collect();
+    let suggestions = mismatch_suggestion(kind, source, primary_range);
+    // Surface the rename target as an explicit footer so consumers that only
+    // render footers (CLI plain mode) still mention the fix.
+    if let (Some(_declared), Some(expected)) = (mismatch_declared(kind), mismatch_expected(kind)) {
+        footers.push(format!("rename to '{expected}'"));
+    }
+    (message, footers, suggestions)
+}
+
+/// `Some(declared)` if `kind` is one of the rewritable *Mismatch variants.
+fn mismatch_declared(kind: &ValidationErrorKind) -> Option<&str> {
+    use ValidationErrorKind::*;
+    match kind {
+        ObjectNameMismatch { declared, .. }
+        | SchemaMismatch { declared, .. }
+        | DatabaseMismatch { declared, .. }
+        | ClusterNameMismatch { declared, .. }
+        | RoleNameMismatch { declared, .. }
+        | NetworkPolicyNameMismatch { declared, .. } => Some(declared.as_str()),
+        _ => None,
+    }
+}
+
+fn mismatch_expected(kind: &ValidationErrorKind) -> Option<&str> {
+    use ValidationErrorKind::*;
+    match kind {
+        ObjectNameMismatch { expected, .. }
+        | SchemaMismatch { expected, .. }
+        | DatabaseMismatch { expected, .. }
+        | ClusterNameMismatch { expected, .. }
+        | RoleNameMismatch { expected, .. }
+        | NetworkPolicyNameMismatch { expected, .. } => Some(expected.as_str()),
+        _ => None,
+    }
+}
+
+fn mismatch_suggestion(
+    kind: &ValidationErrorKind,
+    source: &str,
+    primary_range: &Range<usize>,
+) -> Vec<Suggestion> {
+    let (Some(declared), Some(expected)) = (mismatch_declared(kind), mismatch_expected(kind))
+    else {
+        return Vec::new();
+    };
+    let span = locate_replacement(source, primary_range, declared);
+    vec![Suggestion {
+        label: format!("rename to `{expected}`"),
+        alternatives: vec![Replacement {
+            byte_range: span,
+            replacement: expected.to_string(),
+        }],
+    }]
 }
 
 #[cfg(test)]
@@ -436,5 +528,55 @@ mod tests {
     fn locate_replacement_falls_back_to_search() {
         let r = locate_replacement("SELECT emails FROM t", &(0..0), "emails");
         assert_eq!(r, 7..13);
+    }
+
+    #[test]
+    fn find_identifier_after_skips_earlier_occurrence() {
+        let source = "CREATE TABLE foo (...);\nCREATE VIEW v AS SELECT * FROM foo;";
+        let r = find_identifier_after(source, "foo", 24).unwrap();
+        // Match should be the second `foo`, not the first.
+        assert!(r.start > 24);
+        assert_eq!(&source[r.clone()], "foo");
+    }
+
+    #[test]
+    fn locate_validation_object_name_mismatch_finds_declared_token() {
+        use crate::project::error::ValidationErrorKind;
+        let source = "CREATE TABLE customers (id INT);";
+        let kind = ValidationErrorKind::ObjectNameMismatch {
+            declared: "customers".to_string(),
+            expected: "users".to_string(),
+        };
+        let r = locate_validation(&kind, source, Some(0)).unwrap();
+        assert_eq!(&source[r], "customers");
+    }
+
+    #[test]
+    fn format_validation_kind_object_name_mismatch_yields_rename_suggestion() {
+        use crate::project::error::ValidationErrorKind;
+        let source = "CREATE TABLE customers (id INT);";
+        let kind = ValidationErrorKind::ObjectNameMismatch {
+            declared: "customers".to_string(),
+            expected: "users".to_string(),
+        };
+        let primary = locate_validation(&kind, source, Some(0)).unwrap();
+        let (msg, footers, suggestions) = format_validation_kind(&kind, source, &primary);
+        assert!(msg.contains("declared 'customers'"));
+        assert!(msg.contains("expected 'users'"));
+        assert!(footers.iter().any(|f| f.contains("rename to 'users'")));
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].alternatives.len(), 1);
+        assert_eq!(suggestions[0].alternatives[0].replacement, "users");
+        assert_eq!(&source[suggestions[0].alternatives[0].byte_range.clone()], "customers");
+    }
+
+    #[test]
+    fn format_validation_kind_unhandled_returns_no_suggestions() {
+        use crate::project::error::ValidationErrorKind;
+        let kind = ValidationErrorKind::NoMainStatement {
+            object_name: "x".to_string(),
+        };
+        let (_msg, _footers, sugg) = format_validation_kind(&kind, "", &(0..0));
+        assert!(sugg.is_empty());
     }
 }
