@@ -884,4 +884,74 @@ mod tests {
         .await;
         assert!(result.is_ok(), "concurrent publish_diagnostics timed out");
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn code_action_returns_quickfix_for_unknown_column_diagnostic() {
+        use crate::lsp::code_action::QuickFixData;
+        use std::sync::Mutex as StdMutex;
+        use tower_lsp::lsp_types::{
+            CodeActionContext, CodeActionKind, CodeActionOrCommand, CodeActionParams, Diagnostic,
+            DiagnosticSeverity, PartialResultParams, Position, Range, TextDocumentIdentifier,
+            WorkDoneProgressParams,
+        };
+
+        let captured_client: Arc<StdMutex<Option<Client>>> = Arc::new(StdMutex::new(None));
+        let captured_client_clone = Arc::clone(&captured_client);
+        let (_service, _socket) = tower_lsp::LspService::new(move |client| {
+            *captured_client_clone.lock().unwrap() = Some(client.clone());
+            Backend::new_with_root(client, std::env::temp_dir())
+        });
+        let client = captured_client.lock().unwrap().take().unwrap();
+        let backend = Backend::new_with_root(client, std::env::temp_dir());
+
+        let uri = Url::from_file_path(std::env::temp_dir().join("qf.sql")).unwrap();
+        let qf = QuickFixData {
+            suggestions: vec![code_action::SuggestionData {
+                label: "did you mean `customer_name`?".to_string(),
+                alternatives: vec![code_action::ReplacementData {
+                    range: Range::new(Position::new(0, 7), Position::new(0, 20)),
+                    new_text: "customer_name".to_string(),
+                }],
+            }],
+        };
+        let diag = Diagnostic {
+            range: Range::new(Position::new(0, 7), Position::new(0, 20)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("mz-deploy".to_string()),
+            message: "column custoser_name does not exist".to_string(),
+            data: Some(serde_json::to_value(qf).unwrap()),
+            ..Default::default()
+        };
+
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: diag.range,
+            context: CodeActionContext {
+                diagnostics: vec![diag],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+
+        let response = backend.code_action(params).await.unwrap();
+        let actions = response.expect("code_action should return Some");
+        assert_eq!(actions.len(), 1);
+        let CodeActionOrCommand::CodeAction(ca) = &actions[0] else {
+            panic!("expected CodeAction");
+        };
+        assert_eq!(ca.kind.as_ref(), Some(&CodeActionKind::QUICKFIX));
+        assert_eq!(ca.is_preferred, Some(true));
+        let edits = ca
+            .edit
+            .as_ref()
+            .unwrap()
+            .changes
+            .as_ref()
+            .unwrap()
+            .get(&uri)
+            .unwrap();
+        assert_eq!(edits[0].new_text, "customer_name");
+    }
 }
