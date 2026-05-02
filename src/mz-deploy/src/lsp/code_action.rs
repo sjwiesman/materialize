@@ -9,7 +9,10 @@
 
 //! LSP code-action support: serializable suggestion payload + builder.
 
-use crate::diagnostics::Suggestion;
+use crate::diagnostics::{Replacement, Suggestion, last_component, locate_replacement};
+use crate::project::compiler::typecheck::ObjectTypeCheckErrorKind;
+use crate::project_cache::ProjectCache;
+use mz_sql::catalog::CatalogError;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
 use tower_lsp::lsp_types::Range;
@@ -133,6 +136,107 @@ fn action_for_alt(
         }),
         is_preferred: Some(is_preferred),
         ..Default::default()
+    }
+}
+
+/// Per-kind candidate name pools harvested from the project cache. Empty
+/// vectors are valid — they just mean no fuzzy suggestions for that kind.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Candidates {
+    pub items: Vec<String>,
+    pub schemas: Vec<String>,
+    pub databases: Vec<String>,
+    pub clusters: Vec<String>,
+}
+
+/// LSP-side enrichment: for `Catalog::Unknown{Item,Schema,Database,Cluster}`,
+/// fuzzy-match the offending name against the corresponding pool and return
+/// one [`Suggestion`] containing the closest alternatives. Returns an empty
+/// vec for variants we don't enrich (everything else, including
+/// `UnknownColumn`/`UnknownFunction` whose suggestions come from upstream).
+pub(crate) fn fuzzy_suggestions(
+    kind: &ObjectTypeCheckErrorKind,
+    source: &str,
+    primary_range: &std::ops::Range<usize>,
+    candidates: &Candidates,
+) -> Vec<Suggestion> {
+    let (needle, pool): (&str, &[String]) = match kind {
+        ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownItem(name)) => {
+            (last_component(name), &candidates.items)
+        }
+        ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownSchema(name)) => {
+            (last_component(name), &candidates.schemas)
+        }
+        ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownDatabase(name)) => {
+            (last_component(name), &candidates.databases)
+        }
+        ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownCluster(name)) => {
+            (name.as_str(), &candidates.clusters)
+        }
+        _ => return Vec::new(),
+    };
+
+    let matches = did_you_mean(needle, pool.iter().cloned());
+    if matches.is_empty() {
+        return Vec::new();
+    }
+
+    let span = locate_replacement(source, primary_range, needle);
+    let label = match matches.as_slice() {
+        [single] => format!("did you mean `{single}`?"),
+        _ => "did you mean one of these?".to_string(),
+    };
+    let alternatives = matches
+        .into_iter()
+        .map(|alt| Replacement {
+            byte_range: span.clone(),
+            replacement: alt,
+        })
+        .collect();
+    vec![Suggestion {
+        label,
+        alternatives,
+    }]
+}
+
+/// Build a [`Candidates`] set from the project cache: every project item
+/// name into `items`, every schema into `schemas`, every database into
+/// `databases`, and the unique non-empty cluster names referenced by
+/// project objects into `clusters`. Returns an empty `Candidates` when
+/// `cache` is `None`.
+pub(crate) fn harvest_candidates(cache: Option<&ProjectCache>) -> Candidates {
+    let Some(cache) = cache else {
+        return Candidates::default();
+    };
+    let dbs = cache.list_databases_with_objects();
+    let mut databases = Vec::with_capacity(dbs.len());
+    let mut schemas: Vec<String> = Vec::new();
+    for db in &dbs {
+        databases.push(db.name.clone());
+        for s in &db.schemas {
+            schemas.push(s.name.clone());
+        }
+    }
+    schemas.sort();
+    schemas.dedup();
+
+    let summaries = cache.list_objects();
+    let mut items: Vec<String> = summaries.iter().map(|s| s.name.clone()).collect();
+    items.sort();
+    items.dedup();
+
+    let mut clusters: Vec<String> = summaries
+        .iter()
+        .filter_map(|s| s.cluster.clone())
+        .collect();
+    clusters.sort();
+    clusters.dedup();
+
+    Candidates {
+        items,
+        schemas,
+        databases,
+        clusters,
     }
 }
 
@@ -350,4 +454,84 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    fn cands(items: &[&str], schemas: &[&str], databases: &[&str], clusters: &[&str]) -> Candidates {
+        Candidates {
+            items: items.iter().map(|s| s.to_string()).collect(),
+            schemas: schemas.iter().map(|s| s.to_string()).collect(),
+            databases: databases.iter().map(|s| s.to_string()).collect(),
+            clusters: clusters.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn fuzzy_suggestions_for_unknown_item_uses_items_pool() {
+        let source = "SELECT * FROM cusotmers";
+        let primary = 14..23; // "cusotmers"
+        let kind = ObjectTypeCheckErrorKind::Catalog(
+            CatalogError::UnknownItem("cusotmers".to_string()),
+        );
+        let c = cands(&["customers", "products"], &[], &[], &[]);
+        let out = fuzzy_suggestions(&kind, source, &primary, &c);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].alternatives.len(), 1);
+        assert_eq!(out[0].alternatives[0].replacement, "customers");
+        assert_eq!(out[0].alternatives[0].byte_range, 14..23);
+    }
+
+    #[test]
+    fn fuzzy_suggestions_for_unknown_schema_uses_schemas_pool() {
+        let source = "SELECT * FROM publik.t";
+        let primary = 14..20; // "publik"
+        let kind = ObjectTypeCheckErrorKind::Catalog(
+            CatalogError::UnknownSchema("publik".to_string()),
+        );
+        let c = cands(&[], &["public", "private"], &[], &[]);
+        let out = fuzzy_suggestions(&kind, source, &primary, &c);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].alternatives[0].replacement, "public");
+    }
+
+    #[test]
+    fn fuzzy_suggestions_for_unknown_cluster_uses_clusters_pool() {
+        let source = "CREATE VIEW v IN CLUSTER quikstart AS SELECT 1";
+        let primary = 25..34; // "quikstart"
+        let kind = ObjectTypeCheckErrorKind::Catalog(
+            CatalogError::UnknownCluster("quikstart".to_string()),
+        );
+        let c = cands(&[], &[], &[], &["quickstart", "compute"]);
+        let out = fuzzy_suggestions(&kind, source, &primary, &c);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].alternatives[0].replacement, "quickstart");
+    }
+
+    #[test]
+    fn fuzzy_suggestions_for_kind_without_matches_returns_empty() {
+        let source = "SELECT 1";
+        let primary = 0..0;
+        let kind = ObjectTypeCheckErrorKind::Catalog(
+            CatalogError::UnknownItem("zzzzzzz".to_string()),
+        );
+        let c = cands(&["customers"], &[], &[], &[]);
+        let out = fuzzy_suggestions(&kind, source, &primary, &c);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn fuzzy_suggestions_for_unhandled_kind_returns_empty() {
+        let source = "SELECT 1";
+        let primary = 0..0;
+        let kind = ObjectTypeCheckErrorKind::Internal("whatever".to_string());
+        let c = cands(&["customers"], &["public"], &["materialize"], &["quickstart"]);
+        let out = fuzzy_suggestions(&kind, source, &primary, &c);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn harvest_candidates_none_returns_default() {
+        let c = harvest_candidates(None);
+        assert!(c.items.is_empty());
+        assert!(c.schemas.is_empty());
+        assert!(c.databases.is_empty());
+        assert!(c.clusters.is_empty());
+    }
 }
