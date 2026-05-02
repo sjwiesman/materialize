@@ -412,7 +412,11 @@ impl Backend {
                 )
                 .await
             {
-                let tc_diags = diagnostics::typecheck_diagnostics(&fs, &tc_err);
+                let candidates = {
+                    let guard = self.project_cache.lock().await;
+                    code_action::harvest_candidates(guard.as_ref())
+                };
+                let tc_diags = diagnostics::typecheck_diagnostics(&fs, &tc_err, &candidates);
                 if tc_diags.is_empty() {
                     self.client
                         .log_message(MessageType::ERROR, format!("Typecheck failed: {tc_err}"))
