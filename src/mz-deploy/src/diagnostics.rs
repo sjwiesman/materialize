@@ -349,13 +349,8 @@ pub(crate) fn format_validation_kind(
     primary_range: &Range<usize>,
 ) -> (String, Vec<String>, Vec<Suggestion>) {
     let message = kind.message();
-    let mut footers: Vec<String> = kind.help().into_iter().collect();
+    let footers: Vec<String> = kind.help().into_iter().collect();
     let suggestions = mismatch_suggestion(kind, source, primary_range);
-    // Surface the rename target as an explicit footer so consumers that only
-    // render footers (CLI plain mode) still mention the fix.
-    if let (Some(_declared), Some(expected)) = (mismatch_declared(kind), mismatch_expected(kind)) {
-        footers.push(format!("rename to '{expected}'"));
-    }
     (message, footers, suggestions)
 }
 
