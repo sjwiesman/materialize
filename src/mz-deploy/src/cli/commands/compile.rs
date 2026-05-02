@@ -31,9 +31,9 @@ use crate::cli::progress;
 use crate::config::Settings;
 use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
-use crate::{project, timing, verbose};
+use crate::{project, verbose};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Compile and validate the project, showing the deployment plan.
 ///
@@ -97,7 +97,6 @@ fn run_inner(
         progress::action("Compiling", &shown.display().to_string());
     }
 
-    let parse_start = Instant::now();
     let fs = crate::fs::FileSystem::new();
     let planned_project = project::plan_sync(
         &fs,
@@ -106,13 +105,6 @@ fn run_inner(
         settings.profile_suffix(),
         settings.variables(),
     )?;
-
-    let parse_duration = parse_start.elapsed();
-    timing!("project::plan", parse_duration);
-
-    let validate_start = Instant::now();
-    let validate_duration = validate_start.elapsed();
-    timing!("topological_sort", validate_duration);
 
     let validation = project::analysis::deps::validate_dependencies(
         &settings.dependencies,
@@ -150,7 +142,7 @@ fn run_inner(
     validate_constraints_with_types(&planned_project, &types_lock, tc.as_ref())?;
 
     if !skip_typecheck {
-        let _ = typecheck_project(settings, &planned_project)?;
+        typecheck_project(settings, &planned_project)?;
 
         // Post-typecheck column validation: two-tier lookup (TypesCache then types_lock)
         {
@@ -201,14 +193,9 @@ fn run_inner(
 }
 
 /// Perform type checking using the in-process catalog backend.
-fn typecheck_project(
-    settings: &Settings,
-    planned_project: &Project,
-) -> Result<Option<Duration>, CliError> {
+fn typecheck_project(settings: &Settings, planned_project: &Project) -> Result<(), CliError> {
     let directory = &settings.directory;
     use crate::project::compiler::typecheck;
-
-    let typecheck_start = Instant::now();
 
     let external_types = crate::types::load_types_lock(directory).unwrap_or_default();
 
@@ -220,7 +207,6 @@ fn typecheck_project(
         planned_project,
         external_types,
     )?;
-    timing!("typecheck", typecheck_start.elapsed());
     crate::verbose!(
         "typecheck: ran={} skipped={} schema_stable={} schema_changed={}",
         stats.ran,
@@ -229,7 +215,7 @@ fn typecheck_project(
         stats.schema_changed,
     );
 
-    Ok(Some(typecheck_start.elapsed()))
+    Ok(())
 }
 
 /// Validate FK constraints before runtime typecheck.

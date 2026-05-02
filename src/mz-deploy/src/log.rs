@@ -24,9 +24,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// timing of when verbose mode is enabled/disabled doesn't matter.
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
-/// Global timing output flag.
-static TIMING: AtomicBool = AtomicBool::new(false);
-
 /// Global JSON output flag.
 static JSON_OUTPUT: AtomicBool = AtomicBool::new(false);
 
@@ -63,16 +60,6 @@ pub fn verbose_enabled() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
 
-/// Enable or disable timing output.
-pub fn set_timing(v: bool) {
-    TIMING.store(v, Ordering::Relaxed);
-}
-
-/// Check if timing output is currently enabled.
-pub fn timing_enabled() -> bool {
-    TIMING.load(Ordering::Relaxed)
-}
-
 /// Check if color is enabled.
 pub fn color_enabled() -> bool {
     let supports_color = AtomicBool::new(false);
@@ -89,24 +76,6 @@ macro_rules! verbose {
     ($($arg:tt)*) => {
         if $crate::log::verbose_enabled() {
             eprintln!($($arg)*);
-        }
-    };
-}
-
-/// Print a timing measurement when timing mode is enabled.
-///
-/// Emits a single line to stderr with a dotted-leader format:
-/// ```text
-///   ⏱ typecheck_plan........... 8ms
-/// ```
-///
-/// The label can include leading spaces for visual nesting.
-#[macro_export]
-#[allow(clippy::print_stderr)]
-macro_rules! timing {
-    ($label:expr, $duration:expr) => {
-        if $crate::log::timing_enabled() {
-            eprintln!("  ⏱ {:.<28} {:>5}ms", $label, $duration.as_millis());
         }
     };
 }
