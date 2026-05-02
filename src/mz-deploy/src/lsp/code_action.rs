@@ -15,7 +15,10 @@ use crate::project_cache::ProjectCache;
 use mz_sql::catalog::CatalogError;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
-use tower_lsp::lsp_types::Range;
+use tower_lsp::lsp_types::{
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, Diagnostic, Range, TextEdit,
+    Url, WorkspaceEdit,
+};
 
 /// JSON payload riding on `Diagnostic.data` so the `code_action` handler
 /// can rebuild a `WorkspaceEdit` without re-running the typecheck.
@@ -73,12 +76,6 @@ fn byte_range_to_lsp(range: std::ops::Range<usize>, rope: &Rope) -> Range {
     Range::new(start, end)
 }
 
-use std::collections::HashMap;
-use tower_lsp::lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams, Diagnostic, TextEdit, Url,
-    WorkspaceEdit,
-};
-
 /// Build the list of quick-fix code actions for a `textDocument/codeAction`
 /// request. Inspects each diagnostic's `data` field for [`QuickFixData`] and
 /// emits one [`CodeAction`] per alternative.
@@ -123,7 +120,8 @@ fn action_for_alt(
         range: alt.range,
         new_text: alt.new_text,
     };
-    let mut changes = HashMap::new();
+    #[allow(clippy::disallowed_types)]
+    let mut changes = std::collections::HashMap::new();
     changes.insert(uri.clone(), vec![edit]);
     CodeAction {
         title,
