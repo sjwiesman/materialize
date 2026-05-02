@@ -141,20 +141,28 @@ fn validation_to_positional(errors: &ValidationErrors) -> Vec<PositionalDiagnost
 }
 
 fn validation_error_to_positional(error: &ValidationError) -> PositionalDiagnostic {
-    let message = error.kind.message();
-    let footers: Vec<String> = error.kind.help().into_iter().collect();
     let file = error.context.file.clone();
 
-    if let (Some(offset), Ok(source)) = (error.context.byte_offset, std::fs::read_to_string(&file))
-    {
+    if let Ok(source) = std::fs::read_to_string(&file) {
+        let primary_range = crate::diagnostics::locate_validation(
+            &error.kind,
+            &source,
+            error.context.byte_offset,
+        )
+        .unwrap_or_else(|| {
+            let off = error.context.byte_offset.unwrap_or(0);
+            off..off
+        });
+        let (message, footers, suggestions) =
+            crate::diagnostics::format_validation_kind(&error.kind, &source, &primary_range);
         return PositionalDiagnostic {
             severity: Severity::Error,
             file,
             source,
-            byte_range: offset..offset,
+            byte_range: primary_range,
             message,
             footers,
-            suggestions: Vec::new(),
+            suggestions,
         };
     }
 
@@ -163,8 +171,8 @@ fn validation_error_to_positional(error: &ValidationError) -> PositionalDiagnost
         file,
         source: error.context.sql_statement.clone().unwrap_or_default(),
         byte_range: 0..0,
-        message,
-        footers,
+        message: error.kind.message(),
+        footers: error.kind.help().into_iter().collect(),
         suggestions: Vec::new(),
     }
 }
