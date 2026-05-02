@@ -217,6 +217,8 @@ pub(crate) fn harvest_candidates(cache: Option<&ProjectCache>) -> Candidates {
             schemas.push(s.name.clone());
         }
     }
+    databases.sort();
+    databases.dedup();
     schemas.sort();
     schemas.dedup();
 
