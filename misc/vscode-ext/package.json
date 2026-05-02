@@ -2,7 +2,7 @@
   "name": "mz-deploy",
   "displayName": "Materialize mz-deploy",
   "description": "SQL language support for mz-deploy projects: go-to-definition, hover, completion, diagnostics, and code lenses for running tests and explaining objects.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "MaterializeInc",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/MaterializeInc/materialize/tree/main/misc/vscode-ext",
@@ -54,6 +54,14 @@
       {
         "command": "mz-deploy.switchProfile",
         "title": "mz-deploy: Switch Profile"
+      }
+    ],
+    "languages": [
+      {
+        "id": "toml",
+        "filenames": [
+          "types.lock"
+        ]
       }
     ]
   },
