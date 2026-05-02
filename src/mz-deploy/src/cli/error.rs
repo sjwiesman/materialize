@@ -470,14 +470,12 @@ impl CliError {
                      parameterizing {} with a {} and setting it per-profile \
                      in {}:\n\n  \
                      -- in your .sql file\n  \
-                     CREATE MATERIALIZED VIEW ... IN CLUSTER :\"analytics_cluster\" AS ...\n\n  \
+                     CREATE MATERIALIZED VIEW ... IN CLUSTER :\"cluster\" AS ...\n\n  \
                      # in project.toml\n  \
                      [profiles.dev.variables]\n  \
-                     analytics_cluster = \"analytics_dev\"\n\n  \
+                     cluster = \"dev\"\n\n  \
                      [profiles.prod.variables]\n  \
-                     analytics_cluster = \"analytics_prod\"\n\n\
-                     If your project only uses one profile, put the variable \
-                     under [profiles.default.variables] instead.",
+                     cluster = \"prod\"",
                     cluster_list,
                     more,
                     "IN CLUSTER".if_supports_color(Stream::Stderr, |t| t.cyan()),
@@ -522,10 +520,7 @@ impl CliError {
                 name.if_supports_color(Stream::Stderr, |t| t.cyan()),
                 "M.1-small".if_supports_color(Stream::Stderr, |t| t.cyan())
             )),
-            Self::TestsFailed { .. } => Some(
-                "review the test output above for details on which assertions failed"
-                    .to_string(),
-            ),
+            Self::TestsFailed { .. } => None,
             Self::TestValidationFailed(_) => Some(
                 "review the validation error above and update your test to match the schema.\n\
                  Run 'mz-deploy compile' to regenerate the type cache if needed"

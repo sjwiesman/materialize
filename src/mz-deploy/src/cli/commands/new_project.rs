@@ -26,6 +26,7 @@ use std::process::Command;
 const GITIGNORE: &str = include_str!("../scaffold/gitignore");
 const PROJECT_TOML: &str = include_str!("../scaffold/project.toml");
 const README_MD: &str = include_str!("../scaffold/README.md");
+const VSCODE_EXTENSIONS_JSON: &str = include_str!("../scaffold/vscode-extensions.json");
 
 /// Shared options for project scaffolding.
 pub struct ScaffoldOpts {
@@ -179,15 +180,18 @@ fn scaffold(project_dir: &Path, name: &str, opts: &ScaffoldOpts) -> Result<(), C
     create_dir(project_dir, "clusters")?;
     create_dir(project_dir, "roles")?;
     create_dir(project_dir, "network-policies")?;
-    //create_dir(project_dir, ".agents/skills/mz-deploy/references")?;
-    //create_dir(project_dir, ".claude/skills")?;
-    //create_dir(project_dir, ".github/workflows")?;
+    create_dir(project_dir, ".vscode")?;
     add_file(project_dir, "models/materialize/public/.gitkeep", "")?;
     add_file(project_dir, "clusters/.gitkeep", "")?;
     add_file(project_dir, "roles/.gitkeep", "")?;
     add_file(project_dir, "network-policies/.gitkeep", "")?;
     add_file(project_dir, ".gitignore", GITIGNORE)?;
     add_file(project_dir, "project.toml", PROJECT_TOML)?;
+    add_file(
+        project_dir,
+        ".vscode/extensions.json",
+        VSCODE_EXTENSIONS_JSON,
+    )?;
     add_file(
         project_dir,
         "README.md",

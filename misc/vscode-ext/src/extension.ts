@@ -51,9 +51,14 @@ function resolveBinaryPath(): string {
  */
 function isBinaryAvailable(): Promise<boolean> {
   return new Promise((resolve) => {
-    execFile(resolveBinaryPath(), ["--version"], { timeout: 5000 }, (error) => {
-      resolve(!error);
-    });
+    execFile(
+      resolveBinaryPath(),
+      ["--version"],
+      { timeout: 5000, env: plainEnv() },
+      (error) => {
+        resolve(!error);
+      },
+    );
   });
 }
 
@@ -91,9 +96,32 @@ async function readActiveProfile(workspace: string): Promise<string | null> {
   }
 }
 
-/** Strip ANSI SGR escapes (owo_colors does not honor `NO_COLOR`). */
-function stripAnsi(s: string): string {
-  return s.replace(/\x1b\[[0-9;]*m/g, "");
+/** Spawn env that forces `mz-deploy` to emit plain (non-ANSI) output. */
+function plainEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, NO_COLOR: "1" };
+}
+
+/**
+ * Run `mz-deploy <args>` as a VSCode task. Output streams to a managed
+ * terminal pane; the process is spawned directly so there's no shell-prompt
+ * race that swallows the first character.
+ */
+async function runMzDeployTask(name: string, args: string[]): Promise<void> {
+  const cwd = getWorkspacePath();
+  const execution = new vscode.ProcessExecution(resolveBinaryPath(), args, cwd ? { cwd } : {});
+  const task = new vscode.Task(
+    { type: "process", task: name },
+    vscode.TaskScope.Workspace,
+    name,
+    "mz-deploy",
+    execution,
+  );
+  task.presentationOptions = {
+    reveal: vscode.TaskRevealKind.Always,
+    panel: vscode.TaskPanelKind.Dedicated,
+    clear: true,
+  };
+  await vscode.tasks.executeTask(task);
 }
 
 interface ProfileListing {
@@ -111,10 +139,10 @@ function listProfiles(workspace: string): Promise<ProfileListing> {
     execFile(
       resolveBinaryPath(),
       ["--output", "json", "profile", "list"],
-      { cwd: workspace, timeout: 5000 },
+      { cwd: workspace, timeout: 5000, env: plainEnv() },
       (error, stdout, stderr) => {
         if (error) {
-          reject(new Error(stripAnsi(stderr || error.message).trim()));
+          reject(new Error((stderr || error.message).trim()));
           return;
         }
         try {
@@ -135,10 +163,10 @@ function setActiveProfile(workspace: string, name: string): Promise<void> {
     execFile(
       resolveBinaryPath(),
       ["profile", "set", name],
-      { cwd: workspace, timeout: 5000 },
+      { cwd: workspace, timeout: 5000, env: plainEnv() },
       (error, _stdout, stderr) => {
         if (error) {
-          reject(new Error(stripAnsi(stderr || error.message).trim()));
+          reject(new Error((stderr || error.message).trim()));
         } else {
           resolve();
         }
@@ -171,9 +199,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
       if (activeEditor) {
         await activeEditor.document.save();
       }
-      const terminal = vscode.window.createTerminal("mz-deploy test");
-      terminal.show();
-      terminal.sendText(`${resolveBinaryPath()} test '${filter}'`);
+      await runMzDeployTask("test", ["test", filter]);
     }),
   );
 
@@ -183,9 +209,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
       if (activeEditor) {
         await activeEditor.document.save();
       }
-      const terminal = vscode.window.createTerminal("mz-deploy explain");
-      terminal.show();
-      terminal.sendText(`${resolveBinaryPath()} explain '${target}'`);
+      await runMzDeployTask("explain", ["explain", target]);
     }),
   );
 
