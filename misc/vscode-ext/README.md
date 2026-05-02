@@ -33,12 +33,6 @@ The extension activates automatically when a workspace contains a
 |---------|---------|-------------|
 | `mz-deploy.path` | `mz-deploy` | Path to the `mz-deploy` binary. |
 
-## Development
-
-See
-[`misc/vscode-ext/`](https://github.com/MaterializeInc/materialize/tree/main/misc/vscode-ext)
-in the Materialize repository for build instructions.
-
 ## License
 
 See the bundled [LICENSE](LICENSE) file (Business Source License 1.1).

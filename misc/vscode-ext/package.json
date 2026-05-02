@@ -1,9 +1,9 @@
 {
-  "name": "mz-deploy-lsp",
-  "displayName": "mz-deploy",
+  "name": "mz-deploy",
+  "displayName": "Materialize mz-deploy",
   "description": "SQL language support for mz-deploy projects: go-to-definition, hover, completion, diagnostics, and code lenses for running tests and explaining objects.",
-  "version": "0.1.0",
-  "publisher": "materialize",
+  "version": "0.1.1",
+  "publisher": "MaterializeInc",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://github.com/MaterializeInc/materialize/tree/main/misc/vscode-ext",
   "repository": {
