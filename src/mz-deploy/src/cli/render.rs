@@ -153,8 +153,15 @@ fn validation_error_to_positional(error: &ValidationError) -> PositionalDiagnost
             let off = error.context.byte_offset.unwrap_or(0);
             off..off
         });
-        let (message, footers, suggestions) =
+        let (message, mut footers, suggestions) =
             crate::diagnostics::format_validation_kind(&error.kind, &source, &primary_range);
+        // The structured suggestion's label already prints as a `help:` line
+        // above the inline patch, so dropping the footer here avoids a
+        // duplicate hint. The LSP path keeps the footer in its message string
+        // for clients that don't render code actions.
+        if !suggestions.is_empty() {
+            footers.clear();
+        }
         return PositionalDiagnostic {
             severity: Severity::Error,
             file,
