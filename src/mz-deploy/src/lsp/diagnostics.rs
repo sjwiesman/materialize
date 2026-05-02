@@ -194,6 +194,7 @@ pub(crate) fn validation_diagnostics(
 pub(crate) fn typecheck_diagnostics(
     fs: &FileSystem,
     error: &TypeCheckError,
+    candidates: &crate::lsp::code_action::Candidates,
 ) -> BTreeMap<PathBuf, Vec<Diagnostic>> {
     let errors: &[ObjectTypeCheckError] = match error {
         TypeCheckError::Multiple(errs) => errs.as_slice(),
@@ -214,8 +215,16 @@ pub(crate) fn typecheck_diagnostics(
         let diag = match entry.as_ref() {
             Some((source, rope)) => {
                 let byte_range = locate_typecheck(&e.kind, source).unwrap_or(0..0);
-                let (body, footers, suggestions) =
+                let (body, footers, mut suggestions) =
                     crate::diagnostics::format_typecheck_kind(&e.kind, source, &byte_range);
+                if suggestions.is_empty() {
+                    suggestions = crate::lsp::code_action::fuzzy_suggestions(
+                        &e.kind,
+                        source,
+                        &byte_range,
+                        candidates,
+                    );
+                }
 
                 let mut message = body;
                 if let Some(detail) = e.detail() {
@@ -440,7 +449,7 @@ mod tests {
 
     #[test]
     fn typecheck_unknown_column_attaches_quickfix_data() {
-        use crate::lsp::code_action::QuickFixData;
+        use crate::lsp::code_action::{Candidates, QuickFixData};
         use crate::project::compiler::typecheck::{
             ObjectTypeCheckError, ObjectTypeCheckErrorKind,
         };
@@ -466,7 +475,8 @@ mod tests {
         let tc = TypeCheckError::Multiple(vec![err]);
 
         let fs = FileSystem::default();
-        let map = typecheck_diagnostics(&fs, &tc);
+        let candidates = Candidates::default();
+        let map = typecheck_diagnostics(&fs, &tc, &candidates);
         let diags = map.get(&path).expect("diags for file");
         assert_eq!(diags.len(), 1);
 
@@ -479,6 +489,45 @@ mod tests {
         assert_eq!(qf.suggestions[0].alternatives.len(), 1);
         assert_eq!(qf.suggestions[0].alternatives[0].new_text, "customer_name");
         assert!(diags[0].message.contains("column custoser_name does not exist"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn typecheck_unknown_item_attaches_fuzzy_quickfix_data() {
+        use crate::lsp::code_action::{Candidates, QuickFixData};
+        use crate::project::compiler::typecheck::{
+            ObjectTypeCheckError, ObjectTypeCheckErrorKind,
+        };
+        use crate::project::ir::object_id::ObjectId;
+        use mz_sql::catalog::CatalogError;
+
+        let source = "SELECT * FROM cusotmers";
+        let path = std::env::temp_dir().join("typecheck_fuzzy_test.sql");
+        std::fs::write(&path, source).unwrap();
+
+        let err = ObjectTypeCheckError {
+            object_id: ObjectId::new("materialize".to_string(), "public".to_string(), "v".to_string()),
+            file_path: path.clone(),
+            kind: ObjectTypeCheckErrorKind::Catalog(
+                CatalogError::UnknownItem("cusotmers".to_string()),
+            ),
+        };
+        let tc = TypeCheckError::Multiple(vec![err]);
+
+        let fs = FileSystem::default();
+        let candidates = Candidates {
+            items: vec!["customers".to_string()],
+            ..Default::default()
+        };
+        let map = typecheck_diagnostics(&fs, &tc, &candidates);
+        let diags = map.get(&path).expect("diags for file");
+        assert_eq!(diags.len(), 1);
+
+        let data = diags[0].data.as_ref().expect("Diagnostic.data should be set");
+        let qf: QuickFixData = serde_json::from_value(data.clone()).expect("decodes");
+        assert_eq!(qf.suggestions.len(), 1);
+        assert_eq!(qf.suggestions[0].alternatives.len(), 1);
+        assert_eq!(qf.suggestions[0].alternatives[0].new_text, "customers");
         let _ = std::fs::remove_file(&path);
     }
 }
