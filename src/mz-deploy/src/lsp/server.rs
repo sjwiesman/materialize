@@ -42,8 +42,8 @@
 
 use crate::config::{ProjectSettings, read_mzprofile};
 use crate::lsp::{
-    code_lens, completion, diagnostics, document_symbol, goto_definition, hover, references,
-    semantic_tokens, toml_diagnostics, workspace_symbol,
+    code_action, code_lens, completion, diagnostics, document_symbol, goto_definition, hover,
+    references, semantic_tokens, toml_diagnostics, workspace_symbol,
 };
 use crate::project;
 use crate::project::compiler::typecheck::TypeCheckError;
@@ -537,6 +537,7 @@ impl LanguageServer for Backend {
                 code_lens_provider: Some(CodeLensOptions {
                     resolve_provider: Some(false),
                 }),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -775,6 +776,18 @@ impl LanguageServer for Backend {
         let cache_guard = self.project_cache.lock().await;
         let lenses = code_lens::code_lenses(&file_uri, text, &root, cache_guard.as_ref());
         Ok(Some(lenses))
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        let actions = code_action::build_code_actions(&params);
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
     }
 
     async fn semantic_tokens_full(
