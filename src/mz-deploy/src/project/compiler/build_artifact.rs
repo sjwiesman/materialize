@@ -151,21 +151,26 @@ impl BuildArtifact {
     }
 
     fn initialize(&self) -> Result<(), BuildArtifactError> {
-        self.conn
-            .execute_batch(
-                "
-                PRAGMA journal_mode=WAL;
-                PRAGMA synchronous=NORMAL;
-                PRAGMA cache_size=-65536;
-                PRAGMA temp_store=MEMORY;
-                PRAGMA mmap_size=268435456;
-                PRAGMA wal_autocheckpoint=10000;
-                ",
-            )
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+        // Negative cache_size is in KiB; positive would be page count.
+        const PAGE_CACHE_KIB: i64 = -64 * 1024;
+        const MMAP_BYTES: i64 = 256 * 1024 * 1024;
+        const WAL_AUTOCHECKPOINT_PAGES: i64 = 10_000;
+        let pragmas = format!(
+            "
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA cache_size={PAGE_CACHE_KIB};
+            PRAGMA temp_store=MEMORY;
+            PRAGMA mmap_size={MMAP_BYTES};
+            PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES};
+            ",
+        );
+        self.conn.execute_batch(&pragmas).map_err(|source| {
+            BuildArtifactError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
-            })?;
+            }
+        })?;
         self.conn
             .execute_batch(
                 "
@@ -834,15 +839,9 @@ impl BuildArtifact {
         tx.commit().map_err(&db_err)
     }
 
-    /// Persist project state, updating only rows whose source object changed
-    /// (`changed_keys`) or was removed (`deleted_keys`).
-    ///
-    /// Per-object tables (`project_objects`, dependencies, comments, indexes,
-    /// constraints, grants, tests, aliases, infrastructure, infrastructure
-    /// properties) are touched only for the affected keys. Project-wide
-    /// tables (databases, schemas, external/cluster dependencies, replacement
-    /// schemas, mod statements) are small and rewritten in full each call.
-    pub(crate) fn write_project_incremental(
+    /// Rewrites per-object rows for `changed_keys ∪ deleted_keys`; small
+    /// project-wide tables are rewritten in full.
+    pub(crate) fn write_project(
         &mut self,
         project: &graph::Project,
         changed_keys: &BTreeSet<String>,
@@ -870,7 +869,6 @@ impl BuildArtifact {
 
         let tx = self.conn.transaction().map_err(&db_err)?;
 
-        // 1. Drop per-object rows for objects that changed or were removed.
         if !changed_keys.is_empty() || !deleted_keys.is_empty() {
             for table in PER_OBJECT_TABLES {
                 let mut stmt = tx
@@ -882,9 +880,6 @@ impl BuildArtifact {
             }
         }
 
-        // 2. Rewrite project-wide tables in full. These are small (one row per
-        // database / schema / external dep / cluster / etc.) so the overhead
-        // is negligible compared to per-object writes.
         tx.execute_batch(
             "
             DELETE FROM project_databases;
@@ -1586,7 +1581,6 @@ mod tests {
         }
     }
 
-    /// Build a minimal `graph::Project` from a single object.
     fn all_object_keys(project: &graph::Project) -> BTreeSet<String> {
         project
             .databases
@@ -1650,7 +1644,7 @@ mod tests {
         let stmt = parse_stmt("CREATE VIEW v AS SELECT o.id FROM orders AS o");
         let project = make_project("mydb", "public", stmt);
         let changed = all_object_keys(&project);
-        db.write_project_incremental(&project, &changed, &BTreeSet::new(), temp.path())
+        db.write_project(&project, &changed, &BTreeSet::new(), temp.path())
             .unwrap();
 
         // Query the aliases table.
@@ -1684,7 +1678,7 @@ mod tests {
         let stmt = parse_stmt("CREATE TABLE t (id INT)");
         let project = make_project("mydb", "public", stmt);
         let changed = all_object_keys(&project);
-        db.write_project_incremental(&project, &changed, &BTreeSet::new(), temp.path())
+        db.write_project(&project, &changed, &BTreeSet::new(), temp.path())
             .unwrap();
 
         let count: i64 = db

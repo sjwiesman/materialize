@@ -17,21 +17,26 @@ use super::base_facts::BaseFacts;
 use super::datalog::DirtyState;
 use crate::project::ir::object_id::ObjectId;
 use crate::verbose;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::collections::BTreeSet;
 
 /// Emits an initial summary of inputs before rule evaluation starts.
 pub(super) fn log_datalog_start(changed_stmts: &BTreeSet<ObjectId>, base_facts: &BaseFacts) {
+    let header_style = Style::new().cyan().bold();
     verbose!(
         "{} {}",
-        "▶".cyan(),
-        "Starting fixed-point computation...".cyan().bold()
+        "▶".if_supports_color(Stream::Stderr, |t| t.cyan()),
+        "Starting fixed-point computation..."
+            .if_supports_color(Stream::Stderr, |t| header_style.style(t))
     );
     verbose!(
         "  ├─ Initial changed statements: [{}]",
         changed_stmts
             .iter()
-            .map(|o| o.to_string().cyan().to_string())
+            .map(|o| o
+                .to_string()
+                .if_supports_color(Stream::Stderr, |t| t.cyan())
+                .to_string())
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -40,7 +45,10 @@ pub(super) fn log_datalog_start(changed_stmts: &BTreeSet<ObjectId>, base_facts: 
         base_facts
             .is_sink
             .iter()
-            .map(|o| o.to_string().yellow().to_string())
+            .map(|o| o
+                .to_string()
+                .if_supports_color(Stream::Stderr, |t| t.yellow())
+                .to_string())
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -48,46 +56,84 @@ pub(super) fn log_datalog_start(changed_stmts: &BTreeSet<ObjectId>, base_facts: 
 
 /// Emits per-iteration progress for dirty set growth.
 pub(super) fn log_iteration(iteration: usize, state: &DirtyState) {
+    let header_style = Style::new().cyan().bold();
     verbose!(
         "\n{} {} (stmts={}, clusters={}, schemas={})",
-        "▶".cyan(),
-        format!("Iteration {}", iteration).cyan().bold(),
-        state.dirty_stmts.len().to_string().bold(),
-        state.dirty_clusters.len().to_string().bold(),
-        state.dirty_schemas.len().to_string().bold()
+        "▶".if_supports_color(Stream::Stderr, |t| t.cyan()),
+        format!("Iteration {}", iteration)
+            .if_supports_color(Stream::Stderr, |t| header_style.style(t)),
+        state
+            .dirty_stmts
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
+        state
+            .dirty_clusters
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
+        state
+            .dirty_schemas
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold())
     );
 }
 
 /// Emits final dirty object/cluster/schema sets after convergence.
 pub(super) fn log_final_results(state: &DirtyState) {
-    verbose!("{} {}", "▶".cyan(), "Final Results".cyan().bold());
+    let header_style = Style::new().cyan().bold();
+    verbose!(
+        "{} {}",
+        "▶".if_supports_color(Stream::Stderr, |t| t.cyan()),
+        "Final Results".if_supports_color(Stream::Stderr, |t| header_style.style(t))
+    );
     verbose!(
         "  ├─ Dirty statements ({}): [{}]",
-        state.dirty_stmts.len().to_string().bold(),
+        state
+            .dirty_stmts
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
         state
             .dirty_stmts
             .iter()
-            .map(|o| o.to_string().cyan().to_string())
+            .map(|o| o
+                .to_string()
+                .if_supports_color(Stream::Stderr, |t| t.cyan())
+                .to_string())
             .collect::<Vec<_>>()
             .join(", ")
     );
     verbose!(
         "  ├─ Dirty clusters ({}): [{}]",
-        state.dirty_clusters.len().to_string().bold(),
+        state
+            .dirty_clusters
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
         state
             .dirty_clusters
             .iter()
-            .map(|c| c.magenta().to_string())
+            .map(|c| c
+                .if_supports_color(Stream::Stderr, |t| t.magenta())
+                .to_string())
             .collect::<Vec<_>>()
             .join(", ")
     );
     verbose!(
         "  └─ Dirty schemas ({}): [{}]",
-        state.dirty_schemas.len().to_string().bold(),
+        state
+            .dirty_schemas
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
         state
             .dirty_schemas
             .iter()
-            .map(|sq| format!("{}.{}", sq.database, sq.schema).blue().to_string())
+            .map(|sq| format!("{}.{}", sq.database, sq.schema)
+                .if_supports_color(Stream::Stderr, |t| t.blue())
+                .to_string())
             .collect::<Vec<_>>()
             .join(", ")
     );

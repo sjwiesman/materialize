@@ -107,11 +107,12 @@ pub fn all_help() -> String {
 /// Print an error message for an unknown command, listing valid commands.
 #[allow(clippy::print_stderr)]
 pub fn print_unknown_command(name: &str) {
-    use owo_colors::OwoColorize;
+    use owo_colors::{OwoColorize, Stream, Style};
 
+    let error_style = Style::new().bright_red().bold();
     eprintln!(
         "{}: no help entry for '{}'",
-        "error".bright_red().bold(),
+        "error".if_supports_color(Stream::Stderr, |t| error_style.style(t)),
         name
     );
     eprintln!();

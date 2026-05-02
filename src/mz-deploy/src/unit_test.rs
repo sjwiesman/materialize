@@ -53,7 +53,7 @@ use crate::types::ColumnType;
 #[cfg(test)]
 use crate::types::Types;
 use mz_sql_parser::ast::{CreateViewStatement, IfExistsBehavior, ViewDefinition};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -198,32 +198,41 @@ pub struct UnmockedDependencyError {
 
 impl fmt::Display for UnmockedDependencyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error_style = Style::new().bright_red().bold();
+        let marker_style = Style::new().bright_blue().bold();
         writeln!(
             f,
             "{}: test '{}' has unmocked dependencies",
-            "error".bright_red().bold(),
-            self.test_name.cyan()
+            "error".if_supports_color(Stream::Stderr, |t| error_style.style(t)),
+            self.test_name
+                .if_supports_color(Stream::Stderr, |t| t.cyan())
         )?;
         writeln!(
             f,
             " {} target view: {}",
-            "-->".bright_blue().bold(),
-            self.target_view.yellow()
+            "-->".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+            self.target_view
+                .if_supports_color(Stream::Stderr, |t| t.yellow())
         )?;
         writeln!(f)?;
         writeln!(
             f,
             "  {} The following dependencies must be mocked:",
-            "|".bright_blue().bold()
+            "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
         )?;
         for dep in &self.missing_mocks {
-            writeln!(f, "  {}   - {}", "|".bright_blue().bold(), dep.yellow())?;
+            writeln!(
+                f,
+                "  {}   - {}",
+                "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+                dep.if_supports_color(Stream::Stderr, |t| t.yellow())
+            )?;
         }
         writeln!(f)?;
         writeln!(
             f,
             "  {} Add mocks for these dependencies in the WITH clause of the test",
-            "=".bright_blue().bold()
+            "=".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
         )?;
         Ok(())
     }
@@ -250,17 +259,21 @@ pub struct MockSchemaMismatchError {
 
 impl fmt::Display for MockSchemaMismatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error_style = Style::new().bright_red().bold();
+        let marker_style = Style::new().bright_blue().bold();
         writeln!(
             f,
             "{}: mock '{}' schema doesn't match actual schema",
-            "error".bright_red().bold(),
-            self.mock_fqn.cyan()
+            "error".if_supports_color(Stream::Stderr, |t| error_style.style(t)),
+            self.mock_fqn
+                .if_supports_color(Stream::Stderr, |t| t.cyan())
         )?;
         writeln!(
             f,
             " {} in test: {}",
-            "-->".bright_blue().bold(),
-            self.test_name.yellow()
+            "-->".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+            self.test_name
+                .if_supports_color(Stream::Stderr, |t| t.yellow())
         )?;
         writeln!(f)?;
 
@@ -268,15 +281,16 @@ impl fmt::Display for MockSchemaMismatchError {
             writeln!(
                 f,
                 "  {} Missing columns (required but not in mock):",
-                "|".bright_blue().bold()
+                "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
             )?;
             for (col, typ) in &self.missing_columns {
                 writeln!(
                     f,
                     "  {}   - {} {}",
-                    "|".bright_blue().bold(),
-                    col.red(),
-                    typ.to_uppercase().dimmed()
+                    "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+                    col.if_supports_color(Stream::Stderr, |t| t.red()),
+                    typ.to_uppercase()
+                        .if_supports_color(Stream::Stderr, |t| t.dimmed())
                 )?;
             }
         }
@@ -285,23 +299,32 @@ impl fmt::Display for MockSchemaMismatchError {
             writeln!(
                 f,
                 "  {} Extra columns (in mock but not in actual schema):",
-                "|".bright_blue().bold()
+                "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
             )?;
             for col in &self.extra_columns {
-                writeln!(f, "  {}   - {}", "|".bright_blue().bold(), col.yellow())?;
+                writeln!(
+                    f,
+                    "  {}   - {}",
+                    "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+                    col.if_supports_color(Stream::Stderr, |t| t.yellow())
+                )?;
             }
         }
 
         if !self.type_mismatches.is_empty() {
-            writeln!(f, "  {} Type mismatches:", "|".bright_blue().bold())?;
+            writeln!(
+                f,
+                "  {} Type mismatches:",
+                "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
+            )?;
             for (col, mock_type, actual_type) in &self.type_mismatches {
                 writeln!(
                     f,
                     "  {}   - {}: mock has '{}', expected '{}'",
-                    "|".bright_blue().bold(),
-                    col.cyan(),
-                    mock_type.red(),
-                    actual_type.green()
+                    "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+                    col.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    mock_type.if_supports_color(Stream::Stderr, |t| t.red()),
+                    actual_type.if_supports_color(Stream::Stderr, |t| t.green())
                 )?;
             }
         }
@@ -310,7 +333,11 @@ impl fmt::Display for MockSchemaMismatchError {
 
         // Show the expected mock signature
         if !self.actual_schema.is_empty() {
-            writeln!(f, "  {} Expected mock signature:", "=".bright_blue().bold())?;
+            writeln!(
+                f,
+                "  {} Expected mock signature:",
+                "=".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
+            )?;
             let cols: Vec<String> = self
                 .actual_schema
                 .iter()
@@ -319,9 +346,11 @@ impl fmt::Display for MockSchemaMismatchError {
             writeln!(
                 f,
                 "  {}   MOCK {}({}) AS (...)",
-                "|".bright_blue().bold(),
-                self.mock_fqn.green(),
-                cols.join(", ").green()
+                "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+                self.mock_fqn
+                    .if_supports_color(Stream::Stderr, |t| t.green()),
+                cols.join(", ")
+                    .if_supports_color(Stream::Stderr, |t| t.green())
             )?;
         }
 
@@ -350,17 +379,21 @@ pub struct ExpectedSchemaMismatchError {
 
 impl fmt::Display for ExpectedSchemaMismatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error_style = Style::new().bright_red().bold();
+        let marker_style = Style::new().bright_blue().bold();
         writeln!(
             f,
             "{}: expected output schema doesn't match target view",
-            "error".bright_red().bold()
+            "error".if_supports_color(Stream::Stderr, |t| error_style.style(t))
         )?;
         writeln!(
             f,
             " {} target: {} | test: {}",
-            "-->".bright_blue().bold(),
-            self.target_view.cyan(),
-            self.test_name.yellow()
+            "-->".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+            self.target_view
+                .if_supports_color(Stream::Stderr, |t| t.cyan()),
+            self.test_name
+                .if_supports_color(Stream::Stderr, |t| t.yellow())
         )?;
         writeln!(f)?;
 
@@ -368,15 +401,16 @@ impl fmt::Display for ExpectedSchemaMismatchError {
             writeln!(
                 f,
                 "  {} Missing columns (in target view but not in expected):",
-                "|".bright_blue().bold()
+                "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
             )?;
             for (col, typ) in &self.missing_columns {
                 writeln!(
                     f,
                     "  {}   - {} {}",
-                    "|".bright_blue().bold(),
-                    col.red(),
-                    typ.to_uppercase().dimmed()
+                    "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+                    col.if_supports_color(Stream::Stderr, |t| t.red()),
+                    typ.to_uppercase()
+                        .if_supports_color(Stream::Stderr, |t| t.dimmed())
                 )?;
             }
         }
@@ -385,23 +419,32 @@ impl fmt::Display for ExpectedSchemaMismatchError {
             writeln!(
                 f,
                 "  {} Extra columns (in expected but not in target view):",
-                "|".bright_blue().bold()
+                "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
             )?;
             for col in &self.extra_columns {
-                writeln!(f, "  {}   - {}", "|".bright_blue().bold(), col.yellow())?;
+                writeln!(
+                    f,
+                    "  {}   - {}",
+                    "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+                    col.if_supports_color(Stream::Stderr, |t| t.yellow())
+                )?;
             }
         }
 
         if !self.type_mismatches.is_empty() {
-            writeln!(f, "  {} Type mismatches:", "|".bright_blue().bold())?;
+            writeln!(
+                f,
+                "  {} Type mismatches:",
+                "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
+            )?;
             for (col, expected_type, actual_type) in &self.type_mismatches {
                 writeln!(
                     f,
                     "  {}   - {}: has '{}', expected '{}'",
-                    "|".bright_blue().bold(),
-                    col.cyan(),
-                    expected_type.red(),
-                    actual_type.green()
+                    "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+                    col.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    expected_type.if_supports_color(Stream::Stderr, |t| t.red()),
+                    actual_type.if_supports_color(Stream::Stderr, |t| t.green())
                 )?;
             }
         }
@@ -410,7 +453,11 @@ impl fmt::Display for ExpectedSchemaMismatchError {
 
         // Show the expected signature
         if !self.actual_schema.is_empty() {
-            writeln!(f, "  {} Expected signature:", "=".bright_blue().bold())?;
+            writeln!(
+                f,
+                "  {} Expected signature:",
+                "=".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
+            )?;
             let cols: Vec<String> = self
                 .actual_schema
                 .iter()
@@ -419,8 +466,9 @@ impl fmt::Display for ExpectedSchemaMismatchError {
             writeln!(
                 f,
                 "  {}   EXPECTED({}) AS (...)",
-                "|".bright_blue().bold(),
-                cols.join(", ").green()
+                "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+                cols.join(", ")
+                    .if_supports_color(Stream::Stderr, |t| t.green())
             )?;
         }
 
@@ -443,17 +491,21 @@ pub struct InvalidAtTimeError {
 
 impl fmt::Display for InvalidAtTimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error_style = Style::new().bright_red().bold();
+        let marker_style = Style::new().bright_blue().bold();
         writeln!(
             f,
             "{}: test '{}' has invalid AT TIME value",
-            "error".bright_red().bold(),
-            self.test_name.cyan()
+            "error".if_supports_color(Stream::Stderr, |t| error_style.style(t)),
+            self.test_name
+                .if_supports_color(Stream::Stderr, |t| t.cyan())
         )?;
         writeln!(
             f,
             " {} value: {}",
-            "-->".bright_blue().bold(),
-            self.at_time_value.yellow()
+            "-->".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+            self.at_time_value
+                .if_supports_color(Stream::Stderr, |t| t.yellow())
         )?;
         writeln!(f)?;
 
@@ -466,17 +518,22 @@ impl fmt::Display for InvalidAtTimeError {
             .map(|idx| &self.db_error[idx..])
             .unwrap_or(&self.db_error);
 
-        writeln!(f, "  {} {}", "|".bright_blue().bold(), display_error.red())?;
+        writeln!(
+            f,
+            "  {} {}",
+            "|".if_supports_color(Stream::Stderr, |t| marker_style.style(t)),
+            display_error.if_supports_color(Stream::Stderr, |t| t.red())
+        )?;
         writeln!(f)?;
         writeln!(
             f,
             "  {} The AT TIME value must be a valid timestamp that can be cast to mz_timestamp",
-            "=".bright_blue().bold()
+            "=".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
         )?;
         writeln!(
             f,
             "  {} Example: AT TIME '2024-01-15 10:00:00'",
-            "=".bright_blue().bold()
+            "=".if_supports_color(Stream::Stderr, |t| marker_style.style(t))
         )?;
         Ok(())
     }

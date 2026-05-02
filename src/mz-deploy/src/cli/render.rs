@@ -21,6 +21,7 @@
 
 use crate::cli::CliError;
 use crate::diagnostics::{PositionalDiagnostic, Replacement, Severity, Suggestion};
+use crate::log::color_enabled;
 use crate::project::compiler::typecheck::{
     ObjectTypeCheckError, ObjectTypeCheckErrorKind, TypeCheckError,
 };
@@ -74,7 +75,12 @@ pub(crate) fn render(pd: &PositionalDiagnostic) -> String {
         groups.push(group);
     }
 
-    Renderer::styled().render(&groups[..]).to_string()
+    let renderer = if color_enabled() {
+        Renderer::styled()
+    } else {
+        Renderer::plain()
+    };
+    renderer.render(&groups[..]).to_string()
 }
 
 /// Render `path` as a snippet origin, dropping redundant `./` components

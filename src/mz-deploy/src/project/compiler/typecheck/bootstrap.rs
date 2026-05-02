@@ -7,18 +7,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-//! Bootstrap the shared catalog used by every per-task typecheck.
-//!
-//! Seeds builtins (via [`CatalogRuntime::open`]), bootstraps namespaces,
-//! registers external `types.lock` entries as stub tables, and registers
-//! non-typechecked project objects (tables, sources, sinks, secrets,
-//! connections) from their compiled SQL. The set of registered objects can
-//! be narrowed via the `restrict` parameter so incremental runs only pay
-//! for the deps the dirty subgraph actually needs.
-//!
-//! Returns the catalog wrapped in `Arc` plus a map of column metadata for
-//! the registered non-typechecked objects. The parallel executor forks
-//! per-task catalogs from this baseline.
+//! Builds the shared base catalog forked by per-task typechecks.
 
 use super::catalog::CatalogRuntime;
 use super::convert::{create_catalog_item_sql, relation_desc_to_columns};

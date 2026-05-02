@@ -44,7 +44,7 @@ use crate::project_cache::ProjectCache;
 use crate::types::{self, Types};
 use crate::unit_test;
 use crate::{info, info_nonl, verbose};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -551,22 +551,40 @@ async fn run_single_test(
 /// Prints the test summary line showing pass/fail counts.
 fn print_summary(summary: &TestSummary) {
     let total_failed = summary.failed + summary.validation_failed;
-    info_nonl!("\n{}: ", "test result".bold());
+    info_nonl!(
+        "\n{}: ",
+        "test result".if_supports_color(Stream::Stderr, |t| t.bold())
+    );
     if total_failed == 0 {
-        info_nonl!("{}. ", "ok".green().bold());
+        let style = Style::new().green().bold();
+        info_nonl!(
+            "{}. ",
+            "ok".if_supports_color(Stream::Stderr, |t| style.style(t))
+        );
     } else {
-        info_nonl!("{}. ", "FAILED".red().bold());
+        let style = Style::new().red().bold();
+        info_nonl!(
+            "{}. ",
+            "FAILED".if_supports_color(Stream::Stderr, |t| style.style(t))
+        );
     }
-    info_nonl!("{}; ", format!("{} passed", summary.passed).green());
+    info_nonl!(
+        "{}; ",
+        format!("{} passed", summary.passed).if_supports_color(Stream::Stderr, |t| t.green())
+    );
     if summary.failed > 0 {
-        info_nonl!("{}; ", format!("{} failed", summary.failed).red());
+        info_nonl!(
+            "{}; ",
+            format!("{} failed", summary.failed).if_supports_color(Stream::Stderr, |t| t.red())
+        );
     } else {
         info_nonl!("{} failed; ", summary.failed);
     }
     if summary.validation_failed > 0 {
         info!(
             "{}",
-            format!("{} validation errors", summary.validation_failed).red()
+            format!("{} validation errors", summary.validation_failed)
+                .if_supports_color(Stream::Stderr, |t| t.red())
         );
     } else {
         info!("{} validation errors", summary.validation_failed);
@@ -577,19 +595,21 @@ fn print_summary(summary: &TestSummary) {
 fn print_test_outcome(name: &str, outcome: &TestOutcome) {
     match outcome {
         TestOutcome::Passed => {
+            let ok_style = Style::new().green().bold();
             info!(
                 "{} {} ... {}",
-                "test".cyan(),
-                name.cyan(),
-                "ok".green().bold()
+                "test".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                name.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "ok".if_supports_color(Stream::Stderr, |t| ok_style.style(t))
             );
         }
         TestOutcome::ValidationFailed(failure) => {
+            let fail_style = Style::new().red().bold();
             info!(
                 "{} {} ... {}",
-                "test".cyan(),
-                name.cyan(),
-                "VALIDATION FAILED".red().bold()
+                "test".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                name.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "VALIDATION FAILED".if_supports_color(Stream::Stderr, |t| fail_style.style(t))
             );
             match failure {
                 ValidationFailure::UnitTest(e) => print_test_validation_error(e),
@@ -599,11 +619,12 @@ fn print_test_outcome(name: &str, outcome: &TestOutcome) {
             }
         }
         TestOutcome::Failed(failure) => {
+            let fail_style = Style::new().red().bold();
             info!(
                 "{} {} ... {}",
-                "test".cyan(),
-                name.cyan(),
-                "FAILED".red().bold()
+                "test".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                name.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "FAILED".if_supports_color(Stream::Stderr, |t| fail_style.style(t))
             );
             match failure {
                 ExecutionFailure::AssertionFailed {
@@ -614,7 +635,12 @@ fn print_test_outcome(name: &str, outcome: &TestOutcome) {
                     info_nonl!("{}", format_assertion_rows(columns, missing, unexpected))
                 }
                 ExecutionFailure::Error(msg) => {
-                    info!("  {}: {}", "error".red().bold(), msg)
+                    let err_style = Style::new().red().bold();
+                    info!(
+                        "  {}: {}",
+                        "error".if_supports_color(Stream::Stderr, |t| err_style.style(t)),
+                        msg
+                    )
                 }
             }
         }
@@ -637,9 +663,10 @@ fn print_test_validation_error(error: &unit_test::TestValidationError) {
             info!("{}", inner)
         }
         unit_test::TestValidationError::TypesCacheUnavailable { reason } => {
+            let style = Style::new().bright_red().bold();
             info!(
                 "{}: types cache unavailable: {}",
-                "error".bright_red().bold(),
+                "error".if_supports_color(Stream::Stderr, |t| style.style(t)),
                 reason
             );
         }
@@ -695,7 +722,13 @@ fn format_assertion_rows(
     unexpected: &[BTreeMap<String, String>],
 ) -> String {
     let mut out = String::new();
-    writeln!(out, "  {}:", "Test assertion failed".yellow().bold()).unwrap();
+    let title_style = Style::new().yellow().bold();
+    writeln!(
+        out,
+        "  {}:",
+        "Test assertion failed".if_supports_color(Stream::Stderr, |t| title_style.style(t))
+    )
+    .unwrap();
     if missing.is_empty() && unexpected.is_empty() {
         return out;
     }
@@ -703,15 +736,37 @@ fn format_assertion_rows(
         .chain(columns.iter().cloned())
         .collect::<Vec<_>>()
         .join(" | ");
-    writeln!(out, "  {}", header.bold().cyan()).unwrap();
-    writeln!(out, "  {}", "-".repeat(header.len()).cyan()).unwrap();
+    let header_style = Style::new().bold().cyan();
+    writeln!(
+        out,
+        "  {}",
+        header.if_supports_color(Stream::Stderr, |t| header_style.style(t))
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "  {}",
+        "-".repeat(header.len())
+            .if_supports_color(Stream::Stderr, |t| t.cyan())
+    )
+    .unwrap();
 
     let groups: [(&str, &[BTreeMap<String, String>]); 2] =
         [("MISSING", missing), ("UNEXPECTED", unexpected)];
     for (status, rows) in groups {
         let status_colored = match status {
-            "MISSING" => status.red().bold().to_string(),
-            "UNEXPECTED" => status.yellow().bold().to_string(),
+            "MISSING" => {
+                let style = Style::new().red().bold();
+                status
+                    .if_supports_color(Stream::Stderr, |t| style.style(t))
+                    .to_string()
+            }
+            "UNEXPECTED" => {
+                let style = Style::new().yellow().bold();
+                status
+                    .if_supports_color(Stream::Stderr, |t| style.style(t))
+                    .to_string()
+            }
             _ => status.to_string(),
         };
         for row in rows {
@@ -824,7 +879,10 @@ fn load_or_generate_types_cache(
     let directory = &settings.directory;
     let external_types = types::load_types_lock(directory).unwrap_or_default();
 
-    info!("{}", "Running type check...".yellow());
+    info!(
+        "{}",
+        "Running type check...".if_supports_color(Stream::Stderr, |t| t.yellow())
+    );
     typecheck::run(
         directory,
         settings.profile_name().unwrap_or(""),

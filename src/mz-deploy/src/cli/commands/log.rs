@@ -14,7 +14,7 @@ use crate::client::{Client, DeploymentHistoryEntry};
 use crate::config::Settings;
 use crate::{info, info_nonl, log};
 use chrono::{DateTime, Local};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::fmt;
 use std::io::{IsTerminal, Write};
 use std::process::{Command, Stdio};
@@ -30,6 +30,7 @@ impl fmt::Display for HistoryOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Deployment history (promoted):\n")?;
 
+        let deployment_style = Style::new().yellow().bold();
         for entry in &self.entries {
             let datetime: DateTime<Local> = entry.promoted_at.with_timezone(&Local);
             let date_str = datetime.format("%a %b %d %H:%M:%S %Y %z").to_string();
@@ -37,24 +38,47 @@ impl fmt::Display for HistoryOutput {
             writeln!(
                 f,
                 "{} {} [{}]",
-                "deployment".yellow().bold(),
-                entry.deploy_id.cyan(),
-                entry.kind.to_string().dimmed()
+                "deployment".if_supports_color(Stream::Stderr, |t| deployment_style.style(t)),
+                entry
+                    .deploy_id
+                    .if_supports_color(Stream::Stderr, |t| t.cyan()),
+                entry
+                    .kind
+                    .to_string()
+                    .if_supports_color(Stream::Stderr, |t| t.dimmed())
             )?;
             if let Some(commit_sha) = &entry.git_commit {
-                writeln!(f, "{}: {}", "Commit".dimmed(), commit_sha)?;
+                writeln!(
+                    f,
+                    "{}: {}",
+                    "Commit".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                    commit_sha
+                )?;
             }
             writeln!(
                 f,
                 "{}: {}",
-                "Promoted by".dimmed(),
-                entry.deployed_by.yellow()
+                "Promoted by".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                entry
+                    .deployed_by
+                    .if_supports_color(Stream::Stderr, |t| t.yellow())
             )?;
-            writeln!(f, "{}:   {}", "Date".dimmed(), date_str)?;
+            writeln!(
+                f,
+                "{}:   {}",
+                "Date".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                date_str
+            )?;
             writeln!(f)?;
 
             for sq in &entry.schemas {
-                writeln!(f, "    {}.{}", sq.database.dimmed(), sq.schema)?;
+                writeln!(
+                    f,
+                    "    {}.{}",
+                    sq.database
+                        .if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                    sq.schema
+                )?;
             }
             writeln!(f)?;
         }
@@ -100,12 +124,17 @@ pub async fn run(settings: &Settings, limit: Option<usize>) -> Result<(), CliErr
         info!("No deployment history found.");
         info!();
         info!("To create and promote a deployment, run:");
-        info!("  {} {} {}", "mz-deploy".cyan(), "stage".cyan(), ".".cyan());
         info!(
             "  {} {} {}",
-            "mz-deploy".cyan(),
-            "apply".cyan(),
-            "--staging-env <name>".cyan()
+            "mz-deploy".if_supports_color(Stream::Stderr, |t| t.cyan()),
+            "stage".if_supports_color(Stream::Stderr, |t| t.cyan()),
+            ".".if_supports_color(Stream::Stderr, |t| t.cyan())
+        );
+        info!(
+            "  {} {} {}",
+            "mz-deploy".if_supports_color(Stream::Stderr, |t| t.cyan()),
+            "apply".if_supports_color(Stream::Stderr, |t| t.cyan()),
+            "--staging-env <name>".if_supports_color(Stream::Stderr, |t| t.cyan())
         );
     } else {
         let formatted = format!("{output}");

@@ -17,7 +17,7 @@ use crate::cli::CliError;
 use crate::cli::progress;
 use crate::config::{ProfilesConfig, write_mzprofile};
 use crate::{info, info_nonl, log};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
@@ -88,7 +88,10 @@ fn prompt_default_profile(project_dir: &Path) -> Result<(), CliError> {
         Err(_) => {
             info!("No profiles configured yet.");
             info!("  Add one to ~/.mz/profiles.toml, then run:");
-            info!("    {}", "mz-deploy profile set <name>".cyan());
+            info!(
+                "    {}",
+                "mz-deploy profile set <name>".if_supports_color(Stream::Stderr, |t| t.cyan())
+            );
             print_profile_help_hint();
             return Ok(());
         }
@@ -101,7 +104,10 @@ fn prompt_default_profile(project_dir: &Path) -> Result<(), CliError> {
             "  Add one to {}, then run:",
             profiles_config.source_path().display()
         );
-        info!("    {}", "mz-deploy profile set <name>".cyan());
+        info!(
+            "    {}",
+            "mz-deploy profile set <name>".if_supports_color(Stream::Stderr, |t| t.cyan())
+        );
         print_profile_help_hint();
         return Ok(());
     }
@@ -119,7 +125,7 @@ fn prompt_default_profile(project_dir: &Path) -> Result<(), CliError> {
     if trimmed.is_empty() {
         info!(
             "Skipped. Set a default later with {}",
-            "mz-deploy profile set <name>".cyan()
+            "mz-deploy profile set <name>".if_supports_color(Stream::Stderr, |t| t.cyan())
         );
         print_profile_help_hint();
         return Ok(());
@@ -130,7 +136,7 @@ fn prompt_default_profile(project_dir: &Path) -> Result<(), CliError> {
         _ => {
             info!(
                 "Invalid choice. Skipped — set a default later with {}",
-                "mz-deploy profile set <name>".cyan()
+                "mz-deploy profile set <name>".if_supports_color(Stream::Stderr, |t| t.cyan())
             );
             print_profile_help_hint();
             return Ok(());
@@ -140,11 +146,12 @@ fn prompt_default_profile(project_dir: &Path) -> Result<(), CliError> {
     let name = names[choice - 1];
     write_mzprofile(project_dir, name)?;
 
+    let check_style = Style::new().green().bold();
     info!(
         "  {} default profile set to {}. Update with {}",
-        "✓".green().bold(),
-        name.green(),
-        "mz-deploy profile set <name>".cyan(),
+        "✓".if_supports_color(Stream::Stderr, |t| check_style.style(t)),
+        name.if_supports_color(Stream::Stderr, |t| t.green()),
+        "mz-deploy profile set <name>".if_supports_color(Stream::Stderr, |t| t.cyan()),
     );
     print_profile_help_hint();
     Ok(())
@@ -152,7 +159,10 @@ fn prompt_default_profile(project_dir: &Path) -> Result<(), CliError> {
 
 /// One-line nudge to the help page; appended to every profile-prompt outcome.
 fn print_profile_help_hint() {
-    info!("  Learn more: {}", "mz-deploy help profile".cyan());
+    info!(
+        "  Learn more: {}",
+        "mz-deploy help profile".if_supports_color(Stream::Stderr, |t| t.cyan())
+    );
 }
 
 /// Nudge users toward installing the optional Materialize agent skill.

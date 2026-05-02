@@ -15,7 +15,7 @@ use crate::config::Settings;
 use crate::log;
 use crate::project::SchemaQualifier;
 use chrono::{DateTime, Utc};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::fmt;
 
 #[derive(serde::Serialize)]
@@ -44,9 +44,9 @@ impl fmt::Display for ListOutput {
             writeln!(
                 f,
                 "  {} {} {}",
-                "mz-deploy".cyan(),
-                "stage".cyan(),
-                ".".cyan()
+                "mz-deploy".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "stage".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                ".".if_supports_color(Stream::Stderr, |t| t.cyan())
             )?;
             return Ok(());
         }
@@ -73,19 +73,31 @@ impl fmt::Display for ListOutput {
                 }
             };
 
+            let deploy_id_style = Style::new().cyan().bold();
             writeln!(
                 f,
                 "  {} {} by {} {} [{}]",
-                "●".green(),
-                deployment.deploy_id.cyan().bold(),
-                deployment.deployed_by.yellow(),
-                format!("({})", timestamp).dimmed(),
-                deployment.kind.to_string().dimmed(),
+                "●".if_supports_color(Stream::Stderr, |t| t.green()),
+                deployment
+                    .deploy_id
+                    .if_supports_color(Stream::Stderr, |t| deploy_id_style.style(t)),
+                deployment
+                    .deployed_by
+                    .if_supports_color(Stream::Stderr, |t| t.yellow()),
+                format!("({})", timestamp).if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                deployment
+                    .kind
+                    .to_string()
+                    .if_supports_color(Stream::Stderr, |t| t.dimmed()),
             )?;
 
             // Display commit if available
             if let Some(commit_sha) = &deployment.git_commit {
-                writeln!(f, "    commit: {}", commit_sha.dimmed())?;
+                writeln!(
+                    f,
+                    "    commit: {}",
+                    commit_sha.if_supports_color(Stream::Stderr, |t| t.dimmed())
+                )?;
             }
 
             // Display cluster status
@@ -105,11 +117,21 @@ impl fmt::Display for ListOutput {
                 } else {
                     format!("clusters: {} of {} ready", ready_count, total_clusters)
                 };
-                writeln!(f, "    {}\n", text.blue())?;
+                writeln!(
+                    f,
+                    "    {}\n",
+                    text.if_supports_color(Stream::Stderr, |t| t.blue())
+                )?;
             }
 
             for sq in &deployment.schemas {
-                writeln!(f, "    {}.{}", sq.database.dimmed(), sq.schema)?;
+                writeln!(
+                    f,
+                    "    {}.{}",
+                    sq.database
+                        .if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                    sq.schema
+                )?;
             }
             writeln!(f)?;
         }

@@ -20,7 +20,7 @@
 use crate::config::ConfigError;
 use crate::project::SchemaQualifier;
 use crate::project::ir::object_id::ObjectId;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::fmt;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -233,13 +233,20 @@ impl fmt::Display for DatabaseValidationError {
             } => {
                 let relative_path = format_relative_path(file_path);
 
+                let error_style = Style::new().bright_red().bold();
+                let arrow_style = Style::new().bright_blue().bold();
                 writeln!(
                     f,
                     "{}: failed to compile '{}': missing external dependencies",
-                    "error".bright_red().bold(),
+                    "error".if_supports_color(Stream::Stderr, |t| error_style.style(t)),
                     object_name
                 )?;
-                writeln!(f, " {} {}", "-->".bright_blue().bold(), relative_path)?;
+                writeln!(
+                    f,
+                    " {} {}",
+                    "-->".if_supports_color(Stream::Stderr, |t| arrow_style.style(t)),
+                    relative_path
+                )?;
                 writeln!(f)?;
                 writeln!(f, "  Missing dependencies:")?;
                 for dep in missing_dependencies {
@@ -294,10 +301,11 @@ impl fmt::Display for DatabaseValidationError {
                 compute_objects,
                 storage_objects,
             } => {
+                let error_style = Style::new().bright_red().bold();
                 writeln!(
                     f,
                     "{}: cluster '{}' contains both storage and computation objects",
-                    "error".bright_red().bold(),
+                    "error".if_supports_color(Stream::Stderr, |t| error_style.style(t)),
                     cluster_name
                 )?;
                 writeln!(f)?;
@@ -311,10 +319,11 @@ impl fmt::Display for DatabaseValidationError {
                     writeln!(f, "    - {}", obj)?;
                 }
                 writeln!(f)?;
+                let help_style = Style::new().bright_cyan().bold();
                 writeln!(
                     f,
                     "  {} Move sources/sinks to a separate cluster to avoid accidental recreation",
-                    "help:".bright_cyan().bold()
+                    "help:".if_supports_color(Stream::Stderr, |t| help_style.style(t))
                 )?;
                 Ok(())
             }
@@ -322,10 +331,12 @@ impl fmt::Display for DatabaseValidationError {
                 missing_database_usage,
                 missing_createcluster,
             } => {
+                let error_style = Style::new().bright_red().bold();
+                let help_style = Style::new().bright_cyan().bold();
                 writeln!(
                     f,
                     "{}: insufficient privileges to deploy this project",
-                    "error".bright_red().bold()
+                    "error".if_supports_color(Stream::Stderr, |t| error_style.style(t))
                 )?;
                 writeln!(f)?;
 
@@ -345,7 +356,7 @@ impl fmt::Display for DatabaseValidationError {
                 writeln!(
                     f,
                     "  {} Ask your administrator to grant the required privileges:",
-                    "help:".bright_cyan().bold()
+                    "help:".if_supports_color(Stream::Stderr, |t| help_style.style(t))
                 )?;
                 writeln!(f)?;
 
@@ -365,10 +376,12 @@ impl fmt::Display for DatabaseValidationError {
                 unowned_schemas,
                 current_user,
             } => {
+                let error_style = Style::new().bright_red().bold();
+                let help_style = Style::new().bright_cyan().bold();
                 writeln!(
                     f,
                     "{}: current role '{}' does not own the following production schemas",
-                    "error".bright_red().bold(),
+                    "error".if_supports_color(Stream::Stderr, |t| error_style.style(t)),
                     current_user
                 )?;
                 writeln!(f)?;
@@ -379,7 +392,7 @@ impl fmt::Display for DatabaseValidationError {
                 writeln!(
                     f,
                     "  {} Grant ownership of the schemas to the current role:",
-                    "help:".bright_cyan().bold()
+                    "help:".if_supports_color(Stream::Stderr, |t| help_style.style(t))
                 )?;
                 writeln!(f)?;
                 for sq in unowned_schemas {
@@ -395,10 +408,12 @@ impl fmt::Display for DatabaseValidationError {
                 unowned_clusters,
                 current_user,
             } => {
+                let error_style = Style::new().bright_red().bold();
+                let help_style = Style::new().bright_cyan().bold();
                 writeln!(
                     f,
                     "{}: current role '{}' does not own the following production clusters",
-                    "error".bright_red().bold(),
+                    "error".if_supports_color(Stream::Stderr, |t| error_style.style(t)),
                     current_user
                 )?;
                 writeln!(f)?;
@@ -409,7 +424,7 @@ impl fmt::Display for DatabaseValidationError {
                 writeln!(
                     f,
                     "  {} Grant ownership of the clusters to the current role:",
-                    "help:".bright_cyan().bold()
+                    "help:".if_supports_color(Stream::Stderr, |t| help_style.style(t))
                 )?;
                 writeln!(f)?;
                 for cluster in unowned_clusters {
@@ -422,10 +437,11 @@ impl fmt::Display for DatabaseValidationError {
                 Ok(())
             }
             DatabaseValidationError::MissingSources(sources) => {
+                let error_style = Style::new().bright_red().bold();
                 writeln!(
                     f,
                     "{}: The following sources are referenced but do not exist:",
-                    "error".bright_red().bold()
+                    "error".if_supports_color(Stream::Stderr, |t| error_style.style(t))
                 )?;
                 for source in sources {
                     writeln!(
@@ -442,10 +458,12 @@ impl fmt::Display for DatabaseValidationError {
                 Ok(())
             }
             DatabaseValidationError::MissingConnections(connections) => {
+                let error_style = Style::new().bright_red().bold();
+                let help_style = Style::new().bright_cyan().bold();
                 writeln!(
                     f,
                     "{}: The following connections are referenced but do not exist:",
-                    "error".bright_red().bold()
+                    "error".if_supports_color(Stream::Stderr, |t| error_style.style(t))
                 )?;
                 for conn in connections {
                     writeln!(f, "  - {}.{}.{}", conn.database, conn.schema, conn.object)?;
@@ -454,24 +472,26 @@ impl fmt::Display for DatabaseValidationError {
                 writeln!(
                     f,
                     "{} Connections are not managed by mz-deploy and must be created separately.",
-                    "help:".bright_cyan().bold()
+                    "help:".if_supports_color(Stream::Stderr, |t| help_style.style(t))
                 )?;
                 Ok(())
             }
             DatabaseValidationError::MissingTableDependencies {
                 objects_needing_tables,
             } => {
+                let error_style = Style::new().bright_red().bold();
+                let help_style = Style::new().bright_cyan().bold();
                 writeln!(
                     f,
                     "{}: Objects depend on tables that don't exist in the database",
-                    "error".bright_red().bold()
+                    "error".if_supports_color(Stream::Stderr, |t| error_style.style(t))
                 )?;
                 writeln!(f)?;
                 for (object, missing_tables) in objects_needing_tables {
                     writeln!(
                         f,
                         "  {} {}.{}.{} depends on:",
-                        "×".bright_red(),
+                        "×".if_supports_color(Stream::Stderr, |t| t.bright_red()),
                         object.database,
                         object.schema,
                         object.object
@@ -488,7 +508,7 @@ impl fmt::Display for DatabaseValidationError {
                 writeln!(
                     f,
                     "{} Run 'mz-deploy apply' to create the required tables first",
-                    "help:".bright_cyan().bold()
+                    "help:".if_supports_color(Stream::Stderr, |t| help_style.style(t))
                 )?;
                 Ok(())
             }

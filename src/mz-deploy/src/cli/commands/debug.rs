@@ -14,7 +14,7 @@ use crate::client::{Client, SERVER_CLUSTER_NAME};
 use crate::config::Settings;
 use crate::docker_runtime::{DockerRuntime, DockerStatus};
 use crate::log;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream};
 use std::fmt;
 
 /// Health of the `_mz_deploy_server` cluster as observed by `debug`.
@@ -57,37 +57,59 @@ struct DebugOutput {
 
 impl fmt::Display for DebugOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{}: {}", "Profile".green(), self.profile.cyan())?;
+        writeln!(
+            f,
+            "{}: {}",
+            "Profile".if_supports_color(Stream::Stderr, |t| t.green()),
+            self.profile.if_supports_color(Stream::Stderr, |t| t.cyan())
+        )?;
         writeln!(
             f,
             "{} {}:{}",
-            "Connected to".green(),
-            self.host.cyan(),
-            self.port.to_string().cyan()
+            "Connected to".if_supports_color(Stream::Stderr, |t| t.green()),
+            self.host.if_supports_color(Stream::Stderr, |t| t.cyan()),
+            self.port
+                .to_string()
+                .if_supports_color(Stream::Stderr, |t| t.cyan())
         )?;
-        writeln!(f, "  {}: {}", "Environment".dimmed(), self.environment_id)?;
-        writeln!(f, "  {}: {}", "Version".dimmed(), self.version)?;
-        writeln!(f, "  {}: {}", "Role".dimmed(), self.role.yellow())?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Environment".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+            self.environment_id
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Version".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+            self.version
+        )?;
+        writeln!(
+            f,
+            "  {}: {}",
+            "Role".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+            self.role.if_supports_color(Stream::Stderr, |t| t.yellow())
+        )?;
 
         let cluster_line = match &self.server_cluster_health {
             ServerClusterHealth::Healthy => format!(
                 "{}: {} ({})",
-                "Server cluster".green(),
-                SERVER_CLUSTER_NAME.cyan(),
-                "healthy".green(),
+                "Server cluster".if_supports_color(Stream::Stderr, |t| t.green()),
+                SERVER_CLUSTER_NAME.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "healthy".if_supports_color(Stream::Stderr, |t| t.green()),
             ),
             ServerClusterHealth::NotReady { reason } => format!(
                 "{}: {} ({}: {})\n  hint: run `mz-deploy setup`",
-                "Server cluster".green(),
-                SERVER_CLUSTER_NAME.cyan(),
-                "not ready".yellow(),
+                "Server cluster".if_supports_color(Stream::Stderr, |t| t.green()),
+                SERVER_CLUSTER_NAME.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "not ready".if_supports_color(Stream::Stderr, |t| t.yellow()),
                 reason,
             ),
             ServerClusterHealth::Missing => format!(
                 "{}: {} ({})\n  hint: run `mz-deploy setup`",
-                "Server cluster".green(),
-                SERVER_CLUSTER_NAME.cyan(),
-                "missing".red(),
+                "Server cluster".if_supports_color(Stream::Stderr, |t| t.green()),
+                SERVER_CLUSTER_NAME.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "missing".if_supports_color(Stream::Stderr, |t| t.red()),
             ),
         };
         writeln!(f, "{}", cluster_line)?;
@@ -95,15 +117,19 @@ impl fmt::Display for DebugOutput {
         let docker_label = match self.docker_status.as_str() {
             "running" => format!(
                 "{}: {}",
-                "Docker".green(),
-                "installed, daemon running".green()
+                "Docker".if_supports_color(Stream::Stderr, |t| t.green()),
+                "installed, daemon running".if_supports_color(Stream::Stderr, |t| t.green())
             ),
             "not_running" => format!(
                 "{}: {}",
-                "Docker".green(),
-                "installed, daemon not running".yellow()
+                "Docker".if_supports_color(Stream::Stderr, |t| t.green()),
+                "installed, daemon not running".if_supports_color(Stream::Stderr, |t| t.yellow())
             ),
-            _ => format!("{}: {}", "Docker".green(), "not installed".yellow()),
+            _ => format!(
+                "{}: {}",
+                "Docker".if_supports_color(Stream::Stderr, |t| t.green()),
+                "not installed".if_supports_color(Stream::Stderr, |t| t.yellow())
+            ),
         };
         write!(f, "{}", docker_label)?;
 

@@ -14,6 +14,7 @@
 //! messages are printed to stdout to help users understand what the tool
 //! is doing.
 
+use owo_colors::{OwoColorize, Stream};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Global verbose mode flag.
@@ -70,6 +71,15 @@ pub fn set_timing(v: bool) {
 /// Check if timing output is currently enabled.
 pub fn timing_enabled() -> bool {
     TIMING.load(Ordering::Relaxed)
+}
+
+/// Check if color is enabled.
+pub fn color_enabled() -> bool {
+    let supports_color = AtomicBool::new(false);
+    let _ = "".if_supports_color(Stream::Stderr, |_| {
+        supports_color.store(true, Ordering::Relaxed)
+    });
+    supports_color.load(Ordering::Relaxed)
 }
 
 /// Print a message only when verbose mode is enabled.

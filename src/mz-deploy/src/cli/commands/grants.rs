@@ -19,7 +19,7 @@ use mz_sql_parser::ast::{
     ObjectType, Privilege, PrivilegeSpecification, Raw, RevokePrivilegesStatement,
     UnresolvedItemName, UnresolvedObjectName,
 };
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -339,11 +339,12 @@ pub async fn execute_revocations(
     object_type_label: &str,
     display_name: &impl fmt::Display,
 ) -> Result<(), CliError> {
+    let dash_style = Style::new().red().bold();
     for stmt in revocations {
         if !executor.is_dry_run() {
             info!(
                 "  {} Revoking stale grant on {} '{}'",
-                "-".red().bold(),
+                "-".if_supports_color(Stream::Stderr, |t| dash_style.style(t)),
                 object_type_label,
                 display_name,
             );

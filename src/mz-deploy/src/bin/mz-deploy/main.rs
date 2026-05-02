@@ -773,14 +773,6 @@ enum DeleteCommand {
 async fn main() {
     let args = Args::parse();
 
-    // Suppress ANSI color escapes when NO_COLOR is set or stderr isn't a
-    // TTY (e.g. piped into a log aggregator or CI). Honors the widely
-    // adopted NO_COLOR convention (https://no-color.org/).
-    use std::io::IsTerminal;
-    if std::env::var_os("NO_COLOR").is_some() || !std::io::stderr().is_terminal() {
-        owo_colors::set_override(false);
-    }
-
     log::set_verbose(args.verbose);
     log::set_timing(args.timing);
     log::set_quiet(args.quiet);

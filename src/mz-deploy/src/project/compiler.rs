@@ -450,23 +450,15 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
     }
 
     let mut project = graph::Project::from(compiled_project);
-    project.compile_dirty = miss_keys
-        .iter()
-        .filter_map(|k| k.parse().ok())
-        .collect();
+    project.compile_dirty = miss_keys.iter().filter_map(|k| k.parse().ok()).collect();
 
-    // Persist the compiled project to SQLite for LSP consumption.
-    // Advisory — failure is logged but doesn't block compilation.
-    //
-    // Only the per-object rows for changed and deleted objects need
-    // rewriting; the project-wide tables (databases, schemas, external
-    // dependencies, etc.) are small and rewritten in full each call.
+    // Advisory persist for LSP consumption — failure is logged, not fatal.
     let deleted_keys: BTreeSet<String> = existing_rows
         .keys()
         .filter(|k| !current_keys.contains(*k))
         .cloned()
         .collect();
-    if let Err(e) = db.write_project_incremental(&project, &miss_keys, &deleted_keys, root) {
+    if let Err(e) = db.write_project(&project, &miss_keys, &deleted_keys, root) {
         verbose!("Failed to persist project to SQLite: {}", e);
     }
 

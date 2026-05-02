@@ -19,11 +19,10 @@ use crate::{info, info_nonl};
 use crossterm::{
     cursor::{Hide, MoveToColumn, MoveUp, Show},
     execute,
-    style::Stylize,
     terminal::{Clear, ClearType},
 };
 use futures::StreamExt;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::pin::pin;
@@ -99,7 +98,12 @@ async fn run_snapshot(
     }
 
     info!();
-    info!("{}", format!("  Deployment: {}", deploy_id).cyan().bold());
+    let style = Style::new().cyan().bold();
+    info!(
+        "{}",
+        format!("  Deployment: {}", deploy_id)
+            .if_supports_color(Stream::Stderr, |t| style.style(t))
+    );
     info!();
 
     let mut has_failures = false;
@@ -126,7 +130,11 @@ async fn run_snapshot(
     } else if has_non_ready {
         Err(CliError::ClustersHydrating)
     } else {
-        info!("{}", "  All clusters are ready!".green().bold());
+        let style = Style::new().green().bold();
+        info!(
+            "{}",
+            "  All clusters are ready!".if_supports_color(Stream::Stderr, |t| style.style(t))
+        );
         Ok(())
     }
 }
@@ -257,7 +265,12 @@ async fn monitor_hydration_ndjson(
 /// Print status for a single cluster with visual formatting.
 fn print_cluster_status(ctx: &ClusterStatusContext, allowed_lag_secs: i64) {
     // Cluster name header
-    info!("  {}", ctx.cluster_name.as_str().bold());
+    info!(
+        "  {}",
+        ctx.cluster_name
+            .as_str()
+            .if_supports_color(Stream::Stderr, |t| t.bold())
+    );
 
     // Progress bar
     let bar = render_progress_bar(ctx.hydrated_count, ctx.total_count, 40);
@@ -266,27 +279,48 @@ fn print_cluster_status(ctx: &ClusterStatusContext, allowed_lag_secs: i64) {
     info_nonl!("  {} ", bar);
     match &ctx.status {
         ClusterDeploymentStatus::Ready => {
-            info_nonl!("{} {}", "✓".green(), "ready".green())
+            info_nonl!(
+                "{} {}",
+                "✓".if_supports_color(Stream::Stderr, |t| t.green()),
+                "ready".if_supports_color(Stream::Stderr, |t| t.green())
+            )
         }
         ClusterDeploymentStatus::Hydrating { .. } => {
-            info_nonl!("{} {}", "◐".yellow(), "hydrating".yellow())
+            info_nonl!(
+                "{} {}",
+                "◐".if_supports_color(Stream::Stderr, |t| t.yellow()),
+                "hydrating".if_supports_color(Stream::Stderr, |t| t.yellow())
+            )
         }
         ClusterDeploymentStatus::Lagging { .. } => {
-            info_nonl!("{} {}", "⚠".yellow(), "lagging".yellow())
+            info_nonl!(
+                "{} {}",
+                "⚠".if_supports_color(Stream::Stderr, |t| t.yellow()),
+                "lagging".if_supports_color(Stream::Stderr, |t| t.yellow())
+            )
         }
         ClusterDeploymentStatus::Failing { .. } => {
-            info_nonl!("{} {}", "✗".red(), "failing".red())
+            info_nonl!(
+                "{} {}",
+                "✗".if_supports_color(Stream::Stderr, |t| t.red()),
+                "failing".if_supports_color(Stream::Stderr, |t| t.red())
+            )
         }
     }
-    info!("  {}", progress_str.dimmed());
+    info!(
+        "  {}",
+        progress_str.if_supports_color(Stream::Stderr, |t| t.dimmed())
+    );
 
     // Additional context based on status
     match &ctx.status {
         ClusterDeploymentStatus::Ready => {
             info!(
                 "  {} lag: {}s",
-                "└".dimmed(),
-                ctx.max_lag_secs.to_string().green()
+                "└".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                ctx.max_lag_secs
+                    .to_string()
+                    .if_supports_color(Stream::Stderr, |t| t.green())
             );
         }
         ClusterDeploymentStatus::Hydrating { hydrated, total } => {
@@ -296,18 +330,32 @@ fn print_cluster_status(ctx: &ClusterStatusContext, allowed_lag_secs: i64) {
             } else {
                 0
             };
-            info!("  {} {}% complete", "└".dimmed(), pct.to_string().yellow());
+            info!(
+                "  {} {}% complete",
+                "└".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                pct.to_string()
+                    .if_supports_color(Stream::Stderr, |t| t.yellow())
+            );
         }
         ClusterDeploymentStatus::Lagging { max_lag_secs } => {
+            let style = Style::new().yellow().bold();
             info!(
                 "  {} lag: {}s (threshold: {}s)",
-                "└".dimmed(),
-                max_lag_secs.to_string().yellow().bold(),
+                "└".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                max_lag_secs
+                    .to_string()
+                    .if_supports_color(Stream::Stderr, |t| style.style(t)),
                 allowed_lag_secs
             );
         }
         ClusterDeploymentStatus::Failing { reason } => {
-            info!("  {} {}", "└".dimmed(), reason.to_string().red());
+            info!(
+                "  {} {}",
+                "└".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                reason
+                    .to_string()
+                    .if_supports_color(Stream::Stderr, |t| t.red())
+            );
         }
     }
     info!();
@@ -317,7 +365,12 @@ fn print_cluster_status(ctx: &ClusterStatusContext, allowed_lag_secs: i64) {
 #[allow(clippy::as_conversions)]
 fn render_progress_bar(current: i64, total: i64, width: usize) -> String {
     if total == 0 {
-        return format!("[{}]", "░".repeat(width).dimmed());
+        return format!(
+            "[{}]",
+            "░"
+                .repeat(width)
+                .if_supports_color(Stream::Stderr, |t| t.dimmed())
+        );
     }
 
     let filled = ((current as f64 / total as f64) * width as f64) as usize;
@@ -325,8 +378,12 @@ fn render_progress_bar(current: i64, total: i64, width: usize) -> String {
 
     format!(
         "[{}{}]",
-        "█".repeat(filled).cyan(),
-        "░".repeat(empty).dimmed()
+        "█"
+            .repeat(filled)
+            .if_supports_color(Stream::Stderr, |t| t.cyan()),
+        "░"
+            .repeat(empty)
+            .if_supports_color(Stream::Stderr, |t| t.dimmed())
     )
 }
 
@@ -349,16 +406,32 @@ fn print_summary(statuses: &[ClusterStatusContext]) {
     info_nonl!("  ");
     let mut parts = Vec::new();
     if ready > 0 {
-        parts.push(format!("{} ready", ready).green().to_string());
+        parts.push(
+            format!("{} ready", ready)
+                .if_supports_color(Stream::Stderr, |t| t.green())
+                .to_string(),
+        );
     }
     if hydrating > 0 {
-        parts.push(format!("{} hydrating", hydrating).yellow().to_string());
+        parts.push(
+            format!("{} hydrating", hydrating)
+                .if_supports_color(Stream::Stderr, |t| t.yellow())
+                .to_string(),
+        );
     }
     if lagging > 0 {
-        parts.push(format!("{} lagging", lagging).yellow().to_string());
+        parts.push(
+            format!("{} lagging", lagging)
+                .if_supports_color(Stream::Stderr, |t| t.yellow())
+                .to_string(),
+        );
     }
     if failing > 0 {
-        parts.push(format!("{} failing", failing).red().to_string());
+        parts.push(
+            format!("{} failing", failing)
+                .if_supports_color(Stream::Stderr, |t| t.red())
+                .to_string(),
+        );
     }
     info!("{}", parts.join(" · "));
 }
@@ -486,7 +559,11 @@ async fn monitor_hydration_live(
         if all_ready {
             let _ = execute!(stdout, Show);
             info!();
-            info!("{}", "  All clusters are ready!".green().bold());
+            let style = Style::new().green().bold();
+            info!(
+                "{}",
+                "  All clusters are ready!".if_supports_color(Stream::Stderr, |t| style.style(t))
+            );
             return Ok(());
         }
     }
@@ -535,13 +612,17 @@ fn render_dashboard(
 
     // Header
     info!();
+    let header_style = Style::new().cyan().bold();
     info!(
         "{}",
         format!("  mz-deploy wait · deployment: {}", deploy_id)
-            .cyan()
-            .bold()
+            .if_supports_color(Stream::Stderr, |t| header_style.style(t))
     );
-    info!("  {} {}", "elapsed:".dimmed(), elapsed_str.dimmed());
+    info!(
+        "  {} {}",
+        "elapsed:".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+        elapsed_str.if_supports_color(Stream::Stderr, |t| t.dimmed())
+    );
     info!();
 
     // Sort clusters by name for consistent ordering

@@ -473,7 +473,7 @@ impl mz_sql::catalog::CatalogCollectionItem for LocalItem {
 /// system objects on creation, then incrementally extended with project
 /// objects during validation. Each instance is scoped to a single typecheck
 /// run to avoid state leakage between validations.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(super) struct CatalogRuntime {
     active_role: StubRole,
     active_database: Option<mz_sql::names::DatabaseId>,
@@ -499,9 +499,8 @@ pub(super) struct CatalogRuntime {
     mz_unsafe_schema_id: SchemaId,
 }
 
-/// Construct a typecheck error with the object's inferred file path.
-/// The placeholder file path is rewritten to the real on-disk path by
-/// the caller in `typecheck::run`.
+/// Build a typecheck error with a synthesized file path; callers replace it
+/// with the real on-disk path before surfacing diagnostics.
 fn build_error(object_id: &ObjectId, kind: ObjectTypeCheckErrorKind) -> ObjectTypeCheckError {
     ObjectTypeCheckError {
         object_id: object_id.clone(),
@@ -511,6 +510,83 @@ fn build_error(object_id: &ObjectId, kind: ObjectTypeCheckErrorKind) -> ObjectTy
         )),
         kind,
     }
+}
+
+/// Build a `LocalItem` from a planned table/view/MV statement.
+///
+/// Allocates fresh ids and pulls the per-variant fields (name, item type,
+/// dependencies, output desc, cluster) out of the plan. Both `CatalogRuntime`
+/// and `TaskCatalog` use this; only the final `insert_item` call differs.
+fn build_local_item(
+    object_id: &ObjectId,
+    sql: &str,
+    plan: Plan,
+    resolved_ids: ResolvedIds,
+    ids: &mut IdAllocator,
+) -> Result<(LocalItem, RelationDesc), CatalogError> {
+    let item_id = CatalogItemId::User(ids.allocate_item());
+    let global_id = GlobalId::User(ids.allocate_global());
+    let oid = ids.allocate_oid()?;
+
+    let (name, item_type, desc, uses, cluster_id) = match plan {
+        Plan::CreateTable(plan) => (
+            plan.name,
+            CatalogItemType::Table,
+            plan.table.desc.latest(),
+            BTreeSet::new(),
+            None,
+        ),
+        Plan::CreateView(plan) => {
+            let desc = RelationDesc::new(
+                plan.view.expr.top_level_typ(),
+                plan.view.column_names.clone(),
+            );
+            (
+                plan.name,
+                CatalogItemType::View,
+                desc,
+                plan.view.dependencies.0,
+                None,
+            )
+        }
+        Plan::CreateMaterializedView(plan) => {
+            let desc = RelationDesc::new(
+                plan.materialized_view.expr.top_level_typ(),
+                plan.materialized_view.column_names.clone(),
+            );
+            (
+                plan.name,
+                CatalogItemType::MaterializedView,
+                desc,
+                plan.materialized_view.dependencies.0,
+                Some(plan.materialized_view.cluster_id),
+            )
+        }
+        other => unreachable!(
+            "build_local_item only handles table/view/MV plans for {}, got {other:?}",
+            object_id
+        ),
+    };
+
+    let item = LocalItem {
+        name,
+        id: item_id,
+        global_id,
+        oid,
+        item_type,
+        create_sql: sql.into(),
+        references: resolved_ids,
+        uses,
+        referenced_by: Vec::new(),
+        used_by: Vec::new(),
+        relation_desc: Some(desc.clone()),
+        func: None,
+        type_details: None,
+        owner_id: MZ_SYSTEM_ROLE_ID,
+        privileges: PrivilegeMap::default(),
+        cluster_id,
+    };
+    Ok((item, desc))
 }
 
 impl CatalogRuntime {
@@ -664,9 +740,8 @@ impl CatalogRuntime {
         let start = Instant::now();
 
         let resolve_start = Instant::now();
-        let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast).map_err(|e| {
-            build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e)))
-        })?;
+        let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast)
+            .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
         timing!(
             &format!("      catalog: resolve {}", object_id),
             resolve_start.elapsed()
@@ -1080,8 +1155,7 @@ impl CatalogRuntime {
     }
 
     /// Insert a SQL-planned item (table, view, or materialized view) into the
-    /// catalog, extracting its column schema and dependency references. Returns
-    /// the item's output column description.
+    /// catalog. Returns the item's output column description.
     fn insert_item_from_plan(
         &mut self,
         object_id: &ObjectId,
@@ -1089,71 +1163,7 @@ impl CatalogRuntime {
         plan: Plan,
         resolved_ids: ResolvedIds,
     ) -> Result<RelationDesc, CatalogError> {
-        let item_id = CatalogItemId::User(self.ids.allocate_item());
-        let global_id = GlobalId::User(self.ids.allocate_global());
-        let oid = self.ids.allocate_oid()?;
-
-        let (name, item_type, desc, uses, cluster_id) = match plan {
-            Plan::CreateTable(plan) => (
-                plan.name,
-                CatalogItemType::Table,
-                plan.table.desc.latest(),
-                BTreeSet::new(),
-                None,
-            ),
-            Plan::CreateView(plan) => {
-                let desc = RelationDesc::new(
-                    plan.view.expr.top_level_typ(),
-                    plan.view.column_names.clone(),
-                );
-                (
-                    plan.name,
-                    CatalogItemType::View,
-                    desc,
-                    plan.view.dependencies.0,
-                    None,
-                )
-            }
-            Plan::CreateMaterializedView(plan) => {
-                let desc = RelationDesc::new(
-                    plan.materialized_view.expr.top_level_typ(),
-                    plan.materialized_view.column_names.clone(),
-                );
-                (
-                    plan.name,
-                    CatalogItemType::MaterializedView,
-                    desc,
-                    plan.materialized_view.dependencies.0,
-                    Some(plan.materialized_view.cluster_id),
-                )
-            }
-            _ => {
-                return Err(CatalogError::UnexpectedType {
-                    name: object_id.to_string(),
-                    actual_type: CatalogItemType::Source,
-                    expected_type: CatalogItemType::Table,
-                });
-            }
-        };
-
-        let item = LocalItem {
-            name,
-            id: item_id,
-            global_id,
-            oid,
-            item_type,
-            create_sql: sql.into(),
-            references: resolved_ids,
-            uses,
-            referenced_by: Vec::new(),
-            used_by: Vec::new(),
-            relation_desc: Some(desc.clone()),
-            func: None,
-            type_details: None,
-            owner_id: MZ_SYSTEM_ROLE_ID,
-            privileges: PrivilegeMap::default(),
-            cluster_id,
-        };
+        let (item, desc) = build_local_item(object_id, sql, plan, resolved_ids, &mut self.ids)?;
         self.insert_item(item);
         Ok(desc)
     }
@@ -1240,9 +1250,6 @@ impl CatalogRuntime {
     }
 }
 
-
-/// Provides human-readable names for expression display. Maps `GlobalId`s
-/// to qualified item names and column names.
 impl ExprHumanizer for CatalogRuntime {
     fn humanize_id(&self, id: GlobalId) -> Option<String> {
         self.items_by_global_id
@@ -1794,14 +1801,8 @@ impl SessionCatalog for CatalogRuntime {
     }
 }
 
-/// Per-task overlay over a shared, immutable [`CatalogRuntime`]. Each parallel
-/// typecheck worker constructs its own `TaskCatalog` from the same
-/// `Arc<CatalogRuntime>` and writes its stub-table dependencies and the new
-/// item being checked into the overlay maps. Reads consult the overlay first
-/// and fall through to `base` when an item or schema isn't local.
-///
-/// The overlay's `IdAllocator` is forked from base at construction so each
-/// task can mint fresh ids without coordinating.
+/// Per-task overlay over a shared [`CatalogRuntime`]: reads consult the
+/// overlay first and fall through to `base`.
 #[derive(Debug)]
 pub(super) struct TaskCatalog {
     base: Arc<CatalogRuntime>,
@@ -1897,71 +1898,7 @@ impl TaskCatalog {
         plan: Plan,
         resolved_ids: ResolvedIds,
     ) -> Result<RelationDesc, CatalogError> {
-        let item_id = CatalogItemId::User(self.ids.allocate_item());
-        let global_id = GlobalId::User(self.ids.allocate_global());
-        let oid = self.ids.allocate_oid()?;
-
-        let (name, item_type, desc, uses, cluster_id) = match plan {
-            Plan::CreateTable(plan) => (
-                plan.name,
-                CatalogItemType::Table,
-                plan.table.desc.latest(),
-                BTreeSet::new(),
-                None,
-            ),
-            Plan::CreateView(plan) => {
-                let desc = RelationDesc::new(
-                    plan.view.expr.top_level_typ(),
-                    plan.view.column_names.clone(),
-                );
-                (
-                    plan.name,
-                    CatalogItemType::View,
-                    desc,
-                    plan.view.dependencies.0,
-                    None,
-                )
-            }
-            Plan::CreateMaterializedView(plan) => {
-                let desc = RelationDesc::new(
-                    plan.materialized_view.expr.top_level_typ(),
-                    plan.materialized_view.column_names.clone(),
-                );
-                (
-                    plan.name,
-                    CatalogItemType::MaterializedView,
-                    desc,
-                    plan.materialized_view.dependencies.0,
-                    Some(plan.materialized_view.cluster_id),
-                )
-            }
-            _ => {
-                return Err(CatalogError::UnexpectedType {
-                    name: object_id.to_string(),
-                    actual_type: CatalogItemType::Source,
-                    expected_type: CatalogItemType::Table,
-                });
-            }
-        };
-
-        let item = LocalItem {
-            name,
-            id: item_id,
-            global_id,
-            oid,
-            item_type,
-            create_sql: sql.into(),
-            references: resolved_ids,
-            uses,
-            referenced_by: Vec::new(),
-            used_by: Vec::new(),
-            relation_desc: Some(desc.clone()),
-            func: None,
-            type_details: None,
-            owner_id: MZ_SYSTEM_ROLE_ID,
-            privileges: PrivilegeMap::default(),
-            cluster_id,
-        };
+        let (item, desc) = build_local_item(object_id, sql, plan, resolved_ids, &mut self.ids)?;
         self.insert_item(item);
         Ok(desc)
     }
@@ -1986,9 +1923,8 @@ impl TaskCatalog {
         // Lift each schema into the overlay on first write so subsequent
         // inserts and reads see the new item id.
         if !self.schemas_by_key.contains_key(&schema_key) {
-            if let Some(base_schema) = self.base.schemas_by_key.get(&schema_key) {
-                self.schemas_by_key
-                    .insert(schema_key.clone(), base_schema.clone());
+            if let Some(base_schema) = self.base.schemas_by_key.get(&schema_key).cloned() {
+                self.schemas_by_key.insert(schema_key.clone(), base_schema);
             }
         }
         if let Some(schema) = self.schemas_by_key.get_mut(&schema_key) {
@@ -1996,8 +1932,8 @@ impl TaskCatalog {
         }
 
         if !self.schemas_by_id.contains_key(&id_key) {
-            if let Some(base_schema) = self.base.schemas_by_id.get(&id_key) {
-                self.schemas_by_id.insert(id_key.clone(), base_schema.clone());
+            if let Some(base_schema) = self.base.schemas_by_id.get(&id_key).cloned() {
+                self.schemas_by_id.insert(id_key.clone(), base_schema);
             }
         }
         if let Some(schema) = self.schemas_by_id.get_mut(&id_key) {
@@ -2540,7 +2476,7 @@ impl ExprHumanizer for TaskCatalog {
 
 impl ConnectionResolver for TaskCatalog {
     fn resolve_connection(&self, id: CatalogItemId) -> Connection<InlinedConnection> {
-        self.base.resolve_connection(id)
+        unreachable!("catalog backend cannot resolve connection {id}")
     }
 }
 
