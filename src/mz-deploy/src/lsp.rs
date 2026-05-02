@@ -98,6 +98,7 @@
 //! Parse diagnostics run per-file on every keystroke. Incremental updates may
 //! come later; the pipeline is fast enough for typical project sizes.
 
+mod code_action;
 mod code_lens;
 mod completion;
 pub mod diagnostics;
