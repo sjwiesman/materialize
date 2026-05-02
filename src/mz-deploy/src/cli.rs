@@ -43,11 +43,16 @@ pub use error::CliError;
 /// optional [`CliError::hint`] is appended in either path.
 #[allow(clippy::print_stderr)]
 pub fn display_error(error: &CliError) {
-    use owo_colors::OwoColorize;
+    use owo_colors::{OwoColorize, Stream, Style};
 
     let positional = render::to_positional(error);
     if positional.is_empty() {
-        eprintln!("{}: {}", "error".bright_red().bold(), error);
+        let error_style = Style::new().bright_red().bold();
+        eprintln!(
+            "{}: {}",
+            "error".if_supports_color(Stream::Stderr, |t| error_style.style(t)),
+            error
+        );
     } else {
         for pd in &positional {
             eprintln!("{}", render::render(pd));
@@ -55,10 +60,11 @@ pub fn display_error(error: &CliError) {
     }
 
     if let Some(hint) = error.hint() {
+        let eq_style = Style::new().bright_blue().bold();
         eprintln!(
             "  {} {}",
-            "=".bright_blue().bold(),
-            format!("help: {}", hint).bold()
+            "=".if_supports_color(Stream::Stderr, |t| eq_style.style(t)),
+            format!("help: {}", hint).if_supports_color(Stream::Stderr, |t| t.bold())
         );
     }
 

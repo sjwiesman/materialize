@@ -172,14 +172,12 @@ fn worker_loop<T, F>(
             let prev = dep_bk.remaining_deps.fetch_sub(1, Ordering::AcqRel);
             debug_assert!(prev >= 1, "remaining_deps underflow for {dependent_id:?}");
             if prev == 1 {
-                tx.send(Some(dependent_id.clone()))
-                    .expect("channel open");
+                tx.send(Some(dependent_id.clone())).expect("channel open");
             }
         }
 
         let prev = completed.fetch_add(1, Ordering::Relaxed);
         if prev + 1 == total {
-            // Last node done. Wake any worker still parked in `rx.recv()`.
             for _ in 0..worker_count.saturating_sub(1) {
                 tx.send(None).expect("channel open");
             }

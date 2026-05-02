@@ -39,7 +39,7 @@ use crate::project::ast::Statement;
 use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
 use crate::verbose;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::collections::BTreeSet;
 
 /// Base facts extracted from the project for Datalog computation.
@@ -79,10 +79,12 @@ pub(super) struct BaseFacts {
 
 /// Extract all base facts from the project for Datalog computation.
 pub(super) fn extract_base_facts(project: &Project) -> BaseFacts {
+    let header_style = Style::new().cyan().bold();
     verbose!(
         "{} {}",
-        "▶".cyan(),
-        "Extracting base facts from project...".cyan().bold()
+        "▶".if_supports_color(Stream::Stderr, |t| t.cyan()),
+        "Extracting base facts from project..."
+            .if_supports_color(Stream::Stderr, |t| header_style.style(t))
     );
     let mut object_in_schema = Vec::new();
     let mut depends_on = Vec::new();
@@ -108,7 +110,13 @@ pub(super) fn extract_base_facts(project: &Project) -> BaseFacts {
 
                 // IsSink fact - sinks should not propagate dirtiness to clusters/schemas
                 if matches!(obj.typed_object.stmt, Statement::CreateSink(_)) {
-                    verbose!("  ├─ {}: {}", "IsSink".yellow(), obj_id.to_string().cyan());
+                    verbose!(
+                        "  ├─ {}: {}",
+                        "IsSink".if_supports_color(Stream::Stderr, |t| t.yellow()),
+                        obj_id
+                            .to_string()
+                            .if_supports_color(Stream::Stderr, |t| t.cyan())
+                    );
                     is_sink.insert(obj_id.clone());
                 }
 
@@ -116,8 +124,10 @@ pub(super) fn extract_base_facts(project: &Project) -> BaseFacts {
                 if is_replacement_schema {
                     verbose!(
                         "  ├─ {}: {}",
-                        "IsReplacement".yellow(),
-                        obj_id.to_string().cyan()
+                        "IsReplacement".if_supports_color(Stream::Stderr, |t| t.yellow()),
+                        obj_id
+                            .to_string()
+                            .if_supports_color(Stream::Stderr, |t| t.cyan())
                     );
                     is_replacement.insert(obj_id.clone());
                 }
@@ -179,12 +189,30 @@ pub(super) fn extract_base_facts(project: &Project) -> BaseFacts {
 
     verbose!(
         "  └─ Base facts: {} objects, {} dependencies, {} stmt→cluster, {} index→cluster, {} sinks, {} replacements",
-        object_in_schema.len().to_string().bold(),
-        depends_on.len().to_string().bold(),
-        stmt_uses_cluster.len().to_string().bold(),
-        index_uses_cluster.len().to_string().bold(),
-        is_sink.len().to_string().bold(),
-        is_replacement.len().to_string().bold()
+        object_in_schema
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
+        depends_on
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
+        stmt_uses_cluster
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
+        index_uses_cluster
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
+        is_sink
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold()),
+        is_replacement
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold())
     );
 
     BaseFacts {

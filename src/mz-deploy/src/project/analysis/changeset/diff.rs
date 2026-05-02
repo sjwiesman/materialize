@@ -25,7 +25,7 @@
 use crate::project::analysis::deployment_snapshot::DeploymentSnapshot;
 use crate::project::ir::object_id::ObjectId;
 use crate::verbose;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::collections::BTreeSet;
 
 /// Find changed objects by comparing snapshot hashes.
@@ -33,10 +33,12 @@ pub(super) fn find_changed_objects(
     old_snapshot: &DeploymentSnapshot,
     new_snapshot: &DeploymentSnapshot,
 ) -> BTreeSet<ObjectId> {
+    let header_style = Style::new().cyan().bold();
     verbose!(
         "{} {}",
-        "▶".cyan(),
-        "Comparing deployment snapshots...".cyan().bold()
+        "▶".if_supports_color(Stream::Stderr, |t| t.cyan()),
+        "Comparing deployment snapshots..."
+            .if_supports_color(Stream::Stderr, |t| header_style.style(t))
     );
     let mut changed = BTreeSet::new();
 
@@ -46,21 +48,31 @@ pub(super) fn find_changed_objects(
             Some(old_hash) if old_hash != new_hash => {
                 verbose!(
                     "  ├─ {}: {} ({} {} → {})",
-                    "Changed".green(),
-                    object_id.to_string().cyan(),
-                    "hash".dimmed(),
-                    old_hash[..8].to_string().dimmed(),
-                    new_hash[..8].to_string().dimmed()
+                    "Changed".if_supports_color(Stream::Stderr, |t| t.green()),
+                    object_id
+                        .to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "hash".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                    old_hash[..8]
+                        .to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                    new_hash[..8]
+                        .to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.dimmed())
                 );
                 changed.insert(object_id.clone());
             }
             None => {
                 verbose!(
                     "  ├─ {}: {} ({} {})",
-                    "New".green(),
-                    object_id.to_string().cyan(),
-                    "hash".dimmed(),
-                    new_hash[..8].to_string().dimmed()
+                    "New".if_supports_color(Stream::Stderr, |t| t.green()),
+                    object_id
+                        .to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "hash".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                    new_hash[..8]
+                        .to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.dimmed())
                 );
                 changed.insert(object_id.clone());
             }
@@ -71,14 +83,23 @@ pub(super) fn find_changed_objects(
     // Deleted objects
     for object_id in old_snapshot.objects.keys() {
         if !new_snapshot.objects.contains_key(object_id) {
-            verbose!("  ├─ {}: {}", "Deleted".red(), object_id.to_string().cyan());
+            verbose!(
+                "  ├─ {}: {}",
+                "Deleted".if_supports_color(Stream::Stderr, |t| t.red()),
+                object_id
+                    .to_string()
+                    .if_supports_color(Stream::Stderr, |t| t.cyan())
+            );
             changed.insert(object_id.clone());
         }
     }
 
     verbose!(
         "  └─ Found {} changed object(s)",
-        changed.len().to_string().bold()
+        changed
+            .len()
+            .to_string()
+            .if_supports_color(Stream::Stderr, |t| t.bold())
     );
     changed
 }

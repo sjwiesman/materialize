@@ -15,7 +15,7 @@ use crate::config::Settings;
 use crate::log;
 use crate::project::ir::object_id::ObjectId;
 use chrono::{DateTime, Local};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -28,30 +28,47 @@ struct DescribeOutput {
 
 impl fmt::Display for DescribeOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let deployment_style = Style::new().yellow().bold();
         writeln!(
             f,
             "{} {} [{}]",
-            "deployment".yellow().bold(),
-            self.deploy_id.cyan(),
-            self.details.kind.to_string().dimmed(),
+            "deployment".if_supports_color(Stream::Stderr, |t| deployment_style.style(t)),
+            self.deploy_id
+                .if_supports_color(Stream::Stderr, |t| t.cyan()),
+            self.details
+                .kind
+                .to_string()
+                .if_supports_color(Stream::Stderr, |t| t.dimmed()),
         )?;
 
         if let Some(commit_sha) = &self.details.git_commit {
-            writeln!(f, "{}: {}", "Commit".dimmed(), commit_sha)?;
+            writeln!(
+                f,
+                "{}: {}",
+                "Commit".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                commit_sha
+            )?;
         }
 
         writeln!(
             f,
             "{}: {}",
-            "Deployed by".dimmed(),
-            self.details.deployed_by.yellow()
+            "Deployed by".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+            self.details
+                .deployed_by
+                .if_supports_color(Stream::Stderr, |t| t.yellow())
         )?;
 
         let deployed_datetime: DateTime<Local> = self.details.deployed_at.with_timezone(&Local);
         let deployed_str = deployed_datetime
             .format("%a %b %d %H:%M:%S %Y %z")
             .to_string();
-        writeln!(f, "{}: {}", "Deployed at".dimmed(), deployed_str)?;
+        writeln!(
+            f,
+            "{}: {}",
+            "Deployed at".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+            deployed_str
+        )?;
 
         if let Some(promoted) = self.details.promoted_at {
             if self.details.kind == DeploymentKind::Objects {
@@ -59,32 +76,62 @@ impl fmt::Display for DescribeOutput {
                 let promoted_str = promoted_datetime
                     .format("%a %b %d %H:%M:%S %Y %z")
                     .to_string();
-                writeln!(f, "{}: {}", "Promoted at".dimmed(), promoted_str)?;
+                writeln!(
+                    f,
+                    "{}: {}",
+                    "Promoted at".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                    promoted_str
+                )?;
             }
         } else {
-            writeln!(f, "{}: {}", "Status".dimmed(), "staging".yellow())?;
+            writeln!(
+                f,
+                "{}: {}",
+                "Status".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                "staging".if_supports_color(Stream::Stderr, |t| t.yellow())
+            )?;
         }
 
         writeln!(f)?;
 
         // Display schemas
-        writeln!(f, "{} ({}):", "Schemas".bold(), self.details.schemas.len())?;
+        writeln!(
+            f,
+            "{} ({}):",
+            "Schemas".if_supports_color(Stream::Stderr, |t| t.bold()),
+            self.details.schemas.len()
+        )?;
         for sq in &self.details.schemas {
-            writeln!(f, "    {}.{}", sq.database.dimmed(), sq.schema)?;
+            writeln!(
+                f,
+                "    {}.{}",
+                sq.database
+                    .if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                sq.schema
+            )?;
         }
         writeln!(f)?;
 
         // Display objects
-        writeln!(f, "{} ({}):", "Objects".bold(), self.objects.len())?;
+        writeln!(
+            f,
+            "{} ({}):",
+            "Objects".if_supports_color(Stream::Stderr, |t| t.bold()),
+            self.objects.len()
+        )?;
         for (object_id, hash) in &self.objects {
             let short_hash = &hash[..hash.len().min(12)];
             writeln!(
                 f,
                 "    {}.{}.{}  {}",
-                object_id.database.dimmed(),
-                object_id.schema.dimmed(),
+                object_id
+                    .database
+                    .if_supports_color(Stream::Stderr, |t| t.dimmed()),
+                object_id
+                    .schema
+                    .if_supports_color(Stream::Stderr, |t| t.dimmed()),
                 object_id.object,
-                short_hash.dimmed()
+                short_hash.if_supports_color(Stream::Stderr, |t| t.dimmed())
             )?;
         }
 

@@ -14,87 +14,74 @@
 //! scannable output similar to tools like dbt.
 
 use crate::info;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::time::Duration;
 
 /// Print a stage start message with yellow arrow.
-///
-/// # Example
-/// ```ignore
-/// stage_start("Parsing SQL files");
-/// // Output: → Parsing SQL files...
-/// ```
 pub fn stage_start(name: &str) {
-    info!("{} {}...", "→".yellow(), name);
+    info!(
+        "{} {}...",
+        "→".if_supports_color(Stream::Stderr, |t| t.yellow()),
+        name
+    );
 }
 
 /// Print a stage completion message with green checkmark and duration.
-///
-/// # Example
-/// ```ignore
-/// stage_success("15 objects parsed", Duration::from_millis(100));
-/// // Output:   ✓ 15 objects parsed (0.1s)
-/// ```
 pub fn stage_success(message: &str, duration: Duration) {
     let seconds = duration.as_secs_f64();
+    let suffix = format!("({}s)", format_duration(seconds));
     info!(
         "  {} {} {}",
-        "✓".green(),
+        "✓".if_supports_color(Stream::Stderr, |t| t.green()),
         message,
-        format!("({}s)", format_duration(seconds)).dimmed()
+        suffix.if_supports_color(Stream::Stderr, |t| t.dimmed()),
     );
 }
 
 /// Print an informational message with blue info symbol.
-///
-/// # Example
-/// ```ignore
-/// info("3 external dependencies detected");
-/// // Output:   ℹ 3 external dependencies detected
-/// ```
 pub fn info(message: &str) {
-    info!("  {} {}", "ℹ".blue(), message);
+    info!(
+        "  {} {}",
+        "ℹ".if_supports_color(Stream::Stderr, |t| t.blue()),
+        message
+    );
 }
 
 /// Print a success message with green checkmark.
-///
-/// # Example
-/// ```ignore
-/// success("All objects validated");
-/// // Output:   ✓ All objects validated
-/// ```
 pub fn success(message: &str) {
-    info!("  {} {}", "✓".green(), message);
+    info!(
+        "  {} {}",
+        "✓".if_supports_color(Stream::Stderr, |t| t.green()),
+        message
+    );
 }
 
 /// Print a warning message with yellow exclamation symbol.
 pub fn warn(message: &str) {
-    info!("  {} {}", "⚠".yellow(), message);
+    info!(
+        "  {} {}",
+        "⚠".if_supports_color(Stream::Stderr, |t| t.yellow()),
+        message
+    );
 }
 
 /// Print an error message with red X symbol.
-///
-/// # Example
-/// ```ignore
-/// error("Type checking failed");
-/// // Output:   ✗ Type checking failed
-/// ```
 pub fn error(message: &str) {
-    info!("  {} {}", "✗".red(), message);
+    info!(
+        "  {} {}",
+        "✗".if_supports_color(Stream::Stderr, |t| t.red()),
+        message
+    );
 }
 
 /// Print a cargo-style action line: a 12-column right-aligned bold-green
 /// verb followed by `message`.
-///
-/// # Example
-/// ```ignore
-/// action("Compiling", "/tmp/project");
-/// // Output:    Compiling /tmp/project
-/// ```
 pub fn action(verb: &str, message: &str) {
+    let label = format!("{:>12}", verb);
+    let style = Style::new().bright_green().bold();
     info!(
         "{} {}",
-        format!("{:>12}", verb).bright_green().bold(),
+        label.if_supports_color(Stream::Stderr, |t| style.style(t)),
         message
     );
 }

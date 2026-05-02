@@ -40,7 +40,7 @@ use crate::project::ir::graph::Project;
 use crate::project::resolve::normalize;
 use crate::project::{self, ir::compiled};
 use crate::{info, verbose};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -91,21 +91,26 @@ impl fmt::Display for ObjectResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.action {
             ObjectAction::Created | ObjectAction::Altered => {
-                write!(f, "  {} {}", "✓".green(), self.object)
+                write!(
+                    f,
+                    "  {} {}",
+                    "✓".if_supports_color(Stream::Stderr, |t| t.green()),
+                    self.object
+                )
             }
             ObjectAction::UpToDate => write!(
                 f,
                 "  {} {} ({})",
-                "=".dimmed(),
+                "=".if_supports_color(Stream::Stderr, |t| t.dimmed()),
                 self.object,
-                "up to date".dimmed()
+                "up to date".if_supports_color(Stream::Stderr, |t| t.dimmed())
             ),
             ObjectAction::Skipped => write!(
                 f,
                 "  {} {} ({})",
-                "-".dimmed(),
+                "-".if_supports_color(Stream::Stderr, |t| t.dimmed()),
                 self.object,
-                "skipped".dimmed()
+                "skipped".if_supports_color(Stream::Stderr, |t| t.dimmed())
             ),
         }
     }
@@ -148,7 +153,7 @@ impl fmt::Display for ApplyResult {
         if created > 0 {
             lines.push(format!(
                 "  {} Creating {} new {}...",
-                "ℹ".blue(),
+                "ℹ".if_supports_color(Stream::Stderr, |t| t.blue()),
                 created,
                 label
             ));
@@ -156,7 +161,7 @@ impl fmt::Display for ApplyResult {
         if altered > 0 {
             lines.push(format!(
                 "  {} Altering {} {}...",
-                "ℹ".blue(),
+                "ℹ".if_supports_color(Stream::Stderr, |t| t.blue()),
                 altered,
                 label
             ));
@@ -164,7 +169,7 @@ impl fmt::Display for ApplyResult {
         if up_to_date > 0 && created == 0 && altered == 0 {
             lines.push(format!(
                 "  {} {} {} up to date",
-                "ℹ".blue(),
+                "ℹ".if_supports_color(Stream::Stderr, |t| t.blue()),
                 up_to_date,
                 label
             ));

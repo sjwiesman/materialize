@@ -21,7 +21,7 @@ use crate::project::analysis::deployment_snapshot;
 use crate::project::ir::object_id::ObjectId;
 use crate::{info, verbose};
 use itertools::Itertools;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -217,24 +217,30 @@ impl fmt::Display for DeploymentPlan {
         // Note resume state if applicable
         match self.apply_state {
             ApplyState::PreSwap => {
+                let style = Style::new().yellow().bold();
                 writeln!(
                     f,
                     "\n  {} Resuming from pre-swap state (apply state schemas already created)",
-                    "note:".yellow().bold()
+                    "note:".if_supports_color(Stream::Stderr, |t| style.style(t))
                 )?;
             }
             ApplyState::PostSwap => {
+                let style = Style::new().yellow().bold();
                 writeln!(
                     f,
                     "\n  {} Resuming from post-swap state (swap already completed, showing remaining work)",
-                    "note:".yellow().bold()
+                    "note:".if_supports_color(Stream::Stderr, |t| style.style(t))
                 )?;
             }
             ApplyState::NotStarted => {}
         }
 
         // Schema Swaps
-        writeln!(f, "\n  {}", "Schema Swaps:".bold())?;
+        writeln!(
+            f,
+            "\n  {}",
+            "Schema Swaps:".if_supports_color(Stream::Stderr, |t| t.bold())
+        )?;
         if self.staging_schemas.is_empty() {
             writeln!(f, "    (none)")?;
         } else {
@@ -242,10 +248,10 @@ impl fmt::Display for DeploymentPlan {
                 writeln!(
                     f,
                     "    {} {}.{} {} {}.{}",
-                    "~".yellow(),
+                    "~".if_supports_color(Stream::Stderr, |t| t.yellow()),
                     swap.database,
                     swap.production_schema,
-                    "<->".dimmed(),
+                    "<->".if_supports_color(Stream::Stderr, |t| t.dimmed()),
                     swap.database,
                     swap.staging_schema
                 )?;
@@ -253,7 +259,11 @@ impl fmt::Display for DeploymentPlan {
         }
 
         // Cluster Swaps
-        writeln!(f, "\n  {}", "Cluster Swaps:".bold())?;
+        writeln!(
+            f,
+            "\n  {}",
+            "Cluster Swaps:".if_supports_color(Stream::Stderr, |t| t.bold())
+        )?;
         if self.staging_clusters.is_empty() {
             writeln!(f, "    (none)")?;
         } else {
@@ -261,16 +271,20 @@ impl fmt::Display for DeploymentPlan {
                 writeln!(
                     f,
                     "    {} {} {} {}",
-                    "~".yellow(),
+                    "~".if_supports_color(Stream::Stderr, |t| t.yellow()),
                     swap.production_cluster,
-                    "<->".dimmed(),
+                    "<->".if_supports_color(Stream::Stderr, |t| t.dimmed()),
                     swap.staging_cluster
                 )?;
             }
         }
 
         // Sinks to Create
-        writeln!(f, "\n  {}", "Sinks to Create:".bold())?;
+        writeln!(
+            f,
+            "\n  {}",
+            "Sinks to Create:".if_supports_color(Stream::Stderr, |t| t.bold())
+        )?;
         if self.pending_statements.is_empty() {
             writeln!(f, "    (none)")?;
         } else {
@@ -278,7 +292,7 @@ impl fmt::Display for DeploymentPlan {
                 writeln!(
                     f,
                     "    {} {}.{}.{}",
-                    "+".green(),
+                    "+".if_supports_color(Stream::Stderr, |t| t.green()),
                     stmt.database,
                     stmt.schema,
                     stmt.object
@@ -287,7 +301,11 @@ impl fmt::Display for DeploymentPlan {
         }
 
         // Replacement MVs
-        writeln!(f, "\n  {}", "Replacement Materialized Views:".bold())?;
+        writeln!(
+            f,
+            "\n  {}",
+            "Replacement Materialized Views:".if_supports_color(Stream::Stderr, |t| t.bold())
+        )?;
         if self.replacement_mvs.is_empty() {
             writeln!(f, "    (none)")?;
         } else {
@@ -295,11 +313,11 @@ impl fmt::Display for DeploymentPlan {
                 writeln!(
                     f,
                     "    {} {}.{}.{} {} {}.{}.{}",
-                    "~".yellow(),
+                    "~".if_supports_color(Stream::Stderr, |t| t.yellow()),
                     record.target_database,
                     record.target_schema,
                     record.target_name,
-                    "<-".dimmed(),
+                    "<-".if_supports_color(Stream::Stderr, |t| t.dimmed()),
                     record.target_database,
                     record.replacement_schema,
                     record.target_name
@@ -308,7 +326,11 @@ impl fmt::Display for DeploymentPlan {
         }
 
         // Sinks to Repoint
-        writeln!(f, "\n  {}", "Sinks to Repoint:".bold())?;
+        writeln!(
+            f,
+            "\n  {}",
+            "Sinks to Repoint:".if_supports_color(Stream::Stderr, |t| t.bold())
+        )?;
         if self.dependent_sinks.is_empty() {
             writeln!(f, "    (none)")?;
         } else {
@@ -316,11 +338,11 @@ impl fmt::Display for DeploymentPlan {
                 writeln!(
                     f,
                     "    {} {}.{}.{} {} {}.{}.{}",
-                    "~".yellow(),
+                    "~".if_supports_color(Stream::Stderr, |t| t.yellow()),
                     sink.sink_database,
                     sink.sink_schema,
                     sink.sink_name,
-                    "->".dimmed(),
+                    "->".if_supports_color(Stream::Stderr, |t| t.dimmed()),
                     sink.dependency_database,
                     sink.dependency_schema,
                     sink.dependency_name
@@ -329,13 +351,22 @@ impl fmt::Display for DeploymentPlan {
         }
 
         // Old Resources to Drop
-        writeln!(f, "\n  {}", "Old Resources to Drop:".bold())?;
+        writeln!(
+            f,
+            "\n  {}",
+            "Old Resources to Drop:".if_supports_color(Stream::Stderr, |t| t.bold())
+        )?;
         let drops = self.resources_to_drop();
         if drops.is_empty() {
             writeln!(f, "    (none)")?;
         } else {
             for drop in &drops {
-                writeln!(f, "    {} {}", "-".red(), drop.name)?;
+                writeln!(
+                    f,
+                    "    {} {}",
+                    "-".if_supports_color(Stream::Stderr, |t| t.red()),
+                    drop.name
+                )?;
             }
         }
 
@@ -569,9 +600,10 @@ async fn gather_resources_and_check_conflicts(
     if !conflicts.is_empty() {
         if force {
             // With --force, show warning but continue
+            let style = Style::new().yellow().bold();
             info!(
                 "\n{}: deployment conflicts detected, but continuing due to --force flag",
-                "warning".yellow().bold()
+                "warning".if_supports_color(Stream::Stderr, |t| style.style(t))
             );
             for conflict in &conflicts {
                 info!(

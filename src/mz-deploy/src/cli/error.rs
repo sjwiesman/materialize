@@ -24,7 +24,7 @@ use crate::secret_resolver::SecretResolveError;
 use crate::types::TypesError;
 use crate::unit_test::TestValidationError;
 use chrono::{DateTime, Local};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use thiserror::Error;
 
 /// An object `setup::verify` expected to find but didn't.
@@ -274,11 +274,11 @@ impl CliError {
                 ConnectionError::DeploymentNotFound { deploy_id } => Some(format!(
                     "verify the staging environment name '{}' is correct, or deploy to staging first using:\n  \
                      {} {} {} --name {}",
-                    deploy_id.yellow(),
-                    "mz-deploy".cyan(),
-                    "stage".cyan(),
-                    ".".cyan(),
-                    deploy_id.cyan()
+                    deploy_id.if_supports_color(Stream::Stderr, |t| t.yellow()),
+                    "mz-deploy".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "stage".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    ".".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    deploy_id.if_supports_color(Stream::Stderr, |t| t.cyan())
                 )),
                 ConnectionError::DeploymentAlreadyPromoted { .. } => Some(
                     "this staging environment has already been applied to production.\n\
@@ -296,13 +296,14 @@ impl CliError {
                             .format("%a %b %d %H:%M:%S %Y %z")
                             .to_string();
                         format!("  - {}.{} (last promoted by '{}' at {})",
-                            c.database.yellow(),
-                            c.schema.yellow(),
+                            c.database.if_supports_color(Stream::Stderr, |t| t.yellow()),
+                            c.schema.if_supports_color(Stream::Stderr, |t| t.yellow()),
                             c.deploy_id,
                             promoted_str)
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+                let force_style = Style::new().yellow().bold();
                 Some(format!(
                     "the following schemas were updated in production after your deployment started:\n{}\n\n\
                      Rebase your deployment by running:\n  \
@@ -310,13 +311,13 @@ impl CliError {
                      {} {} {} --name <staging-env>\n\n\
                      Or use {} to force the deployment (may overwrite recent changes)",
                     conflict_list,
-                    "mz-deploy".cyan(),
-                    "abort".cyan(),
-                    "--name <staging-env>".cyan(),
-                    "mz-deploy".cyan(),
-                    "stage".cyan(),
-                    ".".cyan(),
-                    "--force".yellow().bold()
+                    "mz-deploy".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "abort".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "--name <staging-env>".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "mz-deploy".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "stage".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    ".".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "--force".if_supports_color(Stream::Stderr, |t| force_style.style(t))
                 ))
             }
             Self::GitShaFailed => Some(
@@ -337,7 +338,12 @@ impl CliError {
                     .iter()
                     .take(5)
                     .map(|(db, schema, obj)| {
-                        format!("  - {}.{}.{}", db.yellow(), schema.yellow(), obj.yellow())
+                        format!(
+                            "  - {}.{}.{}",
+                            db.if_supports_color(Stream::Stderr, |t| t.yellow()),
+                            schema.if_supports_color(Stream::Stderr, |t| t.yellow()),
+                            obj.if_supports_color(Stream::Stderr, |t| t.yellow())
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -353,12 +359,12 @@ impl CliError {
                      {} {} {} <staging-env>",
                     object_list,
                     more,
-                    "mz-deploy".cyan(),
-                    "stage".cyan(),
-                    ".".cyan(),
-                    "mz-deploy".cyan(),
-                    "apply".cyan(),
-                    "--staging-env".cyan()
+                    "mz-deploy".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "stage".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    ".".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "mz-deploy".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "apply".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "--staging-env".if_supports_color(Stream::Stderr, |t| t.cyan())
                 ))
             }
             Self::SetupRequired { missing } => {
@@ -367,21 +373,21 @@ impl CliError {
                     .take(5)
                     .map(|m| match m {
                         MissingObject::Cluster(name) => {
-                            format!("  • cluster {}", name.yellow())
+                            format!("  • cluster {}", name.if_supports_color(Stream::Stderr, |t| t.yellow()))
                         }
                         MissingObject::Database(name) => {
-                            format!("  • database {}", name.yellow())
+                            format!("  • database {}", name.if_supports_color(Stream::Stderr, |t| t.yellow()))
                         }
                         MissingObject::SchemaObject { schema, name, kind } => {
                             format!(
                                 "  • {} _mz_deploy.{}.{}",
                                 kind,
-                                schema.yellow(),
-                                name.yellow(),
+                                schema.if_supports_color(Stream::Stderr, |t| t.yellow()),
+                                name.if_supports_color(Stream::Stderr, |t| t.yellow()),
                             )
                         }
                         MissingObject::Role(name) => {
-                            format!("  • role {}", name.yellow())
+                            format!("  • role {}", name.if_supports_color(Stream::Stderr, |t| t.yellow()))
                         }
                     })
                     .collect::<Vec<_>>()
@@ -397,10 +403,10 @@ impl CliError {
                      privileges to initialize or self-heal the installation.",
                     list,
                     more,
-                    "mz-deploy setup".cyan(),
-                    "CREATECLUSTER".cyan(),
-                    "CREATEDB".cyan(),
-                    "CREATEROLE".cyan(),
+                    "mz-deploy setup".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "CREATECLUSTER".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "CREATEDB".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "CREATEROLE".if_supports_color(Stream::Stderr, |t| t.cyan()),
                 ))
             }
             Self::InvalidUnitTestTarget { .. } => Some(
@@ -416,10 +422,10 @@ impl CliError {
                 "{} is the only command that writes to `_mz_deploy`, and only \
                  the owning role can do so.\n\n  \
                  Re-run as {}, or have {} run {} to transfer ownership.",
-                "mz-deploy setup".cyan(),
-                owner.cyan(),
-                owner.cyan(),
-                format!("ALTER DATABASE _mz_deploy OWNER TO {}", current_role).cyan(),
+                "mz-deploy setup".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                owner.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                owner.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                format!("ALTER DATABASE _mz_deploy OWNER TO {}", current_role).if_supports_color(Stream::Stderr, |t| t.cyan()),
             )),
             Self::SetupRequiresSuperuser { current_role } => Some(format!(
                 "{} grants {} and {} on the system. With RBAC enabled, only \
@@ -430,10 +436,10 @@ impl CliError {
                  ordinary deployer/developer/monitor roles use mz-deploy \
                  normally — only this bootstrap step requires elevated \
                  privileges.",
-                "mz-deploy setup".cyan(),
-                "CREATEDB".cyan(),
-                "CREATECLUSTER".cyan(),
-                current_role.cyan(),
+                "mz-deploy setup".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "CREATEDB".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "CREATECLUSTER".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                current_role.if_supports_color(Stream::Stderr, |t| t.cyan()),
             )),
             Self::DevTargetsProductionCluster { clusters } => {
                 let cluster_list = clusters
@@ -444,7 +450,7 @@ impl CliError {
                         let promoted_str = promoted_local.format("%b %d, %Y").to_string();
                         format!(
                             "  • {}  (hosts {}.{}, promoted {})",
-                            rec.cluster_name.yellow(),
+                            rec.cluster_name.if_supports_color(Stream::Stderr, |t| t.yellow()),
                             rec.database,
                             rec.schema,
                             promoted_str,
@@ -474,9 +480,9 @@ impl CliError {
                      under [profiles.default.variables] instead.",
                     cluster_list,
                     more,
-                    "IN CLUSTER".cyan(),
-                    ":variable".cyan(),
-                    "project.toml".cyan(),
+                    "IN CLUSTER".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    ":variable".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "project.toml".if_supports_color(Stream::Stderr, |t| t.cyan()),
                 ))
             }
             Self::DeploymentTableCreationFailed { .. } => Some(
@@ -493,7 +499,7 @@ impl CliError {
                  - The new object has an incompatible schema (e.g., Avro schema mismatch)\n  \
                  - The replacement object doesn't exist in the new schema\n\n\
                  To proceed, you may need to manually drop and recreate the sink",
-                sink.yellow()
+                sink.if_supports_color(Stream::Stderr, |t| t.yellow())
             )),
             Self::DeploymentStateWriteFailed { .. } => Some(
                 "the SQL was applied successfully, but deployment tracking failed.\n\
@@ -507,14 +513,14 @@ impl CliError {
             Self::SchemaNotFound { database, schema } => Some(format!(
                 "create the schema first, or check that you're connected to the correct database.\n  \
                  CREATE SCHEMA {}.{}",
-                database.cyan(),
-                schema.cyan()
+                database.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                schema.if_supports_color(Stream::Stderr, |t| t.cyan())
             )),
             Self::ClusterNotFound { name } => Some(format!(
                 "create the cluster first:\n  \
                  CREATE CLUSTER {} SIZE = '{}' REPLICATION FACTOR = 1",
-                name.cyan(),
-                "M.1-small".cyan()
+                name.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "M.1-small".if_supports_color(Stream::Stderr, |t| t.cyan())
             )),
             Self::TestsFailed { .. } => Some(
                 "review the test output above for details on which assertions failed"
@@ -548,7 +554,7 @@ impl CliError {
                 let object_list = objects
                     .iter()
                     .take(5)
-                    .map(|obj| format!("  - {}", obj.yellow()))
+                    .map(|obj| format!("  - {}", obj.if_supports_color(Stream::Stderr, |t| t.yellow())))
                     .collect::<Vec<_>>()
                     .join("\n");
                 let more = if objects.len() > 5 {
@@ -570,14 +576,14 @@ impl CliError {
                     Some(format!(
                         "the cluster '{}' has no replicas running. Ensure the cluster is scaled up:\n  \
                          ALTER CLUSTER {} SET (REPLICATION FACTOR = 1)",
-                        cluster.yellow(),
-                        cluster.cyan()
+                        cluster.if_supports_color(Stream::Stderr, |t| t.yellow()),
+                        cluster.if_supports_color(Stream::Stderr, |t| t.cyan())
                     ))
                 } else {
                     Some(format!(
                         "grant USAGE on the cluster to your role:\n  \
                          GRANT USAGE ON CLUSTER {} TO <your-role>",
-                        cluster.cyan()
+                        cluster.if_supports_color(Stream::Stderr, |t| t.cyan())
                     ))
                 }
             }
@@ -602,7 +608,7 @@ impl CliError {
                     "your current profile is configured for {}, but this command requires deploying privileges.\n\
                      Switch to a profile whose role is a member of '{}'",
                     action,
-                    required_role.cyan()
+                    required_role.if_supports_color(Stream::Stderr, |t| t.cyan())
                 ))
             }
             Self::UndeclaredDependencies { undeclared } => {
@@ -615,13 +621,13 @@ impl CliError {
                     "add these to project.toml:\n\n    dependencies = [\n{}\n    ]\n\n  \
                      then run `{}` to fetch their schemas.",
                     dep_list,
-                    "mz-deploy lock".cyan()
+                    "mz-deploy lock".if_supports_color(Stream::Stderr, |t| t.cyan())
                 ))
             }
             Self::DeclaredDependenciesMissing { missing } => {
                 let list = missing
                     .iter()
-                    .map(|d| format!("  {} {}", "×".red(), d))
+                    .map(|d| format!("  {} {}", "×".if_supports_color(Stream::Stderr, |t| t.red()), d))
                     .collect::<Vec<_>>()
                     .join("\n");
                 Some(format!(
@@ -634,9 +640,9 @@ impl CliError {
                 "record a default profile for this project:\n  \
                  {}\n\n\
                  or pass {} for a one-off run, or export {}.",
-                "mz-deploy profile set <name>".cyan(),
-                "--profile <name>".cyan(),
-                "MZ_DEPLOY_PROFILE=<name>".cyan(),
+                "mz-deploy profile set <name>".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "--profile <name>".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                "MZ_DEPLOY_PROFILE=<name>".if_supports_color(Stream::Stderr, |t| t.cyan()),
             )),
             Self::Config(_)
             | Self::Validation(_)

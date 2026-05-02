@@ -28,7 +28,7 @@
 use crate::cli::CliError;
 use crate::config::{ProfilesConfig, read_mzprofile, write_mzprofile};
 use crate::{info, log};
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use serde::Serialize;
 use std::fmt;
 use std::path::Path;
@@ -59,7 +59,12 @@ impl fmt::Display for ProfileListing {
             }
             first = false;
             if entry.active {
-                write!(f, "  {}  {}", entry.name.green(), "(active)".dimmed())?;
+                write!(
+                    f,
+                    "  {}  {}",
+                    entry.name.if_supports_color(Stream::Stderr, |t| t.green()),
+                    "(active)".if_supports_color(Stream::Stderr, |t| t.dimmed())
+                )?;
             } else {
                 write!(f, "  {}", entry.name)?;
             }
@@ -104,10 +109,11 @@ pub fn set(directory: &Path, profiles_dir: Option<&Path>, name: &str) -> Result<
 
     write_mzprofile(directory, name)?;
 
+    let check_style = Style::new().green().bold();
     info!(
         "  {} default profile set to {}",
-        "✓".green().bold(),
-        name.green(),
+        "✓".if_supports_color(Stream::Stderr, |t| check_style.style(t)),
+        name.if_supports_color(Stream::Stderr, |t| t.green()),
     );
     Ok(())
 }
@@ -123,19 +129,27 @@ pub fn current(directory: &Path, cli_profile: Option<&str>) -> Result<(), CliErr
         } else {
             "--profile flag"
         };
-        info!("  {} ({})", name.green(), source.dimmed());
+        info!(
+            "  {} ({})",
+            name.if_supports_color(Stream::Stderr, |t| t.green()),
+            source.if_supports_color(Stream::Stderr, |t| t.dimmed())
+        );
         return Ok(());
     }
 
     match read_mzprofile(directory)? {
         Some(name) => {
-            info!("  {} ({})", name.green(), "project default".dimmed(),);
+            info!(
+                "  {} ({})",
+                name.if_supports_color(Stream::Stderr, |t| t.green()),
+                "project default".if_supports_color(Stream::Stderr, |t| t.dimmed()),
+            );
         }
         None => {
             info!(
                 "  {} no profile selected — run {} to set one",
-                "⚠".yellow(),
-                "mz-deploy profile set <name>".cyan(),
+                "⚠".if_supports_color(Stream::Stderr, |t| t.yellow()),
+                "mz-deploy profile set <name>".if_supports_color(Stream::Stderr, |t| t.cyan()),
             );
         }
     }

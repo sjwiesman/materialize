@@ -55,7 +55,7 @@ use crate::project::SchemaQualifier;
 use crate::project::ast::Cluster;
 use crate::project::ir::object_id::ObjectId;
 use crate::verbose;
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream, Style};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Pre-computed indexes for efficient Datalog rule evaluation.
@@ -222,8 +222,10 @@ impl<'a> Evaluator<'a> {
             if state.sizes() == prev_sizes {
                 verbose!(
                     "\n{} Fixed point reached after {} iteration(s)",
-                    "✓".green(),
-                    iteration.to_string().bold()
+                    "✓".if_supports_color(Stream::Stderr, |t| t.green()),
+                    iteration
+                        .to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.bold())
                 );
                 break;
             }
@@ -256,10 +258,12 @@ impl<'a> Evaluator<'a> {
     fn derive_cluster_dirtiness(&self, state: &DirtyState, pending: &mut PendingFacts) {
         for obj in self.changed_stmts {
             if self.base_facts.is_sink.contains(obj) {
+                let skip_style = Style::new().yellow().bold();
                 verbose!(
                     "  ├─ {}: {} is a sink, not marking clusters dirty",
-                    "SKIP".yellow().bold(),
-                    obj.to_string().cyan()
+                    "SKIP".if_supports_color(Stream::Stderr, |t| skip_style.style(t)),
+                    obj.to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.cyan())
                 );
                 continue;
             }
@@ -272,9 +276,10 @@ impl<'a> Evaluator<'a> {
                     {
                         verbose!(
                             "  ├─ {}: DirtyCluster({}) ← ChangedStmt({}) uses cluster",
-                            "Rule 1".bold(),
-                            cluster.magenta(),
-                            obj.to_string().cyan()
+                            "Rule 1".if_supports_color(Stream::Stderr, |t| t.bold()),
+                            cluster.if_supports_color(Stream::Stderr, |t| t.magenta()),
+                            obj.to_string()
+                                .if_supports_color(Stream::Stderr, |t| t.cyan())
                         );
                     }
                 }
@@ -288,9 +293,10 @@ impl<'a> Evaluator<'a> {
                     {
                         verbose!(
                             "  ├─ {}: DirtyCluster({}) ← ChangedStmt({}) has index on cluster",
-                            "Rule 2".bold(),
-                            cluster.magenta(),
-                            obj.to_string().cyan()
+                            "Rule 2".if_supports_color(Stream::Stderr, |t| t.bold()),
+                            cluster.if_supports_color(Stream::Stderr, |t| t.magenta()),
+                            obj.to_string()
+                                .if_supports_color(Stream::Stderr, |t| t.cyan())
                         );
                     }
                 }
@@ -312,9 +318,10 @@ impl<'a> Evaluator<'a> {
                 {
                     verbose!(
                         "  ├─ {}: DirtyStmt({}) ← uses DirtyCluster({})",
-                        "Rule 3".bold(),
-                        obj.to_string().cyan(),
-                        cluster.magenta()
+                        "Rule 3".if_supports_color(Stream::Stderr, |t| t.bold()),
+                        obj.to_string()
+                            .if_supports_color(Stream::Stderr, |t| t.cyan()),
+                        cluster.if_supports_color(Stream::Stderr, |t| t.magenta())
                     );
                     break;
                 }
@@ -333,10 +340,13 @@ impl<'a> Evaluator<'a> {
     fn derive_stmt_dependency_dirtiness(&self, state: &DirtyState, pending: &mut PendingFacts) {
         for dirty_obj in &state.dirty_stmts {
             if self.changed_replacements.contains(dirty_obj) {
+                let skip_style = Style::new().yellow().bold();
                 verbose!(
                     "  ├─ {}: {} is a changed replacement MV, not propagating to dependents",
-                    "SKIP".yellow().bold(),
-                    dirty_obj.to_string().cyan()
+                    "SKIP".if_supports_color(Stream::Stderr, |t| skip_style.style(t)),
+                    dirty_obj
+                        .to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.cyan())
                 );
                 continue;
             }
@@ -347,9 +357,13 @@ impl<'a> Evaluator<'a> {
                     {
                         verbose!(
                             "  ├─ {}: DirtyStmt({}) ← depends on DirtyStmt({})",
-                            "Rule 4".bold(),
-                            child.to_string().cyan(),
-                            dirty_obj.to_string().cyan()
+                            "Rule 4".if_supports_color(Stream::Stderr, |t| t.bold()),
+                            child
+                                .to_string()
+                                .if_supports_color(Stream::Stderr, |t| t.cyan()),
+                            dirty_obj
+                                .to_string()
+                                .if_supports_color(Stream::Stderr, |t| t.cyan())
                         );
                     }
                 }
@@ -368,18 +382,22 @@ impl<'a> Evaluator<'a> {
     fn derive_schema_dirtiness(&self, state: &DirtyState, pending: &mut PendingFacts) {
         for obj in &state.dirty_stmts {
             if self.base_facts.is_sink.contains(obj) {
+                let skip_style = Style::new().yellow().bold();
                 verbose!(
                     "  ├─ {}: {} is a sink, not marking schema dirty",
-                    "SKIP".yellow().bold(),
-                    obj.to_string().cyan()
+                    "SKIP".if_supports_color(Stream::Stderr, |t| skip_style.style(t)),
+                    obj.to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.cyan())
                 );
                 continue;
             }
             if self.base_facts.is_replacement.contains(obj) {
+                let skip_style = Style::new().yellow().bold();
                 verbose!(
                     "  ├─ {}: {} is a replacement MV, not marking schema dirty",
-                    "SKIP".yellow().bold(),
-                    obj.to_string().cyan()
+                    "SKIP".if_supports_color(Stream::Stderr, |t| skip_style.style(t)),
+                    obj.to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.cyan())
                 );
                 continue;
             }
@@ -389,9 +407,11 @@ impl<'a> Evaluator<'a> {
             {
                 verbose!(
                     "  ├─ {}: DirtySchema({}) ← DirtyStmt({}) in schema",
-                    "Rule 5".bold(),
-                    format!("{}.{}", sq.database, sq.schema).blue(),
-                    obj.to_string().cyan()
+                    "Rule 5".if_supports_color(Stream::Stderr, |t| t.bold()),
+                    format!("{}.{}", sq.database, sq.schema)
+                        .if_supports_color(Stream::Stderr, |t| t.blue()),
+                    obj.to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.cyan())
                 );
             }
         }
@@ -415,9 +435,11 @@ impl<'a> Evaluator<'a> {
                     }
                     verbose!(
                         "  ├─ {}: DirtyStmt({}) ← in DirtySchema({})",
-                        "Rule 6".bold(),
-                        obj.to_string().cyan(),
-                        format!("{}.{}", dirty_schema.database, dirty_schema.schema).blue()
+                        "Rule 6".if_supports_color(Stream::Stderr, |t| t.bold()),
+                        obj.to_string()
+                            .if_supports_color(Stream::Stderr, |t| t.cyan()),
+                        format!("{}.{}", dirty_schema.database, dirty_schema.schema)
+                            .if_supports_color(Stream::Stderr, |t| t.blue())
                     );
                 }
             }
