@@ -155,7 +155,7 @@ pub(crate) fn locate_catalog(e: &CatalogError, source: &str) -> Option<Range<usi
 
 /// Strip qualifying prefixes from a dotted identifier, returning the final
 /// component. `schema.table` → `table`; `t` → `t`.
-fn last_component(s: &str) -> &str {
+pub(crate) fn last_component(s: &str) -> &str {
     s.rsplit_once('.').map(|(_, last)| last).unwrap_or(s)
 }
 
@@ -301,7 +301,7 @@ fn column_display(table: Option<&PartialItemName>, column: &ColumnName) -> Strin
 /// otherwise fall back to a whole-word search of the source so the patch
 /// still lands somewhere reasonable for variants whose locator returned a
 /// less specific span.
-fn locate_replacement(
+pub(crate) fn locate_replacement(
     source: &str,
     primary_range: &Range<usize>,
     needle: &str,
