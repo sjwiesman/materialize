@@ -185,6 +185,131 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+use mz_repr::ColumnName;
+use mz_sql::names::PartialItemName;
+
+/// Build the (message, footers, suggestions) triple for one typecheck kind.
+///
+/// Variants that carry alternatives (`UnknownColumn::similar`,
+/// `UnknownFunction::alternative`) are formatted directly so we control
+/// identifier quoting and can emit structured patches. Other variants fall
+/// back to `Display` + the upstream `hint()`.
+pub(crate) fn format_typecheck_kind(
+    kind: &ObjectTypeCheckErrorKind,
+    source: &str,
+    primary_range: &Range<usize>,
+) -> (String, Vec<String>, Vec<Suggestion>) {
+    match kind {
+        ObjectTypeCheckErrorKind::Plan(e) => format_plan(e, source, primary_range),
+        ObjectTypeCheckErrorKind::Catalog(e) => format_catalog(e, source, primary_range),
+        ObjectTypeCheckErrorKind::Parser(e) => (e.to_string(), Vec::new(), Vec::new()),
+        ObjectTypeCheckErrorKind::Internal(msg) => (msg.clone(), Vec::new(), Vec::new()),
+    }
+}
+
+fn format_plan(
+    e: &PlanError,
+    source: &str,
+    primary_range: &Range<usize>,
+) -> (String, Vec<String>, Vec<Suggestion>) {
+    if let PlanError::UnknownColumn {
+        table,
+        column,
+        similar,
+    } = e
+    {
+        let qualified = column_display(table.as_ref(), column);
+        let message = format!("column {qualified} does not exist");
+        if similar.is_empty() {
+            return (message, Vec::new(), Vec::new());
+        }
+        let span = locate_replacement(source, primary_range, column.as_str());
+        let label = match similar.as_ref() {
+            [single] => format!("did you mean `{}`?", column_display(table.as_ref(), single)),
+            _ => "did you mean one of these?".to_string(),
+        };
+        let alternatives = similar
+            .iter()
+            .map(|alt| Replacement {
+                byte_range: span.clone(),
+                replacement: alt.as_str().to_string(),
+            })
+            .collect();
+        return (
+            message,
+            Vec::new(),
+            vec![Suggestion {
+                label,
+                alternatives,
+            }],
+        );
+    }
+    fallback_plan(e)
+}
+
+fn fallback_plan(e: &PlanError) -> (String, Vec<String>, Vec<Suggestion>) {
+    let footers = e.hint().into_iter().collect();
+    (e.to_string(), footers, Vec::new())
+}
+
+fn format_catalog(
+    e: &CatalogError,
+    source: &str,
+    primary_range: &Range<usize>,
+) -> (String, Vec<String>, Vec<Suggestion>) {
+    match e {
+        CatalogError::UnknownFunction {
+            name,
+            alternative: Some(alt),
+        } => {
+            let message = format!("function {name} does not exist");
+            let suggestion = Suggestion {
+                label: format!("did you mean `{alt}`?"),
+                alternatives: vec![Replacement {
+                    byte_range: locate_replacement(source, primary_range, last_component(name)),
+                    replacement: alt.clone(),
+                }],
+            };
+            (message, Vec::new(), vec![suggestion])
+        }
+        other => fallback_catalog(other),
+    }
+}
+
+fn fallback_catalog(e: &CatalogError) -> (String, Vec<String>, Vec<Suggestion>) {
+    let footers = e.hint().into_iter().collect();
+    (e.to_string(), footers, Vec::new())
+}
+
+/// Format `table.column` as a dotted PostgreSQL reference (relation +
+/// column). Each component is rendered as its raw identifier — no outer
+/// quotes — so a reader interprets the dot as a separator rather than as
+/// part of a single quoted identifier.
+fn column_display(table: Option<&PartialItemName>, column: &ColumnName) -> String {
+    match table {
+        Some(t) => format!("{}.{}", t.item, column),
+        None => column.as_str().to_string(),
+    }
+}
+
+/// Find the byte range of `needle` to replace.
+///
+/// Prefer the primary annotation range when its content matches `needle`;
+/// otherwise fall back to a whole-word search of the source so the patch
+/// still lands somewhere reasonable for variants whose locator returned a
+/// less specific span.
+fn locate_replacement(
+    source: &str,
+    primary_range: &Range<usize>,
+    needle: &str,
+) -> Range<usize> {
+    let in_bounds = primary_range.end <= source.len() && primary_range.start <= primary_range.end;
+    if in_bounds && &source[primary_range.clone()] == needle {
+        return primary_range.clone();
+    }
+    find_identifier(source, needle).unwrap_or_else(|| primary_range.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +421,17 @@ mod tests {
             ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownItem("bogus_table".into()));
         let r = locate_typecheck(&kind, source).unwrap();
         assert_eq!(&source[r], "bogus_table");
+    }
+
+    #[test]
+    fn locate_replacement_prefers_primary_range_when_matches() {
+        let r = locate_replacement("SELECT emails FROM t", &(7..13), "emails");
+        assert_eq!(r, 7..13);
+    }
+
+    #[test]
+    fn locate_replacement_falls_back_to_search() {
+        let r = locate_replacement("SELECT emails FROM t", &(0..0), "emails");
+        assert_eq!(r, 7..13);
     }
 }
