@@ -18,12 +18,18 @@
 //! Both consumers share the locator helpers in this module
 //! ([`find_identifier`], [`locate_plan`], [`locate_catalog`],
 //! [`locate_typecheck`]) which derive byte ranges from `mz_sql` errors that
-//! carry only an identifier name (no offset).
+//! carry only an identifier name (no offset). The module also exposes
+//! [`format_typecheck_kind`], the shared formatter that turns an
+//! [`ObjectTypeCheckErrorKind`] into the `(message, footers, suggestions)`
+//! triple consumed by both the CLI and (in upcoming work) the LSP.
 
-use mz_sql::catalog::CatalogError;
-use mz_sql::plan::PlanError;
 use std::ops::Range;
 use std::path::PathBuf;
+
+use mz_repr::ColumnName;
+use mz_sql::catalog::CatalogError;
+use mz_sql::names::PartialItemName;
+use mz_sql::plan::PlanError;
 
 use crate::project::compiler::typecheck::ObjectTypeCheckErrorKind;
 
@@ -184,9 +190,6 @@ pub(crate) fn find_identifier(source: &str, name: &str) -> Option<Range<usize>> 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
-
-use mz_repr::ColumnName;
-use mz_sql::names::PartialItemName;
 
 /// Build the (message, footers, suggestions) triple for one typecheck kind.
 ///
