@@ -834,15 +834,34 @@ impl BuildArtifact {
         tx.commit().map_err(&db_err)
     }
 
-    /// Persist a complete snapshot of the compiled project graph.
+    /// Persist project state, updating only rows whose source object changed
+    /// (`changed_keys`) or was removed (`deleted_keys`).
     ///
-    /// Atomically replaces all prior project metadata, ensuring consumers
-    /// always see a consistent view of the full project.
-    pub(crate) fn write_project(
+    /// Per-object tables (`project_objects`, dependencies, comments, indexes,
+    /// constraints, grants, tests, aliases, infrastructure, infrastructure
+    /// properties) are touched only for the affected keys. Project-wide
+    /// tables (databases, schemas, external/cluster dependencies, replacement
+    /// schemas, mod statements) are small and rewritten in full each call.
+    pub(crate) fn write_project_incremental(
         &mut self,
         project: &graph::Project,
+        changed_keys: &BTreeSet<String>,
+        deleted_keys: &BTreeSet<String>,
         root: &Path,
     ) -> Result<(), BuildArtifactError> {
+        const PER_OBJECT_TABLES: &[&str] = &[
+            "project_objects",
+            "project_dependencies",
+            "project_comments",
+            "project_indexes",
+            "project_constraints",
+            "project_grants",
+            "project_tests",
+            "project_aliases",
+            "project_infrastructure",
+            "project_infrastructure_properties",
+        ];
+
         let db_path = self.path.clone();
         let db_err = |source: rusqlite::Error| BuildArtifactError::DatabaseOperationFailed {
             path: db_path.clone(),
@@ -851,23 +870,28 @@ impl BuildArtifact {
 
         let tx = self.conn.transaction().map_err(&db_err)?;
 
+        // 1. Drop per-object rows for objects that changed or were removed.
+        if !changed_keys.is_empty() || !deleted_keys.is_empty() {
+            for table in PER_OBJECT_TABLES {
+                let mut stmt = tx
+                    .prepare(&format!("DELETE FROM {table} WHERE object_key = ?1"))
+                    .map_err(&db_err)?;
+                for key in changed_keys.iter().chain(deleted_keys.iter()) {
+                    stmt.execute(params![key]).map_err(&db_err)?;
+                }
+            }
+        }
+
+        // 2. Rewrite project-wide tables in full. These are small (one row per
+        // database / schema / external dep / cluster / etc.) so the overhead
+        // is negligible compared to per-object writes.
         tx.execute_batch(
             "
             DELETE FROM project_databases;
             DELETE FROM project_schemas;
-            DELETE FROM project_objects;
-            DELETE FROM project_dependencies;
             DELETE FROM project_external_dependencies;
             DELETE FROM project_cluster_dependencies;
             DELETE FROM project_replacement_schemas;
-            DELETE FROM project_comments;
-            DELETE FROM project_indexes;
-            DELETE FROM project_constraints;
-            DELETE FROM project_grants;
-            DELETE FROM project_tests;
-            DELETE FROM project_infrastructure;
-            DELETE FROM project_infrastructure_properties;
-            DELETE FROM project_aliases;
             DELETE FROM project_mod_statements;
             ",
         )
@@ -887,7 +911,9 @@ impl BuildArtifact {
                         .map_err(&db_err)?;
 
                     for obj in &schema.objects {
-                        stmts.insert_object(obj, &db.name, &schema.name, root, &db_err)?;
+                        if changed_keys.contains(&obj.id.to_string()) {
+                            stmts.insert_object(obj, &db.name, &schema.name, root, &db_err)?;
+                        }
                     }
                 }
 
@@ -1561,6 +1587,18 @@ mod tests {
     }
 
     /// Build a minimal `graph::Project` from a single object.
+    fn all_object_keys(project: &graph::Project) -> BTreeSet<String> {
+        project
+            .databases
+            .iter()
+            .flat_map(|db| {
+                db.schemas
+                    .iter()
+                    .flat_map(|s| s.objects.iter().map(|o| o.id.to_string()))
+            })
+            .collect()
+    }
+
     fn make_project(db_name: &str, schema_name: &str, stmt: Statement) -> graph::Project {
         use crate::project::ir::compiled;
 
@@ -1611,7 +1649,9 @@ mod tests {
 
         let stmt = parse_stmt("CREATE VIEW v AS SELECT o.id FROM orders AS o");
         let project = make_project("mydb", "public", stmt);
-        db.write_project(&project, temp.path()).unwrap();
+        let changed = all_object_keys(&project);
+        db.write_project_incremental(&project, &changed, &BTreeSet::new(), temp.path())
+            .unwrap();
 
         // Query the aliases table.
         let rows: Vec<(String, String, String)> = db
@@ -1643,7 +1683,9 @@ mod tests {
 
         let stmt = parse_stmt("CREATE TABLE t (id INT)");
         let project = make_project("mydb", "public", stmt);
-        db.write_project(&project, temp.path()).unwrap();
+        let changed = all_object_keys(&project);
+        db.write_project_incremental(&project, &changed, &BTreeSet::new(), temp.path())
+            .unwrap();
 
         let count: i64 = db
             .conn
