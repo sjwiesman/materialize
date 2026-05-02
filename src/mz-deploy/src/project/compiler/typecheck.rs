@@ -23,7 +23,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 mod bootstrap;
 mod catalog;
@@ -92,18 +91,14 @@ pub(crate) fn run(
 
     // Open the build artifact db now so we can use it for incremental reads
     // (cached columns, prior external-type digests) and the final upserts.
-    let db_open_start = Instant::now();
     let mut db = BuildArtifact::open(directory, profile, profile_suffix, variables)
         .map_err(TypesError::from)?;
-    crate::timing!("typecheck: open_db", db_open_start.elapsed());
 
     // Snapshot all cached typecheck columns up front. Reading inside the DAG
     // would require a Sync SQLite handle, which rusqlite::Connection isn't.
     // The map is keyed by `ObjectId.to_string()` (matches sqlite layout).
-    let cache_load_start = Instant::now();
     let cached_columns_by_key: BTreeMap<String, BTreeMap<String, ColumnType>> =
         db.load_typecheck_columns().map_err(TypesError::from)?;
-    crate::timing!("typecheck: load_cached_columns", cache_load_start.elapsed());
 
     // Diff per-external-table digests against the cached set. Any project
     // object whose `external_dependencies` intersects the changed set is added
@@ -186,10 +181,8 @@ pub(crate) fn run(
         }
     }
 
-    let bootstrap_start = Instant::now();
     let (base_catalog, base_columns) =
         bootstrap::bootstrap_catalog(project, &external_types, Some(&bootstrap_set))?;
-    crate::timing!("typecheck: bootstrap_catalog", bootstrap_start.elapsed());
 
     // Build the DAG only over `dag_nodes`. Direct-dep edges are filtered to
     // node IDs actually present in the DAG (other deps are already stubbed
@@ -226,7 +219,6 @@ pub(crate) fn run(
 
     let typed_objects = Arc::new(typed_objects);
     let cached_columns_by_key = Arc::new(cached_columns_by_key);
-    let dag_start = Instant::now();
     let outcomes = {
         let typed_objects = Arc::clone(&typed_objects);
         let base_catalog = Arc::clone(&base_catalog);
@@ -267,9 +259,7 @@ pub(crate) fn run(
             },
         )
     };
-    crate::timing!("typecheck: dag_executor", dag_start.elapsed());
 
-    let merge_start = Instant::now();
     let mut errors: Vec<ObjectTypeCheckError> = Vec::new();
     let mut upsert_rows: Vec<(String, String, BTreeMap<String, ColumnType>)> = Vec::new();
     let mut merged_tables: BTreeMap<ObjectId, BTreeMap<String, ColumnType>> = BTreeMap::new();
@@ -337,12 +327,9 @@ pub(crate) fn run(
         }
     }
 
-    crate::timing!("typecheck: merge_results", merge_start.elapsed());
-
     // Drop cache rows for failed/blocked nodes. Without this, a previously
     // successful row would let a now-broken view skip typecheck on the next
     // run and silently report success.
-    let persist_start = Instant::now();
     db.upsert_typecheck_results(&upsert_rows)
         .map_err(TypesError::from)?;
     let keep: BTreeSet<String> = typed_objects
@@ -354,7 +341,6 @@ pub(crate) fn run(
         .map_err(TypesError::from)?;
     db.replace_external_type_digests(&current_ext_digests)
         .map_err(TypesError::from)?;
-    crate::timing!("typecheck: persist", persist_start.elapsed());
 
     if !errors.is_empty() {
         return Err(TypeCheckError::Multiple(errors));

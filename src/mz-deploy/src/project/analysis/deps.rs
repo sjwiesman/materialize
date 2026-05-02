@@ -122,8 +122,6 @@ impl From<compiled::Project> for Project {
     ///    hierarchical `Project` structure.
     fn from(compiled_project: compiled::Project) -> Self {
         // Flatten all compiled objects and collect defined object IDs.
-        let collect_start = std::time::Instant::now();
-
         let mut object_tasks = Vec::new();
         let mut defined_objects = BTreeSet::new();
 
@@ -177,11 +175,7 @@ impl From<compiled::Project> for Project {
             });
         }
 
-        crate::timing!("  graph: collect", collect_start.elapsed());
-
         // Extract dependencies and clusters from each object.
-        let process_start = std::time::Instant::now();
-
         let processed: Vec<ProcessedObject> = object_tasks
             .into_par_iter()
             .map(|task| {
@@ -232,11 +226,7 @@ impl From<compiled::Project> for Project {
             })
             .collect();
 
-        crate::timing!("  graph: process", process_start.elapsed());
-
         // Merge results into dependency graph and hierarchical structure.
-        let reassemble_start = std::time::Instant::now();
-
         let mut dependency_graph = BTreeMap::new();
         let mut external_dependencies = BTreeSet::new();
         let mut cluster_dependencies = BTreeSet::new();
@@ -343,8 +333,6 @@ impl From<compiled::Project> for Project {
                 mod_statements: meta.mod_statements,
             });
         }
-
-        crate::timing!("  graph: reassemble", reassemble_start.elapsed());
 
         Project {
             databases,

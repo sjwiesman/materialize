@@ -15,7 +15,7 @@
 
 use crate::client::{Client, ConnectionError, Profile};
 use crate::config::default_docker_image;
-use crate::{timing, verbose};
+use crate::verbose;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::{Duration, sleep};
@@ -76,41 +76,25 @@ impl DockerRuntime {
     }
 
     pub(crate) async fn get_client(&self) -> Result<Client, DockerRuntimeError> {
-        let start = std::time::Instant::now();
-
         let profile = Self::make_profile();
         // The ephemeral Docker container has no `_mz_deploy_server` cluster,
         // so bypass the usual session-cluster pin and use the server default.
         let client = match Client::connect_with_profile_no_pin(profile).await {
             Ok(client) => {
-                timing!("  connect (fast-path)", start.elapsed());
-                verbose!(
-                    "Fast-path connect succeeded ({}ms)",
-                    start.elapsed().as_millis()
-                );
+                verbose!("Fast-path connect succeeded");
                 client
             }
             Err(_) => {
-                timing!("  connect (fast-path fail)", start.elapsed());
-                verbose!(
-                    "Fast-path connect failed ({}ms), falling back to Docker CLI",
-                    start.elapsed().as_millis()
-                );
-                let ensure_start = std::time::Instant::now();
+                verbose!("Fast-path connect failed, falling back to Docker CLI");
                 self.ensure_container().await?;
-                timing!("  ensure_container", ensure_start.elapsed());
-
-                let connect_start = std::time::Instant::now();
                 let profile = Self::make_profile();
                 verbose!("Connecting to Materialize...");
                 let client = Client::connect_with_profile_no_pin(profile).await?;
-                timing!("  connect (slow-path)", connect_start.elapsed());
-                verbose!("Connected ({}ms)", connect_start.elapsed().as_millis());
+                verbose!("Connected");
                 client
             }
         };
 
-        verbose!("get_client total ({}ms)", start.elapsed().as_millis());
         Ok(client)
     }
 

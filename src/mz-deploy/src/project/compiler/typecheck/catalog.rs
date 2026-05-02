@@ -22,7 +22,6 @@
 use super::error::ObjectTypeCheckErrorKind;
 use super::{ObjectTypeCheckError, TypeCheckError};
 use crate::project::ir::object_id::ObjectId;
-use crate::timing;
 use crate::types::ColumnType;
 use chrono::Utc;
 use mz_build_info::DUMMY_BUILD_INFO;
@@ -653,10 +652,7 @@ impl CatalogRuntime {
 
     /// Initialize a fresh catalog for one typecheck run.
     pub(super) fn open() -> Result<Self, TypeCheckError> {
-        let start = Instant::now();
-        let catalog = Self::new().map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))?;
-        timing!("    catalog: new", start.elapsed());
-        Ok(catalog)
+        Self::new().map_err(|e| TypeCheckError::DatabaseSetupError(e.to_string()))
     }
 
     /// Ensure all database/schema namespaces referenced by the project and
@@ -666,7 +662,6 @@ impl CatalogRuntime {
         project: &super::Project,
         external_types: &super::Types,
     ) {
-        let start = Instant::now();
         let mut namespaces = BTreeSet::new();
         for object in project.iter_objects() {
             namespaces.insert((object.id.database.clone(), object.id.schema.clone()));
@@ -676,14 +671,8 @@ impl CatalogRuntime {
         }
 
         for (database, schema) in namespaces {
-            let namespace_start = Instant::now();
             self.ensure_user_schema(&database, &schema);
-            timing!(
-                &format!("      catalog: ensure_namespace {}.{}", database, schema),
-                namespace_start.elapsed()
-            );
         }
-        timing!("    catalog: bootstrap_namespaces", start.elapsed());
     }
 
     /// Insert a placeholder table with the given column schema.
@@ -692,22 +681,10 @@ impl CatalogRuntime {
         object_id: &ObjectId,
         columns: &BTreeMap<String, ColumnType>,
     ) -> Result<(), TypeCheckError> {
-        let build_sql_start = Instant::now();
         let sql = super::convert::create_stub_table_sql(object_id, columns);
-        timing!(
-            &format!("        catalog: build_stub_sql {}", object_id),
-            build_sql_start.elapsed()
-        );
-        let create_start = Instant::now();
-        let result = self
-            .create_item(object_id, &sql)
+        self.create_item(object_id, &sql)
             .map(|_| ())
-            .map_err(|e| TypeCheckError::Multiple(vec![e]));
-        timing!(
-            &format!("        catalog: create_stub_table {}", object_id),
-            create_start.elapsed()
-        );
-        result
+            .map_err(|e| TypeCheckError::Multiple(vec![e]))
     }
 
     /// Parse, resolve, and type-check a SQL statement against the catalog.
@@ -737,17 +714,8 @@ impl CatalogRuntime {
         ast: mz_sql_parser::ast::Statement<mz_sql_parser::ast::Raw>,
         create_sql: &str,
     ) -> Result<RelationDesc, ObjectTypeCheckError> {
-        let start = Instant::now();
-
-        let resolve_start = Instant::now();
         let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast)
             .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
-        timing!(
-            &format!("      catalog: resolve {}", object_id),
-            resolve_start.elapsed()
-        );
-
-        let plan_start = Instant::now();
         let pcx = PlanContext::new(Utc::now());
         let plan = mz_sql::plan::plan(
             Some(&pcx),
@@ -757,24 +725,8 @@ impl CatalogRuntime {
             &resolved_ids,
         )
         .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
-        timing!(
-            &format!("      catalog: plan {}", object_id),
-            plan_start.elapsed()
-        );
-
-        let insert_start = Instant::now();
-        let desc = self
-            .insert_item_from_plan(object_id, create_sql, plan, resolved_ids)
-            .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Catalog(e)))?;
-        timing!(
-            &format!("      catalog: insert_item {}", object_id),
-            insert_start.elapsed()
-        );
-        timing!(
-            &format!("    catalog: create_item {}", object_id),
-            start.elapsed()
-        );
-        Ok(desc)
+        self.insert_item_from_plan(object_id, create_sql, plan, resolved_ids)
+            .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Catalog(e)))
     }
 
     /// Register all system schemas discovered from the builtin catalog.
@@ -1960,7 +1912,8 @@ impl TaskCatalog {
                 for item_id in item_ids {
                     if let Some(item) = self.items_by_id.get(item_id) {
                         if predicate(item) {
-                            return Some(item.as_ref() as &dyn CatalogItem);
+                            let item: &dyn CatalogItem = item.as_ref();
+                            return Some(item);
                         }
                     }
                 }
@@ -1970,7 +1923,8 @@ impl TaskCatalog {
                 for item_id in item_ids {
                     let item = self.base.items_by_id.get(item_id).expect("item exists");
                     if predicate(item) {
-                        return Some(item.as_ref() as &dyn CatalogItem);
+                        let item: &dyn CatalogItem = item.as_ref();
+                        return Some(item);
                     }
                 }
             }
