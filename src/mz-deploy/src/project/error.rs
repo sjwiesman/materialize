@@ -33,12 +33,12 @@
 mod dependency;
 mod load;
 mod parse;
-mod validation;
+pub(crate) mod validation;
 
 pub(crate) use dependency::DependencyError;
 pub(crate) use load::LoadError;
 pub(crate) use parse::ParseError;
-pub(crate) use validation::{ErrorContext, ValidationError, ValidationErrorKind, ValidationErrors};
+pub(crate) use validation::{ValidationError, ValidationErrorKind, ValidationErrors};
 
 use thiserror::Error;
 

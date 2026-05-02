@@ -558,7 +558,8 @@ mod tests {
     #[test]
     fn validation_object_name_mismatch_attaches_quickfix_data() {
         use crate::lsp::code_action::QuickFixData;
-        use crate::project::error::{ErrorContext, ValidationError, ValidationErrorKind};
+        use crate::project::error::validation::ErrorContext;
+        use crate::project::error::{ValidationError, ValidationErrorKind};
 
         let source = "CREATE TABLE customers (id INT);";
         let path = std::env::temp_dir().join("validation_qf_test.sql");
