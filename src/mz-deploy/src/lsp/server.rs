@@ -42,8 +42,8 @@
 
 use crate::config::{ProjectSettings, read_mzprofile};
 use crate::lsp::{
-    code_lens, completion, diagnostics, document_symbol, goto_definition, hover, references,
-    semantic_tokens, toml_diagnostics, workspace_symbol,
+    code_action, code_lens, completion, diagnostics, document_symbol, goto_definition, hover,
+    references, semantic_tokens, toml_diagnostics, workspace_symbol,
 };
 use crate::project;
 use crate::project::compiler::typecheck::TypeCheckError;
@@ -412,7 +412,11 @@ impl Backend {
                 )
                 .await
             {
-                let tc_diags = diagnostics::typecheck_diagnostics(&fs, &tc_err);
+                let candidates = {
+                    let guard = self.project_cache.lock().await;
+                    code_action::harvest_candidates(guard.as_ref())
+                };
+                let tc_diags = diagnostics::typecheck_diagnostics(&fs, &tc_err, &candidates);
                 if tc_diags.is_empty() {
                     self.client
                         .log_message(MessageType::ERROR, format!("Typecheck failed: {tc_err}"))
@@ -537,6 +541,7 @@ impl LanguageServer for Backend {
                 code_lens_provider: Some(CodeLensOptions {
                     resolve_provider: Some(false),
                 }),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
@@ -777,6 +782,18 @@ impl LanguageServer for Backend {
         Ok(Some(lenses))
     }
 
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> Result<Option<CodeActionResponse>> {
+        let actions = code_action::build_code_actions(&params);
+        if actions.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(actions))
+        }
+    }
+
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
@@ -870,5 +887,75 @@ mod tests {
         })
         .await;
         assert!(result.is_ok(), "concurrent publish_diagnostics timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn code_action_returns_quickfix_for_unknown_column_diagnostic() {
+        use crate::lsp::code_action::QuickFixData;
+        use std::sync::Mutex as StdMutex;
+        use tower_lsp::lsp_types::{
+            CodeActionContext, CodeActionKind, CodeActionOrCommand, CodeActionParams, Diagnostic,
+            DiagnosticSeverity, PartialResultParams, Position, Range, TextDocumentIdentifier,
+            WorkDoneProgressParams,
+        };
+
+        let captured_client: Arc<StdMutex<Option<Client>>> = Arc::new(StdMutex::new(None));
+        let captured_client_clone = Arc::clone(&captured_client);
+        let (_service, _socket) = tower_lsp::LspService::new(move |client| {
+            *captured_client_clone.lock().unwrap() = Some(client.clone());
+            Backend::new_with_root(client, std::env::temp_dir())
+        });
+        let client = captured_client.lock().unwrap().take().unwrap();
+        let backend = Backend::new_with_root(client, std::env::temp_dir());
+
+        let uri = Url::from_file_path(std::env::temp_dir().join("qf.sql")).unwrap();
+        let qf = QuickFixData {
+            suggestions: vec![code_action::SuggestionData {
+                label: "did you mean `customer_name`?".to_string(),
+                alternatives: vec![code_action::ReplacementData {
+                    range: Range::new(Position::new(0, 7), Position::new(0, 20)),
+                    new_text: "customer_name".to_string(),
+                }],
+            }],
+        };
+        let diag = Diagnostic {
+            range: Range::new(Position::new(0, 7), Position::new(0, 20)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some("mz-deploy".to_string()),
+            message: "column custoser_name does not exist".to_string(),
+            data: Some(serde_json::to_value(qf).unwrap()),
+            ..Default::default()
+        };
+
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: diag.range,
+            context: CodeActionContext {
+                diagnostics: vec![diag],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+
+        let response = backend.code_action(params).await.unwrap();
+        let actions = response.expect("code_action should return Some");
+        assert_eq!(actions.len(), 1);
+        let CodeActionOrCommand::CodeAction(ca) = &actions[0] else {
+            panic!("expected CodeAction");
+        };
+        assert_eq!(ca.kind.as_ref(), Some(&CodeActionKind::QUICKFIX));
+        assert_eq!(ca.is_preferred, Some(true));
+        let edits = ca
+            .edit
+            .as_ref()
+            .unwrap()
+            .changes
+            .as_ref()
+            .unwrap()
+            .get(&uri)
+            .unwrap();
+        assert_eq!(edits[0].new_text, "customer_name");
     }
 }

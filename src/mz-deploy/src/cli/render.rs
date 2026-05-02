@@ -20,17 +20,11 @@
 //! [`std::fmt::Display`] path.
 
 use crate::cli::CliError;
-use crate::diagnostics::{PositionalDiagnostic, Replacement, Severity, Suggestion};
+use crate::diagnostics::{PositionalDiagnostic, Severity};
 use crate::log::color_enabled;
-use crate::project::compiler::typecheck::{
-    ObjectTypeCheckError, ObjectTypeCheckErrorKind, TypeCheckError,
-};
+use crate::project::compiler::typecheck::{ObjectTypeCheckError, TypeCheckError};
 use crate::project::error::{ParseError, ProjectError, ValidationError, ValidationErrors};
 use annotate_snippets::{AnnotationKind, Group, Level, Patch, Renderer, Snippet, Title};
-use mz_repr::ColumnName;
-use mz_sql::catalog::CatalogError;
-use mz_sql::names::PartialItemName;
-use mz_sql::plan::PlanError;
 
 /// Render a single [`PositionalDiagnostic`] to a styled string.
 ///
@@ -147,20 +141,28 @@ fn validation_to_positional(errors: &ValidationErrors) -> Vec<PositionalDiagnost
 }
 
 fn validation_error_to_positional(error: &ValidationError) -> PositionalDiagnostic {
-    let message = error.kind.message();
-    let footers: Vec<String> = error.kind.help().into_iter().collect();
     let file = error.context.file.clone();
 
-    if let (Some(offset), Ok(source)) = (error.context.byte_offset, std::fs::read_to_string(&file))
-    {
+    if let Ok(source) = std::fs::read_to_string(&file) {
+        let primary_range = crate::diagnostics::locate_validation(
+            &error.kind,
+            &source,
+            error.context.byte_offset,
+        )
+        .unwrap_or_else(|| {
+            let off = error.context.byte_offset.unwrap_or(0);
+            off..off
+        });
+        let (message, footers, suggestions) =
+            crate::diagnostics::format_validation_kind(&error.kind, &source, &primary_range);
         return PositionalDiagnostic {
             severity: Severity::Error,
             file,
             source,
-            byte_range: offset..offset,
+            byte_range: primary_range,
             message,
             footers,
-            suggestions: Vec::new(),
+            suggestions,
         };
     }
 
@@ -169,8 +171,8 @@ fn validation_error_to_positional(error: &ValidationError) -> PositionalDiagnost
         file,
         source: error.context.sql_statement.clone().unwrap_or_default(),
         byte_range: 0..0,
-        message,
-        footers,
+        message: error.kind.message(),
+        footers: error.kind.help().into_iter().collect(),
         suggestions: Vec::new(),
     }
 }
@@ -193,7 +195,8 @@ fn object_typecheck_to_positional(error: &ObjectTypeCheckError) -> PositionalDia
     let source = std::fs::read_to_string(&error.file_path).unwrap_or_default();
     let primary_range = crate::diagnostics::locate_typecheck(&error.kind, &source).unwrap_or(0..0);
 
-    let (message, footers, suggestions) = format_kind(&error.kind, &source, &primary_range);
+    let (message, footers, suggestions) =
+        crate::diagnostics::format_typecheck_kind(&error.kind, &source, &primary_range);
 
     let mut full_message = message;
     if let Some(detail) = error.detail() {
@@ -212,133 +215,6 @@ fn object_typecheck_to_positional(error: &ObjectTypeCheckError) -> PositionalDia
     }
 }
 
-/// Build the (message, footers, suggestions) triple for one typecheck kind.
-///
-/// Variants that carry alternatives (`UnknownColumn::similar`,
-/// `UnknownFunction::alternative`, `UnknownType::alternative`) are formatted
-/// directly so we control identifier quoting and can emit structured
-/// patches. Other variants fall back to `Display` + the upstream `hint()`.
-fn format_kind(
-    kind: &ObjectTypeCheckErrorKind,
-    source: &str,
-    primary_range: &std::ops::Range<usize>,
-) -> (String, Vec<String>, Vec<Suggestion>) {
-    match kind {
-        ObjectTypeCheckErrorKind::Plan(e) => format_plan(e, source, primary_range),
-        ObjectTypeCheckErrorKind::Catalog(e) => format_catalog(e, source, primary_range),
-        ObjectTypeCheckErrorKind::Parser(e) => (e.to_string(), Vec::new(), Vec::new()),
-        ObjectTypeCheckErrorKind::Internal(msg) => (msg.clone(), Vec::new(), Vec::new()),
-    }
-}
-
-fn format_plan(
-    e: &PlanError,
-    source: &str,
-    primary_range: &std::ops::Range<usize>,
-) -> (String, Vec<String>, Vec<Suggestion>) {
-    if let PlanError::UnknownColumn {
-        table,
-        column,
-        similar,
-    } = e
-    {
-        let qualified = column_display(table.as_ref(), column);
-        let message = format!("column {qualified} does not exist");
-        if similar.is_empty() {
-            return (message, Vec::new(), Vec::new());
-        }
-        let span = locate_replacement(source, primary_range, column.as_str());
-        let label = match similar.as_ref() {
-            [single] => format!("did you mean `{}`?", column_display(table.as_ref(), single)),
-            _ => "did you mean one of these?".to_string(),
-        };
-        let alternatives = similar
-            .iter()
-            .map(|alt| Replacement {
-                byte_range: span.clone(),
-                replacement: alt.as_str().to_string(),
-            })
-            .collect();
-        return (
-            message,
-            Vec::new(),
-            vec![Suggestion {
-                label,
-                alternatives,
-            }],
-        );
-    }
-    fallback_plan(e)
-}
-
-fn fallback_plan(e: &PlanError) -> (String, Vec<String>, Vec<Suggestion>) {
-    let footers = e.hint().into_iter().collect();
-    (e.to_string(), footers, Vec::new())
-}
-
-fn format_catalog(
-    e: &CatalogError,
-    source: &str,
-    primary_range: &std::ops::Range<usize>,
-) -> (String, Vec<String>, Vec<Suggestion>) {
-    match e {
-        CatalogError::UnknownFunction {
-            name,
-            alternative: Some(alt),
-        } => {
-            let message = format!("function {name} does not exist");
-            let suggestion = Suggestion {
-                label: format!("did you mean `{alt}`?"),
-                alternatives: vec![Replacement {
-                    byte_range: locate_replacement(source, primary_range, last_component(name)),
-                    replacement: alt.clone(),
-                }],
-            };
-            (message, Vec::new(), vec![suggestion])
-        }
-        other => fallback_catalog(other),
-    }
-}
-
-fn fallback_catalog(e: &CatalogError) -> (String, Vec<String>, Vec<Suggestion>) {
-    let footers = e.hint().into_iter().collect();
-    (e.to_string(), footers, Vec::new())
-}
-
-/// Format `table.column` as a dotted PostgreSQL reference (relation +
-/// column). Each component is rendered as its raw identifier — no outer
-/// quotes — so a reader interprets the dot as a separator rather than as
-/// part of a single quoted identifier.
-fn column_display(table: Option<&PartialItemName>, column: &ColumnName) -> String {
-    match table {
-        Some(t) => format!("{}.{}", t.item, column),
-        None => column.as_str().to_string(),
-    }
-}
-
-/// Strip the qualifying prefix from a dotted name so the patch replaces
-/// just the trailing component (the name the user typed).
-fn last_component(s: &str) -> &str {
-    s.rsplit_once('.').map(|(_, last)| last).unwrap_or(s)
-}
-
-/// Find the byte range of `needle` to replace.
-///
-/// Prefer the primary annotation range when its content matches `needle`;
-/// otherwise fall back to a whole-word search of the source so the patch
-/// still lands somewhere reasonable for variants whose locator returned a
-/// less specific span.
-fn locate_replacement(
-    source: &str,
-    primary_range: &std::ops::Range<usize>,
-    needle: &str,
-) -> std::ops::Range<usize> {
-    let in_bounds = primary_range.end <= source.len() && primary_range.start <= primary_range.end;
-    if in_bounds && &source[primary_range.clone()] == needle {
-        return primary_range.clone();
-    }
-    crate::diagnostics::find_identifier(source, needle).unwrap_or_else(|| primary_range.clone())
-}
 
 #[cfg(test)]
 mod tests {
@@ -414,23 +290,4 @@ mod tests {
         assert_eq!(origin_string(std::path::Path::new(".")), ".");
     }
 
-    #[test]
-    fn last_component_strips_qualifier() {
-        assert_eq!(last_component("foo"), "foo");
-        assert_eq!(last_component("schema.table"), "table");
-    }
-
-    #[test]
-    fn locate_replacement_prefers_primary_range_when_matches() {
-        // primary_range covers "emails"; needle is "emails" — use the primary.
-        let r = locate_replacement("SELECT emails FROM t", &(7..13), "emails");
-        assert_eq!(r, 7..13);
-    }
-
-    #[test]
-    fn locate_replacement_falls_back_to_search() {
-        // primary_range points elsewhere; use whole-word search.
-        let r = locate_replacement("SELECT emails FROM t", &(0..0), "emails");
-        assert_eq!(r, 7..13);
-    }
 }

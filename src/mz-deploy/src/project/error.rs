@@ -33,7 +33,7 @@
 mod dependency;
 mod load;
 mod parse;
-mod validation;
+pub(crate) mod validation;
 
 pub(crate) use dependency::DependencyError;
 pub(crate) use load::LoadError;

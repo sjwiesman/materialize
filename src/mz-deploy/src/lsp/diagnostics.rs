@@ -151,18 +151,42 @@ pub(crate) fn validation_diagnostics(
             .entry(error.context.file.clone())
             .or_insert_with(|| read_source(fs, &error.context.file));
 
-        let diag = match (error.context.byte_offset, entry.as_ref()) {
-            (Some(offset), Some((source, rope))) => {
+        let diag = match (entry.as_ref(), error.context.byte_offset) {
+            (Some((source, rope)), Some(_)) => {
+                let primary_range = crate::diagnostics::locate_validation(
+                    &error.kind,
+                    source,
+                    error.context.byte_offset,
+                )
+                .unwrap_or_else(|| {
+                    let off = error.context.byte_offset.unwrap_or(0);
+                    off..off
+                });
+                let (body, footers, suggestions) =
+                    crate::diagnostics::format_validation_kind(&error.kind, source, &primary_range);
+
+                let mut message = body;
+                for footer in &footers {
+                    message.push_str("\nhint: ");
+                    message.push_str(footer);
+                }
+
                 let pd = PositionalDiagnostic {
                     severity: Severity::Error,
                     file: error.context.file.clone(),
                     source: source.clone(),
-                    byte_range: offset..offset,
-                    message: error.kind.message(),
-                    footers: Vec::new(),
-                    suggestions: Vec::new(),
+                    byte_range: primary_range,
+                    message,
+                    footers,
+                    suggestions: suggestions.clone(),
                 };
-                to_lsp(&pd, rope)
+                let mut diag = to_lsp(&pd, rope);
+                if let Some(qf) =
+                    crate::lsp::code_action::suggestions_to_data(&suggestions, rope)
+                {
+                    diag.data = Some(serde_json::to_value(qf).expect("serializable"));
+                }
+                diag
             }
             _ => Diagnostic {
                 range: Range::new(zero, zero),
@@ -194,6 +218,7 @@ pub(crate) fn validation_diagnostics(
 pub(crate) fn typecheck_diagnostics(
     fs: &FileSystem,
     error: &TypeCheckError,
+    candidates: &crate::lsp::code_action::Candidates,
 ) -> BTreeMap<PathBuf, Vec<Diagnostic>> {
     let errors: &[ObjectTypeCheckError] = match error {
         TypeCheckError::Multiple(errs) => errs.as_slice(),
@@ -211,37 +236,67 @@ pub(crate) fn typecheck_diagnostics(
             .entry(e.file_path.clone())
             .or_insert_with(|| read_source(fs, &e.file_path));
 
-        let mut message = e.error_message();
-        if let Some(detail) = e.detail() {
-            message.push_str("\ndetail: ");
-            message.push_str(&detail);
-        }
-        if let Some(hint) = e.hint() {
-            message.push_str("\nhint: ");
-            message.push_str(&hint);
-        }
-
         let diag = match entry.as_ref() {
             Some((source, rope)) => {
                 let byte_range = locate_typecheck(&e.kind, source).unwrap_or(0..0);
+                let (body, footers, mut suggestions) =
+                    crate::diagnostics::format_typecheck_kind(&e.kind, source, &byte_range);
+                if suggestions.is_empty() {
+                    suggestions = crate::lsp::code_action::fuzzy_suggestions(
+                        &e.kind,
+                        source,
+                        &byte_range,
+                        candidates,
+                    );
+                }
+
+                let mut message = body;
+                if let Some(detail) = e.detail() {
+                    message.push_str("\ndetail: ");
+                    message.push_str(&detail);
+                }
+                for footer in &footers {
+                    message.push_str("\nhint: ");
+                    message.push_str(footer);
+                }
+
                 let pd = PositionalDiagnostic {
                     severity: Severity::Error,
                     file: e.file_path.clone(),
                     source: source.clone(),
                     byte_range,
                     message,
-                    footers: Vec::new(),
-                    suggestions: Vec::new(),
+                    footers,
+                    suggestions: suggestions.clone(),
                 };
-                to_lsp(&pd, rope)
+                let mut diag = to_lsp(&pd, rope);
+                if let Some(qf) =
+                    crate::lsp::code_action::suggestions_to_data(&suggestions, rope)
+                {
+                    diag.data = Some(serde_json::to_value(qf).expect("serializable"));
+                }
+                diag
             }
-            None => Diagnostic {
-                range: Range::new(zero, zero),
-                severity: Some(DiagnosticSeverity::ERROR),
-                source: Some("mz-deploy".to_string()),
-                message,
-                ..Default::default()
-            },
+            None => {
+                // No source available — fall back to the upstream Display +
+                // detail + hint, with no quick-fix data.
+                let mut message = e.error_message();
+                if let Some(detail) = e.detail() {
+                    message.push_str("\ndetail: ");
+                    message.push_str(&detail);
+                }
+                if let Some(hint) = e.hint() {
+                    message.push_str("\nhint: ");
+                    message.push_str(&hint);
+                }
+                Diagnostic {
+                    range: Range::new(zero, zero),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    source: Some("mz-deploy".to_string()),
+                    message,
+                    ..Default::default()
+                }
+            }
         };
 
         map.entry(e.file_path.clone()).or_default().push(diag);
@@ -414,5 +469,122 @@ mod tests {
         let text = "CREATE VIEW foo AS SELECT 1;";
         let rope = Rope::from_str(text);
         assert!(diagnose(text, &rope, &BTreeMap::new(), None).is_empty());
+    }
+
+    #[test]
+    fn typecheck_unknown_column_attaches_quickfix_data() {
+        use crate::lsp::code_action::{Candidates, QuickFixData};
+        use crate::project::compiler::typecheck::{
+            ObjectTypeCheckError, ObjectTypeCheckErrorKind,
+        };
+        use crate::project::ir::object_id::ObjectId;
+        use mz_repr::ColumnName;
+        use mz_sql::plan::PlanError;
+        use std::sync::Arc;
+
+        let source = "SELECT custoser_name FROM users";
+        let path = std::env::temp_dir().join("typecheck_qf_test.sql");
+        std::fs::write(&path, source).unwrap();
+
+        let plan_err = PlanError::UnknownColumn {
+            table: None,
+            column: ColumnName::from("custoser_name"),
+            similar: Box::new([ColumnName::from("customer_name")]),
+        };
+        let err = ObjectTypeCheckError {
+            object_id: ObjectId::new("materialize".to_string(), "public".to_string(), "v".to_string()),
+            file_path: path.clone(),
+            kind: ObjectTypeCheckErrorKind::Plan(Arc::new(plan_err)),
+        };
+        let tc = TypeCheckError::Multiple(vec![err]);
+
+        let fs = FileSystem::default();
+        let candidates = Candidates::default();
+        let map = typecheck_diagnostics(&fs, &tc, &candidates);
+        let diags = map.get(&path).expect("diags for file");
+        assert_eq!(diags.len(), 1);
+
+        let data = diags[0]
+            .data
+            .as_ref()
+            .expect("Diagnostic.data should be set when suggestions exist");
+        let qf: QuickFixData = serde_json::from_value(data.clone()).expect("decodes");
+        assert_eq!(qf.suggestions.len(), 1);
+        assert_eq!(qf.suggestions[0].alternatives.len(), 1);
+        assert_eq!(qf.suggestions[0].alternatives[0].new_text, "customer_name");
+        assert!(diags[0].message.contains("column custoser_name does not exist"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn typecheck_unknown_item_attaches_fuzzy_quickfix_data() {
+        use crate::lsp::code_action::{Candidates, QuickFixData};
+        use crate::project::compiler::typecheck::{
+            ObjectTypeCheckError, ObjectTypeCheckErrorKind,
+        };
+        use crate::project::ir::object_id::ObjectId;
+        use mz_sql::catalog::CatalogError;
+
+        let source = "SELECT * FROM cusotmers";
+        let path = std::env::temp_dir().join("typecheck_fuzzy_test.sql");
+        std::fs::write(&path, source).unwrap();
+
+        let err = ObjectTypeCheckError {
+            object_id: ObjectId::new("materialize".to_string(), "public".to_string(), "v".to_string()),
+            file_path: path.clone(),
+            kind: ObjectTypeCheckErrorKind::Catalog(
+                CatalogError::UnknownItem("cusotmers".to_string()),
+            ),
+        };
+        let tc = TypeCheckError::Multiple(vec![err]);
+
+        let fs = FileSystem::default();
+        let candidates = Candidates {
+            items: vec!["customers".to_string()],
+            ..Default::default()
+        };
+        let map = typecheck_diagnostics(&fs, &tc, &candidates);
+        let diags = map.get(&path).expect("diags for file");
+        assert_eq!(diags.len(), 1);
+
+        let data = diags[0].data.as_ref().expect("Diagnostic.data should be set");
+        let qf: QuickFixData = serde_json::from_value(data.clone()).expect("decodes");
+        assert_eq!(qf.suggestions.len(), 1);
+        assert_eq!(qf.suggestions[0].alternatives.len(), 1);
+        assert_eq!(qf.suggestions[0].alternatives[0].new_text, "customers");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn validation_object_name_mismatch_attaches_quickfix_data() {
+        use crate::lsp::code_action::QuickFixData;
+        use crate::project::error::validation::ErrorContext;
+        use crate::project::error::{ValidationError, ValidationErrorKind};
+
+        let source = "CREATE TABLE customers (id INT);";
+        let path = std::env::temp_dir().join("validation_qf_test.sql");
+        std::fs::write(&path, source).unwrap();
+
+        let err = ValidationError {
+            kind: ValidationErrorKind::ObjectNameMismatch {
+                declared: "customers".to_string(),
+                expected: "users".to_string(),
+            },
+            context: ErrorContext {
+                file: path.clone(),
+                sql_statement: Some(source.to_string()),
+                byte_offset: Some(0),
+            },
+        };
+
+        let fs = FileSystem::default();
+        let map = validation_diagnostics(&fs, &[err]);
+        let diags = map.get(&path).expect("diags for file");
+        assert_eq!(diags.len(), 1);
+
+        let data = diags[0].data.as_ref().expect("Diagnostic.data should be set");
+        let qf: QuickFixData = serde_json::from_value(data.clone()).expect("decodes");
+        assert_eq!(qf.suggestions[0].alternatives[0].new_text, "users");
+        let _ = std::fs::remove_file(&path);
     }
 }
