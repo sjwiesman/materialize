@@ -128,8 +128,39 @@ fn parse_to_positional(error: &ParseError) -> Vec<PositionalDiagnostic> {
             footers: Vec::new(),
             suggestions: Vec::new(),
         }],
-        ParseError::StatementsParseFailed { .. } | ParseError::UnresolvedVariables(_) => Vec::new(),
+        ParseError::UnresolvedVariables(ve) => unresolved_variables_to_positional(ve),
+        ParseError::StatementsParseFailed { .. } => Vec::new(),
     }
+}
+
+/// One [`PositionalDiagnostic`] per unresolved variable, pointed at its
+/// reference in the source. The hint footer differs based on whether a
+/// profile is active: with no profile, it directs the user to set one;
+/// otherwise, it points at the profile's `[variables]` table.
+fn unresolved_variables_to_positional(
+    error: &crate::project::syntax::variables::VariableError,
+) -> Vec<PositionalDiagnostic> {
+    let source = std::fs::read_to_string(&error.path).unwrap_or_default();
+    let footer = if error.profile_set {
+        "define this variable in [profiles.<name>.variables] in project.toml".to_string()
+    } else {
+        "no profile is selected; run `mz-deploy profile set <name>` and define \
+         this variable in [profiles.<name>.variables] in project.toml"
+            .to_string()
+    };
+    error
+        .unresolved
+        .iter()
+        .map(|uv| PositionalDiagnostic {
+            severity: Severity::Error,
+            file: error.path.clone(),
+            source: source.clone(),
+            byte_range: uv.byte_offset..(uv.byte_offset + uv.byte_len),
+            message: format!("undefined variable ':{}'", uv.name),
+            footers: vec![footer.clone()],
+            suggestions: Vec::new(),
+        })
+        .collect()
 }
 
 fn validation_to_positional(errors: &ValidationErrors) -> Vec<PositionalDiagnostic> {
@@ -210,7 +241,6 @@ fn object_typecheck_to_positional(error: &ObjectTypeCheckError) -> PositionalDia
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +314,4 @@ mod tests {
     fn origin_string_preserves_bare_curdir() {
         assert_eq!(origin_string(std::path::Path::new(".")), ".");
     }
-
 }

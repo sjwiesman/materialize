@@ -782,10 +782,7 @@ impl LanguageServer for Backend {
         Ok(Some(lenses))
     }
 
-    async fn code_action(
-        &self,
-        params: CodeActionParams,
-    ) -> Result<Option<CodeActionResponse>> {
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let actions = code_action::build_code_actions(&params);
         if actions.is_empty() {
             Ok(None)

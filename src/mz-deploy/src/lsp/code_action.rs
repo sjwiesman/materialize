@@ -58,10 +58,7 @@ pub(crate) struct ReplacementData {
 /// formatter into LSP-shaped [`SuggestionData`] using `rope` to map byte
 /// offsets to line/column. Returns `None` when `suggestions` is empty so the
 /// caller can leave `Diagnostic.data` unset.
-pub(crate) fn suggestions_to_data(
-    suggestions: &[Suggestion],
-    rope: &Rope,
-) -> Option<QuickFixData> {
+pub(crate) fn suggestions_to_data(suggestions: &[Suggestion], rope: &Rope) -> Option<QuickFixData> {
     if suggestions.is_empty() {
         return None;
     }
@@ -104,11 +101,7 @@ pub(crate) fn build_code_actions(params: &CodeActionParams) -> Vec<CodeActionOrC
         let Ok(qf) = serde_json::from_value::<QuickFixData>(data.clone()) else {
             continue;
         };
-        let total_alternatives: usize = qf
-            .suggestions
-            .iter()
-            .map(|s| s.alternatives.len())
-            .sum();
+        let total_alternatives: usize = qf.suggestions.iter().map(|s| s.alternatives.len()).sum();
         let unique_best = total_alternatives == 1;
         for suggestion in qf.suggestions {
             for alt in suggestion.alternatives {
@@ -240,10 +233,7 @@ pub(crate) fn harvest_candidates(cache: Option<&ProjectCache>) -> Candidates {
     items.sort();
     items.dedup();
 
-    let mut clusters: Vec<String> = summaries
-        .iter()
-        .filter_map(|s| s.cluster.clone())
-        .collect();
+    let mut clusters: Vec<String> = summaries.iter().filter_map(|s| s.cluster.clone()).collect();
     clusters.sort();
     clusters.dedup();
 
@@ -289,11 +279,12 @@ where
 mod tests {
     use super::*;
     use crate::diagnostics::Replacement;
+    use tower_lsp::lsp_types::Position;
     use tower_lsp::lsp_types::{
         CodeActionContext, CodeActionKind, CodeActionOrCommand, CodeActionParams, Diagnostic,
-        DiagnosticSeverity, PartialResultParams, TextDocumentIdentifier, Url, WorkDoneProgressParams,
+        DiagnosticSeverity, PartialResultParams, TextDocumentIdentifier, Url,
+        WorkDoneProgressParams,
     };
-    use tower_lsp::lsp_types::Position;
 
     #[test]
     fn suggestions_to_data_empty_returns_none() {
@@ -436,7 +427,10 @@ mod tests {
         let out = did_you_mean("customer_name", candidates.iter().map(|s| s.to_string()));
         // "customer_name" (distance 0) and "customer_id" (distance 4) are both within
         // threshold max(2, 13/3) = 4, so both are returned, sorted by distance.
-        assert_eq!(out, vec!["customer_name".to_string(), "customer_id".to_string()]);
+        assert_eq!(
+            out,
+            vec!["customer_name".to_string(), "customer_id".to_string()]
+        );
     }
 
     #[test]
@@ -452,11 +446,11 @@ mod tests {
         // Provide many candidates that are all close enough to hit the limit.
         // "custoser_name" (distance 1 to): customer_name, custumer_name, cust_name, etc.
         let candidates = [
-            "customer_name",      // distance 1
-            "custumer_name",      // distance 1 (typo: transposition)
-            "custoser_name_x",    // distance 2 (one extra char)
-            "customers",          // distance 6 (exceeds threshold, excluded)
-            "x_custoser_name",    // distance 2 (one extra char prefix)
+            "customer_name",   // distance 1
+            "custumer_name",   // distance 1 (typo: transposition)
+            "custoser_name_x", // distance 2 (one extra char)
+            "customers",       // distance 6 (exceeds threshold, excluded)
+            "x_custoser_name", // distance 2 (one extra char prefix)
         ];
         let out = did_you_mean("custoser_name", candidates.iter().map(|s| s.to_string()));
         // Should return at most 3, even though multiple candidates match.
@@ -472,7 +466,12 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    fn cands(items: &[&str], schemas: &[&str], databases: &[&str], clusters: &[&str]) -> Candidates {
+    fn cands(
+        items: &[&str],
+        schemas: &[&str],
+        databases: &[&str],
+        clusters: &[&str],
+    ) -> Candidates {
         Candidates {
             items: items.iter().map(|s| s.to_string()).collect(),
             schemas: schemas.iter().map(|s| s.to_string()).collect(),
@@ -485,9 +484,8 @@ mod tests {
     fn fuzzy_suggestions_for_unknown_item_uses_items_pool() {
         let source = "SELECT * FROM cusotmers";
         let primary = 14..23; // "cusotmers"
-        let kind = ObjectTypeCheckErrorKind::Catalog(
-            CatalogError::UnknownItem("cusotmers".to_string()),
-        );
+        let kind =
+            ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownItem("cusotmers".to_string()));
         let c = cands(&["customers", "products"], &[], &[], &[]);
         let out = fuzzy_suggestions(&kind, source, &primary, &c);
         assert_eq!(out.len(), 1);
@@ -500,9 +498,8 @@ mod tests {
     fn fuzzy_suggestions_for_unknown_schema_uses_schemas_pool() {
         let source = "SELECT * FROM publik.t";
         let primary = 14..20; // "publik"
-        let kind = ObjectTypeCheckErrorKind::Catalog(
-            CatalogError::UnknownSchema("publik".to_string()),
-        );
+        let kind =
+            ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownSchema("publik".to_string()));
         let c = cands(&[], &["public", "private"], &[], &[]);
         let out = fuzzy_suggestions(&kind, source, &primary, &c);
         assert_eq!(out.len(), 1);
@@ -513,9 +510,9 @@ mod tests {
     fn fuzzy_suggestions_for_unknown_cluster_uses_clusters_pool() {
         let source = "CREATE VIEW v IN CLUSTER quikstart AS SELECT 1";
         let primary = 25..34; // "quikstart"
-        let kind = ObjectTypeCheckErrorKind::Catalog(
-            CatalogError::UnknownCluster("quikstart".to_string()),
-        );
+        let kind = ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownCluster(
+            "quikstart".to_string(),
+        ));
         let c = cands(&[], &[], &[], &["quickstart", "compute"]);
         let out = fuzzy_suggestions(&kind, source, &primary, &c);
         assert_eq!(out.len(), 1);
@@ -526,9 +523,8 @@ mod tests {
     fn fuzzy_suggestions_for_kind_without_matches_returns_empty() {
         let source = "SELECT 1";
         let primary = 0..0;
-        let kind = ObjectTypeCheckErrorKind::Catalog(
-            CatalogError::UnknownItem("zzzzzzz".to_string()),
-        );
+        let kind =
+            ObjectTypeCheckErrorKind::Catalog(CatalogError::UnknownItem("zzzzzzz".to_string()));
         let c = cands(&["customers"], &[], &[], &[]);
         let out = fuzzy_suggestions(&kind, source, &primary, &c);
         assert!(out.is_empty());
@@ -539,7 +535,12 @@ mod tests {
         let source = "SELECT 1";
         let primary = 0..0;
         let kind = ObjectTypeCheckErrorKind::Internal("whatever".to_string());
-        let c = cands(&["customers"], &["public"], &["materialize"], &["quickstart"]);
+        let c = cands(
+            &["customers"],
+            &["public"],
+            &["materialize"],
+            &["quickstart"],
+        );
         let out = fuzzy_suggestions(&kind, source, &primary, &c);
         assert!(out.is_empty());
     }
