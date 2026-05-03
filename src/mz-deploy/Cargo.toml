@@ -49,6 +49,7 @@ serde = { workspace = true }
 dirs = { workspace = true }
 serde_json = { workspace = true }
 strsim = { workspace = true }
+supports-color = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
