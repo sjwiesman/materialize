@@ -33,7 +33,7 @@
 //!   the structured upstream error to position the diagnostic. See
 //!   [`crate::diagnostics::locate_typecheck`] for the dispatch.
 
-use crate::diagnostics::{PositionalDiagnostic, Severity, locate_typecheck};
+use crate::diagnostics::{PositionalDiagnostic, Severity, Suggestion, locate_typecheck};
 use crate::fs::FileSystem;
 use crate::project::compiler::typecheck::{ObjectTypeCheckError, TypeCheckError};
 use crate::project::error::ValidationError;
@@ -152,40 +152,19 @@ pub(crate) fn validation_diagnostics(
             .or_insert_with(|| read_source(fs, &error.context.file));
 
         let diag = match (entry.as_ref(), error.context.byte_offset) {
-            (Some((source, rope)), Some(_)) => {
+            (Some((source, rope)), Some(offset)) => {
                 let primary_range = crate::diagnostics::locate_validation(
                     &error.kind,
                     source,
-                    error.context.byte_offset,
+                    Some(offset),
                 )
-                .unwrap_or_else(|| {
-                    let off = error.context.byte_offset.unwrap_or(0);
-                    off..off
-                });
+                .unwrap_or(offset..offset);
                 let (body, footers, suggestions) =
                     crate::diagnostics::format_validation_kind(&error.kind, source, &primary_range);
-
                 let mut message = body;
-                for footer in &footers {
-                    message.push_str("\nhint: ");
-                    message.push_str(footer);
-                }
-
-                let pd = PositionalDiagnostic {
-                    severity: Severity::Error,
-                    file: error.context.file.clone(),
-                    source: source.clone(),
-                    byte_range: primary_range,
-                    message,
-                    footers,
-                    suggestions: suggestions.clone(),
-                };
-                let mut diag = to_lsp(&pd, rope);
-                if let Some(qf) =
-                    crate::lsp::code_action::suggestions_to_data(&suggestions, rope)
-                {
-                    diag.data = Some(serde_json::to_value(qf).expect("serializable"));
-                }
+                append_detail_and_hints(&mut message, None, &footers);
+                let mut diag = build_error_diagnostic(primary_range, message, rope);
+                attach_quickfix_data(&mut diag, &suggestions, rope);
                 diag
             }
             _ => Diagnostic {
@@ -239,56 +218,27 @@ pub(crate) fn typecheck_diagnostics(
         let diag = match entry.as_ref() {
             Some((source, rope)) => {
                 let byte_range = locate_typecheck(&e.kind, source).unwrap_or(0..0);
-                let (body, footers, mut suggestions) =
+                let (body, footers, format_suggestions) =
                     crate::diagnostics::format_typecheck_kind(&e.kind, source, &byte_range);
-                if suggestions.is_empty() {
-                    suggestions = crate::lsp::code_action::fuzzy_suggestions(
-                        &e.kind,
-                        source,
-                        &byte_range,
-                        candidates,
-                    );
-                }
+                let suggestions = if format_suggestions.is_empty() {
+                    crate::lsp::code_action::fuzzy_suggestions(
+                        &e.kind, source, &byte_range, candidates,
+                    )
+                } else {
+                    format_suggestions
+                };
 
                 let mut message = body;
-                if let Some(detail) = e.detail() {
-                    message.push_str("\ndetail: ");
-                    message.push_str(&detail);
-                }
-                for footer in &footers {
-                    message.push_str("\nhint: ");
-                    message.push_str(footer);
-                }
-
-                let pd = PositionalDiagnostic {
-                    severity: Severity::Error,
-                    file: e.file_path.clone(),
-                    source: source.clone(),
-                    byte_range,
-                    message,
-                    footers,
-                    suggestions: suggestions.clone(),
-                };
-                let mut diag = to_lsp(&pd, rope);
-                if let Some(qf) =
-                    crate::lsp::code_action::suggestions_to_data(&suggestions, rope)
-                {
-                    diag.data = Some(serde_json::to_value(qf).expect("serializable"));
-                }
+                append_detail_and_hints(&mut message, e.detail().as_deref(), &footers);
+                let mut diag = build_error_diagnostic(byte_range, message, rope);
+                attach_quickfix_data(&mut diag, &suggestions, rope);
                 diag
             }
             None => {
-                // No source available — fall back to the upstream Display +
-                // detail + hint, with no quick-fix data.
+                // No source available — fall back to the upstream Display.
                 let mut message = e.error_message();
-                if let Some(detail) = e.detail() {
-                    message.push_str("\ndetail: ");
-                    message.push_str(&detail);
-                }
-                if let Some(hint) = e.hint() {
-                    message.push_str("\nhint: ");
-                    message.push_str(&hint);
-                }
+                let footers: Vec<String> = e.hint().into_iter().collect();
+                append_detail_and_hints(&mut message, e.detail().as_deref(), &footers);
                 Diagnostic {
                     range: Range::new(zero, zero),
                     severity: Some(DiagnosticSeverity::ERROR),
@@ -311,10 +261,50 @@ fn read_source(fs: &FileSystem, path: &Path) -> Option<(String, Rope)> {
     Some((text, rope))
 }
 
+/// Build an error-severity LSP `Diagnostic` for `byte_range` in `rope`.
+///
+/// Both LSP diagnostic flows always emit `ERROR`; warnings come from the
+/// per-keystroke parse path via `to_lsp` below.
+fn build_error_diagnostic(byte_range: std::ops::Range<usize>, message: String, rope: &Rope) -> Diagnostic {
+    let zero = Position::new(0, 0);
+    let start = offset_to_position(byte_range.start, rope).unwrap_or(zero);
+    let end = offset_to_position(byte_range.end, rope).unwrap_or(start);
+    Diagnostic {
+        range: Range::new(start, end),
+        severity: Some(DiagnosticSeverity::ERROR),
+        source: Some("mz-deploy".to_string()),
+        message,
+        ..Default::default()
+    }
+}
+
+/// Append `\ndetail: <detail>` (when present) and one `\nhint: <footer>`
+/// line per footer to `message`. Preserves the human-readable advice for
+/// editors that don't render code actions.
+fn append_detail_and_hints(message: &mut String, detail: Option<&str>, footers: &[String]) {
+    if let Some(detail) = detail {
+        message.push_str("\ndetail: ");
+        message.push_str(detail);
+    }
+    for footer in footers {
+        message.push_str("\nhint: ");
+        message.push_str(footer);
+    }
+}
+
+/// Encode `suggestions` as the `QuickFixData` JSON payload on `diag.data`
+/// for the LSP code-action handler. No-op when `suggestions` is empty.
+fn attach_quickfix_data(diag: &mut Diagnostic, suggestions: &[Suggestion], rope: &Rope) {
+    if let Some(qf) = crate::lsp::code_action::suggestions_to_data(suggestions, rope) {
+        diag.data = Some(serde_json::to_value(qf).expect("serializable"));
+    }
+}
+
 /// Convert a [`PositionalDiagnostic`] to an LSP [`Diagnostic`].
 ///
-/// `rope` must index into `pd.source`; the caller is responsible for that
-/// pairing. Byte offsets that fall outside the rope fall back to `(0, 0)`.
+/// Used by the per-keystroke parse path which builds `PositionalDiagnostic`s
+/// with both error and warning severity. The validation / typecheck flows
+/// build `Diagnostic`s directly via [`build_error_diagnostic`].
 fn to_lsp(pd: &PositionalDiagnostic, rope: &Rope) -> Diagnostic {
     let zero = Position::new(0, 0);
     let start = offset_to_position(pd.byte_range.start, rope).unwrap_or(zero);

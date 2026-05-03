@@ -7,7 +7,22 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-//! LSP code-action support: serializable suggestion payload + builder.
+//! LSP code-action support.
+//!
+//! Owns four concerns that all serve the `textDocument/codeAction` flow:
+//!
+//! - **`QuickFixData` payload** (`SuggestionData`, `ReplacementData`,
+//!   `suggestions_to_data`) — JSON sidecar attached to `Diagnostic.data` so
+//!   the same suggestion data round-trips from a diagnostic to a follow-up
+//!   `codeAction` request.
+//! - **Builder** (`build_code_actions`) — turns a `CodeActionParams` request
+//!   back into one `CodeAction` per alternative. Pure; no I/O.
+//! - **Fuzzy enrichment** (`Candidates`, `harvest_candidates`,
+//!   `fuzzy_suggestions`, `did_you_mean`) — for catalog errors the
+//!   typechecker doesn't suggest replacements for (`UnknownItem`,
+//!   `UnknownSchema`, `UnknownDatabase`, `UnknownCluster`), generate
+//!   suggestions LSP-side by Damerau-Levenshtein-matching against names
+//!   harvested from the project cache.
 
 use crate::diagnostics::{Replacement, Suggestion, last_component, locate_replacement};
 use crate::project::compiler::typecheck::ObjectTypeCheckErrorKind;
@@ -174,7 +189,7 @@ pub(crate) fn fuzzy_suggestions(
         _ => return Vec::new(),
     };
 
-    let matches = did_you_mean(needle, pool.iter().cloned());
+    let matches = did_you_mean(needle, pool);
     if matches.is_empty() {
         return Vec::new();
     }
@@ -247,20 +262,23 @@ const MAX_DID_YOU_MEAN: usize = 3;
 /// `needle`, sorted by Damerau-Levenshtein distance ascending. Names whose
 /// distance exceeds `max(2, needle.len() / 3)` are filtered out so unrelated
 /// matches don't surface as quick fixes.
+///
+/// Allocations only happen for surviving candidates, so passing a borrowed
+/// slice (e.g. `pool.iter()`) is cheap even when the pool has thousands of
+/// names.
 pub(crate) fn did_you_mean<I, S>(needle: &str, candidates: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
-    S: Into<String>,
+    S: AsRef<str>,
 {
     let threshold = std::cmp::max(2, needle.len() / 3);
     let mut scored: Vec<(usize, String)> = candidates
         .into_iter()
-        .map(|c| {
-            let s = c.into();
-            let d = strsim::damerau_levenshtein(needle, &s);
-            (d, s)
+        .filter_map(|c| {
+            let s = c.as_ref();
+            let d = strsim::damerau_levenshtein(needle, s);
+            (d <= threshold).then(|| (d, s.to_string()))
         })
-        .filter(|(d, _)| *d <= threshold)
         .collect();
     scored.sort_by_key(|(d, _)| *d);
     scored.truncate(MAX_DID_YOU_MEAN);
