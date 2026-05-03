@@ -913,14 +913,14 @@ impl ValidationErrorKind {
             Self::NoMainStatement { .. } => {
                 Some("each file must contain exactly one primary CREATE statement (CREATE TABLE, CREATE VIEW, etc.)".to_string())
             }
-            Self::ObjectNameMismatch { expected, .. } => {
-                Some(format!("rename to '{expected}' to match the file name"))
+            Self::ObjectNameMismatch { .. } => {
+                Some("the object name in your CREATE statement must match the .sql file name".to_string())
             }
-            Self::SchemaMismatch { expected, .. } => {
-                Some(format!("qualify with '{expected}' to match the directory"))
+            Self::SchemaMismatch { .. } => {
+                Some("the schema in your qualified object name must match the directory name".to_string())
             }
-            Self::DatabaseMismatch { expected, .. } => {
-                Some(format!("qualify with '{expected}' to match the directory"))
+            Self::DatabaseMismatch { .. } => {
+                Some("the database in your qualified object name must match the directory name".to_string())
             }
             Self::IndexReferenceMismatch { .. } => {
                 Some("indexes must be defined in the same file as the object they're created on".to_string())
@@ -1024,8 +1024,8 @@ impl ValidationErrorKind {
             Self::InvalidClusterStatement { .. } => {
                 Some("cluster files can only contain CREATE CLUSTER, GRANT ON CLUSTER, and COMMENT ON CLUSTER statements".to_string())
             }
-            Self::ClusterNameMismatch { expected, .. } => {
-                Some(format!("rename the cluster to '{expected}' to match the file name"))
+            Self::ClusterNameMismatch { .. } => {
+                Some("the cluster name in your CREATE CLUSTER statement must match the .sql file name".to_string())
             }
             Self::ClusterMissingCreateStatement { .. } => {
                 Some("each cluster file must contain exactly one CREATE CLUSTER statement".to_string())
@@ -1042,8 +1042,8 @@ impl ValidationErrorKind {
             Self::InvalidRoleStatement { .. } => {
                 Some("role files can only contain CREATE ROLE, ALTER ROLE, GRANT ROLE, and COMMENT ON ROLE statements".to_string())
             }
-            Self::RoleNameMismatch { expected, .. } => {
-                Some(format!("rename the role to '{expected}' to match the file name"))
+            Self::RoleNameMismatch { .. } => {
+                Some("the role name in your CREATE ROLE statement must match the .sql file name".to_string())
             }
             Self::RoleMissingCreateStatement { .. } => {
                 Some("each role file must contain exactly one CREATE ROLE statement".to_string())
@@ -1063,8 +1063,8 @@ impl ValidationErrorKind {
             Self::InvalidNetworkPolicyStatement { .. } => {
                 Some("network policy files can only contain CREATE NETWORK POLICY, GRANT ON NETWORK POLICY, and COMMENT ON NETWORK POLICY statements".to_string())
             }
-            Self::NetworkPolicyNameMismatch { expected, .. } => {
-                Some(format!("rename the policy to '{expected}' to match the file name"))
+            Self::NetworkPolicyNameMismatch { .. } => {
+                Some("the network policy name in your CREATE NETWORK POLICY statement must match the .sql file name".to_string())
             }
             Self::NetworkPolicyMissingCreateStatement { .. } => {
                 Some("each network policy file must contain exactly one CREATE NETWORK POLICY statement".to_string())

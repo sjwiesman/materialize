@@ -144,24 +144,12 @@ fn validation_error_to_positional(error: &ValidationError) -> PositionalDiagnost
     let file = error.context.file.clone();
 
     if let Ok(source) = std::fs::read_to_string(&file) {
-        let primary_range = crate::diagnostics::locate_validation(
-            &error.kind,
-            &source,
-            error.context.byte_offset,
-        )
-        .unwrap_or_else(|| {
-            let off = error.context.byte_offset.unwrap_or(0);
-            off..off
-        });
-        let (message, mut footers, suggestions) =
+        let offset = error.context.byte_offset.unwrap_or(0);
+        let primary_range =
+            crate::diagnostics::locate_validation(&error.kind, &source, Some(offset))
+                .unwrap_or(offset..offset);
+        let (message, footers, suggestions) =
             crate::diagnostics::format_validation_kind(&error.kind, &source, &primary_range);
-        // The structured suggestion's label already prints as a `help:` line
-        // above the inline patch, so dropping the footer here avoids a
-        // duplicate hint. The LSP path keeps the footer in its message string
-        // for clients that don't render code actions.
-        if !suggestions.is_empty() {
-            footers.clear();
-        }
         return PositionalDiagnostic {
             severity: Severity::Error,
             file,

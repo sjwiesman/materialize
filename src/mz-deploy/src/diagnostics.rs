@@ -16,12 +16,14 @@
 //! wraps it into an [`annotate_snippets`] snippet for terminal output.
 //!
 //! Both consumers share the locator helpers in this module
-//! ([`find_identifier`], [`locate_plan`], [`locate_catalog`],
-//! [`locate_typecheck`]) which derive byte ranges from `mz_sql` errors that
-//! carry only an identifier name (no offset). The module also exposes
-//! [`format_typecheck_kind`], the shared formatter that turns an
-//! [`ObjectTypeCheckErrorKind`] into the `(message, footers, suggestions)`
-//! triple consumed by both the CLI and (in upcoming work) the LSP.
+//! ([`find_identifier`], [`find_identifier_after`], [`locate_plan`],
+//! [`locate_catalog`], [`locate_typecheck`], [`locate_validation`]) which
+//! derive byte ranges from `mz_sql` and validation errors that carry only an
+//! identifier name (no offset). The module also exposes
+//! [`format_typecheck_kind`] and [`format_validation_kind`], the shared
+//! formatters that turn an error kind into a `(message, footers, suggestions)`
+//! triple — `footers` carry class-level advice, `suggestions` carry
+//! mechanical edits encoded as byte-range replacements.
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -334,7 +336,7 @@ pub(crate) fn locate_validation(
     source: &str,
     statement_offset: Option<usize>,
 ) -> Option<Range<usize>> {
-    let needle = mismatch_declared(kind)?;
+    let (needle, _) = mismatch_pair(kind)?;
     find_identifier_after(source, needle, statement_offset.unwrap_or(0))
 }
 
@@ -354,29 +356,20 @@ pub(crate) fn format_validation_kind(
     (message, footers, suggestions)
 }
 
-/// `Some(declared)` if `kind` is one of the rewritable *Mismatch variants.
-fn mismatch_declared(kind: &ValidationErrorKind) -> Option<&str> {
+/// `Some((declared, expected))` if `kind` is a rewritable *Mismatch variant
+/// — the trailing identifier the user wrote, plus the one their file path
+/// requires.
+fn mismatch_pair(kind: &ValidationErrorKind) -> Option<(&str, &str)> {
     use ValidationErrorKind::*;
     match kind {
-        ObjectNameMismatch { declared, .. }
-        | SchemaMismatch { declared, .. }
-        | DatabaseMismatch { declared, .. }
-        | ClusterNameMismatch { declared, .. }
-        | RoleNameMismatch { declared, .. }
-        | NetworkPolicyNameMismatch { declared, .. } => Some(declared.as_str()),
-        _ => None,
-    }
-}
-
-fn mismatch_expected(kind: &ValidationErrorKind) -> Option<&str> {
-    use ValidationErrorKind::*;
-    match kind {
-        ObjectNameMismatch { expected, .. }
-        | SchemaMismatch { expected, .. }
-        | DatabaseMismatch { expected, .. }
-        | ClusterNameMismatch { expected, .. }
-        | RoleNameMismatch { expected, .. }
-        | NetworkPolicyNameMismatch { expected, .. } => Some(expected.as_str()),
+        ObjectNameMismatch { declared, expected }
+        | SchemaMismatch { declared, expected }
+        | DatabaseMismatch { declared, expected }
+        | ClusterNameMismatch { declared, expected }
+        | RoleNameMismatch { declared, expected }
+        | NetworkPolicyNameMismatch { declared, expected } => {
+            Some((declared.as_str(), expected.as_str()))
+        }
         _ => None,
     }
 }
@@ -386,8 +379,7 @@ fn mismatch_suggestion(
     source: &str,
     primary_range: &Range<usize>,
 ) -> Vec<Suggestion> {
-    let (Some(declared), Some(expected)) = (mismatch_declared(kind), mismatch_expected(kind))
-    else {
+    let Some((declared, expected)) = mismatch_pair(kind) else {
         return Vec::new();
     };
     let span = locate_replacement(source, primary_range, declared);
@@ -558,7 +550,10 @@ mod tests {
         let (msg, footers, suggestions) = format_validation_kind(&kind, source, &primary);
         assert!(msg.contains("declared 'customers'"));
         assert!(msg.contains("expected 'users'"));
-        assert!(footers.iter().any(|f| f.contains("rename to 'users'")));
+        // Footer carries the class-level rule (the "why").
+        assert!(footers.iter().any(|f| f.contains("must match the .sql file name")));
+        // Suggestion carries the mechanical edit (the "what").
+        assert!(suggestions[0].label.contains("users"));
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].alternatives.len(), 1);
         assert_eq!(suggestions[0].alternatives[0].replacement, "users");
