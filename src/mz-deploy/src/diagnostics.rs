@@ -551,13 +551,20 @@ mod tests {
         assert!(msg.contains("declared 'customers'"));
         assert!(msg.contains("expected 'users'"));
         // Footer carries the class-level rule (the "why").
-        assert!(footers.iter().any(|f| f.contains("must match the .sql file name")));
+        assert!(
+            footers
+                .iter()
+                .any(|f| f.contains("must match the .sql file name"))
+        );
         // Suggestion carries the mechanical edit (the "what").
         assert!(suggestions[0].label.contains("users"));
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].alternatives.len(), 1);
         assert_eq!(suggestions[0].alternatives[0].replacement, "users");
-        assert_eq!(&source[suggestions[0].alternatives[0].byte_range.clone()], "customers");
+        assert_eq!(
+            &source[suggestions[0].alternatives[0].byte_range.clone()],
+            "customers"
+        );
     }
 
     #[test]
