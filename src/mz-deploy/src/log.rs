@@ -14,7 +14,6 @@
 //! messages are printed to stdout to help users understand what the tool
 //! is doing.
 
-use owo_colors::{OwoColorize, Stream};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Global verbose mode flag.
@@ -60,13 +59,13 @@ pub fn verbose_enabled() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
 
-/// Check if color is enabled.
+/// Check if color is enabled on stderr.
+///
+/// Reads `NO_COLOR` / `FORCE_COLOR` / `CLICOLOR_FORCE` and tty status via
+/// the `supports-color` crate. This is the same source `owo-colors` consults
+/// internally.
 pub fn color_enabled() -> bool {
-    let supports_color = AtomicBool::new(false);
-    let _ = "".if_supports_color(Stream::Stderr, |_| {
-        supports_color.store(true, Ordering::Relaxed)
-    });
-    supports_color.load(Ordering::Relaxed)
+    supports_color::on_cached(supports_color::Stream::Stderr).is_some()
 }
 
 /// Print a message only when verbose mode is enabled.
@@ -97,7 +96,6 @@ macro_rules! verbose {
 ///     }
 /// }
 ///
-/// // One call — no if/else on output format:
 /// log::output(&MyResult { name, count });
 /// ```
 ///
@@ -108,8 +106,6 @@ macro_rules! verbose {
 ///   streaming or machine-only pre-execution plan dumps.
 /// - **Use `info!()`** for supplementary stderr messages (hints, progress) that
 ///   shouldn't appear in JSON output.
-/// - **Use `#[serde(skip)]`** on fields that are only meaningful in human output
-///   (e.g., durations) to keep JSON backward-compatible.
 pub trait Render: std::fmt::Display + serde::Serialize {}
 impl<T: std::fmt::Display + serde::Serialize> Render for T {}
 
