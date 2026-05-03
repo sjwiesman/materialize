@@ -609,7 +609,7 @@ impl CliError {
             Self::UndeclaredDependencies { undeclared } => {
                 let dep_list = undeclared
                     .iter()
-                    .map(|d| format!("    \"{}\",", d))
+                    .map(|d| format!("\t\"{}\",", d))
                     .collect::<Vec<_>>()
                     .join("\n");
                 Some(format!(
