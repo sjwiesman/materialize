@@ -107,13 +107,13 @@ impl DeleteTarget {
                 (
                     directory
                         .join("models")
-                        .join(oid.database())
+                        .join(oid.expect_database())
                         .join(oid.schema())
                         .join(format!("{}.sql", oid.object())),
                     format!(
                         "DROP {} {}.{}.{}",
                         keyword,
-                        quote_identifier(oid.database()),
+                        quote_identifier(oid.expect_database()),
                         quote_identifier(oid.schema()),
                         quote_identifier(oid.object()),
                     ),

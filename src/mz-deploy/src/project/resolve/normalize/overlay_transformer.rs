@@ -32,6 +32,7 @@ use mz_sql_parser::ast::{Ident, UnresolvedItemName};
 use crate::project::SchemaQualifier;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::resolve::normalize::transformers::NameTransformer;
+use mz_repr::namespaces::is_system_schema;
 
 /// Transforms references for `mz-deploy dev` overlay compilation.
 ///
@@ -54,6 +55,12 @@ pub(crate) struct OverlayTransformer<'a> {
 
 impl<'a> NameTransformer for OverlayTransformer<'a> {
     fn transform_name(&self, name: &UnresolvedItemName) -> UnresolvedItemName {
+        // System catalog references are database-less and aren't part of any
+        // project; leave them verbatim so the server resolves them natively.
+        if name.0.len() == 2 && is_system_schema(name.0[0].as_str()) {
+            return name.clone();
+        }
+
         // Normalize to 3-part name first
         let (database, schema, object) = match name.0.len() {
             1 => {

@@ -123,14 +123,10 @@ impl fmt::Display for DescribeOutput {
             let short_hash = &hash[..hash.len().min(12)];
             writeln!(
                 f,
-                "    {}.{}.{}  {}",
+                "    {}  {}",
                 object_id
-                    .database
+                    .to_string()
                     .if_supports_color(Stream::Stderr, |t| t.dimmed()),
-                object_id
-                    .schema
-                    .if_supports_color(Stream::Stderr, |t| t.dimmed()),
-                object_id.object,
                 short_hash.if_supports_color(Stream::Stderr, |t| t.dimmed())
             )?;
         }

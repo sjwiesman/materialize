@@ -111,8 +111,8 @@ impl ChangeSet {
                     && old_snapshot
                         .schemas
                         .get(&SchemaQualifier::new(
-                            obj.database.clone(),
-                            obj.schema.clone(),
+                            obj.expect_database().to_string(),
+                            obj.schema().to_string(),
                         ))
                         .copied()
                         == Some(DeploymentKind::Replacement)
@@ -138,8 +138,8 @@ impl ChangeSet {
                     || old_snapshot
                         .schemas
                         .get(&SchemaQualifier::new(
-                            obj.database.clone(),
-                            obj.schema.clone(),
+                            obj.expect_database().to_string(),
+                            obj.schema().to_string(),
                         ))
                         .copied()
                         != Some(DeploymentKind::Replacement)

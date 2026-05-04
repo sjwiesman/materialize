@@ -648,12 +648,12 @@ fn normalize_fqn(fqn: &str, target_id: &ObjectId) -> ObjectId {
     let parts: Vec<&str> = fqn.split('.').collect();
     match parts.as_slice() {
         [object] => ObjectId::new(
-            target_id.database.clone(),
-            target_id.schema.clone(),
+            target_id.expect_database().to_string(),
+            target_id.schema().to_string(),
             (*object).to_string(),
         ),
         [schema, object] => ObjectId::new(
-            target_id.database.clone(),
+            target_id.expect_database().to_string(),
             (*schema).to_string(),
             (*object).to_string(),
         ),
@@ -1215,25 +1215,13 @@ mod tests {
     }
 
     fn make_target_id() -> ObjectId {
-        ObjectId {
-            database: "materialize".to_string(),
-            schema: "public".to_string(),
-            object: "user_order_summary".to_string(),
-        }
+        ObjectId::new("materialize".to_string(), "public".to_string(), "user_order_summary".to_string())
     }
 
     fn make_dependencies() -> BTreeSet<ObjectId> {
         let mut deps = BTreeSet::new();
-        deps.insert(ObjectId {
-            database: "materialize".to_string(),
-            schema: "public".to_string(),
-            object: "users".to_string(),
-        });
-        deps.insert(ObjectId {
-            database: "materialize".to_string(),
-            schema: "public".to_string(),
-            object: "orders".to_string(),
-        });
+        deps.insert(ObjectId::new("materialize".to_string(), "public".to_string(), "users".to_string()));
+        deps.insert(ObjectId::new("materialize".to_string(), "public".to_string(), "orders".to_string()));
         deps
     }
 
@@ -1641,11 +1629,7 @@ mod tests {
 
     #[test]
     fn test_normalize_fqn_unqualified() {
-        let target_id = ObjectId {
-            database: "mydb".to_string(),
-            schema: "myschema".to_string(),
-            object: "myview".to_string(),
-        };
+        let target_id = ObjectId::new("mydb".to_string(), "myschema".to_string(), "myview".to_string());
 
         let normalized = normalize_fqn("users", &target_id);
         assert_eq!(normalized.to_string(), "mydb.myschema.users");
@@ -1653,11 +1637,7 @@ mod tests {
 
     #[test]
     fn test_normalize_fqn_schema_qualified() {
-        let target_id = ObjectId {
-            database: "mydb".to_string(),
-            schema: "myschema".to_string(),
-            object: "myview".to_string(),
-        };
+        let target_id = ObjectId::new("mydb".to_string(), "myschema".to_string(), "myview".to_string());
 
         let normalized = normalize_fqn("other_schema.users", &target_id);
         assert_eq!(normalized.to_string(), "mydb.other_schema.users");
@@ -1665,11 +1645,7 @@ mod tests {
 
     #[test]
     fn test_normalize_fqn_fully_qualified() {
-        let target_id = ObjectId {
-            database: "mydb".to_string(),
-            schema: "myschema".to_string(),
-            object: "myview".to_string(),
-        };
+        let target_id = ObjectId::new("mydb".to_string(), "myschema".to_string(), "myview".to_string());
 
         let normalized = normalize_fqn("other_db.other_schema.users", &target_id);
         assert_eq!(normalized.to_string(), "other_db.other_schema.users");
@@ -2063,11 +2039,7 @@ mod tests {
         };
 
         let types = Types::default();
-        let target_id = ObjectId {
-            database: "materialize".to_string(),
-            schema: "public".to_string(),
-            object: "my_view".to_string(),
-        };
+        let target_id = ObjectId::new("materialize".to_string(), "public".to_string(), "my_view".to_string());
         let dependencies = BTreeSet::new(); // No dependencies
 
         let result = validate_unit_test(
@@ -2098,19 +2070,11 @@ mod tests {
         };
 
         let types = Types::default(); // Empty types - unknown_table not in types
-        let target_id = ObjectId {
-            database: "materialize".to_string(),
-            schema: "public".to_string(),
-            object: "my_view".to_string(),
-        };
+        let target_id = ObjectId::new("materialize".to_string(), "public".to_string(), "my_view".to_string());
 
         // Dependency is present but not in types
         let mut dependencies = BTreeSet::new();
-        dependencies.insert(ObjectId {
-            database: "materialize".to_string(),
-            schema: "public".to_string(),
-            object: "unknown_table".to_string(),
-        });
+        dependencies.insert(ObjectId::new("materialize".to_string(), "public".to_string(), "unknown_table".to_string()));
 
         // Should pass because mock covers the dependency, even though type info is missing
         let result = validate_unit_test(

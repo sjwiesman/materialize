@@ -1288,3 +1288,61 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert (
             rows == []
         ), f"refused dev run must not insert a manifest row, got: {rows}"
+
+
+def workflow_system_deps(c: Composition, parser: WorkflowArgumentParser) -> None:
+    """Test that system-catalog objects are accepted as 2-part dependencies.
+
+    Verifies:
+    - `lock` succeeds with a project.toml that declares `mz_catalog.mz_objects`,
+      `pg_catalog.pg_class`, etc. without a database prefix.
+    - The generated `types.lock` records each system-schema entry as
+      `schema.object` (no leading database).
+    - Mutating the project.toml to declare a 2-part name with a non-system
+      schema (e.g. `someschema.foo`) is rejected.
+    """
+    setup_base(c)
+
+    project_dir = PROJECTS_DIR / "system-deps" / "v1"
+    types_lock = project_dir / "types.lock"
+    if types_lock.exists():
+        types_lock.unlink()
+
+    # ── Happy path: lock with system-schema deps ──────────────────────────
+    result = run_mz_deploy(c, "system-deps/v1", "lock")
+    assert result.returncode == 0, f"lock failed: {result.stderr}"
+
+    assert types_lock.exists(), f"expected {types_lock} to be created"
+    contents = types_lock.read_text()
+    for system_dep in [
+        "mz_catalog.mz_objects",
+        "pg_catalog.pg_class",
+        "mz_internal.mz_comments",
+        "information_schema.tables",
+    ]:
+        assert (
+            f'name = "{system_dep}"' in contents
+        ), f"expected {system_dep} in types.lock; got:\n{contents}"
+        # Confirm the entry is 2-part — no leading database.
+        assert (
+            f'name = "materialize.{system_dep}"' not in contents
+        ), f"unexpected 3-part form for {system_dep} in types.lock:\n{contents}"
+
+    # ── Negative case: 2-part non-system dep is rejected ──────────────────
+    project_toml = project_dir / "project.toml"
+    original_toml = project_toml.read_text()
+    try:
+        project_toml.write_text(
+            original_toml + '\n# bad entry below\n# (overwritten)\n'
+        )
+        project_toml.write_text('dependencies = ["someschema.foo"]\n')
+        result = run_mz_deploy(c, "system-deps/v1", "lock", check=False)
+        assert (
+            result.returncode != 0
+        ), f"lock should reject 2-part non-system dep, got rc=0: {result.stdout}"
+        assert (
+            "invalid dependency" in result.stderr.lower()
+            or "invalid object id" in result.stderr.lower()
+        ), f"expected invalid-dependency error, got stderr:\n{result.stderr}"
+    finally:
+        project_toml.write_text(original_toml)

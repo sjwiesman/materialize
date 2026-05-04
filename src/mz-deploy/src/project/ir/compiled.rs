@@ -49,9 +49,12 @@ pub struct FullyQualifiedName {
 
 impl FullyQualifiedName {
     /// Get the database name.
+    ///
+    /// `FullyQualifiedName` is constructed only for project-internal user
+    /// objects, so the database is always present.
     #[inline]
     pub fn database(&self) -> &str {
-        self.id.database()
+        self.id.expect_database()
     }
 
     /// Get the schema name.
@@ -241,7 +244,7 @@ impl TryFrom<(&std::path::Path, &str)> for FullyQualifiedName {
 impl From<ObjectId> for FullyQualifiedName {
     fn from(id: ObjectId) -> Self {
         let item_name = UnresolvedItemName(vec![
-            Ident::new(id.database()).expect("validated database identifier"),
+            Ident::new(id.expect_database()).expect("validated database identifier"),
             Ident::new(id.schema()).expect("validated schema identifier"),
             Ident::new(id.object()).expect("validated object identifier"),
         ]);

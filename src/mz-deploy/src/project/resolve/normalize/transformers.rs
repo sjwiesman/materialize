@@ -40,6 +40,7 @@
 
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::object_id::ObjectId;
+use mz_repr::namespaces::is_system_schema;
 use mz_sql_parser::ast::*;
 use std::collections::BTreeMap;
 
@@ -91,8 +92,12 @@ impl<'a> NameTransformer for FullyQualifyingTransformer<'a> {
                 UnresolvedItemName(vec![database, schema, object])
             }
             2 => {
-                // Schema-qualified: schema.object
-                // Prepend database to make database.schema.object
+                // Schema-qualified: schema.object. System catalogs are
+                // database-less, so leave them as 2-part. Otherwise prepend
+                // the file's default database.
+                if is_system_schema(name.0[0].as_str()) {
+                    return name.clone();
+                }
                 let schema = name.0[0].clone();
                 let object = name.0[1].clone();
                 let database = Ident::new(self.fqn.database()).expect("valid database identifier");
@@ -136,6 +141,12 @@ pub struct FlatteningTransformer<'a> {
 
 impl<'a> NameTransformer for FlatteningTransformer<'a> {
     fn transform_name(&self, name: &UnresolvedItemName) -> UnresolvedItemName {
+        // System catalog references live outside the flattening container:
+        // the typecheck server resolves them natively. Leave them as-is.
+        if name.0.len() == 2 && is_system_schema(name.0[0].as_str()) {
+            return name.clone();
+        }
+
         // First, fully qualify the name to ensure we have all parts
         let fully_qualified = match name.0.len() {
             1 => {
@@ -223,34 +234,11 @@ impl<'a> StagingTransformer<'a> {
     pub(crate) fn is_external(&self, name: &UnresolvedItemName) -> bool {
         use ObjectId;
 
-        // Try to construct an ObjectId from the name
-        let object_id = match name.0.len() {
-            1 => {
-                // Unqualified: use default database and schema
-                ObjectId {
-                    database: self.fqn.database().to_string(),
-                    schema: self.fqn.schema().to_string(),
-                    object: name.0[0].to_string(),
-                }
-            }
-            2 => {
-                // Schema-qualified: use default database
-                ObjectId {
-                    database: self.fqn.database().to_string(),
-                    schema: name.0[0].to_string(),
-                    object: name.0[1].to_string(),
-                }
-            }
-            3 => {
-                // Fully qualified
-                ObjectId {
-                    database: name.0[0].to_string(),
-                    schema: name.0[1].to_string(),
-                    object: name.0[2].to_string(),
-                }
-            }
-            _ => return false, // Invalid name, not external
-        };
+        if name.0.is_empty() || name.0.len() > 3 {
+            return false; // Invalid name, not external
+        }
+        let object_id =
+            ObjectId::from_item_name(name, self.fqn.database(), self.fqn.schema());
 
         // Check if it's in the external dependencies
         if self.external_dependencies.contains(&object_id) {
@@ -436,6 +424,11 @@ impl<'a> ExplainTransformer<'a> {
 
 impl<'a> NameTransformer for ExplainTransformer<'a> {
     fn transform_name(&self, name: &UnresolvedItemName) -> UnresolvedItemName {
+        // System catalog references aren't flattened into the explain schema;
+        // the server resolves them natively.
+        if name.0.len() == 2 && is_system_schema(name.0[0].as_str()) {
+            return name.clone();
+        }
         let parts = match name.0.len() {
             1 => [
                 self.fqn.database().to_string(),

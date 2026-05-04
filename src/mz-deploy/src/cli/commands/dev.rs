@@ -184,7 +184,7 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
 
     let dirty_schemas: BTreeSet<SchemaQualifier> = overlay_objects
         .iter()
-        .map(|(id, _)| SchemaQualifier::new(id.database.clone(), id.schema.clone()))
+        .map(|(id, _)| SchemaQualifier::new(id.expect_database().to_string(), id.schema().to_string()))
         .collect();
 
     print_plan(&dirty_schemas, &profile_name);

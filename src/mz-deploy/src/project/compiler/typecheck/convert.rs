@@ -40,13 +40,20 @@ pub(super) fn create_stub_table_sql(
         ));
     }
 
-    format!(
-        "CREATE TABLE {}.{}.{} ({})",
-        quote_identifier(&object_id.database),
-        quote_identifier(&object_id.schema),
-        quote_identifier(&object_id.object),
-        col_defs.join(", ")
-    )
+    let prefix = match object_id.database() {
+        Some(db) => format!(
+            "{}.{}.{}",
+            quote_identifier(db),
+            quote_identifier(object_id.schema()),
+            quote_identifier(object_id.object()),
+        ),
+        None => format!(
+            "{}.{}",
+            quote_identifier(object_id.schema()),
+            quote_identifier(object_id.object()),
+        ),
+    };
+    format!("CREATE TABLE {} ({})", prefix, col_defs.join(", "))
 }
 
 /// Transform a compiled statement into SQL for the private catalog workspace.
