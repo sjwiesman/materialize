@@ -57,6 +57,7 @@ pub async fn run(settings: &Settings) -> Result<(), CliError> {
         .query_types_for_objects(&declared, &source_tables)
         .await
         .map_err(CliError::Connection)?;
+
     if !missing.is_empty() {
         return Err(CliError::DeclaredDependenciesMissing { missing });
     }

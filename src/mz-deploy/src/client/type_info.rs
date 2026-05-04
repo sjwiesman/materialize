@@ -23,14 +23,10 @@
 //!   single query per object.
 //! - **`query_external_types`** delegates to `query_types_for_objects`, extracting
 //!   object lists from the compiled project graph.
-//! - **Incremental type checking** uses [`query_object_columns`](TypeInfoClient::query_object_columns)
-//!   to query a single view's output columns inline after validation, enabling
-//!   type-hash comparison for dirty propagation.
 
 use crate::client::connection::TypeInfoClient;
 use crate::client::errors::ConnectionError;
 use crate::client::quote_identifier;
-use crate::project::ir::graph;
 use crate::project::ir::object_id::ObjectId;
 use crate::types::{ColumnType, ObjectKind, Types};
 use serde::Deserialize;
@@ -39,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Per-object payload returned by the catalog query in `query_types_for_objects`.
 #[derive(Deserialize)]
 struct CatalogObjectInfo {
-    object_type: String,
+    object_type: ObjectKind,
     object_comment: Option<String>,
     columns: Vec<CatalogColumnInfo>,
 }
@@ -98,9 +94,7 @@ impl TypeInfoClient<'_> {
         let input_json = serde_json::Value::Array(
             all_oids
                 .iter()
-                .map(|o| {
-                    serde_json::json!({"db": o.database, "sch": o.schema, "obj": o.object})
-                })
+                .map(|o| serde_json::json!({"db": o.database, "sch": o.schema, "obj": o.object}))
                 .collect(),
         );
 
@@ -170,16 +164,7 @@ impl TypeInfoClient<'_> {
             let kind = if source_table_set.contains(&oid) {
                 ObjectKind::Table
             } else {
-                match info.object_type.as_str() {
-                    "table" => ObjectKind::Table,
-                    "view" => ObjectKind::View,
-                    "materialized-view" => ObjectKind::MaterializedView,
-                    "source" => ObjectKind::Source,
-                    "sink" => ObjectKind::Sink,
-                    "secret" => ObjectKind::Secret,
-                    "connection" => ObjectKind::Connection,
-                    _ => ObjectKind::Table,
-                }
+                info.object_type
             };
             kinds.insert(oid.clone(), kind);
 
@@ -218,89 +203,5 @@ impl TypeInfoClient<'_> {
             },
             missing,
         ))
-    }
-
-    /// Query SHOW COLUMNS for external dependencies and `CREATE TABLE FROM SOURCE` tables.
-    ///
-    /// Plain `CREATE TABLE` objects are excluded — their schemas are derived from
-    /// the SQL AST during type checking. Only `CreateTableFromSource` tables need
-    /// their columns queried from the live server.
-    ///
-    /// Delegates to [`query_types_for_objects`](Self::query_types_for_objects).
-    pub async fn query_external_types(
-        &self,
-        project: &graph::Project,
-    ) -> Result<Types, ConnectionError> {
-        let external: Vec<ObjectId> = project.external_dependencies.iter().cloned().collect();
-        let source_tables: Vec<ObjectId> = project.get_tables_from_source().collect();
-        let (types, _missing) = self
-            .query_types_for_objects(&external, &source_tables)
-            .await?;
-        Ok(types)
-    }
-
-    /// Query column types for a single object via `SHOW COLUMNS`.
-    ///
-    /// When `flatten` is true, the object is referenced using the flattened
-    /// `"db.schema.object"` form (for temporary views). Otherwise it uses
-    /// the standard `db.schema.object` quoting.
-    pub async fn query_object_columns(
-        &self,
-        oid: &ObjectId,
-        flatten: bool,
-    ) -> Result<BTreeMap<String, ColumnType>, ConnectionError> {
-        let object_ref = if flatten {
-            format!("\"{}.{}.{}\"", oid.database, oid.schema, oid.object)
-        } else {
-            let quoted_db = quote_identifier(&oid.database);
-            let quoted_schema = quote_identifier(&oid.schema);
-            let quoted_object = quote_identifier(&oid.object);
-            format!("{}.{}.{}", quoted_db, quoted_schema, quoted_object)
-        };
-
-        let rows = self
-            .client
-            .query(&format!("SHOW COLUMNS FROM {}", object_ref), &[])
-            .await?;
-
-        let mut columns = BTreeMap::new();
-        for (position, row) in rows.iter().enumerate() {
-            let name: String = row.get("name");
-            let type_str: String = row.get("type");
-            let nullable: bool = row.get("nullable");
-
-            columns.insert(
-                name,
-                ColumnType {
-                    r#type: type_str,
-                    nullable,
-                    position,
-                    comment: None,
-                },
-            );
-        }
-
-        Ok(columns)
-    }
-
-    /// Query types for internal project views from the database.
-    pub async fn query_internal_types(
-        &self,
-        object_ids: &[&ObjectId],
-        flatten: bool,
-    ) -> Result<Types, ConnectionError> {
-        let mut objects = BTreeMap::new();
-
-        for oid in object_ids {
-            let columns = self.query_object_columns(oid, flatten).await?;
-            objects.insert((*oid).clone(), columns);
-        }
-
-        Ok(Types {
-            version: 1,
-            tables: objects,
-            kinds: BTreeMap::new(),
-            comments: BTreeMap::new(),
-        })
     }
 }
