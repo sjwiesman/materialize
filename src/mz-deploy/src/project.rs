@@ -73,7 +73,9 @@ impl SchemaQualifier {
     /// Collect the distinct `(database, schema)` pairs from a slice of objects.
     pub fn collect_from(objs: &[&ir::graph::DatabaseObject]) -> BTreeSet<Self> {
         objs.iter()
-            .map(|obj| Self::new(obj.id.database.clone(), obj.id.schema.clone()))
+            .map(|obj| {
+                Self::new(obj.id.expect_database().to_string(), obj.id.schema().to_string())
+            })
             .collect()
     }
 }

@@ -198,11 +198,6 @@ impl ProjectSettings {
                 .map_err(|_| ConfigError::InvalidDependency {
                     entry: entry.clone(),
                 })?;
-            if id.database().is_empty() || id.schema().is_empty() || id.object().is_empty() {
-                return Err(ConfigError::InvalidDependency {
-                    entry: entry.clone(),
-                });
-            }
             if !seen.insert(id) {
                 return Err(ConfigError::DuplicateDependency {
                     entry: entry.clone(),
@@ -902,5 +897,58 @@ mod tests {
         // `mz-deploy profile set`.
         let err = toml::from_str::<ProjectSettings>(r#"profile = "default""#).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_dependencies_accepts_user_three_part() {
+        let settings: ProjectSettings = toml::from_str(
+            r#"dependencies = ["materialize.public.foo"]"#,
+        )
+        .unwrap();
+        let deps = settings.validate_dependencies().unwrap();
+        assert_eq!(deps.len(), 1);
+        let dep = deps.iter().next().unwrap();
+        assert_eq!(dep.database(), Some("materialize"));
+        assert_eq!(dep.schema(), "public");
+        assert_eq!(dep.object(), "foo");
+    }
+
+    #[test]
+    fn validate_dependencies_accepts_system_two_part() {
+        let settings: ProjectSettings = toml::from_str(
+            r#"dependencies = ["mz_catalog.mz_objects", "pg_catalog.pg_class"]"#,
+        )
+        .unwrap();
+        let deps = settings.validate_dependencies().unwrap();
+        assert_eq!(deps.len(), 2);
+        for dep in &deps {
+            assert_eq!(dep.database(), None);
+        }
+    }
+
+    #[test]
+    fn validate_dependencies_rejects_non_system_two_part() {
+        let settings: ProjectSettings =
+            toml::from_str(r#"dependencies = ["public.foo"]"#).unwrap();
+        let err = settings.validate_dependencies().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidDependency { .. }));
+    }
+
+    #[test]
+    fn validate_dependencies_rejects_one_part() {
+        let settings: ProjectSettings =
+            toml::from_str(r#"dependencies = ["foo"]"#).unwrap();
+        let err = settings.validate_dependencies().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidDependency { .. }));
+    }
+
+    #[test]
+    fn validate_dependencies_rejects_duplicates() {
+        let settings: ProjectSettings = toml::from_str(
+            r#"dependencies = ["mz_catalog.mz_objects", "mz_catalog.mz_objects"]"#,
+        )
+        .unwrap();
+        let err = settings.validate_dependencies().unwrap_err();
+        assert!(matches!(err, ConfigError::DuplicateDependency { .. }));
     }
 }

@@ -26,7 +26,6 @@
 
 use crate::client::connection::TypeInfoClient;
 use crate::client::errors::ConnectionError;
-use crate::client::quote_identifier;
 use crate::project::ir::object_id::ObjectId;
 use crate::types::{ColumnType, ObjectKind, Types};
 use serde::Deserialize;
@@ -94,7 +93,11 @@ impl TypeInfoClient<'_> {
         let input_json = serde_json::Value::Array(
             all_oids
                 .iter()
-                .map(|o| serde_json::json!({"db": o.database, "sch": o.schema, "obj": o.object}))
+                .map(|o| serde_json::json!({
+                    "db": o.database(),
+                    "sch": o.schema(),
+                    "obj": o.object(),
+                }))
                 .collect(),
         );
 
@@ -127,9 +130,8 @@ impl TypeInfoClient<'_> {
                         ) \
                     )::text AS data \
                  FROM input i \
-                 JOIN mz_catalog.mz_databases d ON d.name = i.db \
-                 JOIN mz_catalog.mz_schemas s \
-                    ON s.database_id = d.id AND s.name = i.sch \
+                 JOIN mz_catalog.mz_schemas s ON s.name = i.sch \
+                 LEFT JOIN mz_catalog.mz_databases d ON d.id = s.database_id \
                  JOIN mz_catalog.mz_objects o \
                     ON o.schema_id = s.id AND o.name = i.obj \
                  LEFT JOIN mz_catalog.mz_columns c ON c.id = o.id \
@@ -137,6 +139,8 @@ impl TypeInfoClient<'_> {
                     ON o.id = obj_comment.id AND obj_comment.object_sub_id IS NULL \
                  LEFT JOIN mz_internal.mz_comments col_comment \
                     ON c.id = col_comment.id AND col_comment.object_sub_id = c.position \
+                 WHERE (i.db IS NULL AND s.database_id IS NULL) \
+                    OR (i.db IS NOT NULL AND d.name = i.db) \
                  GROUP BY i.db, i.sch, i.obj, o.type, obj_comment.comment",
                 &[&input_json],
             )
@@ -148,10 +152,12 @@ impl TypeInfoClient<'_> {
         let mut found = BTreeSet::new();
 
         for row in &rows {
-            let oid = ObjectId {
-                database: row.get("db"),
-                schema: row.get("sch"),
-                object: row.get("obj"),
+            let db: Option<String> = row.get("db");
+            let sch: String = row.get("sch");
+            let obj: String = row.get("obj");
+            let oid = match db {
+                Some(db) => ObjectId::new(db, sch, obj),
+                None => ObjectId::new_system(sch, obj),
             };
             let data: String = row.get("data");
             let info: CatalogObjectInfo = serde_json::from_str(&data).map_err(|e| {

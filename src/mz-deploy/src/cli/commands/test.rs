@@ -136,17 +136,17 @@ impl TestFilter {
 
     fn matches(&self, object_id: &ObjectId, test: &unit_test::UnitTest) -> bool {
         if let Some(ref db) = self.database {
-            if db != &object_id.database {
+            if Some(db.as_str()) != object_id.database() {
                 return false;
             }
         }
         if let Some(ref schema) = self.schema {
-            if schema != &object_id.schema {
+            if schema != object_id.schema() {
                 return false;
             }
         }
         if let Some(ref obj) = self.object {
-            if obj != &object_id.object {
+            if obj != object_id.object() {
                 return false;
             }
         }
@@ -255,7 +255,9 @@ impl TestResultEntry {
         test_case.set_classname(&self.object_id.to_string());
         test_case.set_filepath(&format!(
             "models/{}/{}/{}.sql",
-            self.object_id.database, self.object_id.schema, self.object_id.object
+            self.object_id.expect_database(),
+            self.object_id.schema(),
+            self.object_id.object()
         ));
         test_case
     }

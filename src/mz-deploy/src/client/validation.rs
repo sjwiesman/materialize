@@ -304,10 +304,14 @@ fn collect_external_dependencies(
     let mut external_databases = BTreeSet::new();
     let mut external_schemas = BTreeSet::new();
     for ext_dep in &planned_project.external_dependencies {
-        if !project_databases.contains(&ext_dep.database) {
-            external_databases.insert(ext_dep.database.clone());
+        // System-schema deps have no database, so there's nothing to require.
+        let Some(db) = ext_dep.database() else {
+            continue;
+        };
+        if !project_databases.contains(db) {
+            external_databases.insert(db.to_string());
         }
-        external_schemas.insert((ext_dep.database.clone(), ext_dep.schema.clone()));
+        external_schemas.insert((db.to_string(), ext_dep.schema().to_string()));
     }
     (external_databases, external_schemas)
 }
@@ -360,9 +364,9 @@ fn build_object_paths(
             for obj in &schema.objects {
                 let file_path = project_root
                     .join("models")
-                    .join(&obj.id.database)
-                    .join(&obj.id.schema)
-                    .join(format!("{}.sql", obj.id.object));
+                    .join(obj.id.expect_database())
+                    .join(obj.id.schema())
+                    .join(format!("{}.sql", obj.id.object()));
                 object_paths.insert(obj.id.clone(), file_path);
             }
         }
@@ -733,7 +737,7 @@ pub(crate) async fn validate_sources_exist_impl(
     for obj in planned_project.iter_objects() {
         if let Statement::CreateTableFromSource(ref stmt) = obj.typed_object.stmt {
             let source_id =
-                ObjectId::from_raw_item_name(&stmt.source, &obj.id.database, &obj.id.schema);
+                ObjectId::from_raw_item_name(&stmt.source, obj.id.expect_database(), obj.id.schema());
             if !defined_sources.contains(&source_id) {
                 referenced_sources.insert(source_id);
             }
@@ -766,8 +770,8 @@ pub(crate) async fn validate_sink_connections_exist_impl(
                 CreateSinkConnection::Kafka { connection, .. } => {
                     vec![ObjectId::from_raw_item_name(
                         connection,
-                        &obj.id.database,
-                        &obj.id.schema,
+                        obj.id.expect_database(),
+                        obj.id.schema(),
                     )]
                 }
                 CreateSinkConnection::Iceberg {
@@ -776,11 +780,11 @@ pub(crate) async fn validate_sink_connections_exist_impl(
                     ..
                 } => {
                     vec![
-                        ObjectId::from_raw_item_name(connection, &obj.id.database, &obj.id.schema),
+                        ObjectId::from_raw_item_name(connection, obj.id.expect_database(), obj.id.schema()),
                         ObjectId::from_raw_item_name(
                             aws_connection,
-                            &obj.id.database,
-                            &obj.id.schema,
+                            obj.id.expect_database(),
+                            obj.id.schema(),
                         ),
                     ]
                 }

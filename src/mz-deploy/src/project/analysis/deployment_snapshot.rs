@@ -266,7 +266,7 @@ pub(crate) fn build_snapshot_from_planned(
         // Track which schema this object belongs to.
         // Schemas marked as replacement in the project config get Replacement kind;
         // all others default to Objects.
-        let sq = SchemaQualifier::new(object_id.database.clone(), object_id.schema.clone());
+        let sq = SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string());
         let kind = if planned_project.replacement_schemas.contains(&sq) {
             DeploymentKind::Replacement
         } else {
@@ -343,9 +343,9 @@ pub(crate) async fn write_to_database(
     for (object_id, hash) in &snapshot.objects {
         object_records.push(DeploymentObjectRecord {
             deploy_id: deploy_id.to_string(),
-            database: object_id.database.clone(),
-            schema: object_id.schema.clone(),
-            object: object_id.object.clone(),
+            database: object_id.expect_database().to_string(),
+            schema: object_id.schema().to_string(),
+            object: object_id.object().to_string(),
             object_hash: hash.clone(),
             deployed_at: now,
         });
@@ -461,11 +461,7 @@ mod tests {
         let snapshot = build_snapshot_from_planned(&planned_project).unwrap();
 
         // Only the view and MV should be in the snapshot
-        let object_names: Vec<&str> = snapshot
-            .objects
-            .keys()
-            .map(|id| id.object.as_str())
-            .collect();
+        let object_names: Vec<&str> = snapshot.objects.keys().map(|id| id.object()).collect();
         assert_eq!(
             object_names,
             vec!["my_mv", "my_view"],
@@ -476,7 +472,7 @@ mod tests {
         // Apply-managed objects should NOT be present
         for name in &["my_table", "my_source", "my_conn", "my_secret"] {
             assert!(
-                !snapshot.objects.keys().any(|id| id.object == *name),
+                !snapshot.objects.keys().any(|id| id.object() == *name),
                 "{} should not be in the snapshot",
                 name
             );

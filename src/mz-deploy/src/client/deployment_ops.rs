@@ -526,11 +526,7 @@ pub(super) async fn get_deployment_objects(
             ConnectionError::Message(format!("Failed to parse deployment kind: {}", e))
         })?;
 
-        let object_id = ObjectId {
-            database: database.clone(),
-            schema: schema.clone(),
-            object,
-        };
+        let object_id = ObjectId::new(database.clone(), schema.clone(), object);
         objects.insert(object_id, object_hash);
         schemas
             .entry(SchemaQualifier::new(database, schema))

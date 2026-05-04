@@ -1226,11 +1226,7 @@ fn test_staging_external_dependency_not_transformed() {
     // Test that external dependencies are NOT transformed
     let fqn = staging_test_fqn();
     let mut external_deps = BTreeSet::new();
-    external_deps.insert(ObjectId {
-        database: "materialize".to_string(),
-        schema: "sources".to_string(),
-        object: "kafka_events".to_string(),
-    });
+    external_deps.insert(ObjectId::new("materialize".to_string(), "sources".to_string(), "kafka_events".to_string()));
 
     let replacement_objects = BTreeSet::new();
     let mut visitor = NormalizingVisitor::staging(
@@ -1275,11 +1271,7 @@ fn test_staging_mixed_internal_and_external() {
     // Test query with both internal (should be transformed) and external (should not) dependencies
     let fqn = staging_test_fqn();
     let mut external_deps = BTreeSet::new();
-    external_deps.insert(ObjectId {
-        database: "materialize".to_string(),
-        schema: "sources".to_string(),
-        object: "raw_events".to_string(),
-    });
+    external_deps.insert(ObjectId::new("materialize".to_string(), "sources".to_string(), "raw_events".to_string()));
 
     let replacement_objects = BTreeSet::new();
     let mut visitor = NormalizingVisitor::staging(
@@ -1327,11 +1319,7 @@ fn test_staging_objects_to_deploy_filter() {
     let fqn = staging_test_fqn();
     let external_deps = BTreeSet::new();
     let mut objects_to_deploy = BTreeSet::new();
-    objects_to_deploy.insert(ObjectId {
-        database: "materialize".to_string(),
-        schema: "public".to_string(),
-        object: "sales".to_string(),
-    });
+    objects_to_deploy.insert(ObjectId::new("materialize".to_string(), "public".to_string(), "sales".to_string()));
     // Note: "inventory" is NOT in objects_to_deploy
 
     let replacement_objects = BTreeSet::new();
@@ -1392,25 +1380,13 @@ fn test_staging_cross_schema_objects_to_deploy_filter() {
 
     let external_deps = BTreeSet::new();
     let mut objects_to_deploy = BTreeSet::new();
-    objects_to_deploy.insert(ObjectId {
-        database: "app".to_string(),
-        schema: "ops".to_string(),
-        object: "top_spenders".to_string(),
-    });
+    objects_to_deploy.insert(ObjectId::new("app".to_string(), "ops".to_string(), "top_spenders".to_string()));
     // order_summary IS in objects_to_deploy (it changed)
-    objects_to_deploy.insert(ObjectId {
-        database: "app".to_string(),
-        schema: "core".to_string(),
-        object: "order_summary".to_string(),
-    });
+    objects_to_deploy.insert(ObjectId::new("app".to_string(), "core".to_string(), "order_summary".to_string()));
 
     // Mark order_summary as a replacement object (deployed in-place)
     let mut replacement_objects = BTreeSet::new();
-    replacement_objects.insert(ObjectId {
-        database: "app".to_string(),
-        schema: "core".to_string(),
-        object: "order_summary".to_string(),
-    });
+    replacement_objects.insert(ObjectId::new("app".to_string(), "core".to_string(), "order_summary".to_string()));
 
     let mut visitor = NormalizingVisitor::staging(
         &fqn,
@@ -1465,16 +1441,8 @@ fn test_staging_replacement_schema_full_deploy() {
 
     let external_deps = BTreeSet::new();
     let mut objects_to_deploy = BTreeSet::new();
-    objects_to_deploy.insert(ObjectId {
-        database: "app".to_string(),
-        schema: "ops".to_string(),
-        object: "top_spenders".to_string(),
-    });
-    objects_to_deploy.insert(ObjectId {
-        database: "app".to_string(),
-        schema: "core".to_string(),
-        object: "order_summary".to_string(),
-    });
+    objects_to_deploy.insert(ObjectId::new("app".to_string(), "ops".to_string(), "top_spenders".to_string()));
+    objects_to_deploy.insert(ObjectId::new("app".to_string(), "core".to_string(), "order_summary".to_string()));
 
     // Empty replacement_objects — first deploy, no MVs exist in production yet
     let replacement_objects = BTreeSet::new();
@@ -1531,24 +1499,12 @@ fn test_staging_replacement_schema_incremental_deploy() {
 
     let external_deps = BTreeSet::new();
     let mut objects_to_deploy = BTreeSet::new();
-    objects_to_deploy.insert(ObjectId {
-        database: "app".to_string(),
-        schema: "ops".to_string(),
-        object: "top_spenders".to_string(),
-    });
-    objects_to_deploy.insert(ObjectId {
-        database: "app".to_string(),
-        schema: "core".to_string(),
-        object: "order_summary".to_string(),
-    });
+    objects_to_deploy.insert(ObjectId::new("app".to_string(), "ops".to_string(), "top_spenders".to_string()));
+    objects_to_deploy.insert(ObjectId::new("app".to_string(), "core".to_string(), "order_summary".to_string()));
 
     // order_summary is a replacement object (exists in production, being updated)
     let mut replacement_objects = BTreeSet::new();
-    replacement_objects.insert(ObjectId {
-        database: "app".to_string(),
-        schema: "core".to_string(),
-        object: "order_summary".to_string(),
-    });
+    replacement_objects.insert(ObjectId::new("app".to_string(), "core".to_string(), "order_summary".to_string()));
 
     let mut visitor = NormalizingVisitor::staging(
         &fqn,
@@ -2358,6 +2314,38 @@ fn test_in_list_with_subquery_normalized() {
         assert!(
             normalized_sql.contains("materialize.public.t3"),
             "Table inside IN list second subquery should be qualified, got: {}",
+            normalized_sql
+        );
+    } else {
+        panic!("Expected CreateView statement");
+    }
+}
+
+#[test]
+fn test_system_schema_2part_not_qualified() {
+    let fqn = test_fqn();
+    let mut visitor = NormalizingVisitor::fully_qualifying(&fqn);
+
+    let sql = r#"
+        CREATE VIEW test_view AS
+        SELECT id, name FROM mz_catalog.mz_objects
+    "#;
+
+    let statements = parse_statements(vec![sql]).unwrap();
+    if let Statement::CreateView(view) = &statements[0] {
+        let mut query = view.definition.query.clone();
+        visitor.normalize_query(&mut query);
+
+        let normalized_sql = query.to_ast_string(FormatMode::Simple);
+
+        assert!(
+            normalized_sql.contains("mz_catalog.mz_objects"),
+            "system-schema reference should remain 2-part, got: {}",
+            normalized_sql
+        );
+        assert!(
+            !normalized_sql.contains("materialize.mz_catalog.mz_objects"),
+            "system-schema reference should NOT be prepended with default db, got: {}",
             normalized_sql
         );
     } else {

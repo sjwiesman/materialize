@@ -157,7 +157,7 @@ pub async fn run(settings: &Settings, target: &str) -> Result<(), CliError> {
             .unwrap_or_default()
             .as_millis()
     );
-    let explain_db = &target.object_id.database;
+    let explain_db = target.object_id.expect_database();
 
     // Execute the explain plan with cleanup
     let result = execute_explain(
@@ -207,11 +207,11 @@ fn parse_target(target: &str) -> Result<ExplainTarget, CliError> {
     }
 
     Ok(ExplainTarget {
-        object_id: ObjectId {
-            database: parts[0].to_string(),
-            schema: parts[1].to_string(),
-            object: parts[2].to_string(),
-        },
+        object_id: ObjectId::new(
+            parts[0].to_string(),
+            parts[1].to_string(),
+            parts[2].to_string(),
+        ),
         index_name,
     })
 }

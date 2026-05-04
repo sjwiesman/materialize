@@ -268,27 +268,27 @@ pub async fn run(
                 .objects
                 .iter()
                 .map(|(id, _)| StagePlanObject {
-                    database: id.database.clone(),
-                    schema: id.schema.clone(),
-                    object: id.object.clone(),
+                    database: id.expect_database().to_string(),
+                    schema: id.schema().to_string(),
+                    object: id.object().to_string(),
                 })
                 .collect(),
             sinks: analysis
                 .sinks
                 .iter()
                 .map(|(id, _)| StagePlanObject {
-                    database: id.database.clone(),
-                    schema: id.schema.clone(),
-                    object: id.object.clone(),
+                    database: id.expect_database().to_string(),
+                    schema: id.schema().to_string(),
+                    object: id.object().to_string(),
                 })
                 .collect(),
             replacement_mvs: analysis
                 .replacement_mvs
                 .iter()
                 .map(|(id, _)| StagePlanObject {
-                    database: id.database.clone(),
-                    schema: id.schema.clone(),
-                    object: id.object.clone(),
+                    database: id.expect_database().to_string(),
+                    schema: id.schema().to_string(),
+                    object: id.object().to_string(),
                 })
                 .collect(),
         };
@@ -519,8 +519,8 @@ fn collect_stage_resources(
 
     for (object_id, typed_obj) in objects.iter().chain(replacement_mvs.iter()) {
         schema_set.insert(SchemaQualifier::new(
-            object_id.database.clone(),
-            object_id.schema.clone(),
+            object_id.expect_database().to_string(),
+            object_id.schema().to_string(),
         ));
         cluster_set.extend(typed_obj.clusters());
     }
@@ -593,7 +593,7 @@ async fn record_stage_metadata(
         let hash = deployment_snapshot::compute_typed_hash(typed_obj);
         staging_snapshot.objects.insert(object_id.clone(), hash);
         staging_snapshot.schemas.insert(
-            SchemaQualifier::new(object_id.database.clone(), object_id.schema.clone()),
+            SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string()),
             DeploymentKind::Objects,
         );
     }
@@ -604,8 +604,8 @@ async fn record_stage_metadata(
         staging_snapshot
             .schemas
             .entry(SchemaQualifier::new(
-                object_id.database.clone(),
-                object_id.schema.clone(),
+                object_id.expect_database().to_string(),
+                object_id.schema().to_string(),
             ))
             .or_insert(DeploymentKind::Sinks);
     }
@@ -614,7 +614,7 @@ async fn record_stage_metadata(
         let hash = deployment_snapshot::compute_typed_hash(typed_obj);
         staging_snapshot.objects.insert(object_id.clone(), hash);
         staging_snapshot.schemas.insert(
-            SchemaQualifier::new(object_id.database.clone(), object_id.schema.clone()),
+            SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string()),
             DeploymentKind::Replacement,
         );
     }
@@ -658,9 +658,9 @@ async fn record_stage_metadata(
                 PendingStatement {
                     deploy_id: stage_name.to_string(),
                     sequence_num: idx as i32,
-                    database: object_id.database.clone(),
-                    schema: object_id.schema.clone(),
-                    object: object_id.object.clone(),
+                    database: object_id.expect_database().to_string(),
+                    schema: object_id.schema().to_string(),
+                    object: object_id.object().to_string(),
                     object_hash: hash,
                     statement_sql: stmt.to_string(),
                     statement_kind: "sink".to_string(),
@@ -684,10 +684,10 @@ async fn record_stage_metadata(
             .iter()
             .map(|(object_id, _)| ReplacementMvRecord {
                 deploy_id: stage_name.to_string(),
-                target_database: object_id.database.clone(),
-                target_schema: object_id.schema.clone(),
-                target_name: object_id.object.clone(),
-                replacement_schema: format!("{}{}", object_id.schema, staging_suffix),
+                target_database: object_id.expect_database().to_string(),
+                target_schema: object_id.schema().to_string(),
+                target_name: object_id.object().to_string(),
+                replacement_schema: format!("{}{}", object_id.schema(), staging_suffix),
             })
             .collect();
         client
@@ -993,9 +993,9 @@ async fn deploy_objects_to_staging<'a>(
             "Applying {}/{}: {}{} (to schema {}{})",
             idx + 1,
             objects.len(),
-            &object_id.object,
+            object_id.object(),
             staging_suffix,
-            &object_id.schema,
+            object_id.schema(),
             staging_suffix
         );
 
@@ -1016,13 +1016,11 @@ async fn deploy_objects_to_staging<'a>(
     // Deploy replacement MVs using CREATE REPLACEMENT MATERIALIZED VIEW ... FOR
     for (idx, (object_id, typed_obj)) in replacement_mvs.iter().enumerate() {
         verbose!(
-            "Applying replacement MV {}/{}: {} FOR {}.{}.{}",
+            "Applying replacement MV {}/{}: {} FOR {}",
             idx + 1,
             replacement_mvs.len(),
-            &object_id.object,
-            &object_id.database,
-            &object_id.schema,
-            &object_id.object
+            object_id.object(),
+            object_id
         );
 
         let production_target = object_id.to_unresolved_item_name();
@@ -1247,7 +1245,7 @@ fn validate_no_new_objects_in_existing_stable_schemas(
                 && production_snapshot
                     .objects
                     .keys()
-                    .any(|prod| prod.database == obj.database && prod.schema == obj.schema)
+                    .any(|prod| prod.database() == obj.database() && prod.schema() == obj.schema())
         })
         .collect();
 
@@ -1257,9 +1255,9 @@ fn validate_no_new_objects_in_existing_stable_schemas(
 
     let first = blocked[0];
     Err(CliError::NewObjectInExistingStableSchema {
-        database: first.database.clone(),
-        schema: first.schema.clone(),
-        objects: blocked.iter().map(|o| o.object.clone()).collect(),
+        database: first.expect_database().to_string(),
+        schema: first.schema().to_string(),
+        objects: blocked.iter().map(|o| o.object().to_string()).collect(),
     })
 }
 
@@ -1401,7 +1399,7 @@ mod tests {
             1,
             "Only the view should be staged"
         );
-        assert_eq!(partitioned.objects[0].0.object, "my_view");
+        assert_eq!(partitioned.objects[0].0.object(), "my_view");
 
         // Table, source, connection, secret should be counted as skipped
         assert_eq!(
@@ -1470,7 +1468,7 @@ mod tests {
 
         // Only the view should be staged
         assert_eq!(partitioned.objects.len(), 1);
-        assert_eq!(partitioned.objects[0].0.object, "my_view");
+        assert_eq!(partitioned.objects[0].0.object(), "my_view");
         assert_eq!(partitioned.table_count, 4);
 
         // Collect stage resources
@@ -1524,7 +1522,7 @@ mod tests {
         // Build old snapshot: same hashes for everything EXCEPT the view
         let mut old_snapshot = DeploymentSnapshot::default();
         for (object_id, hash) in &new_snapshot.objects {
-            if object_id.object == "my_view" {
+            if object_id.object() == "my_view" {
                 // Different hash to simulate the view having changed
                 old_snapshot
                     .objects
@@ -1566,10 +1564,10 @@ mod tests {
             partitioned
                 .objects
                 .iter()
-                .map(|(id, _)| &id.object)
+                .map(|(id, _)| id.object())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(partitioned.objects[0].0.object, "my_view");
+        assert_eq!(partitioned.objects[0].0.object(), "my_view");
 
         let (schema_set, cluster_set) =
             collect_stage_resources(&partitioned.objects, &partitioned.replacement_mvs);
@@ -1611,7 +1609,7 @@ mod tests {
         // Build old snapshot: same hashes except the view
         let mut old_snapshot = DeploymentSnapshot::default();
         for (object_id, hash) in &new_snapshot.objects {
-            if object_id.object == "my_view" {
+            if object_id.object() == "my_view" {
                 old_snapshot
                     .objects
                     .insert(object_id.clone(), "old_hash".to_string());
@@ -1651,10 +1649,10 @@ mod tests {
             partitioned
                 .objects
                 .iter()
-                .map(|(id, _)| &id.object)
+                .map(|(id, _)| id.object())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(partitioned.objects[0].0.object, "my_view");
+        assert_eq!(partitioned.objects[0].0.object(), "my_view");
 
         let (schema_set, cluster_set) =
             collect_stage_resources(&partitioned.objects, &partitioned.replacement_mvs);
@@ -1947,7 +1945,7 @@ mod tests {
             let hash = deployment_snapshot::compute_typed_hash(typed_obj);
             staging_snapshot.objects.insert(object_id.clone(), hash);
             staging_snapshot.schemas.insert(
-                SchemaQualifier::new(object_id.database.clone(), object_id.schema.clone()),
+                SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string()),
                 DeploymentKind::Objects,
             );
         }
@@ -1958,8 +1956,8 @@ mod tests {
             staging_snapshot
                 .schemas
                 .entry(SchemaQualifier::new(
-                    object_id.database.clone(),
-                    object_id.schema.clone(),
+                    object_id.expect_database().to_string(),
+                    object_id.schema().to_string(),
                 ))
                 .or_insert(DeploymentKind::Sinks);
         }
@@ -1968,7 +1966,7 @@ mod tests {
             let hash = deployment_snapshot::compute_typed_hash(typed_obj);
             staging_snapshot.objects.insert(object_id.clone(), hash);
             staging_snapshot.schemas.insert(
-                SchemaQualifier::new(object_id.database.clone(), object_id.schema.clone()),
+                SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string()),
                 DeploymentKind::Replacement,
             );
         }

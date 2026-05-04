@@ -505,7 +505,9 @@ fn build_error(object_id: &ObjectId, kind: ObjectTypeCheckErrorKind) -> ObjectTy
         object_id: object_id.clone(),
         file_path: PathBuf::from(format!(
             "{}/{}/{}.sql",
-            object_id.database, object_id.schema, object_id.object
+            object_id.expect_database(),
+            object_id.schema(),
+            object_id.object()
         )),
         kind,
     }
@@ -664,10 +666,17 @@ impl CatalogRuntime {
     ) {
         let mut namespaces = BTreeSet::new();
         for object in project.iter_objects() {
-            namespaces.insert((object.id.database.clone(), object.id.schema.clone()));
+            namespaces.insert((
+                object.id.expect_database().to_string(),
+                object.id.schema().to_string(),
+            ));
         }
         for id in external_types.tables.keys() {
-            namespaces.insert((id.database.clone(), id.schema.clone()));
+            // System-schema externals have no database; they're seeded
+            // separately and don't need ensure_user_schema.
+            if let Some(db) = id.database() {
+                namespaces.insert((db.to_string(), id.schema().to_string()));
+            }
         }
 
         for (database, schema) in namespaces {
@@ -2478,11 +2487,7 @@ mod tests {
     fn test_create_table_with_date_column() {
         let mut runtime = CatalogRuntime::new().expect("catalog creation should succeed");
         runtime.ensure_user_schema("test_db", "test_schema");
-        let object_id = ObjectId {
-            database: "test_db".into(),
-            schema: "test_schema".into(),
-            object: "test_table".into(),
-        };
+        let object_id = ObjectId::new("test_db".into(), "test_schema".into(), "test_table".into());
         let sql = r#"CREATE TABLE "test_db"."test_schema"."test_table" ("col_date" date, "col_ts" timestamptz, "col_bool" bool NOT NULL)"#;
         let result = runtime.create_item(&object_id, sql);
         assert!(
@@ -2496,11 +2501,7 @@ mod tests {
     fn test_stub_table_with_date_column() {
         let mut runtime = CatalogRuntime::new().expect("catalog creation should succeed");
         runtime.ensure_user_schema("test_db", "test_schema");
-        let object_id = ObjectId {
-            database: "test_db".into(),
-            schema: "test_schema".into(),
-            object: "test_table".into(),
-        };
+        let object_id = ObjectId::new("test_db".into(), "test_schema".into(), "test_table".into());
         let mut columns = BTreeMap::new();
         columns.insert(
             "col_date".to_string(),

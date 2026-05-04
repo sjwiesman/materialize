@@ -521,29 +521,27 @@ pub(crate) fn qualify_and_filter(
     default_schema: &str,
     prefix: &PrefixContext<'_>,
 ) -> Option<(String, String)> {
-    let sort_key = if id.database() == default_db && id.schema() == default_schema {
+    let in_default_db = id.database() == Some(default_db);
+    let sort_key = if in_default_db && id.schema() == default_schema {
         "1"
-    } else if id.database() == default_db {
+    } else if in_default_db {
         "2"
     } else {
         "3"
     };
 
     if prefix.dots == 0 {
-        let label = if id.database() == default_db && id.schema() == default_schema {
+        let label = if in_default_db && id.schema() == default_schema {
             id.object().to_string()
-        } else if id.database() == default_db {
+        } else if in_default_db || id.database().is_none() {
             format!("{}.{}", id.schema(), id.object())
         } else {
-            format!("{}.{}.{}", id.database(), id.schema(), id.object())
+            id.to_string()
         };
         return Some((label.clone(), format!("{}_{}", sort_key, label)));
     }
 
-    let candidates = [
-        format!("{}.{}", id.schema(), id.object()),
-        format!("{}.{}.{}", id.database(), id.schema(), id.object()),
-    ];
+    let candidates = [format!("{}.{}", id.schema(), id.object()), id.to_string()];
 
     let prefix_lower = prefix.text.to_lowercase();
     for candidate in &candidates {

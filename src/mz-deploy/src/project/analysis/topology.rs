@@ -146,11 +146,11 @@ impl Project {
     /// Find the compiled object for a given ObjectId.
     fn find_typed_object(&self, object_id: &ObjectId) -> Option<&compiled::DatabaseObject> {
         for database in &self.databases {
-            if database.name != object_id.database {
+            if Some(database.name.as_str()) != object_id.database() {
                 continue;
             }
             for schema in &database.schemas {
-                if schema.name != object_id.schema {
+                if schema.name != object_id.schema() {
                     continue;
                 }
                 for obj in &schema.objects {

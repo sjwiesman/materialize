@@ -444,11 +444,7 @@ impl fmt::Display for DatabaseValidationError {
                     "error".if_supports_color(Stream::Stderr, |t| error_style.style(t))
                 )?;
                 for source in sources {
-                    writeln!(
-                        f,
-                        "  - {}.{}.{}",
-                        source.database, source.schema, source.object
-                    )?;
+                    writeln!(f, "  - {}", source)?;
                 }
                 writeln!(f)?;
                 writeln!(
@@ -466,7 +462,7 @@ impl fmt::Display for DatabaseValidationError {
                     "error".if_supports_color(Stream::Stderr, |t| error_style.style(t))
                 )?;
                 for conn in connections {
-                    writeln!(f, "  - {}.{}.{}", conn.database, conn.schema, conn.object)?;
+                    writeln!(f, "  - {}", conn)?;
                 }
                 writeln!(f)?;
                 writeln!(
@@ -490,18 +486,12 @@ impl fmt::Display for DatabaseValidationError {
                 for (object, missing_tables) in objects_needing_tables {
                     writeln!(
                         f,
-                        "  {} {}.{}.{} depends on:",
+                        "  {} {} depends on:",
                         "×".if_supports_color(Stream::Stderr, |t| t.bright_red()),
-                        object.database,
-                        object.schema,
-                        object.object
+                        object
                     )?;
                     for table in missing_tables {
-                        writeln!(
-                            f,
-                            "    - {}.{}.{}",
-                            table.database, table.schema, table.object
-                        )?;
+                        writeln!(f, "    - {}", table)?;
                     }
                 }
                 writeln!(f)?;

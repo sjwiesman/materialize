@@ -81,7 +81,7 @@ impl Display for ChangeSet {
         if !self.changed_objects.is_empty() {
             writeln!(f, "Changed objects:")?;
             for obj in &self.changed_objects {
-                writeln!(f, "  - {}.{}.{}", obj.database, obj.schema, obj.object)?;
+                writeln!(f, "  - {}", obj)?;
             }
         }
 
@@ -102,7 +102,7 @@ impl Display for ChangeSet {
         if !self.objects_to_deploy.is_empty() {
             writeln!(f, "Objects to deploy:")?;
             for obj in &self.objects_to_deploy {
-                writeln!(f, "  - {}.{}.{}", obj.database, obj.schema, obj.object)?;
+                writeln!(f, "  - {}", obj)?;
             }
         }
 

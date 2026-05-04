@@ -837,11 +837,7 @@ async fn execute_pending_sinks(client: &Client, plan: &DeploymentPlan) -> Result
     let sink_ids: BTreeSet<ObjectId> = plan
         .pending_statements
         .iter()
-        .map(|stmt| ObjectId {
-            database: stmt.database.clone(),
-            schema: stmt.schema.clone(),
-            object: stmt.object.clone(),
-        })
+        .map(|stmt| ObjectId::new(stmt.database.clone(), stmt.schema.clone(), stmt.object.clone()))
         .collect();
 
     // Check which sinks already exist (like tables, skip existing ones)
@@ -852,11 +848,8 @@ async fn execute_pending_sinks(client: &Client, plan: &DeploymentPlan) -> Result
         .pending_statements
         .iter()
         .filter(|stmt| {
-            let obj_id = ObjectId {
-                database: stmt.database.clone(),
-                schema: stmt.schema.clone(),
-                object: stmt.object.clone(),
-            };
+            let obj_id =
+                ObjectId::new(stmt.database.clone(), stmt.schema.clone(), stmt.object.clone());
             !existing_sinks.contains(&obj_id)
         })
         .collect();
@@ -865,12 +858,9 @@ async fn execute_pending_sinks(client: &Client, plan: &DeploymentPlan) -> Result
     if !existing_sinks.is_empty() {
         progress::info("Sinks that already exist (skipping):");
         let mut existing_list: Vec<_> = existing_sinks.iter().collect();
-        existing_list.sort_by_key(|obj| (&obj.database, &obj.schema, &obj.object));
+        existing_list.sort_by_key(|obj| obj.to_string());
         for sink_id in existing_list {
-            progress::info(&format!(
-                "  - {}.{}.{}",
-                sink_id.database, sink_id.schema, sink_id.object
-            ));
+            progress::info(&format!("  - {}", sink_id));
         }
     }
 
@@ -1030,11 +1020,11 @@ async fn repoint_dependent_sinks(client: &Client, plan: &DeploymentPlan) -> Resu
                 .dependency_schema
                 .trim_end_matches(staging_suffix)
                 .to_string();
-            ObjectId {
-                database: sink.dependency_database.clone(),
-                schema: new_schema,
-                object: sink.dependency_name.clone(),
-            }
+            ObjectId::new(
+                sink.dependency_database.clone(),
+                new_schema,
+                sink.dependency_name.clone(),
+            )
         })
         .collect();
 
@@ -1048,11 +1038,11 @@ async fn repoint_dependent_sinks(client: &Client, plan: &DeploymentPlan) -> Resu
         // Compute new schema name (strip suffix to get production schema name)
         let new_schema = sink.dependency_schema.trim_end_matches(staging_suffix);
 
-        let replacement_id = ObjectId {
-            database: sink.dependency_database.clone(),
-            schema: new_schema.to_string(),
-            object: sink.dependency_name.clone(),
-        };
+        let replacement_id = ObjectId::new(
+            sink.dependency_database.clone(),
+            new_schema.to_string(),
+            sink.dependency_name.clone(),
+        );
 
         if !existing_ids.contains(&replacement_id) {
             return Err(CliError::SinkRepointFailed {

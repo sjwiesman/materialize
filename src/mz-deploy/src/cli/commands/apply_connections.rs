@@ -70,7 +70,7 @@ impl Connections {
 
         let live_sql = client
             .introspection()
-            .get_connection_create_sql(&obj_id.database, &obj_id.schema, &obj_id.object)
+            .get_connection_create_sql(obj_id.expect_database(), obj_id.schema(), obj_id.object())
             .await
             .map_err(CliError::Connection)?;
 
@@ -184,7 +184,7 @@ pub async fn plan(
         .iter()
         .filter(|(obj_id, _)| !existing.contains(obj_id))
         .map(|(obj_id, _)| {
-            project::SchemaQualifier::new(obj_id.database.clone(), obj_id.schema.clone())
+            project::SchemaQualifier::new(obj_id.expect_database().to_string(), obj_id.schema().to_string())
         })
         .collect();
     apply_plan

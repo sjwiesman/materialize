@@ -218,11 +218,7 @@ mod tests {
     use super::*;
 
     fn id(name: &str) -> ObjectId {
-        ObjectId {
-            database: "d".into(),
-            schema: "s".into(),
-            object: name.into(),
-        }
+        ObjectId::new("d".into(), "s".into(), name.into())
     }
 
     /// Build the (nodes, direct_deps, dependents) triple from a list of
@@ -288,13 +284,13 @@ mod tests {
             nodes.iter().map(|id| (id.clone(), Vec::new())).collect();
 
         let outcomes = run::<String, _>(nodes.clone(), direct_deps, dependents, |id, _deps| {
-            Ok(id.object.clone())
+            Ok(id.object().to_string())
         });
 
         assert_eq!(outcomes.len(), 4);
         for id in &nodes {
             match outcomes.get(id) {
-                Some(NodeOutcome::Ok(v)) => assert_eq!(v.as_ref(), &id.object),
+                Some(NodeOutcome::Ok(v)) => assert_eq!(v.as_ref(), id.object()),
                 other => panic!("unexpected outcome for {id:?}: {other:?}"),
             }
         }
@@ -332,7 +328,7 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
 
         let outcomes = run::<u64, _>(nodes, direct_deps, dependents, move |obj_id, _deps| {
-            if obj_id.object == "b" || obj_id.object == "c" {
+            if obj_id.object() == "b" || obj_id.object() == "c" {
                 barrier.wait();
             }
             Ok(1u64)

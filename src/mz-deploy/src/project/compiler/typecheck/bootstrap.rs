@@ -76,6 +76,10 @@ pub(super) fn bootstrap_catalog(
         if registered_from_create.contains(id) || !included(id) {
             continue;
         }
+        // System catalogs are already in the base catalog; nothing to seed.
+        if id.database().is_none() {
+            continue;
+        }
         runtime.create_stub_table(id, columns)?;
     }
 

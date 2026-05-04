@@ -52,9 +52,9 @@ impl GrantObjectKind {
             Self::Connection => ObjectType::Connection,
         };
         let item_name = UnresolvedItemName::qualified(&[
-            Ident::new_unchecked(&obj_id.database),
-            Ident::new_unchecked(&obj_id.schema),
-            Ident::new_unchecked(&obj_id.object),
+            Ident::new_unchecked(obj_id.expect_database()),
+            Ident::new_unchecked(obj_id.schema()),
+            Ident::new_unchecked(obj_id.object()),
         ]);
         build_grant_target(object_type, UnresolvedObjectName::Item(item_name))
     }
@@ -205,9 +205,9 @@ pub async fn reconcile(
         .introspection()
         .get_database_object_grants(
             kind.catalog_table(),
-            &obj_id.database,
-            &obj_id.schema,
-            &obj_id.object,
+            obj_id.expect_database(),
+            obj_id.schema(),
+            obj_id.object(),
         )
         .await
         .map_err(CliError::Connection)?;
@@ -215,9 +215,9 @@ pub async fn reconcile(
         .introspection()
         .get_default_privilege_grants_for_database_object(
             kind.catalog_table(),
-            &obj_id.database,
-            &obj_id.schema,
-            &obj_id.object,
+            obj_id.expect_database(),
+            obj_id.schema(),
+            obj_id.object(),
             kind.object_type_str(),
         )
         .await
