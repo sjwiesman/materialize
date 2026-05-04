@@ -33,118 +33,191 @@ use crate::client::quote_identifier;
 use crate::project::ir::graph;
 use crate::project::ir::object_id::ObjectId;
 use crate::types::{ColumnType, ObjectKind, Types};
-use std::collections::BTreeMap;
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Per-object payload returned by the catalog query in `query_types_for_objects`.
+#[derive(Deserialize)]
+struct CatalogObjectInfo {
+    object_type: String,
+    object_comment: Option<String>,
+    columns: Vec<CatalogColumnInfo>,
+}
+
+#[derive(Deserialize)]
+struct CatalogColumnInfo {
+    name: String,
+    r#type: String,
+    nullable: bool,
+    position: i64,
+    comment: Option<String>,
+}
 
 impl TypeInfoClient<'_> {
-    /// Query column schemas, object kinds, and comments for the given objects.
+    /// Resolve the column schema, kind, and comments for `objects` plus
+    /// `source_tables` in a single catalog query.
     ///
-    /// Uses a single catalog query per object joining `mz_catalog.mz_columns`,
-    /// `mz_catalog.mz_objects`, `mz_catalog.mz_schemas`, `mz_catalog.mz_databases`,
-    /// and `mz_internal.mz_comments` to retrieve columns, types, nullability,
-    /// object kind, and both object-level and column-level comments in one shot.
+    /// Joins `mz_catalog.mz_columns`, `mz_catalog.mz_objects`,
+    /// `mz_catalog.mz_schemas`, `mz_catalog.mz_databases`, and
+    /// `mz_internal.mz_comments` to retrieve columns, types, nullability,
+    /// object kind, and both object-level and column-level comments. Each input
+    /// triple `(database, schema, object)` is expanded from a single `jsonb`
+    /// parameter via `jsonb_array_elements`, and the per-object metadata is
+    /// returned as a `jsonb` blob deserialized by serde on the client.
     ///
-    /// Source tables are always recorded as `ObjectKind::Table` regardless of the
-    /// catalog result.
+    /// Returns `(types, missing)` where `missing` lists any input objects that
+    /// did not exist in the target catalog. The `lock` command surfaces those
+    /// as `DeclaredDependenciesMissing`.
     ///
-    /// This is the core implementation used by both [`query_external_types`](Self::query_external_types)
-    /// (project-graph driven) and the `lock` command (declared-dependency driven).
+    /// Source tables are always recorded as `ObjectKind::Table` regardless of
+    /// the catalog's `o.type`. Objects without columns (e.g. secrets,
+    /// connections) appear in the result with an empty column map.
     pub async fn query_types_for_objects(
         &self,
         objects: &[ObjectId],
         source_tables: &[ObjectId],
-    ) -> Result<Types, ConnectionError> {
+    ) -> Result<(Types, Vec<ObjectId>), ConnectionError> {
+        let source_table_set: BTreeSet<&ObjectId> = source_tables.iter().collect();
+        let all_oids: Vec<&ObjectId> = objects.iter().chain(source_tables.iter()).collect();
+
+        if all_oids.is_empty() {
+            return Ok((
+                Types {
+                    version: 1,
+                    tables: BTreeMap::new(),
+                    kinds: BTreeMap::new(),
+                    comments: BTreeMap::new(),
+                },
+                Vec::new(),
+            ));
+        }
+
+        // Pass the (db, schema, obj) triples as a single jsonb array. Materialize's
+        // unnest takes one array, so jsonb_array_elements is the cleanest way to
+        // expand the input into a row per object.
+        let input_json = serde_json::Value::Array(
+            all_oids
+                .iter()
+                .map(|o| {
+                    serde_json::json!({"db": o.database, "sch": o.schema, "obj": o.object})
+                })
+                .collect(),
+        );
+
+        let rows = self
+            .client
+            .query(
+                "WITH input AS ( \
+                    SELECT \
+                        elem->>'db' AS db, \
+                        elem->>'sch' AS sch, \
+                        elem->>'obj' AS obj \
+                    FROM jsonb_array_elements($1) AS elem \
+                 ) \
+                 SELECT \
+                    i.db AS db, \
+                    i.sch AS sch, \
+                    i.obj AS obj, \
+                    jsonb_build_object( \
+                        'object_type', o.type, \
+                        'object_comment', obj_comment.comment, \
+                        'columns', COALESCE( \
+                            jsonb_agg(jsonb_build_object( \
+                                'name', c.name, \
+                                'type', c.type, \
+                                'nullable', c.nullable, \
+                                'position', c.position::int8, \
+                                'comment', col_comment.comment \
+                            )) FILTER (WHERE c.id IS NOT NULL), \
+                            '[]'::jsonb \
+                        ) \
+                    )::text AS data \
+                 FROM input i \
+                 JOIN mz_catalog.mz_databases d ON d.name = i.db \
+                 JOIN mz_catalog.mz_schemas s \
+                    ON s.database_id = d.id AND s.name = i.sch \
+                 JOIN mz_catalog.mz_objects o \
+                    ON o.schema_id = s.id AND o.name = i.obj \
+                 LEFT JOIN mz_catalog.mz_columns c ON c.id = o.id \
+                 LEFT JOIN mz_internal.mz_comments obj_comment \
+                    ON o.id = obj_comment.id AND obj_comment.object_sub_id IS NULL \
+                 LEFT JOIN mz_internal.mz_comments col_comment \
+                    ON c.id = col_comment.id AND col_comment.object_sub_id = c.position \
+                 GROUP BY i.db, i.sch, i.obj, o.type, obj_comment.comment",
+                &[&input_json],
+            )
+            .await?;
+
         let mut tables = BTreeMap::new();
         let mut kinds = BTreeMap::new();
         let mut comments = BTreeMap::new();
+        let mut found = BTreeSet::new();
 
-        let source_table_set: std::collections::BTreeSet<&ObjectId> =
-            source_tables.iter().collect();
+        for row in &rows {
+            let oid = ObjectId {
+                database: row.get("db"),
+                schema: row.get("sch"),
+                object: row.get("obj"),
+            };
+            let data: String = row.get("data");
+            let info: CatalogObjectInfo = serde_json::from_str(&data).map_err(|e| {
+                ConnectionError::Message(format!(
+                    "failed to decode catalog metadata for {}: {}",
+                    oid, e
+                ))
+            })?;
 
-        let all_oids: Vec<&ObjectId> = objects.iter().chain(source_tables.iter()).collect();
+            let kind = if source_table_set.contains(&oid) {
+                ObjectKind::Table
+            } else {
+                match info.object_type.as_str() {
+                    "table" => ObjectKind::Table,
+                    "view" => ObjectKind::View,
+                    "materialized-view" => ObjectKind::MaterializedView,
+                    "source" => ObjectKind::Source,
+                    "sink" => ObjectKind::Sink,
+                    "secret" => ObjectKind::Secret,
+                    "connection" => ObjectKind::Connection,
+                    _ => ObjectKind::Table,
+                }
+            };
+            kinds.insert(oid.clone(), kind);
 
-        for oid in &all_oids {
-            let rows = self
-                .client
-                .query(
-                    "SELECT \
-                        c.name, \
-                        c.type, \
-                        c.nullable, \
-                        c.position::int8 AS position, \
-                        o.type AS object_type, \
-                        obj_comment.comment AS object_comment, \
-                        col_comment.comment AS column_comment \
-                     FROM mz_catalog.mz_columns c \
-                     JOIN mz_catalog.mz_objects o ON c.id = o.id \
-                     JOIN mz_catalog.mz_schemas s ON o.schema_id = s.id \
-                     JOIN mz_catalog.mz_databases d ON s.database_id = d.id \
-                     LEFT JOIN mz_internal.mz_comments obj_comment \
-                        ON o.id = obj_comment.id AND obj_comment.object_sub_id IS NULL \
-                     LEFT JOIN mz_internal.mz_comments col_comment \
-                        ON o.id = col_comment.id AND col_comment.object_sub_id = c.position \
-                     WHERE d.name = $1 AND s.name = $2 AND o.name = $3 \
-                     ORDER BY c.position",
-                    &[&oid.database, &oid.schema, &oid.object],
-                )
-                .await?;
+            if let Some(comment) = info.object_comment {
+                comments.insert(oid.clone(), comment);
+            }
 
             let mut columns = BTreeMap::new();
-            let mut object_kind_set = false;
-
-            for row in &rows {
-                let name: String = row.get("name");
-                let type_str: String = row.get("type");
-                let nullable: bool = row.get("nullable");
-                let position: i64 = row.get("position");
-                let col_comment: Option<String> = row.get("column_comment");
-
-                // Extract object-level metadata from the first row
-                if !object_kind_set {
-                    let object_type: String = row.get("object_type");
-                    let kind = if source_table_set.contains(*oid) {
-                        ObjectKind::Table
-                    } else {
-                        match object_type.as_str() {
-                            "table" => ObjectKind::Table,
-                            "view" => ObjectKind::View,
-                            "materialized-view" => ObjectKind::MaterializedView,
-                            "source" => ObjectKind::Source,
-                            "sink" => ObjectKind::Sink,
-                            "secret" => ObjectKind::Secret,
-                            "connection" => ObjectKind::Connection,
-                            _ => ObjectKind::Table,
-                        }
-                    };
-                    kinds.insert((*oid).clone(), kind);
-
-                    let obj_comment: Option<String> = row.get("object_comment");
-                    if let Some(comment) = obj_comment {
-                        comments.insert((*oid).clone(), comment);
-                    }
-
-                    object_kind_set = true;
-                }
-
+            for col in info.columns {
                 columns.insert(
-                    name,
+                    col.name,
                     ColumnType {
-                        r#type: type_str,
-                        nullable,
-                        position: usize::try_from(position).unwrap_or(0),
-                        comment: col_comment,
+                        r#type: col.r#type,
+                        nullable: col.nullable,
+                        position: usize::try_from(col.position).unwrap_or(0),
+                        comment: col.comment,
                     },
                 );
             }
-
-            tables.insert((*oid).clone(), columns);
+            tables.insert(oid.clone(), columns);
+            found.insert(oid);
         }
 
-        Ok(Types {
-            version: 1,
-            tables,
-            kinds,
-            comments,
-        })
+        let missing: Vec<ObjectId> = all_oids
+            .iter()
+            .filter(|o| !found.contains(**o))
+            .map(|o| (*o).clone())
+            .collect();
+
+        Ok((
+            Types {
+                version: 1,
+                tables,
+                kinds,
+                comments,
+            },
+            missing,
+        ))
     }
 
     /// Query SHOW COLUMNS for external dependencies and `CREATE TABLE FROM SOURCE` tables.
@@ -160,8 +233,10 @@ impl TypeInfoClient<'_> {
     ) -> Result<Types, ConnectionError> {
         let external: Vec<ObjectId> = project.external_dependencies.iter().cloned().collect();
         let source_tables: Vec<ObjectId> = project.get_tables_from_source().collect();
-        self.query_types_for_objects(&external, &source_tables)
-            .await
+        let (types, _missing) = self
+            .query_types_for_objects(&external, &source_tables)
+            .await?;
+        Ok(types)
     }
 
     /// Query column types for a single object via `SHOW COLUMNS`.
