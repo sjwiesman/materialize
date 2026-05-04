@@ -314,7 +314,6 @@ impl From<&Types> for TypesLock {
             connection: Vec::new(),
         };
 
-        // BTreeMap iteration is already FQN-sorted; preserves deterministic output.
         for (id, columns) in &types.tables {
             let mut cols: Vec<_> = columns.iter().collect();
             cols.sort_by_key(|(_, ct)| ct.position);
@@ -328,7 +327,7 @@ impl From<&Types> for TypesLock {
                 })
                 .collect();
 
-            let kind = types.kinds[id];
+            let kind = types.kinds.get(id).expect(&format!("no kind for type {}", id.clone()));
             let comment = types.comments.get(id).cloned();
 
             let obj = ObjectLock {
@@ -337,7 +336,7 @@ impl From<&Types> for TypesLock {
                 columns: cols,
             };
 
-            lock.vec_for_kind(kind).push(obj);
+            lock.vec_for_kind(*kind).push(obj);
         }
 
         lock

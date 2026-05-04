@@ -16,6 +16,8 @@
 //! lightweight syntax-only path is a planned follow-up). Hard-errors if any
 //! declared dependency does not exist in the target database.
 
+use std::time::Instant;
+
 use crate::cli::CliError;
 use crate::cli::progress;
 use crate::client::Client;
@@ -26,22 +28,19 @@ use crate::project::ir::object_id::ObjectId;
 pub async fn run(settings: &Settings) -> Result<(), CliError> {
     let directory = &settings.directory;
 
-    progress::info("Resolving declared dependencies...");
+    let start = Instant::now();
+    let canonical = directory.canonicalize();
+    let shown = canonical.as_deref().unwrap_or(directory);
+    progress::action("Locking", &shown.display().to_string());
 
     // Discover source tables via compilation (pragmatic first step;
     // lightweight syntax-only extraction is a follow-up optimization)
     let source_tables = discover_source_tables(settings)?;
 
     if settings.dependencies.is_empty() && source_tables.is_empty() {
-        progress::info("No declared dependencies or source tables found - types.lock not needed");
+        progress::finished("lock", start.elapsed());
         return Ok(());
     }
-
-    progress::info(&format!(
-        "Found {} declared dependencies and {} source tables",
-        settings.dependencies.len(),
-        source_tables.len()
-    ));
 
     // Connect to the database
     let profile = settings.connection();
@@ -49,48 +48,25 @@ pub async fn run(settings: &Settings) -> Result<(), CliError> {
         .await
         .map_err(CliError::Connection)?;
 
-    // Query types for declared dependencies and source tables.
-    // If SHOW COLUMNS fails (e.g., object doesn't exist), catch the error
-    // and report it as DeclaredDependenciesMissing with a user-friendly hint
-    // instead of a raw database error.
+    // Resolve types for declared dependencies and source tables in one
+    // catalog query. Missing objects (those not in the target catalog) are
+    // surfaced as DeclaredDependenciesMissing with a user-friendly hint.
     let declared: Vec<ObjectId> = settings.dependencies.iter().cloned().collect();
-    let types = match client
+    let (types, missing) = client
         .types()
         .query_types_for_objects(&declared, &source_tables)
         .await
-    {
-        Ok(types) => types,
-        Err(_) => {
-            // Query failed — likely because a declared dependency doesn't exist.
-            // Probe each declared dependency individually to identify which are missing.
-            let mut missing = Vec::new();
-            for dep in &declared {
-                let probe = client
-                    .types()
-                    .query_types_for_objects(std::slice::from_ref(dep), &[])
-                    .await;
-                if probe.is_err() {
-                    missing.push(dep.clone());
-                }
-            }
-            if !missing.is_empty() {
-                return Err(CliError::DeclaredDependenciesMissing { missing });
-            }
-            // If all individual probes succeed, the error was something else
-            // (e.g., a source table issue). Re-run to get the original error.
-            client
-                .types()
-                .query_types_for_objects(&declared, &source_tables)
-                .await?
-        }
-    };
+        .map_err(CliError::Connection)?;
+    if !missing.is_empty() {
+        return Err(CliError::DeclaredDependenciesMissing { missing });
+    }
 
     types.write_types_lock(directory)?;
 
-    progress::success(&format!(
-        "Successfully generated types.lock with {} object schemas",
-        types.tables.len()
-    ));
+    progress::finished(
+        &format!("locking {} objects", types.tables.len()),
+        start.elapsed(),
+    );
 
     Ok(())
 }
