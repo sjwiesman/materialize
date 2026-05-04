@@ -327,7 +327,10 @@ impl From<&Types> for TypesLock {
                 })
                 .collect();
 
-            let kind = types.kinds.get(id).expect(&format!("no kind for type {}", id.clone()));
+            let kind = types
+                .kinds
+                .get(id)
+                .expect(&format!("no kind for type {}", id.clone()));
             let comment = types.comments.get(id).cloned();
 
             let obj = ObjectLock {
