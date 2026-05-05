@@ -128,8 +128,9 @@ impl Client {
         profile: Profile,
         pin_server_cluster: bool,
     ) -> Result<Self, ConnectionError> {
+        let host = profile.require_host()?;
         let mut config = tokio_postgres::Config::new();
-        config.host(&profile.host);
+        config.host(host);
         config.port(profile.port);
         config.user(&profile.username);
         if let Some(password) = &profile.password {
@@ -148,18 +149,12 @@ impl Client {
             config.options(&inner);
         }
 
-        let mode = profile
-            .sslmode
-            .unwrap_or_else(|| default_sslmode(&profile.host));
+        let mode = profile.sslmode.unwrap_or_else(|| default_sslmode(host));
         let hunt: Vec<&std::path::Path> =
             DEFAULT_CA_PATHS.iter().map(std::path::Path::new).collect();
-        let spec = plan_connector(
-            mode,
-            profile.sslrootcert.as_deref(),
-            &profile.host,
-            &hunt,
-            |p| p.exists(),
-        )?;
+        let spec = plan_connector(mode, profile.sslrootcert.as_deref(), host, &hunt, |p| {
+            p.exists()
+        })?;
         let connector = build_connector(spec)?;
 
         config.ssl_mode(tokio_ssl_mode(mode));
@@ -330,11 +325,30 @@ const DEFAULT_CA_PATHS: &[&str] = &[
 /// but certificate verification is not. Users who want verification set
 /// `sslmode = "verify-ca"` or `sslmode = "verify-full"` explicitly.
 pub(crate) fn default_sslmode(host: &str) -> SslMode {
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+    if is_loopback_host(host) {
         SslMode::Prefer
     } else {
         SslMode::Require
     }
+}
+
+/// Returns `true` if `host` names the loopback interface.
+///
+/// Recognizes `localhost`, any address in `127.0.0.0/8`, and `::1` (with or
+/// without URL-style brackets). Used by the SQL TLS defaults and by
+/// `mz-deploy mcp` to pick `http://` vs `https://`.
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    if host == "localhost" {
+        return true;
+    }
+    let unbracketed = host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
+        return ip.is_loopback();
+    }
+    false
 }
 
 fn tokio_ssl_mode(mode: SslMode) -> tokio_postgres::config::SslMode {
@@ -532,6 +546,9 @@ fn classify_connect_error(
     profile: &Profile,
     mode: SslMode,
 ) -> ConnectionError {
+    // Caller has already gone through `require_host()` to attempt the
+    // connection that produced this error, so `host` must be `Some` here.
+    let host = profile.host.clone().unwrap_or_default();
     if matches!(mode, SslMode::VerifyCa | SslMode::VerifyFull) {
         if let Some(ssl_msg) = ssl_error_in_chain(&source) {
             let hostname_suffix = if ssl_msg.contains("hostname mismatch")
@@ -543,7 +560,7 @@ fn classify_connect_error(
                 ""
             };
             return ConnectionError::TlsVerification {
-                host: profile.host.clone(),
+                host,
                 port: profile.port,
                 hostname_suffix,
                 source,
@@ -557,14 +574,14 @@ fn classify_connect_error(
     ) && message_indicates_tls_refused(&source)
     {
         return ConnectionError::TlsRequiredNotSupported {
-            host: profile.host.clone(),
+            host,
             port: profile.port,
             source,
         };
     }
 
     ConnectionError::Connect {
-        host: profile.host.clone(),
+        host,
         port: profile.port,
         source,
     }

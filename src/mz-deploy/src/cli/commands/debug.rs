@@ -173,7 +173,8 @@ pub async fn run(settings: &Settings) -> Result<(), CliError> {
 
     let output = DebugOutput {
         profile: profile.name.clone(),
-        host: profile.host.to_string(),
+        // Connect succeeded above, so `require_host` will succeed too.
+        host: profile.require_host()?.to_string(),
         port: profile.port,
         environment_id,
         server_cluster_health: cluster_health,

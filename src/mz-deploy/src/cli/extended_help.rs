@@ -44,6 +44,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("lock", include_str!("help/lock.md")),
     ("lsp", include_str!("help/lsp.md")),
     ("log", include_str!("help/log.md")),
+    ("mcp", include_str!("help/mcp.md")),
     ("new", include_str!("help/new.md")),
     ("profiles", include_str!("help/profiles.md")),
     ("setup", include_str!("help/setup.md")),

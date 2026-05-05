@@ -30,18 +30,17 @@ const APPLICATION_NAME: &str = "mz-deploy-sql";
 /// profile (or server default) selects.
 pub fn run(settings: &Settings, psql_args: Vec<String>) -> Result<(), CliError> {
     let profile = settings.connection();
+    let host = profile.require_host()?;
 
     let mut cmd = Command::new("psql");
-    cmd.env("PGHOST", &profile.host);
+    cmd.env("PGHOST", host);
     cmd.env("PGPORT", profile.port.to_string());
     cmd.env("PGUSER", &profile.username);
     if let Some(password) = &profile.password {
         cmd.env("PGPASSWORD", password);
     }
 
-    let mode = profile
-        .sslmode
-        .unwrap_or_else(|| default_sslmode(&profile.host));
+    let mode = profile.sslmode.unwrap_or_else(|| default_sslmode(host));
     cmd.env("PGSSLMODE", mode.libpq_name());
     if let Some(cert) = &profile.sslrootcert {
         cmd.env("PGSSLROOTCERT", cert);

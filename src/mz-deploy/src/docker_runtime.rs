@@ -101,13 +101,14 @@ impl DockerRuntime {
     fn make_profile() -> Profile {
         Profile {
             name: "docker-typecheck".to_string(),
-            host: "localhost".to_string(),
+            host: Some("localhost".to_string()),
             port: CONTAINER_PORT,
             username: "materialize".to_string(),
             password: None,
             options: Default::default(),
             sslmode: None,
             sslrootcert: None,
+            http_host: None,
         }
     }
 

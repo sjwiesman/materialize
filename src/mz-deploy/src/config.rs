@@ -257,6 +257,21 @@ pub enum ConfigError {
         "duplicate dependency '{entry}': each object may appear at most once in 'dependencies'"
     )]
     DuplicateDependency { entry: String },
+    #[error(
+        "profile '{profile}' has no host configured: set 'host' (SQL pgwire) \
+         or 'http_host' (HTTP API) in profiles.toml"
+    )]
+    ProfileMissingAnyHost { profile: String },
+    #[error(
+        "profile '{profile}' has no SQL host configured: this command requires \
+         a SQL connection. Set 'host' in profiles.toml."
+    )]
+    ProfileMissingSqlHost { profile: String },
+    #[error(
+        "profile '{profile}' has no HTTP host configured: 'mz-deploy mcp' \
+         requires the HTTP API hostname. Set 'http_host' in profiles.toml."
+    )]
+    ProfileMissingHttpHost { profile: String },
 }
 
 /// TLS mode selection for a profile, matching libpq's `sslmode` vocabulary
@@ -286,10 +301,15 @@ impl SslMode {
 /// Resolved connection details for a Materialize region.
 ///
 /// Constructed from a `profiles.toml` entry after environment variable expansion.
+///
+/// Either `host` or `http_host` must be set. SQL commands require `host`;
+/// `mz-deploy mcp` requires `http_host`. A profile that only sets `http_host`
+/// is valid for MCP-only use.
 #[derive(Debug, Clone)]
 pub struct Profile {
     pub name: String,
-    pub host: String,
+    /// SQL pgwire host. Required for any command that opens a SQL connection.
+    pub host: Option<String>,
     pub port: u16,
     pub username: String,
     pub password: Option<String>,
@@ -301,11 +321,36 @@ pub struct Profile {
     /// Explicit CA bundle path for `verify-ca` / `verify-full`. `None` falls
     /// through to the platform CA hunt.
     pub sslrootcert: Option<PathBuf>,
+    /// Hostname of the Materialize HTTP API.
+    pub http_host: Option<String>,
+}
+
+impl Profile {
+    /// Borrow the SQL host, returning a clear error if the profile only
+    /// configures the HTTP API.
+    pub fn require_host(&self) -> Result<&str, ConfigError> {
+        self.host
+            .as_deref()
+            .ok_or_else(|| ConfigError::ProfileMissingSqlHost {
+                profile: self.name.clone(),
+            })
+    }
+
+    /// Borrow the HTTP host, returning a clear error if the profile only
+    /// configures the SQL pgwire endpoint.
+    pub fn require_http_host(&self) -> Result<&str, ConfigError> {
+        self.http_host
+            .as_deref()
+            .ok_or_else(|| ConfigError::ProfileMissingHttpHost {
+                profile: self.name.clone(),
+            })
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
 struct ProfileData {
-    pub host: String,
+    #[serde(default)]
+    pub host: Option<String>,
     #[serde(default = "default_port")]
     pub port: u16,
     pub username: String,
@@ -316,6 +361,8 @@ struct ProfileData {
     pub sslmode: Option<SslMode>,
     #[serde(default)]
     pub sslrootcert: Option<PathBuf>,
+    #[serde(default)]
+    pub http_host: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -410,6 +457,11 @@ impl ProfilesConfig {
                     });
                 }
             }
+            if data.host.is_none() && data.http_host.is_none() {
+                return Err(ConfigError::ProfileMissingAnyHost {
+                    profile: name.clone(),
+                });
+            }
             profiles.insert(
                 name.clone(),
                 Profile {
@@ -421,6 +473,7 @@ impl ProfilesConfig {
                     options: data.options,
                     sslmode: data.sslmode,
                     sslrootcert: data.sslrootcert,
+                    http_host: data.http_host,
                 },
             );
         }

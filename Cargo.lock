@@ -6329,6 +6329,7 @@ dependencies = [
  "owo-colors",
  "postgres-openssl",
  "rayon",
+ "reqwest",
  "ropey",
  "rusqlite",
  "serde",
@@ -6343,6 +6344,7 @@ dependencies = [
  "tokio-postgres",
  "toml",
  "tower-lsp",
+ "url",
  "uuid",
 ]
 

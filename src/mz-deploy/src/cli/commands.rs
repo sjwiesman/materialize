@@ -31,6 +31,7 @@
 //! - **[`describe`]** — Print a summary of the compiled project.
 //! - **[`debug`]** — Dump internal state for troubleshooting.
 //! - **[`sql`]** — Launch an interactive psql session using the active profile.
+//! - **[`mcp`]** — Proxy stdio JSON-RPC to the developer MCP HTTP endpoint.
 //! - **[`list`]** — List active deployments.
 //! - **[`setup`]** — Initialize deployment tracking infrastructure.
 //! - **[`log`]** — Show deployment history.
@@ -72,6 +73,7 @@ pub mod grants;
 pub mod list;
 pub mod lock;
 pub mod log;
+pub mod mcp;
 pub mod new_project;
 pub mod profile;
 pub mod promote;
