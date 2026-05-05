@@ -12,7 +12,7 @@
 //! Validation runs against an `mz-deploy` in-memory catalog using `mz-sql`
 //! directly (see [`catalog`]). See [`run`] for the algorithm.
 
-use super::build_artifact::BuildArtifact;
+use super::cache::BuildArtifact;
 use crate::project::ast::Statement;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::graph::Project;

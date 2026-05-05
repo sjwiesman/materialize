@@ -46,10 +46,10 @@ use crate::lsp::{
     references, semantic_tokens, toml_diagnostics, workspace_symbol,
 };
 use crate::project;
+use crate::project::compiler::cache::ProjectCache;
 use crate::project::compiler::typecheck::TypeCheckError;
 use crate::project::error::{ProjectError, ValidationErrors};
 use crate::project::ir::graph;
-use crate::project_cache::ProjectCache;
 use crate::types;
 use ropey::Rope;
 use std::collections::{BTreeMap, BTreeSet};

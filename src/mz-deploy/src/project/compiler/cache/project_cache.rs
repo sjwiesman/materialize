@@ -151,13 +151,8 @@ impl ProjectCache {
         profile: &str,
         profile_suffix: Option<&str>,
         variables: &BTreeMap<String, String>,
-    ) -> Result<Option<Self>, crate::types::TypesError> {
-        let path = crate::project::compiler::build_artifact::build_artifact_path(
-            directory,
-            profile,
-            profile_suffix,
-            variables,
-        );
+    ) -> Result<Option<Self>, super::CacheError> {
+        let path = super::db_path(directory, profile, profile_suffix, variables);
         if !path.exists() {
             return Ok(None);
         }
@@ -165,9 +160,9 @@ impl ProjectCache {
             &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(|e| crate::types::TypesError::FileReadFailed {
+        .map_err(|source| super::CacheError::DatabaseOpenFailed {
             path: path.clone(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            source,
         })?;
         Ok(Some(Self { conn }))
     }
@@ -267,10 +262,11 @@ impl ProjectCache {
     /// object doesn't exist in the cache.
     pub fn get_object(&self, id: &ObjectId) -> Option<CachedObject> {
         let fqn = id.to_string();
+        // object_key is the WHERE filter — no need to read it back.
         let row = self
             .conn
             .query_row(
-                "SELECT object_key, database, schema, name, object_kind, cluster, \
+                "SELECT database, schema, name, object_kind, cluster, \
                  file_path, sql_text, is_constraint_mv \
                  FROM project_objects WHERE object_key = ?1",
                 params![fqn],
@@ -280,38 +276,28 @@ impl ProjectCache {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, bool>(8)?,
+                        row.get::<_, bool>(7)?,
                     ))
                 },
             )
             .ok()?;
 
-        let (
-            object_key,
-            database,
-            schema,
-            name,
-            kind_str,
-            cluster,
-            file_path,
-            sql_text,
-            is_constraint_mv,
-        ) = row;
+        let (database, schema, name, kind_str, cluster, file_path, sql_text, is_constraint_mv) =
+            row;
         let kind = ObjectKind::from_db_str(&kind_str);
 
-        let comments = self.query_comments(&object_key);
-        let indexes = self.query_indexes(&object_key);
-        let constraints = self.query_constraints(&object_key);
-        let grants = self.query_grants(&object_key);
-        let aliases = self.query_aliases(&object_key);
-        let infrastructure = self.query_infrastructure(&object_key);
+        let comments = self.query_comments(&fqn);
+        let indexes = self.query_indexes(&fqn);
+        let constraints = self.query_constraints(&fqn);
+        let grants = self.query_grants(&fqn);
+        let aliases = self.query_aliases(&fqn);
+        let infrastructure = self.query_infrastructure(&fqn);
 
         Some(CachedObject {
-            fqn: object_key,
+            fqn,
             database,
             schema,
             name,

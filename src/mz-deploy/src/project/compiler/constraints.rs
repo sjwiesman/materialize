@@ -91,7 +91,9 @@ pub(crate) fn validate_constraint_fk_targets(
                     },
                     PathBuf::from(format!(
                         "{}/{}/{}.sql",
-                        obj.id.expect_database(), obj.id.schema(), obj.id.object()
+                        obj.id.expect_database(),
+                        obj.id.schema(),
+                        obj.id.object()
                     )),
                     constraint_sql,
                 ));
@@ -136,7 +138,9 @@ pub(crate) fn validate_constraint_columns(
                             },
                             PathBuf::from(format!(
                                 "{}/{}/{}.sql",
-                                obj.id.expect_database(), obj.id.schema(), obj.id.object()
+                                obj.id.expect_database(),
+                                obj.id.schema(),
+                                obj.id.object()
                             )),
                             constraint_sql.clone(),
                         ));
@@ -161,7 +165,9 @@ pub(crate) fn validate_constraint_columns(
                                 },
                                 PathBuf::from(format!(
                                     "{}/{}/{}.sql",
-                                    obj.id.expect_database(), obj.id.schema(), obj.id.object()
+                                    obj.id.expect_database(),
+                                    obj.id.schema(),
+                                    obj.id.object()
                                 )),
                                 constraint_sql.clone(),
                             ));

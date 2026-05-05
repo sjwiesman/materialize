@@ -93,11 +93,13 @@ impl TypeInfoClient<'_> {
         let input_json = serde_json::Value::Array(
             all_oids
                 .iter()
-                .map(|o| serde_json::json!({
-                    "db": o.database(),
-                    "sch": o.schema(),
-                    "obj": o.object(),
-                }))
+                .map(|o| {
+                    serde_json::json!({
+                        "db": o.database(),
+                        "sch": o.schema(),
+                        "obj": o.object(),
+                    })
+                })
                 .collect(),
         );
 

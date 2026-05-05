@@ -29,6 +29,7 @@
 use crate::cli::CliError;
 use crate::cli::progress;
 use crate::config::Settings;
+use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
 use crate::{project, verbose};
@@ -130,7 +131,7 @@ fn run_inner(
 
     let types_lock = crate::types::load_types_lock(directory).unwrap_or_default();
 
-    let tc = crate::project_cache::ProjectCache::open(
+    let tc = ProjectCache::open(
         directory,
         settings.profile_name().unwrap_or(""),
         settings.profile_suffix(),
@@ -146,7 +147,7 @@ fn run_inner(
 
         // Post-typecheck column validation: two-tier lookup (TypesCache then types_lock)
         {
-            let tc = crate::project_cache::ProjectCache::open(
+            let tc = ProjectCache::open(
                 directory,
                 settings.profile_name().unwrap_or(""),
                 settings.profile_suffix(),
@@ -227,7 +228,7 @@ fn typecheck_project(settings: &Settings, planned_project: &Project) -> Result<(
 fn validate_constraints_with_types(
     planned_project: &Project,
     types_lock: &crate::types::Types,
-    types_cache: Option<&crate::project_cache::ProjectCache>,
+    types_cache: Option<&ProjectCache>,
 ) -> Result<(), CliError> {
     let get_kind = |id: &ObjectId| -> crate::types::ObjectKind {
         types_cache

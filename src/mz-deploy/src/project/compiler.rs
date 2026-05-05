@@ -79,7 +79,7 @@
 //! - final dependency extraction and lowering operate on a complete compiled
 //!   project assembled for the current invocation
 
-pub(crate) mod build_artifact;
+pub(crate) mod cache;
 mod cache_io;
 mod constraints;
 mod mod_statements;
@@ -93,14 +93,16 @@ use crate::project::syntax::input;
 use crate::project::syntax::parser::parse_statements_with_context;
 use crate::project::syntax::profile_files::collect_all_sql_files;
 use crate::verbose;
-use build_artifact::{BuildArtifact, FileEntry, ObjectStateRow, StoredObjectRow};
+use cache::BuildArtifact;
+use cache::build_artifact::{
+    CompiledObjectArtifact, CompiledObjectArtifactData, FileEntry, ObjectStateRow,
+};
 use cache_io::hex_digest;
 use mz_sql_parser::ast::{
     CommentStatement, CreateConstraintStatement, CreateIndexStatement, ExecuteUnitTestStatement,
     GrantPrivilegesStatement, Raw, Statement,
 };
 use rayon::prelude::*;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -162,40 +164,6 @@ struct ObjectDescriptor {
 struct VariantDescriptor {
     path: PathBuf,
     profile: Option<String>,
-}
-
-/// Serializable cache artifact for one logical object.
-///
-/// Persisted as a bincode-encoded blob in the SQLite build artifact database.
-/// `Object` carries the compiled SQL strings; `Skipped` records that the
-/// object was intentionally excluded (e.g., a profile variant that doesn't
-/// match the current profile). Both variants are cache hits on the next
-/// invocation if the fingerprint still matches.
-#[derive(Debug, Serialize, Deserialize)]
-enum CompiledObjectArtifact {
-    Object(CachedTypedObjectArtifact),
-    Skipped,
-}
-
-/// The serializable form of a compiled database object.
-///
-/// Stores every SQL statement that constitutes the object as strings rather
-/// than AST nodes, because the AST types are not `Serialize`. On cache load,
-/// each string is re-parsed into its expected AST type via
-/// [`into_compiled_object`](Self::into_compiled_object). If any string fails
-/// to parse (e.g., after a parser upgrade changes the grammar), the cache
-/// entry is treated as a miss and the object is recompiled from source.
-#[derive(Debug, Serialize, Deserialize)]
-struct CachedTypedObjectArtifact {
-    db_name: String,
-    schema_name: String,
-    path: PathBuf,
-    stmt_sql: String,
-    indexes_sql: Vec<String>,
-    constraints_sql: Vec<String>,
-    grants_sql: Vec<String>,
-    comments_sql: Vec<String>,
-    tests_sql: Vec<String>,
 }
 
 /// In-memory representation of a compiled object together with its location.
@@ -327,13 +295,33 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
         .map(|(path, entry)| (path, entry.content_hash))
         .collect();
 
-    let existing_rows = db.load_object_rows().map_err(LoadError::from)?;
+    let existing_fingerprints = db.load_object_fingerprints().map_err(LoadError::from)?;
 
-    let plans: Vec<ObjectPlanResult> = discovery
+    // Phase 1: classify each descriptor as a fingerprint-level Hit/Miss in parallel.
+    let stages: Vec<ObjectPlanStage> = discovery
         .object_descriptors
         .clone()
         .into_par_iter()
-        .map(|descriptor| plan_object(descriptor, &existing_rows, &file_hashes, variables))
+        .map(|descriptor| stage_object(descriptor, &existing_fingerprints, &file_hashes, variables))
+        .collect();
+
+    // Phase 2: load full artifacts only for fingerprint-level hits — selective.
+    let hit_keys: BTreeSet<String> = stages
+        .iter()
+        .filter_map(|stage| match stage {
+            ObjectPlanStage::Hit { object_key, .. } => Some(object_key.clone()),
+            _ => None,
+        })
+        .collect();
+    let hit_artifacts = db
+        .load_object_artifacts(&hit_keys)
+        .map_err(LoadError::from)?;
+
+    // Phase 3: finalize each stage. Hits parse their cached SQL into AST; if any
+    // fragment fails to parse the entry is demoted to a Miss for fresh compilation.
+    let plans: Vec<ObjectPlanResult> = stages
+        .into_par_iter()
+        .map(|stage| finalize_stage(stage, &hit_artifacts))
         .collect();
 
     let mut all_validation_errors = Vec::new();
@@ -453,7 +441,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
     project.compile_dirty = miss_keys.iter().filter_map(|k| k.parse().ok()).collect();
 
     // Advisory persist for LSP consumption — failure is logged, not fatal.
-    let deleted_keys: BTreeSet<String> = existing_rows
+    let deleted_keys: BTreeSet<String> = existing_fingerprints
         .keys()
         .filter(|k| !current_keys.contains(*k))
         .cloned()
@@ -709,24 +697,33 @@ fn parse_mod_statements(
     Ok(Some(statements))
 }
 
-/// Determine whether a single object can be served from cache or needs recompilation.
+/// Intermediate planner classification before cached SQL fragments are loaded.
 ///
-/// Computes the object's fingerprint from its key, file hashes, and variables,
-/// then looks up the corresponding cached row. A cache hit requires:
-///
-/// 1. A row exists for the object key.
-/// 2. The stored fingerprint matches the current fingerprint.
-/// 3. The stored payload deserializes successfully into a [`CompiledObjectArtifact`].
-/// 4. For non-`Skipped` artifacts, the SQL strings re-parse into valid AST nodes.
-///
-/// If any check fails, the object is returned as a `Miss` for fresh compilation.
-/// This function is pure (no I/O, no mutation) and runs in parallel via rayon.
-fn plan_object(
+/// Phase 1 of the planner produces a stage by comparing the current and stored
+/// fingerprints. Hits become candidates for cache reuse; their SQL fragments
+/// are loaded and parsed in a later phase (see [`finalize_stage`]).
+enum ObjectPlanStage {
+    Hit {
+        object_key: String,
+        fingerprint: String,
+        descriptor: ObjectDescriptor,
+    },
+    Miss {
+        object_key: String,
+        fingerprint: String,
+        descriptor: ObjectDescriptor,
+    },
+    ProjectErr(ProjectError),
+}
+
+/// Classify a single object as a fingerprint-level Hit or Miss against the
+/// stored cache, without loading the cached SQL fragments.
+fn stage_object(
     descriptor: ObjectDescriptor,
-    existing_rows: &BTreeMap<String, StoredObjectRow>,
+    existing_fingerprints: &BTreeMap<String, String>,
     file_hashes: &BTreeMap<PathBuf, String>,
     variables: &BTreeMap<String, String>,
-) -> ObjectPlanResult {
+) -> ObjectPlanStage {
     let object_key = object_key(
         &descriptor.db_name,
         &descriptor.schema_name,
@@ -734,67 +731,82 @@ fn plan_object(
     );
     let fingerprint = match object_fingerprint(&descriptor, file_hashes, variables) {
         Ok(fingerprint) => fingerprint,
-        Err(err) => return ObjectPlanResult::ProjectErr(err),
+        Err(err) => return ObjectPlanStage::ProjectErr(err),
     };
 
-    let Some(row) = existing_rows.get(&object_key) else {
-        return ObjectPlanResult::Miss {
+    if existing_fingerprints.get(&object_key) == Some(&fingerprint) {
+        ObjectPlanStage::Hit {
             object_key,
             fingerprint,
             descriptor,
-        };
-    };
-
-    if row.fingerprint != fingerprint {
-        return ObjectPlanResult::Miss {
+        }
+    } else {
+        ObjectPlanStage::Miss {
             object_key,
             fingerprint,
             descriptor,
-        };
+        }
     }
+}
 
-    let Ok(cached) = bincode::deserialize::<CompiledObjectArtifact>(&row.payload) else {
-        verbose!(
-            "recompiling {} after cached object row could not be decoded",
-            object_key
-        );
-        return ObjectPlanResult::Miss {
+/// Turn a fingerprint-level stage into a final [`ObjectPlanResult`].
+///
+/// For a fingerprint Hit, attempts to reconstruct the typed object by
+/// re-parsing the cached SQL fragments. If any fragment fails to parse the
+/// entry is treated as a Miss for fresh compilation.
+fn finalize_stage(
+    stage: ObjectPlanStage,
+    hit_artifacts: &BTreeMap<String, CompiledObjectArtifact>,
+) -> ObjectPlanResult {
+    match stage {
+        ObjectPlanStage::Hit {
             object_key,
             fingerprint,
             descriptor,
-        };
-    };
-
-    match cached {
-        CompiledObjectArtifact::Object(object) => match object.into_compiled_object() {
-            Ok(compiled) => ObjectPlanResult::Hit {
-                object_key,
-                compiled: Some(compiled),
-                stats: CompileStats {
-                    cache_hits: 1,
-                    cache_misses: 0,
-                },
-            },
-            Err(()) => {
+        } => {
+            let Some(artifact) = hit_artifacts.get(&object_key) else {
                 verbose!(
-                    "recompiling {} after cached object payload could not be reconstructed",
+                    "recompiling {} after cached object row was missing during artifact load",
                     object_key
                 );
-                ObjectPlanResult::Miss {
+                return ObjectPlanResult::Miss {
                     object_key,
                     fingerprint,
                     descriptor,
+                };
+            };
+            match artifact_to_compiled_object(artifact) {
+                Ok(compiled) => ObjectPlanResult::Hit {
+                    object_key,
+                    compiled,
+                    stats: CompileStats {
+                        cache_hits: 1,
+                        cache_misses: 0,
+                    },
+                },
+                Err(()) => {
+                    verbose!(
+                        "recompiling {} after cached object payload could not be reconstructed",
+                        object_key
+                    );
+                    ObjectPlanResult::Miss {
+                        object_key,
+                        fingerprint,
+                        descriptor,
+                    }
                 }
             }
-        },
-        CompiledObjectArtifact::Skipped => ObjectPlanResult::Hit {
+        }
+        ObjectPlanStage::Miss {
             object_key,
-            compiled: None,
-            stats: CompileStats {
-                cache_hits: 1,
-                cache_misses: 0,
-            },
+            fingerprint,
+            descriptor,
+        } => ObjectPlanResult::Miss {
+            object_key,
+            fingerprint,
+            descriptor,
         },
+        ObjectPlanStage::ProjectErr(err) => ObjectPlanResult::ProjectErr(err),
     }
 }
 
@@ -891,19 +903,16 @@ fn compile_object(
         };
 
     let artifact = match &compiled {
-        Some(object) => CompiledObjectArtifact::Object(
-            CachedTypedObjectArtifact::from_compiled_object(object.clone()),
-        ),
+        Some(object) => CompiledObjectArtifact::Object(compiled_object_to_artifact_data(object)),
         None => CompiledObjectArtifact::Skipped,
     };
 
-    let payload = bincode::serialize(&artifact).expect("compiled object artifact serializes");
     ObjectCompileResult::Ok {
         compiled,
         state_row: Some(ObjectStateRow {
             object_key,
             fingerprint,
-            payload,
+            artifact,
         }),
         stats: CompileStats {
             cache_hits: 0,
@@ -989,70 +998,71 @@ pub(crate) fn profile_namespace(
     hex_digest(hasher.finalize())
 }
 
-impl CachedTypedObjectArtifact {
-    /// Serialize a compiled object into its cacheable string form.
-    ///
-    /// Converts every AST node in the [`CachedTypedObject`] to its SQL text
-    /// representation (with trailing semicolons). The resulting strings are
-    /// what gets stored in the SQLite cache via bincode serialization.
-    fn from_compiled_object(object: CachedTypedObject) -> Self {
-        Self {
-            db_name: object.db_name,
-            schema_name: object.schema_name,
-            path: object.typed_object.path.clone(),
-            stmt_sql: format!("{};", object.typed_object.stmt),
-            indexes_sql: object
-                .typed_object
-                .indexes
-                .iter()
-                .map(|stmt| format!("{};", stmt))
-                .collect(),
-            constraints_sql: object
-                .typed_object
-                .constraints
-                .iter()
-                .map(|stmt| format!("{};", stmt))
-                .collect(),
-            grants_sql: object
-                .typed_object
-                .grants
-                .iter()
-                .map(|stmt| format!("{};", stmt))
-                .collect(),
-            comments_sql: object
-                .typed_object
-                .comments
-                .iter()
-                .map(|stmt| format!("{};", stmt))
-                .collect(),
-            tests_sql: object
-                .typed_object
-                .tests
-                .iter()
-                .map(|stmt| format!("{};", stmt))
-                .collect(),
-        }
+/// Convert a freshly compiled object into the SQL-text shape persisted in the
+/// cache. Each AST node is rendered with a trailing semicolon so the inverse
+/// parse in [`artifact_to_compiled_object`] sees a self-contained statement.
+fn compiled_object_to_artifact_data(object: &CachedTypedObject) -> CompiledObjectArtifactData {
+    CompiledObjectArtifactData {
+        db_name: object.db_name.clone(),
+        schema_name: object.schema_name.clone(),
+        file_path: object.typed_object.path.clone(),
+        stmt_sql: format!("{};", object.typed_object.stmt),
+        indexes_sql: object
+            .typed_object
+            .indexes
+            .iter()
+            .map(|stmt| format!("{};", stmt))
+            .collect(),
+        constraints_sql: object
+            .typed_object
+            .constraints
+            .iter()
+            .map(|stmt| format!("{};", stmt))
+            .collect(),
+        grants_sql: object
+            .typed_object
+            .grants
+            .iter()
+            .map(|stmt| format!("{};", stmt))
+            .collect(),
+        comments_sql: object
+            .typed_object
+            .comments
+            .iter()
+            .map(|stmt| format!("{};", stmt))
+            .collect(),
+        tests_sql: object
+            .typed_object
+            .tests
+            .iter()
+            .map(|stmt| format!("{};", stmt))
+            .collect(),
     }
+}
 
-    /// Reconstruct a [`CachedTypedObject`] by re-parsing cached SQL strings.
-    ///
-    /// Each SQL string is parsed back into its expected AST type. Returns
-    /// `Err(())` if any string fails to parse — the caller should treat this
-    /// as a cache miss and recompile the object from source.
-    fn into_compiled_object(self) -> Result<CachedTypedObject, ()> {
-        Ok(CachedTypedObject {
-            db_name: self.db_name,
-            schema_name: self.schema_name,
+/// Reconstruct a [`CachedTypedObject`] by re-parsing the cached SQL fragments.
+///
+/// Returns `Ok(None)` for `Skipped` entries. Returns `Err(())` if any fragment
+/// fails to parse — the caller should treat this as a cache miss and recompile
+/// the object from source.
+fn artifact_to_compiled_object(
+    artifact: &CompiledObjectArtifact,
+) -> Result<Option<CachedTypedObject>, ()> {
+    match artifact {
+        CompiledObjectArtifact::Skipped => Ok(None),
+        CompiledObjectArtifact::Object(data) => Ok(Some(CachedTypedObject {
+            db_name: data.db_name.clone(),
+            schema_name: data.schema_name.clone(),
             typed_object: compiled::DatabaseObject {
-                path: self.path,
-                stmt: parse_main_statement(&self.stmt_sql)?,
-                indexes: parse_statement_list(&self.indexes_sql, expect_index)?,
-                constraints: parse_statement_list(&self.constraints_sql, expect_constraint)?,
-                grants: parse_statement_list(&self.grants_sql, expect_grant)?,
-                comments: parse_statement_list(&self.comments_sql, expect_comment)?,
-                tests: parse_statement_list(&self.tests_sql, expect_test)?,
+                path: data.file_path.clone(),
+                stmt: parse_main_statement(&data.stmt_sql)?,
+                indexes: parse_statement_list(&data.indexes_sql, expect_index)?,
+                constraints: parse_statement_list(&data.constraints_sql, expect_constraint)?,
+                grants: parse_statement_list(&data.grants_sql, expect_grant)?,
+                comments: parse_statement_list(&data.comments_sql, expect_comment)?,
+                tests: parse_statement_list(&data.tests_sql, expect_test)?,
             },
-        })
+        })),
     }
 }
 

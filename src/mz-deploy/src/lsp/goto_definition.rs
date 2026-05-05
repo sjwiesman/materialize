@@ -44,8 +44,8 @@
 //!        → models/mydb/public/foo.sql
 //! ```
 
+use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::object_id::ObjectId;
-use crate::project_cache::ProjectCache;
 use mz_sql_lexer::lexer::{self, Token};
 use std::path::Path;
 use tower_lsp::lsp_types::{Location, Range, Url};

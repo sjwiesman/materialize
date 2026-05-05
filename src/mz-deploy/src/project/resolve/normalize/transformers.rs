@@ -237,8 +237,7 @@ impl<'a> StagingTransformer<'a> {
         if name.0.is_empty() || name.0.len() > 3 {
             return false; // Invalid name, not external
         }
-        let object_id =
-            ObjectId::from_item_name(name, self.fqn.database(), self.fqn.schema());
+        let object_id = ObjectId::from_item_name(name, self.fqn.database(), self.fqn.schema());
 
         // Check if it's in the external dependencies
         if self.external_dependencies.contains(&object_id) {

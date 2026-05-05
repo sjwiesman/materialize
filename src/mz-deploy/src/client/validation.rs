@@ -736,8 +736,11 @@ pub(crate) async fn validate_sources_exist_impl(
     let mut referenced_sources = BTreeSet::new();
     for obj in planned_project.iter_objects() {
         if let Statement::CreateTableFromSource(ref stmt) = obj.typed_object.stmt {
-            let source_id =
-                ObjectId::from_raw_item_name(&stmt.source, obj.id.expect_database(), obj.id.schema());
+            let source_id = ObjectId::from_raw_item_name(
+                &stmt.source,
+                obj.id.expect_database(),
+                obj.id.schema(),
+            );
             if !defined_sources.contains(&source_id) {
                 referenced_sources.insert(source_id);
             }
@@ -780,7 +783,11 @@ pub(crate) async fn validate_sink_connections_exist_impl(
                     ..
                 } => {
                     vec![
-                        ObjectId::from_raw_item_name(connection, obj.id.expect_database(), obj.id.schema()),
+                        ObjectId::from_raw_item_name(
+                            connection,
+                            obj.id.expect_database(),
+                            obj.id.schema(),
+                        ),
                         ObjectId::from_raw_item_name(
                             aws_connection,
                             obj.id.expect_database(),
