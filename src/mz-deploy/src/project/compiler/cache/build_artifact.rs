@@ -27,8 +27,10 @@
 //! owns the schema version; a version mismatch triggers a full rebuild of the
 //! namespace-local database.
 
-use super::cache_io::hex_digest;
+use super::CacheError;
+use super::schema;
 use crate::project::ast::Statement;
+use crate::project::compiler::cache_io::hex_digest;
 use crate::project::ir::graph;
 use crate::project::ir::infrastructure::{self, Infrastructure};
 use crate::project::ir::object_id::ObjectId;
@@ -42,41 +44,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
-use thiserror::Error;
 
-const SCHEMA_VERSION: i64 = 8;
-const DB_FILE: &str = "build_artifact.db";
 const OBJECT_STATE_TABLE: &str = "object_state";
 const TYPECHECK_OBJECTS_TABLE: &str = "typecheck_objects";
 const TYPECHECK_COLUMNS_TABLE: &str = "typecheck_columns";
-
-#[derive(Debug, Error)]
-pub enum BuildArtifactError {
-    #[error("failed to create compiler cache directory: {path}")]
-    DirectoryCreationFailed {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("failed to open build artifact database: {path}")]
-    DatabaseOpenFailed {
-        path: PathBuf,
-        #[source]
-        source: rusqlite::Error,
-    },
-    #[error("failed to operate on build artifact database: {path}")]
-    DatabaseOperationFailed {
-        path: PathBuf,
-        #[source]
-        source: rusqlite::Error,
-    },
-    #[error("failed to read cached source file: {path}")]
-    FileReadFailed {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-}
 
 /// A cached file entry returned by [`BuildArtifact::load_file_entries`].
 #[derive(Debug, Clone)]
@@ -88,27 +59,141 @@ pub(crate) struct FileEntry {
     pub contents: Option<String>,
 }
 
-/// A cached object compilation artifact read from `object_state`.
+/// A persisted compile artifact for one logical object.
+///
+/// `Skipped` records that the object was intentionally excluded for the active
+/// profile (e.g., a profile variant that doesn't match). `Object` carries the
+/// SQL strings that constitute a compiled object — they are stored verbatim
+/// and re-parsed on cache hit.
 #[derive(Debug, Clone)]
-pub(crate) struct StoredObjectRow {
-    /// Composite hash of the object key, variant paths, content hashes, and
-    /// compile-time variables. Used to detect cache staleness.
-    pub fingerprint: String,
-    /// Bincode-serialized [`CompiledObjectArtifact`](super::CompiledObjectArtifact).
-    pub payload: Vec<u8>,
+pub(crate) enum CompiledObjectArtifact {
+    Skipped,
+    Object(CompiledObjectArtifactData),
 }
 
-/// Compute the path to the build artifact database file for a given project and profile.
-pub(crate) fn build_artifact_path(
-    root: &Path,
-    profile: &str,
-    profile_suffix: Option<&str>,
-    variables: &BTreeMap<String, String>,
-) -> PathBuf {
-    root.join(crate::types::BUILD_DIR)
-        .join(super::COMPILER_DIR)
-        .join(super::profile_namespace(profile, profile_suffix, variables))
-        .join(DB_FILE)
+/// SQL fragments that together describe a compiled database object.
+///
+/// Stores SQL text rather than AST nodes because the AST types are not
+/// `Serialize`-able. On cache hit, the strings are re-parsed back into AST.
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledObjectArtifactData {
+    pub db_name: String,
+    pub schema_name: String,
+    pub file_path: PathBuf,
+    pub stmt_sql: String,
+    pub indexes_sql: Vec<String>,
+    pub constraints_sql: Vec<String>,
+    pub grants_sql: Vec<String>,
+    pub comments_sql: Vec<String>,
+    pub tests_sql: Vec<String>,
+}
+
+/// Column values to write into the `object_state` row, derived from a
+/// [`CompiledObjectArtifact`].
+struct ObjectStateHeader<'a> {
+    kind: &'static str,
+    db_name: Option<&'a str>,
+    schema_name: Option<&'a str>,
+    file_path: Option<String>,
+    stmt_sql: Option<&'a str>,
+}
+
+impl<'a> ObjectStateHeader<'a> {
+    fn from_artifact(artifact: &'a CompiledObjectArtifact) -> Self {
+        match artifact {
+            CompiledObjectArtifact::Skipped => Self {
+                kind: "skipped",
+                db_name: None,
+                schema_name: None,
+                file_path: None,
+                stmt_sql: None,
+            },
+            CompiledObjectArtifact::Object(data) => Self {
+                kind: "object",
+                db_name: Some(&data.db_name),
+                schema_name: Some(&data.schema_name),
+                file_path: Some(data.file_path.to_string_lossy().into_owned()),
+                stmt_sql: Some(&data.stmt_sql),
+            },
+        }
+    }
+}
+
+fn prepare_delete<'tx>(
+    tx: &'tx rusqlite::Transaction<'_>,
+    table: &str,
+    path: &Path,
+) -> Result<rusqlite::Statement<'tx>, CacheError> {
+    tx.prepare(&format!("DELETE FROM {table} WHERE object_key = ?1"))
+        .map_err(|source| CacheError::DatabaseOperationFailed {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn prepare_fragment_insert<'tx>(
+    tx: &'tx rusqlite::Transaction<'_>,
+    table: &str,
+    path: &Path,
+) -> Result<rusqlite::Statement<'tx>, CacheError> {
+    tx.prepare(&format!(
+        "INSERT INTO {table}(object_key, position, sql_text) VALUES(?1, ?2, ?3)"
+    ))
+    .map_err(|source| CacheError::DatabaseOperationFailed {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn run_execute(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+    path: &Path,
+) -> Result<(), CacheError> {
+    stmt.execute(params)
+        .map(|_| ())
+        .map_err(|source| CacheError::DatabaseOperationFailed {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn write_fragments(
+    stmt: &mut rusqlite::Statement<'_>,
+    object_key: &str,
+    fragments: &[String],
+    path: &Path,
+) -> Result<(), CacheError> {
+    for (position, sql) in fragments.iter().enumerate() {
+        let position = i64::try_from(position).unwrap_or(i64::MAX);
+        stmt.execute(params![object_key, position, sql])
+            .map_err(|source| CacheError::DatabaseOperationFailed {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
+fn collect_fragments(
+    stmt: &mut rusqlite::Statement<'_>,
+    object_key: &str,
+    path: &Path,
+) -> Result<Vec<String>, CacheError> {
+    let rows = stmt
+        .query_map(params![object_key], |row| row.get::<_, String>(0))
+        .map_err(|source| CacheError::DatabaseOperationFailed {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|source| CacheError::DatabaseOperationFailed {
+            path: path.to_path_buf(),
+            source,
+        })?);
+    }
+    Ok(out)
 }
 
 pub(crate) struct BuildArtifact {
@@ -128,29 +213,25 @@ impl BuildArtifact {
         profile: &str,
         profile_suffix: Option<&str>,
         variables: &BTreeMap<String, String>,
-    ) -> Result<Self, BuildArtifactError> {
-        let compiler_root = root
-            .join(crate::types::BUILD_DIR)
-            .join(super::COMPILER_DIR)
-            .join(super::profile_namespace(profile, profile_suffix, variables));
-        fs::create_dir_all(&compiler_root).map_err(|source| {
-            BuildArtifactError::DirectoryCreationFailed {
-                path: compiler_root.clone(),
-                source,
-            }
+    ) -> Result<Self, CacheError> {
+        let path = super::db_path(root, profile, profile_suffix, variables);
+        let parent = path
+            .parent()
+            .expect("cache db path always has a parent directory");
+        fs::create_dir_all(parent).map_err(|source| CacheError::DirectoryCreationFailed {
+            path: parent.to_path_buf(),
+            source,
         })?;
-        let path = compiler_root.join(DB_FILE);
-        let conn =
-            Connection::open(&path).map_err(|source| BuildArtifactError::DatabaseOpenFailed {
-                path: path.clone(),
-                source,
-            })?;
+        let conn = Connection::open(&path).map_err(|source| CacheError::DatabaseOpenFailed {
+            path: path.clone(),
+            source,
+        })?;
         let db = Self { path, conn };
         db.initialize()?;
         Ok(db)
     }
 
-    fn initialize(&self) -> Result<(), BuildArtifactError> {
+    fn initialize(&self) -> Result<(), CacheError> {
         // Negative cache_size is in KiB; positive would be page count.
         const PAGE_CACHE_KIB: i64 = -64 * 1024;
         const MMAP_BYTES: i64 = 256 * 1024 * 1024;
@@ -166,7 +247,7 @@ impl BuildArtifact {
             ",
         );
         self.conn.execute_batch(&pragmas).map_err(|source| {
-            BuildArtifactError::DatabaseOperationFailed {
+            CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             }
@@ -180,7 +261,7 @@ impl BuildArtifact {
                 );
                 ",
             )
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
@@ -196,40 +277,15 @@ impl BuildArtifact {
                 },
             )
             .optional()
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
 
-        if version != Some(SCHEMA_VERSION) {
+        if version != Some(schema::SCHEMA_VERSION) {
             self.conn
-                .execute_batch(
-                    "
-                    DROP TABLE IF EXISTS meta;
-                    DROP TABLE IF EXISTS file_state;
-                    DROP TABLE IF EXISTS object_state;
-                    DROP TABLE IF EXISTS typecheck_state;
-                    DROP TABLE IF EXISTS typecheck_columns;
-                    DROP TABLE IF EXISTS typecheck_objects;
-                    DROP TABLE IF EXISTS external_type_digest;
-                    DROP TABLE IF EXISTS project_databases;
-                    DROP TABLE IF EXISTS project_schemas;
-                    DROP TABLE IF EXISTS project_objects;
-                    DROP TABLE IF EXISTS project_dependencies;
-                    DROP TABLE IF EXISTS project_external_dependencies;
-                    DROP TABLE IF EXISTS project_cluster_dependencies;
-                    DROP TABLE IF EXISTS project_replacement_schemas;
-                    DROP TABLE IF EXISTS project_comments;
-                    DROP TABLE IF EXISTS project_indexes;
-                    DROP TABLE IF EXISTS project_constraints;
-                    DROP TABLE IF EXISTS project_grants;
-                    DROP TABLE IF EXISTS project_tests;
-                    DROP TABLE IF EXISTS project_infrastructure;
-                    DROP TABLE IF EXISTS project_infrastructure_properties;
-                    DROP TABLE IF EXISTS project_mod_statements;
-                    ",
-                )
-                .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                .execute_batch(schema::DROP_SQL)
+                .map_err(|source| CacheError::DatabaseOperationFailed {
                     path: self.path.clone(),
                     source,
                 })?;
@@ -239,150 +295,10 @@ impl BuildArtifact {
         Ok(())
     }
 
-    fn create_schema(&self) -> Result<(), BuildArtifactError> {
+    fn create_schema(&self) -> Result<(), CacheError> {
         self.conn
-            .execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS file_state (
-                    path TEXT PRIMARY KEY,
-                    size INTEGER NOT NULL,
-                    mtime_ns INTEGER NOT NULL,
-                    content_hash TEXT NOT NULL,
-                    contents TEXT
-                );
-                CREATE TABLE IF NOT EXISTS object_state (
-                    object_key TEXT PRIMARY KEY,
-                    fingerprint TEXT NOT NULL,
-                    payload BLOB NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS typecheck_objects (
-                    object_key TEXT PRIMARY KEY,
-                    object_kind TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS typecheck_columns (
-                    object_key TEXT NOT NULL,
-                    column_name TEXT NOT NULL,
-                    column_type TEXT NOT NULL,
-                    nullable INTEGER NOT NULL,
-                    position INTEGER NOT NULL,
-                    PRIMARY KEY (object_key, column_name),
-                    FOREIGN KEY (object_key) REFERENCES typecheck_objects(object_key)
-                );
-                CREATE TABLE IF NOT EXISTS external_type_digest (
-                    object_key TEXT PRIMARY KEY,
-                    digest TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS project_databases (
-                    name TEXT PRIMARY KEY
-                );
-                CREATE TABLE IF NOT EXISTS project_schemas (
-                    database TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    schema_type TEXT NOT NULL,
-                    PRIMARY KEY (database, name)
-                );
-                CREATE TABLE IF NOT EXISTS project_objects (
-                    object_key TEXT PRIMARY KEY,
-                    database TEXT NOT NULL,
-                    schema TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    object_kind TEXT NOT NULL,
-                    cluster TEXT,
-                    file_path TEXT NOT NULL,
-                    sql_text TEXT NOT NULL,
-                    is_constraint_mv INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS project_dependencies (
-                    object_key TEXT NOT NULL,
-                    dependency_key TEXT NOT NULL,
-                    PRIMARY KEY (object_key, dependency_key)
-                );
-                CREATE TABLE IF NOT EXISTS project_external_dependencies (
-                    object_key TEXT NOT NULL PRIMARY KEY
-                );
-                CREATE TABLE IF NOT EXISTS project_cluster_dependencies (
-                    cluster_name TEXT NOT NULL PRIMARY KEY
-                );
-                CREATE TABLE IF NOT EXISTS project_replacement_schemas (
-                    database TEXT NOT NULL,
-                    schema TEXT NOT NULL,
-                    PRIMARY KEY (database, schema)
-                );
-                CREATE TABLE IF NOT EXISTS project_comments (
-                    object_key TEXT NOT NULL,
-                    comment_type TEXT NOT NULL,
-                    target_column TEXT,
-                    comment_text TEXT NOT NULL,
-                    sql_text TEXT NOT NULL,
-                    PRIMARY KEY (object_key, comment_type, target_column)
-                );
-                CREATE TABLE IF NOT EXISTS project_indexes (
-                    object_key TEXT NOT NULL,
-                    index_name TEXT,
-                    cluster TEXT,
-                    columns TEXT NOT NULL,
-                    sql_text TEXT NOT NULL,
-                    PRIMARY KEY (object_key, index_name)
-                );
-                CREATE TABLE IF NOT EXISTS project_constraints (
-                    object_key TEXT NOT NULL,
-                    constraint_name TEXT,
-                    kind TEXT NOT NULL,
-                    enforced INTEGER NOT NULL,
-                    columns TEXT NOT NULL,
-                    ref_object TEXT,
-                    ref_columns TEXT,
-                    sql_text TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS project_grants (
-                    object_key TEXT NOT NULL,
-                    privilege TEXT NOT NULL,
-                    grantee TEXT NOT NULL,
-                    sql_text TEXT NOT NULL,
-                    PRIMARY KEY (object_key, privilege, grantee)
-                );
-                CREATE TABLE IF NOT EXISTS project_tests (
-                    object_key TEXT NOT NULL,
-                    test_name TEXT NOT NULL,
-                    sql_text TEXT NOT NULL,
-                    PRIMARY KEY (object_key, test_name)
-                );
-                CREATE TABLE IF NOT EXISTS project_infrastructure (
-                    object_key TEXT NOT NULL PRIMARY KEY,
-                    infra_type TEXT NOT NULL,
-                    connector_type TEXT,
-                    connection_ref TEXT,
-                    source_ref TEXT,
-                    external_reference TEXT
-                );
-                CREATE TABLE IF NOT EXISTS project_infrastructure_properties (
-                    object_key TEXT NOT NULL,
-                    property_key TEXT NOT NULL,
-                    property_value TEXT NOT NULL,
-                    secret_ref TEXT,
-                    object_ref TEXT,
-                    PRIMARY KEY (object_key, property_key)
-                );
-                CREATE TABLE IF NOT EXISTS project_aliases (
-                    object_key TEXT NOT NULL,
-                    alias TEXT NOT NULL,
-                    target_fqn TEXT NOT NULL,
-                    PRIMARY KEY (object_key, alias)
-                );
-                CREATE TABLE IF NOT EXISTS project_mod_statements (
-                    database TEXT NOT NULL,
-                    schema TEXT,
-                    position INTEGER NOT NULL,
-                    sql_text TEXT NOT NULL,
-                    PRIMARY KEY (database, schema, position)
-                );
-                ",
-            )
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .execute_batch(schema::CREATE_SQL)
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
@@ -390,9 +306,9 @@ impl BuildArtifact {
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
-                params![SCHEMA_VERSION.to_string()],
+                params![schema::SCHEMA_VERSION.to_string()],
             )
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
@@ -413,21 +329,27 @@ impl BuildArtifact {
         fs: &crate::fs::FileSystem,
         paths: &BTreeSet<PathBuf>,
         include_contents: bool,
-    ) -> Result<BTreeMap<PathBuf, FileEntry>, BuildArtifactError> {
-        let tx = self.conn.transaction().map_err(|source| {
-            BuildArtifactError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            }
-        })?;
-        let mut select = tx
-            .prepare(
-                "SELECT size, mtime_ns, content_hash, contents FROM file_state WHERE path = ?1",
-            )
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+    ) -> Result<BTreeMap<PathBuf, FileEntry>, CacheError> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
+        // Skip the (potentially large) contents column when the caller doesn't
+        // need the source text — the plan phase only needs size, mtime, hash.
+        let select_sql = if include_contents {
+            "SELECT size, mtime_ns, content_hash, contents FROM file_state WHERE path = ?1"
+        } else {
+            "SELECT size, mtime_ns, content_hash FROM file_state WHERE path = ?1"
+        };
+        let mut select =
+            tx.prepare(select_sql)
+                .map_err(|source| CacheError::DatabaseOperationFailed {
+                    path: self.path.clone(),
+                    source,
+                })?;
         let mut upsert = tx
             .prepare(
                 "
@@ -440,7 +362,7 @@ impl BuildArtifact {
                     contents = excluded.contents
                 ",
             )
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
@@ -453,12 +375,12 @@ impl BuildArtifact {
             // overlay content fresh, recompute its hash, and skip the
             // upsert (the cache should reflect disk state for next session).
             if fs.is_overlay(path) {
-                let contents = fs.read_to_string(path).map_err(|source| {
-                    BuildArtifactError::FileReadFailed {
-                        path: path.clone(),
-                        source,
-                    }
-                })?;
+                let contents =
+                    fs.read_to_string(path)
+                        .map_err(|source| CacheError::FileReadFailed {
+                            path: path.clone(),
+                            source,
+                        })?;
                 let content_hash = hex_digest(Sha256::digest(contents.as_bytes()));
                 results.insert(
                     path.clone(),
@@ -474,10 +396,15 @@ impl BuildArtifact {
 
             let row: Option<(i64, i64, String, Option<String>)> = select
                 .query_row([path.to_string_lossy().to_string()], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    let size: i64 = row.get(0)?;
+                    let mtime: i64 = row.get(1)?;
+                    let hash: String = row.get(2)?;
+                    let contents: Option<String> =
+                        if include_contents { row.get(3)? } else { None };
+                    Ok((size, mtime, hash, contents))
                 })
                 .optional()
-                .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                .map_err(|source| CacheError::DatabaseOperationFailed {
                     path: self.path.clone(),
                     source,
                 })?;
@@ -494,7 +421,7 @@ impl BuildArtifact {
                     },
                     (true, None) => {
                         let contents = fs.read_to_string(path).map_err(|source| {
-                            BuildArtifactError::FileReadFailed {
+                            CacheError::FileReadFailed {
                                 path: path.clone(),
                                 source,
                             }
@@ -507,7 +434,7 @@ impl BuildArtifact {
                                 content_hash,
                                 &contents,
                             ])
-                            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                            .map_err(|source| CacheError::DatabaseOperationFailed {
                                 path: self.path.clone(),
                                 source,
                             })?;
@@ -522,12 +449,11 @@ impl BuildArtifact {
                     },
                 }
             } else {
-                let contents = fs::read_to_string(path).map_err(|source| {
-                    BuildArtifactError::FileReadFailed {
+                let contents =
+                    fs::read_to_string(path).map_err(|source| CacheError::FileReadFailed {
                         path: path.clone(),
                         source,
-                    }
-                })?;
+                    })?;
                 let content_hash = hex_digest(Sha256::digest(contents.as_bytes()));
                 upsert
                     .execute(params![
@@ -537,7 +463,7 @@ impl BuildArtifact {
                         &content_hash,
                         &contents,
                     ])
-                    .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                    .map_err(|source| CacheError::DatabaseOperationFailed {
                         path: self.path.clone(),
                         source,
                     })?;
@@ -553,97 +479,242 @@ impl BuildArtifact {
         drop(select);
         drop(upsert);
         tx.commit()
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
         Ok(results)
     }
 
-    /// Load all cached object compilation artifacts from `object_state`.
-    pub(crate) fn load_object_rows(
-        &self,
-    ) -> Result<BTreeMap<String, StoredObjectRow>, BuildArtifactError> {
+    /// Load just the (object_key, fingerprint) pairs from `object_state`.
+    ///
+    /// Used during the planning phase to detect cache hits without paying the
+    /// cost of materializing each object's SQL fragments.
+    pub(crate) fn load_object_fingerprints(&self) -> Result<BTreeMap<String, String>, CacheError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT object_key, fingerprint, payload FROM object_state")
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .prepare("SELECT object_key, fingerprint FROM object_state")
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
         let rows = stmt
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    StoredObjectRow {
-                        fingerprint: row.get(1)?,
-                        payload: row.get(2)?,
-                    },
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
 
         let mut result = BTreeMap::new();
         for row in rows {
-            let (key, state) =
-                row.map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
-            result.insert(key, state);
+            let (key, fingerprint) = row.map_err(|source| CacheError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?;
+            result.insert(key, fingerprint);
         }
         Ok(result)
     }
 
-    /// Persist newly compiled object artifacts into `object_state`.
-    pub(crate) fn upsert_object_rows(
-        &mut self,
-        rows: &[ObjectStateRow],
-    ) -> Result<(), BuildArtifactError> {
-        let tx = self.conn.transaction().map_err(|source| {
-            BuildArtifactError::DatabaseOperationFailed {
+    /// Load full compile artifacts for the requested object keys.
+    ///
+    /// Returns an entry only for keys present in `object_state`. Skipped
+    /// objects come back as [`CompiledObjectArtifact::Skipped`]; objects with
+    /// payload data come back as [`CompiledObjectArtifact::Object`].
+    pub(crate) fn load_object_artifacts(
+        &self,
+        keys: &BTreeSet<String>,
+    ) -> Result<BTreeMap<String, CompiledObjectArtifact>, CacheError> {
+        let mut result = BTreeMap::new();
+        if keys.is_empty() {
+            return Ok(result);
+        }
+
+        let mut header = self
+            .conn
+            .prepare(
+                "SELECT kind, db_name, schema_name, file_path, stmt_sql \
+                 FROM object_state WHERE object_key = ?1",
+            )
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
-            }
-        })?;
-        {
-            let mut stmt = tx
-                .prepare(
-                    "
-                    INSERT INTO object_state(object_key, fingerprint, payload)
-                    VALUES(?1, ?2, ?3)
-                    ON CONFLICT(object_key) DO UPDATE SET
-                        fingerprint = excluded.fingerprint,
-                        payload = excluded.payload
-                    ",
-                )
-                .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            })?;
+        let mut indexes = self.prepare_fragment_select("object_state_indexes")?;
+        let mut constraints = self.prepare_fragment_select("object_state_constraints")?;
+        let mut grants = self.prepare_fragment_select("object_state_grants")?;
+        let mut comments = self.prepare_fragment_select("object_state_comments")?;
+        let mut tests = self.prepare_fragment_select("object_state_tests")?;
+
+        for key in keys {
+            let row = header
+                .query_row(params![key], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .optional()
+                .map_err(|source| CacheError::DatabaseOperationFailed {
                     path: self.path.clone(),
                     source,
                 })?;
+            let Some((kind, db_name, schema_name, file_path, stmt_sql)) = row else {
+                continue;
+            };
+            let artifact = match kind.as_str() {
+                "skipped" => CompiledObjectArtifact::Skipped,
+                "object" => CompiledObjectArtifact::Object(CompiledObjectArtifactData {
+                    db_name: db_name.unwrap_or_default(),
+                    schema_name: schema_name.unwrap_or_default(),
+                    file_path: file_path.map(PathBuf::from).unwrap_or_default(),
+                    stmt_sql: stmt_sql.unwrap_or_default(),
+                    indexes_sql: collect_fragments(&mut indexes, key, &self.path)?,
+                    constraints_sql: collect_fragments(&mut constraints, key, &self.path)?,
+                    grants_sql: collect_fragments(&mut grants, key, &self.path)?,
+                    comments_sql: collect_fragments(&mut comments, key, &self.path)?,
+                    tests_sql: collect_fragments(&mut tests, key, &self.path)?,
+                }),
+                _ => continue,
+            };
+            result.insert(key.clone(), artifact);
+        }
+        Ok(result)
+    }
+
+    fn prepare_fragment_select(&self, table: &str) -> Result<rusqlite::Statement<'_>, CacheError> {
+        self.conn
+            .prepare(&format!(
+                "SELECT sql_text FROM {table} WHERE object_key = ?1 ORDER BY position"
+            ))
+            .map_err(|source| CacheError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })
+    }
+
+    /// Persist newly compiled object artifacts into `object_state` and the
+    /// per-fragment child tables.
+    ///
+    /// Each object's previous fragment rows are removed before the new ones are
+    /// written so a row count change in any list (e.g., a removed index) is
+    /// reflected exactly.
+    pub(crate) fn upsert_object_rows(&mut self, rows: &[ObjectStateRow]) -> Result<(), CacheError> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|source| CacheError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?;
+        {
+            let mut upsert_header = tx
+                .prepare(
+                    "
+                    INSERT INTO object_state(
+                        object_key, fingerprint, kind, db_name, schema_name, file_path, stmt_sql
+                    )
+                    VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                    ON CONFLICT(object_key) DO UPDATE SET
+                        fingerprint = excluded.fingerprint,
+                        kind = excluded.kind,
+                        db_name = excluded.db_name,
+                        schema_name = excluded.schema_name,
+                        file_path = excluded.file_path,
+                        stmt_sql = excluded.stmt_sql
+                    ",
+                )
+                .map_err(|source| CacheError::DatabaseOperationFailed {
+                    path: self.path.clone(),
+                    source,
+                })?;
+            let mut delete_indexes = prepare_delete(&tx, "object_state_indexes", &self.path)?;
+            let mut delete_constraints =
+                prepare_delete(&tx, "object_state_constraints", &self.path)?;
+            let mut delete_grants = prepare_delete(&tx, "object_state_grants", &self.path)?;
+            let mut delete_comments = prepare_delete(&tx, "object_state_comments", &self.path)?;
+            let mut delete_tests = prepare_delete(&tx, "object_state_tests", &self.path)?;
+            let mut insert_indexes =
+                prepare_fragment_insert(&tx, "object_state_indexes", &self.path)?;
+            let mut insert_constraints =
+                prepare_fragment_insert(&tx, "object_state_constraints", &self.path)?;
+            let mut insert_grants =
+                prepare_fragment_insert(&tx, "object_state_grants", &self.path)?;
+            let mut insert_comments =
+                prepare_fragment_insert(&tx, "object_state_comments", &self.path)?;
+            let mut insert_tests = prepare_fragment_insert(&tx, "object_state_tests", &self.path)?;
+
             for row in rows {
-                stmt.execute(params![row.object_key, row.fingerprint, row.payload])
-                    .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                let header = ObjectStateHeader::from_artifact(&row.artifact);
+                upsert_header
+                    .execute(params![
+                        row.object_key,
+                        row.fingerprint,
+                        header.kind,
+                        header.db_name,
+                        header.schema_name,
+                        header.file_path,
+                        header.stmt_sql,
+                    ])
+                    .map_err(|source| CacheError::DatabaseOperationFailed {
                         path: self.path.clone(),
                         source,
                     })?;
+
+                run_execute(&mut delete_indexes, params![row.object_key], &self.path)?;
+                run_execute(&mut delete_constraints, params![row.object_key], &self.path)?;
+                run_execute(&mut delete_grants, params![row.object_key], &self.path)?;
+                run_execute(&mut delete_comments, params![row.object_key], &self.path)?;
+                run_execute(&mut delete_tests, params![row.object_key], &self.path)?;
+
+                if let CompiledObjectArtifact::Object(data) = &row.artifact {
+                    write_fragments(
+                        &mut insert_indexes,
+                        &row.object_key,
+                        &data.indexes_sql,
+                        &self.path,
+                    )?;
+                    write_fragments(
+                        &mut insert_constraints,
+                        &row.object_key,
+                        &data.constraints_sql,
+                        &self.path,
+                    )?;
+                    write_fragments(
+                        &mut insert_grants,
+                        &row.object_key,
+                        &data.grants_sql,
+                        &self.path,
+                    )?;
+                    write_fragments(
+                        &mut insert_comments,
+                        &row.object_key,
+                        &data.comments_sql,
+                        &self.path,
+                    )?;
+                    write_fragments(
+                        &mut insert_tests,
+                        &row.object_key,
+                        &data.tests_sql,
+                        &self.path,
+                    )?;
+                }
             }
         }
         tx.commit()
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })
     }
 
     /// Remove `object_state` rows for objects no longer in the current project.
-    pub(crate) fn prune_object_rows(
-        &mut self,
-        keep: &BTreeSet<String>,
-    ) -> Result<(), BuildArtifactError> {
+    pub(crate) fn prune_object_rows(&mut self, keep: &BTreeSet<String>) -> Result<(), CacheError> {
         self.prune_rows(OBJECT_STATE_TABLE, keep)
     }
 
@@ -653,13 +724,14 @@ impl BuildArtifact {
     pub(crate) fn upsert_typecheck_results(
         &mut self,
         rows: &[(String, String, BTreeMap<String, ColumnType>)],
-    ) -> Result<(), BuildArtifactError> {
-        let tx = self.conn.transaction().map_err(|source| {
-            BuildArtifactError::DatabaseOperationFailed {
+    ) -> Result<(), CacheError> {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
-            }
-        })?;
+            })?;
         {
             let mut upsert_obj = tx
                 .prepare(
@@ -670,13 +742,13 @@ impl BuildArtifact {
                         object_kind = excluded.object_kind
                     ",
                 )
-                .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                .map_err(|source| CacheError::DatabaseOperationFailed {
                     path: self.path.clone(),
                     source,
                 })?;
             let mut delete_cols = tx
                 .prepare("DELETE FROM typecheck_columns WHERE object_key = ?1")
-                .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                .map_err(|source| CacheError::DatabaseOperationFailed {
                     path: self.path.clone(),
                     source,
                 })?;
@@ -685,20 +757,20 @@ impl BuildArtifact {
                     "INSERT INTO typecheck_columns(object_key, column_name, column_type, nullable, position)
                      VALUES(?1, ?2, ?3, ?4, ?5)",
                 )
-                .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                .map_err(|source| CacheError::DatabaseOperationFailed {
                     path: self.path.clone(),
                     source,
                 })?;
 
             for (key, kind, columns) in rows {
                 upsert_obj.execute(params![key, kind]).map_err(|source| {
-                    BuildArtifactError::DatabaseOperationFailed {
+                    CacheError::DatabaseOperationFailed {
                         path: self.path.clone(),
                         source,
                     }
                 })?;
                 delete_cols.execute([key]).map_err(|source| {
-                    BuildArtifactError::DatabaseOperationFailed {
+                    CacheError::DatabaseOperationFailed {
                         path: self.path.clone(),
                         source,
                     }
@@ -712,7 +784,7 @@ impl BuildArtifact {
                             i32::from(col_type.nullable),
                             i64::try_from(col_type.position).unwrap_or(0),
                         ])
-                        .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                        .map_err(|source| CacheError::DatabaseOperationFailed {
                             path: self.path.clone(),
                             source,
                         })?;
@@ -720,7 +792,7 @@ impl BuildArtifact {
             }
         }
         tx.commit()
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })
@@ -731,7 +803,7 @@ impl BuildArtifact {
     pub(crate) fn prune_typecheck_results(
         &mut self,
         keep: &BTreeSet<String>,
-    ) -> Result<(), BuildArtifactError> {
+    ) -> Result<(), CacheError> {
         self.prune_rows(TYPECHECK_COLUMNS_TABLE, keep)?;
         self.prune_rows(TYPECHECK_OBJECTS_TABLE, keep)
     }
@@ -743,14 +815,14 @@ impl BuildArtifact {
     /// without holding a live SQLite connection inside the parallel DAG.
     pub(crate) fn load_typecheck_columns(
         &self,
-    ) -> Result<BTreeMap<String, BTreeMap<String, ColumnType>>, BuildArtifactError> {
+    ) -> Result<BTreeMap<String, BTreeMap<String, ColumnType>>, CacheError> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT object_key, column_name, column_type, nullable, position \
                  FROM typecheck_columns",
             )
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
@@ -767,17 +839,16 @@ impl BuildArtifact {
                     },
                 ))
             })
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
         let mut out: BTreeMap<String, BTreeMap<String, ColumnType>> = BTreeMap::new();
         for row in rows {
-            let (key, name, ty) =
-                row.map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+            let (key, name, ty) = row.map_err(|source| CacheError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?;
             out.entry(key).or_default().insert(name, ty);
         }
         Ok(out)
@@ -786,11 +857,11 @@ impl BuildArtifact {
     /// Load the digest map for external types (object_key -> digest).
     pub(crate) fn load_external_type_digests(
         &self,
-    ) -> Result<BTreeMap<String, String>, BuildArtifactError> {
+    ) -> Result<BTreeMap<String, String>, CacheError> {
         let mut stmt = self
             .conn
             .prepare("SELECT object_key, digest FROM external_type_digest")
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
@@ -798,17 +869,16 @@ impl BuildArtifact {
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
         let mut out = BTreeMap::new();
         for row in rows {
-            let (key, digest) =
-                row.map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+            let (key, digest) = row.map_err(|source| CacheError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?;
             out.insert(key, digest);
         }
         Ok(out)
@@ -819,9 +889,9 @@ impl BuildArtifact {
     pub(crate) fn replace_external_type_digests(
         &mut self,
         digests: &BTreeMap<String, String>,
-    ) -> Result<(), BuildArtifactError> {
+    ) -> Result<(), CacheError> {
         let db_path = self.path.clone();
-        let db_err = |source: rusqlite::Error| BuildArtifactError::DatabaseOperationFailed {
+        let db_err = |source: rusqlite::Error| CacheError::DatabaseOperationFailed {
             path: db_path.clone(),
             source,
         };
@@ -847,7 +917,7 @@ impl BuildArtifact {
         changed_keys: &BTreeSet<String>,
         deleted_keys: &BTreeSet<String>,
         root: &Path,
-    ) -> Result<(), BuildArtifactError> {
+    ) -> Result<(), CacheError> {
         const PER_OBJECT_TABLES: &[&str] = &[
             "project_objects",
             "project_dependencies",
@@ -862,7 +932,7 @@ impl BuildArtifact {
         ];
 
         let db_path = self.path.clone();
-        let db_err = |source: rusqlite::Error| BuildArtifactError::DatabaseOperationFailed {
+        let db_err = |source: rusqlite::Error| CacheError::DatabaseOperationFailed {
             path: db_path.clone(),
             source,
         };
@@ -938,64 +1008,58 @@ impl BuildArtifact {
         tx.commit().map_err(&db_err)
     }
 
-    fn load_row_keys(&self, table: &str) -> Result<BTreeSet<String>, BuildArtifactError> {
+    fn load_row_keys(&self, table: &str) -> Result<BTreeSet<String>, CacheError> {
         let mut stmt = self
             .conn
             .prepare(&format!("SELECT object_key FROM {table}"))
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })?;
         let mut keys = BTreeSet::new();
         for row in rows {
-            keys.insert(
-                row.map_err(|source| BuildArtifactError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?,
-            );
+            keys.insert(row.map_err(|source| CacheError::DatabaseOperationFailed {
+                path: self.path.clone(),
+                source,
+            })?);
         }
         Ok(keys)
     }
 
-    fn prune_rows(
-        &mut self,
-        table: &str,
-        keep: &BTreeSet<String>,
-    ) -> Result<(), BuildArtifactError> {
+    fn prune_rows(&mut self, table: &str, keep: &BTreeSet<String>) -> Result<(), CacheError> {
         let existing = self.load_row_keys(table)?;
-        let tx = self.conn.transaction().map_err(|source| {
-            BuildArtifactError::DatabaseOperationFailed {
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
-            }
-        })?;
+            })?;
         {
             let mut stmt = tx
                 .prepare(&format!("DELETE FROM {table} WHERE object_key = ?1"))
-                .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+                .map_err(|source| CacheError::DatabaseOperationFailed {
                     path: self.path.clone(),
                     source,
                 })?;
             for key in &existing {
                 if !keep.contains(key) {
-                    stmt.execute([key]).map_err(|source| {
-                        BuildArtifactError::DatabaseOperationFailed {
+                    stmt.execute([key])
+                        .map_err(|source| CacheError::DatabaseOperationFailed {
                             path: self.path.clone(),
                             source,
-                        }
-                    })?;
+                        })?;
                 }
             }
         }
         tx.commit()
-            .map_err(|source| BuildArtifactError::DatabaseOperationFailed {
+            .map_err(|source| CacheError::DatabaseOperationFailed {
                 path: self.path.clone(),
                 source,
             })
@@ -1029,8 +1093,8 @@ struct ProjectStatements<'tx> {
 impl<'tx> ProjectStatements<'tx> {
     fn new(
         tx: &'tx rusqlite::Transaction<'_>,
-        db_err: &impl Fn(rusqlite::Error) -> BuildArtifactError,
-    ) -> Result<Self, BuildArtifactError> {
+        db_err: &impl Fn(rusqlite::Error) -> CacheError,
+    ) -> Result<Self, CacheError> {
         Ok(Self {
             ins_db: tx
                 .prepare("INSERT INTO project_databases (name) VALUES (?1)")
@@ -1089,8 +1153,8 @@ impl<'tx> ProjectStatements<'tx> {
         db_name: &str,
         schema_name: &str,
         root: &Path,
-        db_err: &impl Fn(rusqlite::Error) -> BuildArtifactError,
-    ) -> Result<(), BuildArtifactError> {
+        db_err: &impl Fn(rusqlite::Error) -> CacheError,
+    ) -> Result<(), CacheError> {
         let object_key = obj.id.to_string();
         let typed = &obj.typed_object;
         let kind = typed.stmt.kind().as_str();
@@ -1244,8 +1308,8 @@ impl<'tx> ProjectStatements<'tx> {
         &mut self,
         object_key: &str,
         infra: &Infrastructure,
-        db_err: &impl Fn(rusqlite::Error) -> BuildArtifactError,
-    ) -> Result<(), BuildArtifactError> {
+        db_err: &impl Fn(rusqlite::Error) -> CacheError,
+    ) -> Result<(), CacheError> {
         let (infra_type, connector_type, connection_ref, source_ref, external_reference) =
             match infra {
                 Infrastructure::Connection { connector_type, .. } => (
@@ -1312,8 +1376,8 @@ impl<'tx> ProjectStatements<'tx> {
     fn insert_mod_statements(
         &mut self,
         db: &graph::Database,
-        db_err: &impl Fn(rusqlite::Error) -> BuildArtifactError,
-    ) -> Result<(), BuildArtifactError> {
+        db_err: &impl Fn(rusqlite::Error) -> CacheError,
+    ) -> Result<(), CacheError> {
         if let Some(stmts) = &db.mod_statements {
             for (pos, stmt) in stmts.iter().enumerate() {
                 self.ins_mod_stmt
@@ -1346,24 +1410,25 @@ impl<'tx> ProjectStatements<'tx> {
     }
 }
 
-fn file_metadata_signature(path: &Path) -> Result<(i64, i64), BuildArtifactError> {
-    let metadata = fs::metadata(path).map_err(|source| BuildArtifactError::FileReadFailed {
+fn file_metadata_signature(path: &Path) -> Result<(i64, i64), CacheError> {
+    let metadata = fs::metadata(path).map_err(|source| CacheError::FileReadFailed {
         path: path.to_path_buf(),
         source,
     })?;
     let size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
     let modified = metadata
         .modified()
-        .map_err(|source| BuildArtifactError::FileReadFailed {
+        .map_err(|source| CacheError::FileReadFailed {
             path: path.to_path_buf(),
             source,
         })?;
-    let duration = modified.duration_since(UNIX_EPOCH).map_err(|source| {
-        BuildArtifactError::FileReadFailed {
-            path: path.to_path_buf(),
-            source: std::io::Error::other(source),
-        }
-    })?;
+    let duration =
+        modified
+            .duration_since(UNIX_EPOCH)
+            .map_err(|source| CacheError::FileReadFailed {
+                path: path.to_path_buf(),
+                source: std::io::Error::other(source),
+            })?;
     // File mtimes are an advisory cache key; saturate if the platform
     // reports a nanosecond value larger than the on-disk schema stores.
     let mtime_ns = i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX);
@@ -1392,17 +1457,14 @@ fn statement_cluster(stmt: &Statement) -> Option<String> {
 }
 
 /// An object compilation artifact to be written to `object_state`.
-///
-/// Same logical shape as [`StoredObjectRow`] but includes the `object_key`
-/// for upsert targeting.
 #[derive(Debug, Clone)]
 pub(crate) struct ObjectStateRow {
     /// Logical object identifier (`database.schema.object`).
     pub object_key: String,
-    /// Composite fingerprint used for cache invalidation (see [`StoredObjectRow`]).
+    /// Composite hash of the object key, variant paths, content hashes, and
+    /// compile-time variables. Used to detect cache staleness.
     pub fingerprint: String,
-    /// Bincode-serialized [`CompiledObjectArtifact`](super::CompiledObjectArtifact).
-    pub payload: Vec<u8>,
+    pub artifact: CompiledObjectArtifact,
 }
 
 /// AST visitor that collects FROM-clause table aliases.
@@ -1543,12 +1605,12 @@ mod tests {
             ObjectStateRow {
                 object_key: "db.public.keep".into(),
                 fingerprint: "keep".into(),
-                payload: vec![1],
+                artifact: CompiledObjectArtifact::Skipped,
             },
             ObjectStateRow {
                 object_key: "db.public.drop".into(),
                 fingerprint: "drop".into(),
-                payload: vec![2],
+                artifact: CompiledObjectArtifact::Skipped,
             },
         ])
         .unwrap();

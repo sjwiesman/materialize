@@ -135,7 +135,7 @@ pub(crate) const BUILD_DIR: &str = "target";
 #[derive(Error, Debug)]
 pub enum TypesError {
     #[error(transparent)]
-    BuildArtifactFailed(#[from] crate::project::compiler::build_artifact::BuildArtifactError),
+    BuildArtifactFailed(#[from] crate::project::compiler::cache::CacheError),
 
     #[error("failed to read types.lock at {path}")]
     FileReadFailed {
@@ -330,7 +330,7 @@ impl From<&Types> for TypesLock {
             let kind = types
                 .kinds
                 .get(id)
-                .expect(&format!("no kind for type {}", id.clone()));
+                .unwrap_or_else(|| panic!("no kind for type {}", id.clone()));
             let comment = types.comments.get(id).cloned();
 
             let obj = ObjectLock {

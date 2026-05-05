@@ -837,7 +837,13 @@ async fn execute_pending_sinks(client: &Client, plan: &DeploymentPlan) -> Result
     let sink_ids: BTreeSet<ObjectId> = plan
         .pending_statements
         .iter()
-        .map(|stmt| ObjectId::new(stmt.database.clone(), stmt.schema.clone(), stmt.object.clone()))
+        .map(|stmt| {
+            ObjectId::new(
+                stmt.database.clone(),
+                stmt.schema.clone(),
+                stmt.object.clone(),
+            )
+        })
         .collect();
 
     // Check which sinks already exist (like tables, skip existing ones)
@@ -848,8 +854,11 @@ async fn execute_pending_sinks(client: &Client, plan: &DeploymentPlan) -> Result
         .pending_statements
         .iter()
         .filter(|stmt| {
-            let obj_id =
-                ObjectId::new(stmt.database.clone(), stmt.schema.clone(), stmt.object.clone());
+            let obj_id = ObjectId::new(
+                stmt.database.clone(),
+                stmt.schema.clone(),
+                stmt.object.clone(),
+            );
             !existing_sinks.contains(&obj_id)
         })
         .collect();

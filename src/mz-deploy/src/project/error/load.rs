@@ -19,7 +19,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum LoadError {
     #[error(transparent)]
-    BuildArtifactFailed(#[from] crate::project::compiler::build_artifact::BuildArtifactError),
+    BuildArtifactFailed(#[from] crate::project::compiler::cache::CacheError),
 
     /// Project root directory does not exist
     #[error("Project root directory does not exist: {path}")]
@@ -77,13 +77,6 @@ pub enum LoadError {
         path: PathBuf,
         #[source]
         source: std::io::Error,
-    },
-
-    #[error("Failed to deserialize cache file: {path}")]
-    CacheParseFailed {
-        path: PathBuf,
-        #[source]
-        source: bincode::Error,
     },
 
     #[error("Failed to create directory: {path}")]

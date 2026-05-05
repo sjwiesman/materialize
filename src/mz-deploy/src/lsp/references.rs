@@ -28,7 +28,7 @@
 //! When `include_declaration` is true (standard LSP behavior), the defining
 //! file is prepended to the results so the user sees the full picture.
 
-use crate::project_cache::ProjectCache;
+use crate::project::compiler::cache::ProjectCache;
 use std::path::Path;
 use tower_lsp::lsp_types::{Location, Range, Url};
 
@@ -88,7 +88,7 @@ fn file_location(root: &Path, file_path: &str) -> Option<Location> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_cache::ProjectCache;
+    use crate::project::compiler::cache::ProjectCache;
     use std::path::Path;
 
     #[test]

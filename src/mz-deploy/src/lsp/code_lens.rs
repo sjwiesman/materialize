@@ -18,8 +18,8 @@
 //!   fully qualified target (`database.schema.object` or
 //!   `database.schema.object#index_name`).
 
+use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::object_id::ObjectId;
-use crate::project_cache::ProjectCache;
 use crate::types::ObjectKind;
 use std::path::Path;
 use tower_lsp::lsp_types::*;

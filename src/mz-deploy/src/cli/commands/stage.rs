@@ -593,7 +593,10 @@ async fn record_stage_metadata(
         let hash = deployment_snapshot::compute_typed_hash(typed_obj);
         staging_snapshot.objects.insert(object_id.clone(), hash);
         staging_snapshot.schemas.insert(
-            SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string()),
+            SchemaQualifier::new(
+                object_id.expect_database().to_string(),
+                object_id.schema().to_string(),
+            ),
             DeploymentKind::Objects,
         );
     }
@@ -614,7 +617,10 @@ async fn record_stage_metadata(
         let hash = deployment_snapshot::compute_typed_hash(typed_obj);
         staging_snapshot.objects.insert(object_id.clone(), hash);
         staging_snapshot.schemas.insert(
-            SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string()),
+            SchemaQualifier::new(
+                object_id.expect_database().to_string(),
+                object_id.schema().to_string(),
+            ),
             DeploymentKind::Replacement,
         );
     }
@@ -1945,7 +1951,10 @@ mod tests {
             let hash = deployment_snapshot::compute_typed_hash(typed_obj);
             staging_snapshot.objects.insert(object_id.clone(), hash);
             staging_snapshot.schemas.insert(
-                SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string()),
+                SchemaQualifier::new(
+                    object_id.expect_database().to_string(),
+                    object_id.schema().to_string(),
+                ),
                 DeploymentKind::Objects,
             );
         }
@@ -1966,7 +1975,10 @@ mod tests {
             let hash = deployment_snapshot::compute_typed_hash(typed_obj);
             staging_snapshot.objects.insert(object_id.clone(), hash);
             staging_snapshot.schemas.insert(
-                SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string()),
+                SchemaQualifier::new(
+                    object_id.expect_database().to_string(),
+                    object_id.schema().to_string(),
+                ),
                 DeploymentKind::Replacement,
             );
         }

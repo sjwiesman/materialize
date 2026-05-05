@@ -51,8 +51,8 @@
 //! - **Unknown identifier** — Returns `None`.
 
 use super::{functions, goto_definition};
+use crate::project::compiler::cache::{CachedConstraint, ProjectCache};
 use crate::project::syntax::variables::find_variable_at_position;
-use crate::project_cache::{CachedConstraint, ProjectCache};
 use crate::types::Types;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -279,8 +279,8 @@ fn resolve_function_hover(parts: &[String]) -> Option<Hover> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::compiler::cache::ProjectCache;
     use crate::project::ir::object_id::ObjectId;
-    use crate::project_cache::ProjectCache;
     use crate::types::ColumnType;
     use std::collections::BTreeMap;
 

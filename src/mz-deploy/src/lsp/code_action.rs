@@ -25,8 +25,8 @@
 //!   harvested from the project cache.
 
 use crate::diagnostics::{Replacement, Suggestion, last_component, locate_replacement};
+use crate::project::compiler::cache::ProjectCache;
 use crate::project::compiler::typecheck::ObjectTypeCheckErrorKind;
-use crate::project_cache::ProjectCache;
 use mz_sql::catalog::CatalogError;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};

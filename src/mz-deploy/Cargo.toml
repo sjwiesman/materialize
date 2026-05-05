@@ -12,7 +12,6 @@ workspace = true
 [dependencies]
 annotate-snippets = { workspace = true }
 async-stream = { workspace = true }
-bincode = { workspace = true }
 aws-sdk-secretsmanager = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

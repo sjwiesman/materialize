@@ -266,7 +266,10 @@ pub(crate) fn build_snapshot_from_planned(
         // Track which schema this object belongs to.
         // Schemas marked as replacement in the project config get Replacement kind;
         // all others default to Objects.
-        let sq = SchemaQualifier::new(object_id.expect_database().to_string(), object_id.schema().to_string());
+        let sq = SchemaQualifier::new(
+            object_id.expect_database().to_string(),
+            object_id.schema().to_string(),
+        );
         let kind = if planned_project.replacement_schemas.contains(&sq) {
             DeploymentKind::Replacement
         } else {

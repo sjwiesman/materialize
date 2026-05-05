@@ -79,8 +79,8 @@
 //! Converts each [`CompletionCandidate`] into an LSP [`CompletionItem`] with
 //! appropriate kind, detail, and sort text.
 
+use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::object_id::ObjectId;
-use crate::project_cache::ProjectCache;
 use crate::types::{ColumnType, ObjectKind, Types};
 use mz_sql_lexer::keywords::KEYWORDS;
 use std::collections::BTreeMap;

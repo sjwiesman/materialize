@@ -6304,7 +6304,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "aws-sdk-secretsmanager",
- "bincode",
  "chrono",
  "clap",
  "clap_complete",

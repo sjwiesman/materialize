@@ -62,7 +62,10 @@ pub async fn plan(
         .iter()
         .filter(|(obj_id, _)| !existing.contains(obj_id))
         .map(|(obj_id, _)| {
-            project::SchemaQualifier::new(obj_id.expect_database().to_string(), obj_id.schema().to_string())
+            project::SchemaQualifier::new(
+                obj_id.expect_database().to_string(),
+                obj_id.schema().to_string(),
+            )
         })
         .collect();
     apply_plan

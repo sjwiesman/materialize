@@ -32,8 +32,8 @@
 //! supporting statements are not tracked in the typed IR. The hierarchy is
 //! the primary value — range precision can be refined later.
 
+use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::object_id::ObjectId;
-use crate::project_cache::ProjectCache;
 use std::path::Path;
 use tower_lsp::lsp_types::{DocumentSymbol, Range, SymbolKind, Url};
 

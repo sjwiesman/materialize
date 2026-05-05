@@ -74,7 +74,10 @@ impl SchemaQualifier {
     pub fn collect_from(objs: &[&ir::graph::DatabaseObject]) -> BTreeSet<Self> {
         objs.iter()
             .map(|obj| {
-                Self::new(obj.id.expect_database().to_string(), obj.id.schema().to_string())
+                Self::new(
+                    obj.id.expect_database().to_string(),
+                    obj.id.schema().to_string(),
+                )
             })
             .collect()
     }

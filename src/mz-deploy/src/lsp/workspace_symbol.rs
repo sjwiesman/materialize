@@ -21,7 +21,7 @@
 //!   fully-qualified name (`database.schema.object`).
 //! - External dependencies and constraint MVs are excluded (no file path).
 
-use crate::project_cache::ProjectCache;
+use crate::project::compiler::cache::ProjectCache;
 use std::path::Path;
 use tower_lsp::lsp_types::{Location, Range, SymbolInformation, Url};
 
@@ -70,7 +70,7 @@ pub(super) fn workspace_symbols(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project_cache::ProjectCache;
+    use crate::project::compiler::cache::ProjectCache;
     use std::path::Path;
 
     #[test]

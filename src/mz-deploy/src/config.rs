@@ -901,10 +901,8 @@ mod tests {
 
     #[test]
     fn validate_dependencies_accepts_user_three_part() {
-        let settings: ProjectSettings = toml::from_str(
-            r#"dependencies = ["materialize.public.foo"]"#,
-        )
-        .unwrap();
+        let settings: ProjectSettings =
+            toml::from_str(r#"dependencies = ["materialize.public.foo"]"#).unwrap();
         let deps = settings.validate_dependencies().unwrap();
         assert_eq!(deps.len(), 1);
         let dep = deps.iter().next().unwrap();
@@ -915,10 +913,9 @@ mod tests {
 
     #[test]
     fn validate_dependencies_accepts_system_two_part() {
-        let settings: ProjectSettings = toml::from_str(
-            r#"dependencies = ["mz_catalog.mz_objects", "pg_catalog.pg_class"]"#,
-        )
-        .unwrap();
+        let settings: ProjectSettings =
+            toml::from_str(r#"dependencies = ["mz_catalog.mz_objects", "pg_catalog.pg_class"]"#)
+                .unwrap();
         let deps = settings.validate_dependencies().unwrap();
         assert_eq!(deps.len(), 2);
         for dep in &deps {
@@ -928,26 +925,23 @@ mod tests {
 
     #[test]
     fn validate_dependencies_rejects_non_system_two_part() {
-        let settings: ProjectSettings =
-            toml::from_str(r#"dependencies = ["public.foo"]"#).unwrap();
+        let settings: ProjectSettings = toml::from_str(r#"dependencies = ["public.foo"]"#).unwrap();
         let err = settings.validate_dependencies().unwrap_err();
         assert!(matches!(err, ConfigError::InvalidDependency { .. }));
     }
 
     #[test]
     fn validate_dependencies_rejects_one_part() {
-        let settings: ProjectSettings =
-            toml::from_str(r#"dependencies = ["foo"]"#).unwrap();
+        let settings: ProjectSettings = toml::from_str(r#"dependencies = ["foo"]"#).unwrap();
         let err = settings.validate_dependencies().unwrap_err();
         assert!(matches!(err, ConfigError::InvalidDependency { .. }));
     }
 
     #[test]
     fn validate_dependencies_rejects_duplicates() {
-        let settings: ProjectSettings = toml::from_str(
-            r#"dependencies = ["mz_catalog.mz_objects", "mz_catalog.mz_objects"]"#,
-        )
-        .unwrap();
+        let settings: ProjectSettings =
+            toml::from_str(r#"dependencies = ["mz_catalog.mz_objects", "mz_catalog.mz_objects"]"#)
+                .unwrap();
         let err = settings.validate_dependencies().unwrap_err();
         assert!(matches!(err, ConfigError::DuplicateDependency { .. }));
     }

@@ -47,7 +47,6 @@ pub(crate) mod fs;
 pub mod log;
 pub mod lsp;
 pub(crate) mod project;
-pub(crate) mod project_cache;
 pub(crate) mod secret_resolver;
 pub(crate) mod types;
 pub(crate) mod unit_test;
