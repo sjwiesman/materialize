@@ -1333,7 +1333,7 @@ def workflow_system_deps(c: Composition, parser: WorkflowArgumentParser) -> None
     original_toml = project_toml.read_text()
     try:
         project_toml.write_text(
-            original_toml + '\n# bad entry below\n# (overwritten)\n'
+            original_toml + "\n# bad entry below\n# (overwritten)\n"
         )
         project_toml.write_text('dependencies = ["someschema.foo"]\n')
         result = run_mz_deploy(c, "system-deps/v1", "lock", check=False)

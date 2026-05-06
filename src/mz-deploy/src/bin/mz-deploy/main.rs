@@ -861,7 +861,7 @@ async fn run(args: Args) -> Result<(), CliError> {
         return cli::commands::mcp::run(
             &args.directory,
             args.profile.as_deref(),
-            args.profiles_dir.as_deref()
+            args.profiles_dir.as_deref(),
         )
         .await;
     }

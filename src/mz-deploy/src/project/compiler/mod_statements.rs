@@ -35,7 +35,6 @@ fn comment_object_type_name(obj: &CommentObjectType<Raw>) -> &'static str {
         CommentObjectType::Role { .. } => "ROLE",
         CommentObjectType::Cluster { .. } => "CLUSTER",
         CommentObjectType::ClusterReplica { .. } => "CLUSTER REPLICA",
-        CommentObjectType::ContinualTask { .. } => "CONTINUAL TASK",
         CommentObjectType::NetworkPolicy { .. } => "NETWORK POLICY",
     }
 }

@@ -4151,7 +4151,6 @@ impl<'a> Parser<'a> {
         }))
     }
 
-
     fn parse_create_index(&mut self) -> Result<Statement<Raw>, ParserError> {
         let default_index = self.parse_keyword(DEFAULT);
         self.expect_keyword(INDEX)?;

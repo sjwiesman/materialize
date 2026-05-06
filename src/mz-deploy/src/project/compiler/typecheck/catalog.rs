@@ -40,11 +40,11 @@ use mz_repr::{
 use mz_secrets::InMemorySecretsController;
 use mz_sql::ast::Expr;
 use mz_sql::catalog::{
-    BuiltinsConfig, CatalogCluster, CatalogClusterReplica, CatalogConfig, CatalogDatabase,
-    CatalogError, CatalogItem, CatalogItemType, CatalogNetworkPolicy, CatalogRole, CatalogSchema,
-    CatalogType, CatalogTypeDetails, DefaultPrivilegeAclItem, DefaultPrivilegeObject,
-    EnvironmentId, IdReference, NameReference, ObjectType as SqlObjectType, RoleAttributes,
-    SessionCatalog, SystemObjectType,
+    CatalogCluster, CatalogClusterReplica, CatalogConfig, CatalogDatabase, CatalogError,
+    CatalogItem, CatalogItemType, CatalogNetworkPolicy, CatalogRole, CatalogSchema, CatalogType,
+    CatalogTypeDetails, DefaultPrivilegeAclItem, DefaultPrivilegeObject, EnvironmentId,
+    IdReference, NameReference, ObjectType as SqlObjectType, RoleAttributes, SessionCatalog,
+    SystemObjectType,
 };
 use mz_sql::names::{
     Aug, FullItemName, FullSchemaName, ItemQualifiers, PartialItemName, QualifiedItemName,
@@ -621,9 +621,6 @@ impl CatalogRuntime {
             connection_context: mz_storage_types::connections::ConnectionContext::for_tests(
                 secrets_reader,
             ),
-            builtins_cfg: BuiltinsConfig {
-                include_continual_tasks: true,
-            },
             helm_chart_version: None,
         };
         let mut catalog = Self {
@@ -741,7 +738,7 @@ impl CatalogRuntime {
     /// Register all system schemas discovered from the builtin catalog.
     fn seed_system_schemas(&mut self) {
         let mut schemas = BTreeSet::new();
-        for builtin in BUILTINS::iter(&self.config.builtins_cfg) {
+        for builtin in BUILTINS::iter() {
             schemas.insert(builtin.schema().to_string());
         }
         for schema in schemas {
@@ -779,7 +776,7 @@ impl CatalogRuntime {
     /// Register all builtin items (types, functions, tables, views) from
     /// Materialize's built-in catalog.
     fn seed_builtins(&mut self) -> Result<(), CatalogError> {
-        let builtins: Vec<_> = BUILTINS::iter(&self.config.builtins_cfg).collect();
+        let builtins: Vec<_> = BUILTINS::iter().collect();
         for builtin in builtins {
             self.insert_builtin(builtin)?;
         }
@@ -854,13 +851,6 @@ impl CatalogRuntime {
                 None,
                 None,
             ),
-            Builtin::ContinualTask(ct) => (
-                CatalogItemType::ContinualTask,
-                ct.sql.into(),
-                Some(ct.desc.clone()),
-                None,
-                None,
-            ),
             Builtin::Index(index) => (CatalogItemType::Index, index.sql.into(), None, None, None),
             Builtin::Connection(connection) => (
                 CatalogItemType::Connection,
@@ -884,7 +874,6 @@ impl CatalogRuntime {
             Builtin::Type(typ) => typ.oid,
             Builtin::Func(_) => self.ids.allocate_oid()?,
             Builtin::Source(source) => source.oid,
-            Builtin::ContinualTask(ct) => ct.oid,
             Builtin::Index(index) => index.oid,
             Builtin::Connection(connection) => connection.oid,
         };
