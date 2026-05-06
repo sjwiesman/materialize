@@ -2,9 +2,8 @@
 
 Reads connection definitions from the project, creates any that don't exist,
 and reconciles existing connections whose configuration has drifted from the
-project file. Uses `SHOW CREATE CONNECTION` to fetch the live state and
-diffs option-by-option, emitting `ALTER CONNECTION ... SET/DROP` only for
-options that have actually changed.
+project file. Only options that actually changed are altered, so connections
+aren't unnecessarily reset.
 
 ## Usage
 
@@ -17,11 +16,9 @@ options that have actually changed.
 3. Creates missing schemas if needed.
 4. Resolves client-side secret providers in connection options.
 5. For each connection:
-   - Fetches `SHOW CREATE CONNECTION` for the live state.
    - If the connection does not exist, creates it.
-   - If the connection exists, parses the live SQL, diffs options, and
-     emits `ALTER CONNECTION ... SET (option)` or `DROP (option)` for
-     each difference.
+   - If the connection exists, alters only the options that differ from
+     the project file.
    - Applies associated `GRANT` statements.
    - Applies associated `COMMENT` statements.
 6. Reports status per connection:
@@ -36,9 +33,8 @@ overhead.
 ## Secret References
 
 Connection options that reference secrets (e.g. `SASL PASSWORD = SECRET
-my_secret`) are compared structurally with the live state. `SHOW CREATE
-CONNECTION` returns non-redacted SQL with fully-qualified secret names,
-which matches the project's normalized format.
+my_secret`) are compared structurally with the live state, so renaming or
+re-declaring the same secret doesn't trigger an ALTER.
 
 ## Examples
 

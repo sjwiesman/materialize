@@ -20,30 +20,22 @@ bootstrap step needs elevated privileges.
 
 1. Connects to Materialize using the active profile.
 2. Creates the `_mz_deploy` database (if it doesn't exist).
-3. Creates the following tables in `_mz_deploy.public`:
-   - `deployments` — deployment metadata (deploy ID, timestamps, commit, kind)
-   - `objects` — deployed objects and their content hashes
-   - `clusters` — clusters used by each deployment
-   - `pending_statements` — deferred statements (e.g. sinks)
-   - `replacement_mvs` — replacement materialized view tracking
-4. Creates the `production` view for querying current production state.
-5. Creates three roles (if they don't exist):
+3. Creates tracking tables and the `production` view in `_mz_deploy`.
+4. Creates three roles (if they don't exist):
    - `materialize_deployer` — can stage, promote, and abort deployments
    - `materialize_developer` — read-only access to deployment state
    - `materialize_monitor` — read-only monitoring access to deployment state
-6. Grants USAGE on the database and schema, and SELECT, INSERT, UPDATE,
+5. Grants USAGE on the database and schema, and SELECT, INSERT, UPDATE,
    DELETE on all tables to each role.
-7. Grants system privileges to the deploy roles:
+6. Grants system privileges to the deploy roles:
    - `materialize_deployer` — `CREATEDB`, `CREATECLUSTER` (needed by
      `stage`, `promote`, and `apply clusters`).
    - `materialize_developer` — `CREATEDB` (needed by `dev` to create the
      per-developer overlay database).
-8. Creates the `_mz_deploy_server` cluster at size `25cc` (if it doesn't
-   exist). mz-deploy pins every connection to this cluster via libpq
-   options; it is not intended for general-purpose use. If the cluster
-   already exists (e.g. an operator resized it), setup leaves its
-   configuration alone.
-9. Grants `USAGE` on `_mz_deploy_server` to each of the three roles.
+7. Creates the `_mz_deploy_server` cluster (if it doesn't exist) and
+   grants `USAGE` on it to each of the three roles. mz-deploy pins every
+   connection to this cluster; it is not intended for general-purpose
+   use. Resize it via standard `ALTER CLUSTER` if needed.
 
 ## Roles
 

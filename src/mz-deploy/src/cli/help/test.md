@@ -77,7 +77,11 @@ used during test execution:
 ## Behavior
 
 1. Compiles the project and discovers all `EXECUTE UNIT TEST` statements.
-2. Starts a Materialize Docker container (or reuses a running one).
+2. Starts a Materialize Docker container, or reuses the existing one. The
+   container has a fixed name (`mz-deploy-typecheck`) and is shared across
+   `test` and `explain` invocations on this host. Reuse is by name, not by
+   image, so to pick up a different `--docker-image` you must remove the
+   container first: `docker rm -f mz-deploy-typecheck`.
 3. Loads type information from `types.lock` (external dependencies) and
    the compiler database (internal types, regenerated if stale).
 4. For each test:

@@ -10,19 +10,10 @@ after `sql` are forwarded to `psql` unchanged.
 ## Behavior
 
 1. Loads the connection profile from `profiles.toml`.
-2. Sets these environment variables from the profile:
-   - `PGHOST`, `PGPORT`, `PGUSER`
-   - `PGPASSWORD` (if the profile sets a password)
-   - `PGSSLMODE` (profile `sslmode`, or `prefer` for loopback / `require` otherwise)
-   - `PGSSLROOTCERT` (if the profile sets `sslrootcert`)
-   - `PGOPTIONS` (profile `[options]` rendered as `-c key=value` tokens)
-   - `PGAPPNAME=mz-deploy-sql`
-3. Replaces the current process with `psql`, forwarding any trailing args.
-
-Unlike other `mz-deploy` commands, `sql` does **not** pin the session to the
-`_mz_deploy_server` cluster — it's an interactive shell, so the cluster comes
-from the profile's `options.cluster` (or the server default) just like any
-other `psql` connection.
+2. Configures `psql` with the profile's connection settings (host, port,
+   user, password, SSL, and any `[options]` defined in the profile). SSL
+   defaults to required, with plaintext allowed only for loopback hosts.
+3. Launches `psql`, forwarding any trailing args.
 
 ## Examples
 

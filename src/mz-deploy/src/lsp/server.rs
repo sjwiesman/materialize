@@ -43,7 +43,7 @@
 use crate::config::{ProjectSettings, read_mzprofile};
 use crate::lsp::{
     code_action, code_lens, completion, diagnostics, document_symbol, goto_definition, hover,
-    references, semantic_tokens, toml_diagnostics, workspace_symbol,
+    references, semantic_tokens, workspace_symbol,
 };
 use crate::project;
 use crate::project::compiler::cache::ProjectCache;
@@ -190,22 +190,13 @@ impl Backend {
 
     /// Publish parse diagnostics for a single document.
     ///
-    /// Dispatches by file kind: the project's `project.toml` runs through
-    /// [`toml_diagnostics::diagnose_project_toml`]; other `.toml` files
-    /// produce no diagnostics (the SQL parser would emit nonsense for them);
-    /// everything else is treated as SQL.
-    ///
     /// Updates the parse-diagnostic cache for `uri` and republishes the
     /// merged set (parse + project) so prior project-level diagnostics for
     /// this URI survive the per-keystroke refresh.
     async fn publish_diagnostics(&self, uri: Url, text: &str) {
         let rope = Rope::from_str(text);
-        let project_toml_path = self.root.read().await.join("project.toml");
         let path = uri.to_file_path().ok();
         let diags = match path.as_deref() {
-            Some(p) if p == project_toml_path => {
-                toml_diagnostics::diagnose_project_toml(text, &rope)
-            }
             Some(p) if p.extension().and_then(|e| e.to_str()) == Some("toml") => Vec::new(),
             _ => {
                 let variables = self.variables.read().await.clone();

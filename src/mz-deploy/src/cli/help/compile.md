@@ -20,8 +20,10 @@ development and CI pipelines.
 3. Reports a summary of objects, schemas, and dependencies found.
 4. Type-checks every statement using the project's type information. Loads
    external types from `types.lock` and validates column types, function
-   signatures, and dependency schemas. Unchanged objects are skipped
-   automatically via incremental caching.
+   signatures, and dependency schemas. Incremental — re-runs are fast.
+
+Every profile variant is validated regardless of `--profile`, so a syntax
+error in `foo__staging.sql` will still fail `compile --profile production`.
 
 With `-v`, also prints the full dependency graph, deployment order, and
 generated SQL plan. A passing `compile` guarantees that `stage` and
@@ -41,6 +43,8 @@ generated SQL plan. A passing `compile` guarantees that `stage` and
 - **Type-check failure** — The reported error mirrors what Materialize would
   return. Fix the SQL, or if the error involves an external dependency, run
   `mz-deploy lock` to refresh `types.lock`.
+- **Stale incremental cache** — Delete the `target/` build directory and
+  re-run.
 
 ## Exit Codes
 

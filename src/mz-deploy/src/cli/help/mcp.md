@@ -10,7 +10,7 @@ see <https://materialize.com/docs/integrations/mcp-server/mcp-developer/>.
 
 ## Usage
 
-    mz-deploy mcp [--url URL]
+    mz-deploy mcp
 
 ## Profile configuration
 
@@ -31,8 +31,6 @@ password  = "${MZ_PROFILE_PROD_PASSWORD}"
 ```
 
 `http_host` accepts a bare hostname, `host:port`, or a full URL with scheme.
-For ad-hoc overrides without editing the profile, pass `--url <URL>` (or set
-`MZ_DEPLOY_MCP_URL`).
 
 ## Wiring it into an MCP client
 

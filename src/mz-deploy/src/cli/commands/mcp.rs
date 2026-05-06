@@ -43,13 +43,9 @@ pub async fn run(
     directory: &Path,
     cli_profile: Option<&str>,
     profiles_dir: Option<&Path>,
-    url_override: Option<&str>,
 ) -> Result<(), CliError> {
     let profile = resolve_profile(directory, cli_profile, profiles_dir)?;
-    let url = match url_override {
-        Some(u) => u.to_owned(),
-        None => developer_url(profile.require_http_host()?)?,
-    };
+    let url = developer_url(profile.require_http_host()?)?;
     let client = Client::new();
 
     let stdin = BufReader::new(tokio::io::stdin());

@@ -16,10 +16,8 @@ picks up where it left off.
 3. Detects conflicts — checks whether production schemas were touched by
    another deployment after this staging deployment was created. Use
    `--force` to skip this check.
-4. Executes an atomic swap inside a transaction:
-   - Swaps user schemas (production ↔ staging).
-   - Swaps clusters (production ↔ staging).
-   - Swaps apply-state tracking schemas atomically.
+4. Executes an atomic swap of schemas and clusters (production ↔ staging)
+   inside a single transaction.
 5. Post-swap work:
    - Creates deferred sinks (held back during `stage`).
    - Applies replacement materialized views — for schemas marked
@@ -29,7 +27,6 @@ picks up where it left off.
    - Repoints sinks that depended on old production objects.
    - Records the promotion timestamp.
    - Drops the old production resources (now in staging names).
-6. Cleans up apply-state tracking tables.
 
 The command is **resumable**: if it crashes after the swap but before
 cleanup, re-running `mz-deploy promote <DEPLOY_ID>` detects the post-swap
@@ -37,8 +34,11 @@ state and skips directly to step 5.
 
 ## Flags
 
-- `--force` — Skip conflict detection. May overwrite changes made to
-  production after the staging deployment was created.
+- `--force` — Skip conflict detection. If another deployer has promoted
+  work since this deployment was staged, their schemas will be dropped
+  when this promote runs (production schemas are swapped wholesale, not
+  merged). Use only when you are certain you want to clobber the other
+  deployer's changes.
 - `--no-ready-check` — Skip the readiness/hydration check before promoting.
 - `--allowed-lag <SECONDS>` — Maximum wallclock lag (in seconds) for the
   readiness check (default: 300 = 5 minutes).

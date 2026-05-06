@@ -18,8 +18,7 @@ need to be declared.
 1. Parses `project.toml` to identify declared dependencies.
 2. Auto-discovers source tables defined in the project.
 3. Connects to the database.
-4. Fetches column names, types, and nullability for all declared and
-   discovered objects.
+4. Fetches schemas from the database for all declared and discovered objects.
 5. Writes `types.lock` in the project root.
 
 All declared dependencies must exist in the target database. If a declared

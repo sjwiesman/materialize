@@ -102,9 +102,9 @@ This takes precedence over the password in `profiles.toml`, including
 ## Per-profile connection options
 
 Each profile may define an optional `[options]` table whose key–value pairs
-are sent to the server as session variables via libpq's `options` connection
-parameter. This is the cleanest way to pin a default cluster or search path
-for every command that uses a given profile.
+are applied as session variables on every connection. This is the cleanest
+way to pin a default cluster or search path for every command that uses a
+given profile.
 
 ```toml
 [staging]
@@ -123,18 +123,16 @@ Rules:
   letters, digits, or underscores. Invalid keys produce a config-load error.
 - **Values are verbatim** — no `${VAR}` expansion. Use the `password` field
   for secrets.
-- **Applies to every connection** — the options string is built into the
-  connection string, so every mz-deploy command using this profile starts
-  with these session variables set.
+- **Applies to every connection** — every mz-deploy command using this
+  profile starts with these session variables set.
 - **`cluster` is reserved** — mz-deploy pins every connection to its own
-  `_mz_deploy_server` cluster via libpq options. Any `cluster` value you
-  set here is silently overridden.
+  internal cluster. Any `cluster` value you set here is silently overridden.
 
 ## TLS configuration
 
 Two optional fields control TLS: `sslmode` and `sslrootcert`.
 
-`sslmode` follows libpq's vocabulary (minus `allow`):
+`sslmode` follows the PostgreSQL vocabulary (minus `allow`):
 
 | Value | Encrypt | Verify chain | Verify hostname |
 |-------|---------|--------------|-----------------|

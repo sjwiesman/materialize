@@ -19,12 +19,7 @@ staging deployments — it permanently removes the staging environment.
 3. Queries for staging clusters with the `_<deploy_id>` suffix.
 4. Drops all staging schemas with `CASCADE`.
 5. Drops all staging clusters with `CASCADE`.
-6. Deletes tracking records:
-   - Cluster mappings
-   - Pending statements (deferred sinks)
-   - Replacement materialized view records
-   - Apply state schemas
-   - Main deployment record
+6. Deletes deployment tracking records.
 
 Cleanup is best-effort — if a schema or cluster drop fails, the error is
 reported as a warning and cleanup continues. The command can be run

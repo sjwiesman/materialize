@@ -56,7 +56,7 @@ Develop:
   dev                  Rebuild the developer overlay against the current dirty set
   lsp                  Start Language Server Protocol server for editor integration
   sql                  Launch an interactive psql session using the active profile
-  mcp                  Proxy stdio JSON-RPC to Materialize's developer MCP server
+  mcp                  Connect an AI agent to Materialize's developer MCP server
 
 Infrastructure:
   lock                 Generate types.lock file with external dependency schemas
@@ -330,19 +330,12 @@ enum Command {
         psql_args: Vec<String>,
     },
 
-    /// Proxy stdio JSON-RPC to Materialize's developer MCP server
+    /// Connect an AI agent to Materialize's developer MCP server
     #[command(
         hide = true,
         after_help = "Run 'mz-deploy help mcp' for a detailed usage guide."
     )]
-    Mcp {
-        /// Full URL of the developer MCP endpoint. Overrides the auto-derived
-        /// URL (which assumes the HTTP API is on the same host as the SQL
-        /// endpoint). Use this when the HTTP API is fronted by a different
-        /// hostname (e.g. `console.<sql-host>`).
-        #[arg(long, value_name = "URL", env = "MZ_DEPLOY_MCP_URL")]
-        url: Option<String>,
-    },
+    Mcp,
 
     /// Show detailed information about a specific deployment
     ///
@@ -864,12 +857,11 @@ async fn run(args: Args) -> Result<(), CliError> {
         return mz_deploy::lsp::run(args.directory).await;
     }
 
-    if let Some(Command::Mcp { url }) = &args.command {
+    if let Some(Command::Mcp) = &args.command {
         return cli::commands::mcp::run(
             &args.directory,
             args.profile.as_deref(),
-            args.profiles_dir.as_deref(),
-            url.as_deref(),
+            args.profiles_dir.as_deref()
         )
         .await;
     }

@@ -23,7 +23,8 @@ connectivity and configuration before running deployments.
    - Environment ID
    - Materialize version
    - Current role
-   - `_mz_deploy_server` health: `healthy`, `not ready` (reason), or `missing`
+   - Health of mz-deploy's internal cluster (`healthy`, `not ready` with a
+     reason, or `missing`)
 4. Checks Docker availability and displays:
    - Whether Docker is installed
    - Whether the Docker daemon is running
