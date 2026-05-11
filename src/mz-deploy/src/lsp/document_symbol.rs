@@ -10,16 +10,15 @@
 //! Document symbol provider for `.sql` files.
 //!
 //! Returns the structural outline of a `.sql` file: the main CREATE statement
-//! as the root symbol, with supporting statements (indexes, constraints, grants,
-//! comments, unit tests) as children. This powers the editor's "Outline" view
-//! and breadcrumb navigation.
+//! as the root symbol, with supporting statements (indexes, grants, comments,
+//! unit tests) as children. This powers the editor's "Outline" view and
+//! breadcrumb navigation.
 //!
 //! ## Symbol hierarchy
 //!
 //! ```text
 //! CREATE VIEW orders (root)
 //!   ├─ INDEX orders_id_idx
-//!   ├─ PRIMARY KEY orders_pk
 //!   ├─ GRANT SELECT TO analyst
 //!   ├─ COMMENT ON VIEW orders
 //!   └─ TEST test_no_nulls
@@ -83,19 +82,6 @@ pub(super) fn document_symbols(
             idx.name.clone()
         };
         children.push(child_symbol(format!("INDEX {name}"), SymbolKind::KEY));
-    }
-
-    // Constraints
-    for c in &cached_obj.constraints {
-        let name = if c.name.is_empty() {
-            "constraint".to_string()
-        } else {
-            c.name.clone()
-        };
-        children.push(child_symbol(
-            format!("{} {name}", c.kind.to_uppercase()),
-            SymbolKind::PROPERTY,
-        ));
     }
 
     // Grants
@@ -189,20 +175,6 @@ mod tests {
         // Comment child
         assert_eq!(children[1].name, "COMMENT");
         assert_eq!(children[1].kind, SymbolKind::STRING);
-    }
-
-    #[test]
-    fn view_with_constraint() {
-        let (root, cache) = build_test_cache(
-            "CREATE VIEW foo AS SELECT 1 AS id;\n\
-             CREATE PRIMARY KEY NOT ENFORCED foo_pk ON foo (id);",
-        );
-        let file_uri = Url::from_file_path(root.path().join("models/mydb/public/foo.sql")).unwrap();
-
-        let symbols = document_symbols(&file_uri, root.path(), &cache);
-        let children = symbols[0].children.as_ref().unwrap();
-        assert!(children.iter().any(|c| c.name.contains("PRIMARY KEY")));
-        assert!(children.iter().any(|c| c.kind == SymbolKind::PROPERTY));
     }
 
     #[test]

@@ -19,7 +19,7 @@
 //! - An empty query returns all project objects.
 //! - A non-empty query matches by case-insensitive substring on the
 //!   fully-qualified name (`database.schema.object`).
-//! - External dependencies and constraint MVs are excluded (no file path).
+//! - External dependencies are excluded (no file path).
 
 use crate::project::compiler::cache::ProjectCache;
 use std::path::Path;
@@ -29,8 +29,8 @@ use super::symbol_kind::object_kind_to_symbol_kind;
 
 /// Search project objects by name.
 ///
-/// Returns a [`SymbolInformation`] for each matching object. Constraint MVs
-/// and external dependencies are excluded.
+/// Returns a [`SymbolInformation`] for each matching object. External
+/// dependencies are excluded.
 #[allow(deprecated)] // SymbolInformation::deprecated field is deprecated but required
 pub(super) fn workspace_symbols(
     query: &str,
@@ -42,7 +42,6 @@ pub(super) fn workspace_symbols(
     project_cache
         .list_objects()
         .into_iter()
-        .filter(|summary| !summary.is_constraint_mv)
         .filter(|summary| {
             query_lower.is_empty() || summary.fqn.to_lowercase().contains(&query_lower)
         })

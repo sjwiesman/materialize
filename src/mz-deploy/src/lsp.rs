@@ -62,9 +62,9 @@
 //! ## Document Symbols
 //!
 //! Returns the structural outline of a `.sql` file: the main CREATE statement
-//! as the root symbol, with supporting statements (indexes, constraints, grants,
-//! comments, unit tests) as children. Powers the editor's "Outline" view and
-//! breadcrumb navigation.
+//! as the root symbol, with supporting statements (indexes, grants, comments,
+//! unit tests) as children. Powers the editor's "Outline" view and breadcrumb
+//! navigation.
 //!
 //! ## Workspace Symbols
 //!

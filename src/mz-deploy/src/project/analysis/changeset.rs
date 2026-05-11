@@ -1126,13 +1126,11 @@ mod tests {
                     path: std::path::PathBuf::from("test.sql"),
                     stmt,
                     indexes: vec![],
-                    constraints: vec![],
                     grants: vec![],
                     comments: vec![],
                     tests: vec![],
                 },
                 dependencies: BTreeSet::new(),
-                is_constraint_mv: false,
             })
             .collect();
 

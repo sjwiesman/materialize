@@ -24,7 +24,7 @@ pub(crate) mod project_cache;
 pub(crate) mod schema;
 
 pub(crate) use build_artifact::BuildArtifact;
-pub(crate) use project_cache::{CachedConstraint, ProjectCache};
+pub(crate) use project_cache::ProjectCache;
 
 pub(crate) const DB_FILE: &str = "build_artifact.db";
 

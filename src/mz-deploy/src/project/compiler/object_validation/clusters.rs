@@ -69,58 +69,6 @@ pub(super) fn validate_index_clusters(
     }
 }
 
-/// Validates cluster rules for constraints.
-///
-/// - **Enforced constraints** (`enforced: true`): `in_cluster` is **required**. Validate format.
-/// - **Not-enforced constraints** (`enforced: false`): `in_cluster` must **not** be set.
-pub(super) fn validate_constraint_clusters(
-    fqn: &FullyQualifiedName,
-    constraints: &[CreateConstraintStatement<Raw>],
-    offsets: &[usize],
-    errors: &mut Vec<ValidationError>,
-) {
-    for (i, constraint) in constraints.iter().enumerate() {
-        let offset = offsets[i];
-        let constraint_name = constraint
-            .name
-            .as_ref()
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "<unnamed>".to_string());
-
-        if constraint.enforced {
-            // Enforced constraints require IN CLUSTER
-            match &constraint.in_cluster {
-                None => {
-                    let constraint_sql = format!("{};", constraint);
-                    errors.push(ValidationError::with_file_sql_and_offset(
-                        ValidationErrorKind::EnforcedConstraintMissingCluster { constraint_name },
-                        fqn.path.clone(),
-                        constraint_sql,
-                        offset,
-                    ));
-                }
-                Some(cluster) => {
-                    let cluster_name = cluster.to_string();
-                    if let Err(e) = validate_cluster_name(&cluster_name, &fqn.path, offset) {
-                        errors.push(e);
-                    }
-                }
-            }
-        } else {
-            // Not-enforced constraints must NOT have IN CLUSTER
-            if constraint.in_cluster.is_some() {
-                let constraint_sql = format!("{};", constraint);
-                errors.push(ValidationError::with_file_sql_and_offset(
-                    ValidationErrorKind::NotEnforcedConstraintHasCluster { constraint_name },
-                    fqn.path.clone(),
-                    constraint_sql,
-                    offset,
-                ));
-            }
-        }
-    }
-}
-
 /// Validates that a materialized view specifies a cluster.
 ///
 /// Materialized views in Materialize must specify which cluster they run on using the IN CLUSTER clause.

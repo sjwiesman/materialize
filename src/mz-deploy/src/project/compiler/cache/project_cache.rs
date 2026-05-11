@@ -31,10 +31,8 @@ pub struct CachedObject {
     pub cluster: Option<String>,
     pub file_path: String,
     pub sql_text: String,
-    pub is_constraint_mv: bool,
     pub comments: Vec<CachedComment>,
     pub indexes: Vec<CachedIndex>,
-    pub constraints: Vec<CachedConstraint>,
     pub grants: Vec<CachedGrant>,
     pub aliases: BTreeMap<String, String>,
     pub infrastructure: Option<CachedInfrastructure>,
@@ -50,7 +48,6 @@ pub struct CachedObjectSummary {
     pub kind: ObjectKind,
     pub cluster: Option<String>,
     pub file_path: String,
-    pub is_constraint_mv: bool,
 }
 
 /// A database declared in the project.
@@ -83,18 +80,6 @@ pub struct CachedIndex {
     pub name: String,
     pub cluster: Option<String>,
     pub columns: String,
-    pub sql_text: String,
-}
-
-/// A constraint defined on an object.
-#[derive(Debug, Clone)]
-pub struct CachedConstraint {
-    pub name: String,
-    pub kind: String,
-    pub enforced: bool,
-    pub columns: Vec<String>,
-    pub ref_object: Option<String>,
-    pub ref_columns: Option<Vec<String>>,
     pub sql_text: String,
 }
 
@@ -217,8 +202,8 @@ impl ProjectCache {
 
     /// Get lowercased column names for a batch of objects.
     ///
-    /// Used by constraint validation. Issues a single SQL query for all
-    /// requested objects rather than materializing the full types cache.
+    /// Issues a single SQL query for all requested objects rather than
+    /// materializing the full types cache.
     pub fn get_column_names(&self, ids: &[&ObjectId]) -> BTreeMap<String, BTreeSet<String>> {
         if ids.is_empty() {
             return BTreeMap::new();
@@ -258,8 +243,8 @@ impl ProjectCache {
     /// Get full metadata for a project object by fully-qualified name.
     ///
     /// Queries the object row plus all associated comments, indexes,
-    /// constraints, grants, and infrastructure. Returns `None` if the
-    /// object doesn't exist in the cache.
+    /// grants, and infrastructure. Returns `None` if the object doesn't
+    /// exist in the cache.
     pub fn get_object(&self, id: &ObjectId) -> Option<CachedObject> {
         let fqn = id.to_string();
         // object_key is the WHERE filter — no need to read it back.
@@ -267,7 +252,7 @@ impl ProjectCache {
             .conn
             .query_row(
                 "SELECT database, schema, name, object_kind, cluster, \
-                 file_path, sql_text, is_constraint_mv \
+                 file_path, sql_text \
                  FROM project_objects WHERE object_key = ?1",
                 params![fqn],
                 |row| {
@@ -279,19 +264,16 @@ impl ProjectCache {
                         row.get::<_, Option<String>>(4)?,
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
-                        row.get::<_, bool>(7)?,
                     ))
                 },
             )
             .ok()?;
 
-        let (database, schema, name, kind_str, cluster, file_path, sql_text, is_constraint_mv) =
-            row;
+        let (database, schema, name, kind_str, cluster, file_path, sql_text) = row;
         let kind = ObjectKind::from_db_str(&kind_str);
 
         let comments = self.query_comments(&fqn);
         let indexes = self.query_indexes(&fqn);
-        let constraints = self.query_constraints(&fqn);
         let grants = self.query_grants(&fqn);
         let aliases = self.query_aliases(&fqn);
         let infrastructure = self.query_infrastructure(&fqn);
@@ -305,10 +287,8 @@ impl ProjectCache {
             cluster,
             file_path,
             sql_text,
-            is_constraint_mv,
             comments,
             indexes,
-            constraints,
             grants,
             aliases,
             infrastructure,
@@ -333,7 +313,7 @@ impl ProjectCache {
     pub fn list_objects(&self) -> Vec<CachedObjectSummary> {
         let mut stmt = match self.conn.prepare(
             "SELECT object_key, database, schema, name, object_kind, cluster, \
-             file_path, is_constraint_mv FROM project_objects",
+             file_path FROM project_objects",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -347,7 +327,6 @@ impl ProjectCache {
                 kind: ObjectKind::from_db_str(&row.get::<_, String>(4)?),
                 cluster: row.get(5)?,
                 file_path: row.get(6)?,
-                is_constraint_mv: row.get(7)?,
             })
         }) {
             Ok(r) => r,
@@ -357,8 +336,7 @@ impl ProjectCache {
     }
 
     /// Returns a complete project catalog — all databases, schemas, and objects
-    /// with full metadata (comments, indexes, constraints, grants,
-    /// infrastructure).
+    /// with full metadata (comments, indexes, grants, infrastructure).
     pub fn list_databases_with_objects(&self) -> Vec<CachedDatabase> {
         let mut db_stmt = match self.conn.prepare("SELECT name FROM project_databases") {
             Ok(s) => s,
@@ -538,32 +516,6 @@ impl ProjectCache {
         }
     }
 
-    fn query_constraints(&self, object_key: &str) -> Vec<CachedConstraint> {
-        let mut stmt = match self.conn.prepare(
-            "SELECT constraint_name, kind, enforced, columns, ref_object, ref_columns, sql_text \
-             FROM project_constraints WHERE object_key = ?1",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![object_key], |row| {
-            let columns_json: String = row.get(3)?;
-            let ref_columns_json: Option<String> = row.get(5)?;
-            Ok(CachedConstraint {
-                name: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                kind: row.get(1)?,
-                enforced: row.get(2)?,
-                columns: serde_json::from_str(&columns_json).unwrap_or_default(),
-                ref_object: row.get(4)?,
-                ref_columns: ref_columns_json.and_then(|j| serde_json::from_str(&j).ok()),
-                sql_text: row.get(6)?,
-            })
-        }) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
     fn query_grants(&self, object_key: &str) -> Vec<CachedGrant> {
         let mut stmt = match self.conn.prepare(
             "SELECT privilege, grantee, sql_text \
@@ -712,8 +664,7 @@ mod tests {
                 object_kind TEXT NOT NULL,
                 cluster TEXT,
                 file_path TEXT NOT NULL,
-                sql_text TEXT NOT NULL,
-                is_constraint_mv INTEGER NOT NULL DEFAULT 0
+                sql_text TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS project_dependencies (
                 object_key TEXT NOT NULL,
@@ -738,16 +689,6 @@ mod tests {
                 columns TEXT NOT NULL,
                 sql_text TEXT NOT NULL,
                 PRIMARY KEY (object_key, index_name)
-            );
-            CREATE TABLE IF NOT EXISTS project_constraints (
-                object_key TEXT NOT NULL,
-                constraint_name TEXT,
-                kind TEXT NOT NULL,
-                enforced INTEGER NOT NULL,
-                columns TEXT NOT NULL,
-                ref_object TEXT,
-                ref_columns TEXT,
-                sql_text TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS project_grants (
                 object_key TEXT NOT NULL,
@@ -987,8 +928,8 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO project_objects (object_key, database, schema, name, object_kind, cluster, file_path, sql_text, is_constraint_mv) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO project_objects (object_key, database, schema, name, object_kind, cluster, file_path, sql_text) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 "mydb.public.orders",
                 "mydb",
@@ -998,13 +939,12 @@ mod tests {
                 "compute",
                 "sql/orders.sql",
                 "CREATE MATERIALIZED VIEW orders AS SELECT 1",
-                false
             ],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO project_objects (object_key, database, schema, name, object_kind, cluster, file_path, sql_text, is_constraint_mv) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO project_objects (object_key, database, schema, name, object_kind, cluster, file_path, sql_text) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 "mydb.public.users",
                 "mydb",
@@ -1014,7 +954,6 @@ mod tests {
                 None::<String>,
                 "sql/users.sql",
                 "CREATE VIEW users AS SELECT 1",
-                false
             ],
         )
         .unwrap();
@@ -1041,22 +980,6 @@ mod tests {
                 "compute",
                 "id",
                 "CREATE INDEX orders_id_idx ON orders (id)"
-            ],
-        )
-        .unwrap();
-        // Constraint with JSON columns
-        conn.execute(
-            "INSERT INTO project_constraints (object_key, constraint_name, kind, enforced, columns, ref_object, ref_columns, sql_text) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                "mydb.public.orders",
-                "orders_pk",
-                "PRIMARY KEY",
-                true,
-                r#"["id"]"#,
-                None::<String>,
-                None::<String>,
-                "ALTER TABLE orders ADD PRIMARY KEY (id) NOT ENFORCED"
             ],
         )
         .unwrap();
@@ -1170,7 +1093,6 @@ mod tests {
         assert_eq!(obj.kind, ObjectKind::MaterializedView);
         assert_eq!(obj.cluster.as_deref(), Some("compute"));
         assert_eq!(obj.file_path, "sql/orders.sql");
-        assert!(!obj.is_constraint_mv);
 
         // Comments
         assert_eq!(obj.comments.len(), 1);
@@ -1180,12 +1102,6 @@ mod tests {
         // Indexes
         assert_eq!(obj.indexes.len(), 1);
         assert_eq!(obj.indexes[0].name, "orders_id_idx");
-
-        // Constraints
-        assert_eq!(obj.constraints.len(), 1);
-        assert_eq!(obj.constraints[0].kind, "PRIMARY KEY");
-        assert_eq!(obj.constraints[0].columns, vec!["id"]);
-        assert!(obj.constraints[0].enforced);
 
         // Grants
         assert_eq!(obj.grants.len(), 1);
@@ -1355,45 +1271,5 @@ mod tests {
 
         // No statements for unknown
         assert!(cache.get_mod_statements("unknown", None).is_empty());
-    }
-
-    #[test]
-    fn test_constraint_with_ref_columns() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-        let conn = create_test_db(&db_path);
-        conn.execute(
-            "INSERT INTO project_objects (object_key, database, schema, name, object_kind, file_path, sql_text, is_constraint_mv) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params!["db.s.t", "db", "s", "t", "table", "t.sql", "CREATE TABLE t (a INT)", false],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO project_constraints (object_key, constraint_name, kind, enforced, columns, ref_object, ref_columns, sql_text) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                "db.s.t",
-                "fk_orders",
-                "FOREIGN KEY",
-                false,
-                r#"["order_id"]"#,
-                "db.s.orders",
-                r#"["id"]"#,
-                "ALTER TABLE t ADD FOREIGN KEY (order_id) REFERENCES orders (id)"
-            ],
-        )
-        .unwrap();
-        drop(conn);
-
-        let cache = open_cache(&db_path);
-        let obj = cache
-            .get_object(&"db.s.t".parse::<ObjectId>().unwrap())
-            .unwrap();
-        assert_eq!(obj.constraints.len(), 1);
-        let c = &obj.constraints[0];
-        assert_eq!(c.kind, "FOREIGN KEY");
-        assert_eq!(c.columns, vec!["order_id"]);
-        assert_eq!(c.ref_object.as_deref(), Some("db.s.orders"));
-        assert_eq!(c.ref_columns, Some(vec!["id".to_string()]));
     }
 }

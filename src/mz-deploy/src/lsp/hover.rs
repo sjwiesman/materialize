@@ -44,14 +44,13 @@
 //!   name, and a column table (name, type, nullable). If the object has a
 //!   `COMMENT ON` description, it appears as a paragraph after the header.
 //!   If any column has a `COMMENT ON COLUMN` description, a `Description`
-//!   column is added to the table. If the object has constraints (PRIMARY KEY,
-//!   UNIQUE, FOREIGN KEY), they are rendered as a bullet list after the table.
+//!   column is added to the table.
 //! - **Object without cached columns** — Shows just the object kind, name,
-//!   and source file path. Constraints are shown after the path if present.
+//!   and source file path.
 //! - **Unknown identifier** — Returns `None`.
 
 use super::{functions, goto_definition};
-use crate::project::compiler::cache::{CachedConstraint, ProjectCache};
+use crate::project::compiler::cache::ProjectCache;
 use crate::project::syntax::variables::find_variable_at_position;
 use crate::types::Types;
 use std::collections::BTreeMap;
@@ -163,8 +162,6 @@ pub fn resolve_hover(
         }
     }
 
-    let constraints_md = format_constraints(&cached_obj.constraints);
-
     let markdown = match columns {
         Some(cols) if !cols.is_empty() => {
             let mut md = format!("**{kind}** `{fqn}`\n\n");
@@ -191,18 +188,11 @@ pub fn resolve_hover(
                     md.push_str(&format!("| {} | {} {}|\n", name, col_type.r#type, nullable));
                 }
             }
-            if let Some(c) = &constraints_md {
-                md.push_str(&format!("\n**Constraints**\n\n{c}"));
-            }
             md
         }
         _ => {
             let file_path = &cached_obj.file_path;
-            let mut md = format!("**{kind}** `{fqn}`\n\n*{file_path}*");
-            if let Some(c) = &constraints_md {
-                md.push_str(&format!("\n\n**Constraints**\n\n{c}"));
-            }
-            md
+            format!("**{kind}** `{fqn}`\n\n*{file_path}*")
         }
     };
 
@@ -213,37 +203,6 @@ pub fn resolve_hover(
         }),
         range: None,
     })
-}
-
-/// Format constraints as a Markdown bullet list.
-///
-/// Returns `None` when the constraints vec is empty. Each constraint is
-/// rendered as `- **{kind}** \`{name}\` ({columns}) — enforced/not enforced`,
-/// with an additional `→ \`{ref_obj} ({ref_cols})\`` for foreign keys.
-fn format_constraints(constraints: &[CachedConstraint]) -> Option<String> {
-    if constraints.is_empty() {
-        return None;
-    }
-    let mut md = String::new();
-    for c in constraints {
-        let cols_str = c.columns.join(", ");
-        let enforced = if c.enforced {
-            "enforced"
-        } else {
-            "not enforced"
-        };
-
-        md.push_str(&format!("- **{}** `{}` ({})", c.kind, c.name, cols_str));
-        if let Some(ref_obj) = &c.ref_object {
-            if let Some(ref_cols) = &c.ref_columns {
-                md.push_str(&format!(" → `{} ({})`", ref_obj, ref_cols.join(", ")));
-            } else {
-                md.push_str(&format!(" → `{ref_obj}`"));
-            }
-        }
-        md.push_str(&format!(" — {enforced}\n"));
-    }
-    Some(md)
 }
 
 /// Resolve hover for a SQL function name.
@@ -478,98 +437,6 @@ mod tests {
     }
 
     #[test]
-    fn hover_with_enforced_pk_constraint() {
-        let (root, cache, types_lock) = build_test_project_with_comments_and_types_lock(
-            "CREATE VIEW foo AS SELECT 1 AS id;\n\
-             CREATE PRIMARY KEY NOT ENFORCED foo_pk ON foo (id);",
-        );
-        let file_uri = Url::from_file_path(root.path().join("models/mydb/public/bar.sql")).unwrap();
-
-        let hover = resolve_hover(
-            &["foo".to_string()],
-            &file_uri,
-            root.path(),
-            &cache,
-            &types_lock,
-        )
-        .unwrap();
-
-        let text = extract_markdown(&hover);
-        assert!(
-            text.contains("**Constraints**"),
-            "missing constraints header"
-        );
-        assert!(text.contains("**PRIMARY KEY**"), "missing PK kind");
-        assert!(text.contains("`foo_pk`"), "missing constraint name");
-        assert!(text.contains("(id)"), "missing columns");
-    }
-
-    #[test]
-    fn hover_with_not_enforced_constraint() {
-        let (root, cache, types_lock) = build_test_project_with_comments_and_types_lock(
-            "CREATE VIEW foo AS SELECT 1 AS id;\n\
-             CREATE PRIMARY KEY NOT ENFORCED foo_pk ON foo (id);",
-        );
-        let file_uri = Url::from_file_path(root.path().join("models/mydb/public/bar.sql")).unwrap();
-
-        let hover = resolve_hover(
-            &["foo".to_string()],
-            &file_uri,
-            root.path(),
-            &cache,
-            &types_lock,
-        )
-        .unwrap();
-
-        let text = extract_markdown(&hover);
-        assert!(
-            text.contains("— not enforced"),
-            "missing 'not enforced' status"
-        );
-    }
-
-    #[test]
-    fn hover_with_fk_constraint() {
-        let (root, cache, types_lock) = build_test_project_with_fk();
-        let file_uri = Url::from_file_path(root.path().join("models/mydb/public/bar.sql")).unwrap();
-
-        let hover = resolve_hover(
-            &["orders".to_string()],
-            &file_uri,
-            root.path(),
-            &cache,
-            &types_lock,
-        )
-        .unwrap();
-
-        let text = extract_markdown(&hover);
-        assert!(text.contains("**FOREIGN KEY**"), "missing FK kind");
-        assert!(text.contains("→"), "missing arrow for FK reference");
-        assert!(text.contains("foo"), "missing referenced object");
-    }
-
-    #[test]
-    fn hover_no_constraints_omits_section() {
-        let (root, cache, types_lock) = build_test_project_with_types_lock();
-        let file_uri = Url::from_file_path(root.path().join("models/mydb/public/bar.sql")).unwrap();
-
-        let hover = resolve_hover(
-            &["foo".to_string()],
-            &file_uri,
-            root.path(),
-            &cache,
-            &types_lock,
-        )
-        .unwrap();
-
-        let text = extract_markdown(&hover);
-        assert!(
-            !text.contains("Constraints"),
-            "should not have constraints section"
-        );
-    }
-
-    #[test]
     fn hover_types_lock_comments_on_external_dep() {
         let (root, cache) = build_test_project_cache();
         let mut types_lock = Types::default();
@@ -790,63 +657,6 @@ mod tests {
         types_lock
             .tables
             .insert("mydb.public.foo".parse::<ObjectId>().unwrap(), columns);
-
-        (root, cache, types_lock)
-    }
-
-    fn build_test_project_with_fk() -> (tempfile::TempDir, ProjectCache, Types) {
-        let root = tempfile::tempdir().unwrap();
-        let models = root.path().join("models/mydb/public");
-        std::fs::create_dir_all(&models).unwrap();
-        std::fs::write(models.join("foo.sql"), "CREATE VIEW foo AS SELECT 1 AS id;").unwrap();
-        std::fs::write(
-            models.join("orders.sql"),
-            "CREATE VIEW orders AS SELECT 1 AS id, 1 AS user_id;\n\
-             CREATE FOREIGN KEY NOT ENFORCED orders_fk ON orders (user_id) REFERENCES foo (id);",
-        )
-        .unwrap();
-        std::fs::write(
-            models.join("bar.sql"),
-            "CREATE VIEW bar AS SELECT * FROM orders;",
-        )
-        .unwrap();
-        write_project_toml(root.path());
-
-        let _project = crate::project::plan_sync(
-            &crate::fs::FileSystem::new(),
-            root.path(),
-            None,
-            None,
-            &Default::default(),
-        )
-        .expect("project should compile");
-        let cache = ProjectCache::open(root.path(), "", None, &Default::default())
-            .expect("cache should open")
-            .expect("cache DB should exist");
-
-        let mut types_lock = Types::default();
-        let mut columns = BTreeMap::new();
-        columns.insert(
-            "id".to_string(),
-            ColumnType {
-                r#type: "integer".to_string(),
-                nullable: false,
-                position: 0,
-                comment: None,
-            },
-        );
-        columns.insert(
-            "user_id".to_string(),
-            ColumnType {
-                r#type: "integer".to_string(),
-                nullable: true,
-                position: 1,
-                comment: None,
-            },
-        );
-        types_lock
-            .tables
-            .insert("mydb.public.orders".parse::<ObjectId>().unwrap(), columns);
 
         (root, cache, types_lock)
     }

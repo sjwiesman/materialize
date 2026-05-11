@@ -14,7 +14,7 @@
 //! the dependency-aware graph in [`ir::graph`](super::graph).
 //!
 //! - [`DatabaseObject`] is a single `.sql` file after validation and name
-//!   normalization: one primary CREATE statement plus its indexes, constraints,
+//!   normalization: one primary CREATE statement plus its indexes,
 //!   grants, comments, and tests. All identifiers are fully qualified.
 //! - [`Project`] groups validated objects by `(database, schema)` with
 //!   module-level statements, but has **no dependency graph**. Dependency
@@ -420,18 +420,6 @@ pub struct DatabaseObject {
     pub stmt: Statement,
     /// Indexes defined on this object
     pub indexes: Vec<CreateIndexStatement<Raw>>,
-    /// Constraints defined on this object.
-    ///
-    /// Constraints come in two flavors:
-    /// - **Not-enforced**: metadata-only, carried through for documentation
-    ///   and catalog purposes but never executed.
-    /// - **Enforced**: lowered into companion materialized views during the
-    ///   project-graph assembly. See [`crate::project::resolve::constraint`] for
-    ///   the lowering rules.
-    ///
-    /// Both kinds are stored here after object validation. The lowering step
-    /// reads enforced constraints from this vec to generate companion MVs.
-    pub constraints: Vec<CreateConstraintStatement<Raw>>,
     /// Grant statements for this object
     pub grants: Vec<GrantPrivilegesStatement<Raw>>,
     /// Comment statements for this object or its columns
@@ -460,11 +448,6 @@ impl DatabaseObject {
 
         for index in &self.indexes {
             if let Some(RawClusterName::Unresolved(cluster_name)) = &index.in_cluster {
-                cluster_set.insert(cluster_name.to_string());
-            }
-        }
-        for constraint in &self.constraints {
-            if let Some(RawClusterName::Unresolved(cluster_name)) = &constraint.in_cluster {
                 cluster_set.insert(cluster_name.to_string());
             }
         }
@@ -513,11 +496,6 @@ impl DatabaseObject {
         for index in &mut self.indexes {
             rewrite_in_cluster(&mut index.in_cluster, cluster_map);
         }
-
-        // Rewrite IN CLUSTER on constraints
-        for constraint in &mut self.constraints {
-            rewrite_in_cluster(&mut constraint.in_cluster, cluster_map);
-        }
     }
 
     /// Rewrite cross-database references using the given database name map.
@@ -539,7 +517,6 @@ impl DatabaseObject {
         self.stmt = self.stmt.clone().normalize_dependencies_with(&mut visitor);
 
         visitor.normalize_index_references(&mut self.indexes);
-        visitor.normalize_constraint_references(&mut self.constraints);
         visitor.normalize_grant_references(&mut self.grants);
         visitor.normalize_comment_references(&mut self.comments);
     }

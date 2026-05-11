@@ -22,14 +22,11 @@
 //! | `ObjectInSchema(obj, db, sch)` | Project hierarchy | Object `obj` lives in `db.sch` |
 //! | `DependsOn(child, parent)` | `project.dependency_graph` | `child` references `parent` in its query |
 //! | `StmtUsesCluster(obj, cluster)` | `IN CLUSTER` clause on main CREATE | Object's statement runs on `cluster` |
-//! | `IndexUsesCluster(obj, idx, cluster)` | `IN CLUSTER` clause on CREATE INDEX / constraint | Index/constraint `idx` on `obj` runs on `cluster` |
+//! | `IndexUsesCluster(obj, idx, cluster)` | `IN CLUSTER` clause on CREATE INDEX | Index `idx` on `obj` runs on `cluster` |
 //! | `ClusterBoundary(cluster)` | Evaluator-derived from cluster usage facts | The set of clusters eligible to become `DirtyCluster` |
 //! | `IsSink(obj)` | `Statement::CreateSink` | Object writes to an external system |
 //! | `IsReplacement(obj)` | Schema is in `project.replacement_schemas` | Object uses in-place replacement protocol |
 //!
-//! **Key Insight:** `IndexUsesCluster` treats enforced constraints identically
-//! to indexes — both produce `(object, name, cluster)` tuples — because
-//! constraint companion MVs run on clusters with the same lifecycle semantics.
 //! `ClusterBoundary` is derived as the set of all clusters referenced by
 //! statements or indexes in the project.
 
@@ -162,23 +159,6 @@ pub(super) fn extract_base_facts(project: &Project) -> BaseFacts {
                         index_uses_cluster.push((
                             obj_id.clone(),
                             index_name,
-                            Cluster::new(cluster_name.to_string()),
-                        ));
-                    }
-                }
-
-                // IndexUsesCluster facts - extract from constraints (same semantics as indexes)
-                for constraint in &obj.typed_object.constraints {
-                    if let Some(cluster_name) = &constraint.in_cluster {
-                        let constraint_name = constraint
-                            .name
-                            .as_ref()
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| "unnamed_constraint".to_string());
-
-                        index_uses_cluster.push((
-                            obj_id.clone(),
-                            constraint_name,
                             Cluster::new(cluster_name.to_string()),
                         ));
                     }

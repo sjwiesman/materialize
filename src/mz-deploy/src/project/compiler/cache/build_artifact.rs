@@ -82,7 +82,6 @@ pub(crate) struct CompiledObjectArtifactData {
     pub file_path: PathBuf,
     pub stmt_sql: String,
     pub indexes_sql: Vec<String>,
-    pub constraints_sql: Vec<String>,
     pub grants_sql: Vec<String>,
     pub comments_sql: Vec<String>,
     pub tests_sql: Vec<String>,
@@ -543,7 +542,6 @@ impl BuildArtifact {
                 source,
             })?;
         let mut indexes = self.prepare_fragment_select("object_state_indexes")?;
-        let mut constraints = self.prepare_fragment_select("object_state_constraints")?;
         let mut grants = self.prepare_fragment_select("object_state_grants")?;
         let mut comments = self.prepare_fragment_select("object_state_comments")?;
         let mut tests = self.prepare_fragment_select("object_state_tests")?;
@@ -575,7 +573,6 @@ impl BuildArtifact {
                     file_path: file_path.map(PathBuf::from).unwrap_or_default(),
                     stmt_sql: stmt_sql.unwrap_or_default(),
                     indexes_sql: collect_fragments(&mut indexes, key, &self.path)?,
-                    constraints_sql: collect_fragments(&mut constraints, key, &self.path)?,
                     grants_sql: collect_fragments(&mut grants, key, &self.path)?,
                     comments_sql: collect_fragments(&mut comments, key, &self.path)?,
                     tests_sql: collect_fragments(&mut tests, key, &self.path)?,
@@ -634,15 +631,11 @@ impl BuildArtifact {
                     source,
                 })?;
             let mut delete_indexes = prepare_delete(&tx, "object_state_indexes", &self.path)?;
-            let mut delete_constraints =
-                prepare_delete(&tx, "object_state_constraints", &self.path)?;
             let mut delete_grants = prepare_delete(&tx, "object_state_grants", &self.path)?;
             let mut delete_comments = prepare_delete(&tx, "object_state_comments", &self.path)?;
             let mut delete_tests = prepare_delete(&tx, "object_state_tests", &self.path)?;
             let mut insert_indexes =
                 prepare_fragment_insert(&tx, "object_state_indexes", &self.path)?;
-            let mut insert_constraints =
-                prepare_fragment_insert(&tx, "object_state_constraints", &self.path)?;
             let mut insert_grants =
                 prepare_fragment_insert(&tx, "object_state_grants", &self.path)?;
             let mut insert_comments =
@@ -667,7 +660,6 @@ impl BuildArtifact {
                     })?;
 
                 run_execute(&mut delete_indexes, params![row.object_key], &self.path)?;
-                run_execute(&mut delete_constraints, params![row.object_key], &self.path)?;
                 run_execute(&mut delete_grants, params![row.object_key], &self.path)?;
                 run_execute(&mut delete_comments, params![row.object_key], &self.path)?;
                 run_execute(&mut delete_tests, params![row.object_key], &self.path)?;
@@ -677,12 +669,6 @@ impl BuildArtifact {
                         &mut insert_indexes,
                         &row.object_key,
                         &data.indexes_sql,
-                        &self.path,
-                    )?;
-                    write_fragments(
-                        &mut insert_constraints,
-                        &row.object_key,
-                        &data.constraints_sql,
                         &self.path,
                     )?;
                     write_fragments(
@@ -923,7 +909,6 @@ impl BuildArtifact {
             "project_dependencies",
             "project_comments",
             "project_indexes",
-            "project_constraints",
             "project_grants",
             "project_tests",
             "project_aliases",
@@ -1078,7 +1063,6 @@ struct ProjectStatements<'tx> {
     ins_dep: rusqlite::Statement<'tx>,
     ins_comment: rusqlite::Statement<'tx>,
     ins_index: rusqlite::Statement<'tx>,
-    ins_constraint: rusqlite::Statement<'tx>,
     ins_grant: rusqlite::Statement<'tx>,
     ins_test: rusqlite::Statement<'tx>,
     ins_infra: rusqlite::Statement<'tx>,
@@ -1103,7 +1087,7 @@ impl<'tx> ProjectStatements<'tx> {
                 .prepare("INSERT INTO project_schemas (database, name, schema_type) VALUES (?1, ?2, ?3)")
                 .map_err(db_err)?,
             ins_obj: tx
-                .prepare("INSERT INTO project_objects (object_key, database, schema, name, object_kind, cluster, file_path, sql_text, is_constraint_mv) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")
+                .prepare("INSERT INTO project_objects (object_key, database, schema, name, object_kind, cluster, file_path, sql_text) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
                 .map_err(db_err)?,
             ins_dep: tx
                 .prepare("INSERT INTO project_dependencies (object_key, dependency_key) VALUES (?1, ?2)")
@@ -1113,9 +1097,6 @@ impl<'tx> ProjectStatements<'tx> {
                 .map_err(db_err)?,
             ins_index: tx
                 .prepare("INSERT INTO project_indexes (object_key, index_name, cluster, columns, sql_text) VALUES (?1, ?2, ?3, ?4, ?5)")
-                .map_err(db_err)?,
-            ins_constraint: tx
-                .prepare("INSERT INTO project_constraints (object_key, constraint_name, kind, enforced, columns, ref_object, ref_columns, sql_text) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
                 .map_err(db_err)?,
             ins_grant: tx
                 .prepare("INSERT INTO project_grants (object_key, privilege, grantee, sql_text) VALUES (?1, ?2, ?3, ?4)")
@@ -1177,7 +1158,6 @@ impl<'tx> ProjectStatements<'tx> {
                 &cluster,
                 &file_path,
                 &sql_text,
-                i32::from(obj.is_constraint_mv),
             ])
             .map_err(db_err)?;
 
@@ -1227,43 +1207,6 @@ impl<'tx> ProjectStatements<'tx> {
                     &idx_cluster,
                     &columns_str,
                     &idx_sql,
-                ])
-                .map_err(db_err)?;
-        }
-
-        for constraint in &typed.constraints {
-            let constraint_name = constraint
-                .name
-                .as_ref()
-                .map(|n| n.to_string())
-                .unwrap_or_default();
-            let con_kind = constraint.kind.to_string();
-            let enforced = i32::from(constraint.enforced);
-            let columns: Vec<String> = constraint.columns.iter().map(|c| c.to_string()).collect();
-            let columns_json = serde_json::to_string(&columns).unwrap_or_default();
-            let (ref_object, ref_columns) = match &constraint.references {
-                Some(refs) => {
-                    let ref_obj = refs.object.to_string();
-                    let ref_cols: Vec<String> =
-                        refs.columns.iter().map(|c| c.to_string()).collect();
-                    (
-                        Some(ref_obj),
-                        Some(serde_json::to_string(&ref_cols).unwrap_or_default()),
-                    )
-                }
-                None => (None, None),
-            };
-            let con_sql = format!("{};", constraint);
-            self.ins_constraint
-                .execute(params![
-                    &object_key,
-                    &constraint_name,
-                    &con_kind,
-                    enforced,
-                    &columns_json,
-                    &ref_object,
-                    &ref_columns,
-                    &con_sql,
                 ])
                 .map_err(db_err)?;
         }
@@ -1662,7 +1605,6 @@ mod tests {
             path: PathBuf::from("test.sql"),
             stmt,
             indexes: vec![],
-            constraints: vec![],
             grants: vec![],
             comments: vec![],
             tests: vec![],
@@ -1676,7 +1618,6 @@ mod tests {
             id: obj_id,
             typed_object: typed_obj,
             dependencies: BTreeSet::new(),
-            is_constraint_mv: false,
         };
         graph::Project {
             databases: vec![graph::Database {

@@ -14,8 +14,6 @@
 //!
 //! - CTE scope tracking
 //! - identifier qualification and normalization
-//! - lowering declarative constraints into deployable objects
 
-pub(crate) mod constraint;
 pub(crate) mod cte_scope;
 pub(crate) mod normalize;

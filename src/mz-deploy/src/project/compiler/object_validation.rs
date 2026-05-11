@@ -17,7 +17,7 @@
 //! - classify statements and require exactly one primary create statement
 //! - validate names against the source-owned object key
 //! - normalize identifiers and dependencies into canonical qualified form
-//! - validate clusters, references, comments, grants, and constraints
+//! - validate clusters, references, comments, and grants
 //! - resolve active profile variants and reject incompatible overrides
 //!
 //! Project assembly validates database and schema setup statements on every
@@ -31,8 +31,7 @@
 //! 3. **Identifier format** — lowercase, valid characters
 //! 4. **Name normalization** — fully qualify all references via `NormalizingVisitor`
 //! 5. **Cluster validation** — MVs, sinks, sources, indexes have required `IN CLUSTER`
-//! 6. **Reference validation** — indexes, constraints, grants, comments reference the parent object
-//! 7. **Constraint enforcement** — enforced constraints have `IN CLUSTER`
+//! 6. **Reference validation** — indexes, grants, comments reference the parent object
 //!
 //! ## Profile Variant Handling
 //!
@@ -42,20 +41,16 @@
 //! validated. Views and materialized views do not allow profile overrides.
 
 mod clusters;
-mod constraint_enforcement;
 mod identifiers;
 mod references;
 mod schema_constraints;
 
 use clusters::{
-    validate_constraint_clusters, validate_index_clusters, validate_mv_cluster,
-    validate_sink_cluster, validate_source_cluster,
+    validate_index_clusters, validate_mv_cluster, validate_sink_cluster, validate_source_cluster,
 };
-use constraint_enforcement::validate_constraint_enforcement;
 use identifiers::{validate_fqn_identifiers, validate_ident};
 use references::{
-    validate_comment_references, validate_constraint_references, validate_grant_references,
-    validate_index_references,
+    validate_comment_references, validate_grant_references, validate_index_references,
 };
 use schema_constraints::validate_no_storage_and_computation_in_schema;
 
@@ -65,7 +60,7 @@ use crate::project::error::{ValidationError, ValidationErrorKind, ValidationErro
 use crate::project::ir::compiled::{Database, DatabaseObject, FullyQualifiedName, Project, Schema};
 use crate::project::resolve::normalize::NormalizingVisitor;
 use crate::project::syntax::input;
-use crate::project::syntax::parser::LocatedStatement;
+use crate::project::syntax::parser::{LocatedStatement, statement_type_name};
 use mz_sql_parser::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -94,7 +89,6 @@ fn classify_variant_object_type(
             mz_sql_parser::ast::Statement::CreateSecret(_) => Some(ObjectType::Secret),
             mz_sql_parser::ast::Statement::CreateConnection(_) => Some(ObjectType::Connection),
             mz_sql_parser::ast::Statement::CreateIndex(_)
-            | mz_sql_parser::ast::Statement::CreateConstraint(_)
             | mz_sql_parser::ast::Statement::GrantPrivileges(_)
             | mz_sql_parser::ast::Statement::Comment(_)
             | mz_sql_parser::ast::Statement::ExecuteUnitTest(_) => None,
@@ -102,7 +96,7 @@ fn classify_variant_object_type(
                 errors.push(ValidationError::with_file(
                     ValidationErrorKind::UnsupportedStatement {
                         object_name: name.to_string(),
-                        statement_type: format!("{:?}", other),
+                        statement_type: statement_type_name(other).to_string(),
                     },
                     path.to_path_buf(),
                 ));
@@ -176,8 +170,6 @@ fn validate_single_variant(
     let mut object_type: Option<ObjectType> = None;
     let mut indexes = Vec::new();
     let mut index_offsets = Vec::new();
-    let mut constraints = Vec::new();
-    let mut constraint_offsets = Vec::new();
     let mut grants = Vec::new();
     let mut grant_offsets = Vec::new();
     let mut comments = Vec::new();
@@ -309,10 +301,6 @@ fn validate_single_variant(
                 index_offsets.push(byte_offset);
                 indexes.push(s);
             }
-            mz_sql_parser::ast::Statement::CreateConstraint(s) => {
-                constraint_offsets.push(byte_offset);
-                constraints.push(s);
-            }
             mz_sql_parser::ast::Statement::GrantPrivileges(s) => {
                 grant_offsets.push(byte_offset);
                 grants.push(s);
@@ -332,7 +320,7 @@ fn validate_single_variant(
                 errors.push(ValidationError::with_file_and_offset(
                     ValidationErrorKind::UnsupportedStatement {
                         object_name: name.to_string(),
-                        statement_type: format!("{:?}", other),
+                        statement_type: statement_type_name(&other).to_string(),
                     },
                     path.to_path_buf(),
                     byte_offset,
@@ -387,35 +375,19 @@ fn validate_single_variant(
     // Normalize statement name and dependencies
     let stmt = stmt.normalize_stmt(&fqn);
 
-    // Normalize index, constraint, grant, and comment references to be fully qualified
+    // Normalize index, grant, and comment references to be fully qualified
     let visitor = NormalizingVisitor::fully_qualifying(&fqn);
     visitor.normalize_index_references(&mut indexes);
-    visitor.normalize_constraint_references(&mut constraints);
     visitor.normalize_grant_references(&mut grants);
     visitor.normalize_comment_references(&mut comments);
 
     // Validate cluster requirements
     validate_index_clusters(&fqn, &indexes, &index_offsets, &mut errors);
-    validate_constraint_clusters(&fqn, &constraints, &constraint_offsets, &mut errors);
     validate_mv_cluster(&fqn, &stmt, main_offset, &mut errors);
     validate_sink_cluster(&fqn, &stmt, main_offset, &mut errors);
     validate_source_cluster(&fqn, &stmt, main_offset, &mut errors);
 
     validate_index_references(&fqn, &indexes, &index_offsets, &main_ident, &mut errors);
-    validate_constraint_references(
-        &fqn,
-        &constraints,
-        &constraint_offsets,
-        &main_ident,
-        &mut errors,
-    );
-    validate_constraint_enforcement(
-        &fqn,
-        &constraints,
-        &constraint_offsets,
-        obj_type,
-        &mut errors,
-    );
     validate_grant_references(
         &fqn,
         &grants,
@@ -441,7 +413,6 @@ fn validate_single_variant(
         path: path.to_path_buf(),
         stmt,
         indexes,
-        constraints,
         grants,
         comments,
         tests,

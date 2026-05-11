@@ -73,19 +73,17 @@
 //!   had been freshly compiled
 //! - database- and schema-level mod statements are validated on every
 //!   invocation; they are not cached independently
-//! - schema-level and project-level constraints are enforced after object
-//!   artifacts are assembled, so mixed-schema and replacement-schema checks see
+//! - schema-level checks (e.g., storage/computation separation, replacement
+//!   schemas) are enforced after object artifacts are assembled, so they see
 //!   the full current project
-//! - final dependency extraction and lowering operate on a complete compiled
-//!   project assembled for the current invocation
+//! - final dependency extraction operates on a complete compiled project
+//!   assembled for the current invocation
 
 pub(crate) mod cache;
 mod cache_io;
-mod constraints;
 mod mod_statements;
 mod object_validation;
 pub(crate) mod typecheck;
-pub(crate) use constraints::{validate_constraint_columns, validate_constraint_fk_targets};
 
 use super::error::{LoadError, ProjectError, ValidationError, ValidationErrors};
 use crate::project::ir::{compiled, graph};
@@ -99,8 +97,8 @@ use cache::build_artifact::{
 };
 use cache_io::hex_digest;
 use mz_sql_parser::ast::{
-    CommentStatement, CreateConstraintStatement, CreateIndexStatement, ExecuteUnitTestStatement,
-    GrantPrivilegesStatement, Raw, Statement,
+    CommentStatement, CreateIndexStatement, ExecuteUnitTestStatement, GrantPrivilegesStatement,
+    Raw, Statement,
 };
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -1013,12 +1011,6 @@ fn compiled_object_to_artifact_data(object: &CachedTypedObject) -> CompiledObjec
             .iter()
             .map(|stmt| format!("{};", stmt))
             .collect(),
-        constraints_sql: object
-            .typed_object
-            .constraints
-            .iter()
-            .map(|stmt| format!("{};", stmt))
-            .collect(),
         grants_sql: object
             .typed_object
             .grants
@@ -1057,7 +1049,6 @@ fn artifact_to_compiled_object(
                 path: data.file_path.clone(),
                 stmt: parse_main_statement(&data.stmt_sql)?,
                 indexes: parse_statement_list(&data.indexes_sql, expect_index)?,
-                constraints: parse_statement_list(&data.constraints_sql, expect_constraint)?,
                 grants: parse_statement_list(&data.grants_sql, expect_grant)?,
                 comments: parse_statement_list(&data.comments_sql, expect_comment)?,
                 tests: parse_statement_list(&data.tests_sql, expect_test)?,
@@ -1134,14 +1125,6 @@ fn parse_main_statement(sql: &str) -> Result<crate::project::ast::Statement, ()>
 fn expect_index(stmt: Statement<Raw>) -> Result<CreateIndexStatement<Raw>, ()> {
     match stmt {
         Statement::CreateIndex(stmt) => Ok(stmt),
-        _ => Err(()),
-    }
-}
-
-/// Extract a [`CreateConstraintStatement`] from a generic `Statement`, or `Err(())`.
-fn expect_constraint(stmt: Statement<Raw>) -> Result<CreateConstraintStatement<Raw>, ()> {
-    match stmt {
-        Statement::CreateConstraint(stmt) => Ok(stmt),
         _ => Err(()),
     }
 }

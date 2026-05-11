@@ -39,7 +39,7 @@ fn overlay_db_name(base_db: &str, profile: &str) -> String {
 ///
 /// Only the clusters that `create_phase` would actually write to: the
 /// `IN CLUSTER` of each materialized view and of each index. Views have
-/// no cluster, and constraints are not deployed in dev.
+/// no cluster.
 fn overlay_cluster_references(objects: &[ObjectRef<'_>]) -> BTreeSet<String> {
     let mut clusters = BTreeSet::new();
     for (_, obj) in objects {

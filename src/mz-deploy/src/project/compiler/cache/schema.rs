@@ -13,14 +13,13 @@
 //! dropped and recreated from [`CREATE_SQL`] — safe because nothing here is
 //! authoritative.
 
-pub(super) const SCHEMA_VERSION: i64 = 10;
+pub(super) const SCHEMA_VERSION: i64 = 11;
 
 pub(super) const DROP_SQL: &str = "
     DROP TABLE IF EXISTS meta;
     DROP TABLE IF EXISTS file_state;
     DROP TABLE IF EXISTS object_state;
     DROP TABLE IF EXISTS object_state_indexes;
-    DROP TABLE IF EXISTS object_state_constraints;
     DROP TABLE IF EXISTS object_state_grants;
     DROP TABLE IF EXISTS object_state_comments;
     DROP TABLE IF EXISTS object_state_tests;
@@ -38,7 +37,6 @@ pub(super) const DROP_SQL: &str = "
     DROP TABLE IF EXISTS project_replacement_schemas;
     DROP TABLE IF EXISTS project_comments;
     DROP TABLE IF EXISTS project_indexes;
-    DROP TABLE IF EXISTS project_constraints;
     DROP TABLE IF EXISTS project_grants;
     DROP TABLE IF EXISTS project_tests;
     DROP TABLE IF EXISTS project_infrastructure;
@@ -69,12 +67,6 @@ pub(super) const CREATE_SQL: &str = "
         stmt_sql TEXT
     );
     CREATE TABLE IF NOT EXISTS object_state_indexes (
-        object_key TEXT NOT NULL,
-        position INTEGER NOT NULL,
-        sql_text TEXT NOT NULL,
-        PRIMARY KEY (object_key, position)
-    );
-    CREATE TABLE IF NOT EXISTS object_state_constraints (
         object_key TEXT NOT NULL,
         position INTEGER NOT NULL,
         sql_text TEXT NOT NULL,
@@ -132,8 +124,7 @@ pub(super) const CREATE_SQL: &str = "
         object_kind TEXT NOT NULL,
         cluster TEXT,
         file_path TEXT NOT NULL,
-        sql_text TEXT NOT NULL,
-        is_constraint_mv INTEGER NOT NULL DEFAULT 0
+        sql_text TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_project_objects_file_path
         ON project_objects(file_path);
@@ -173,18 +164,6 @@ pub(super) const CREATE_SQL: &str = "
         sql_text TEXT NOT NULL,
         PRIMARY KEY (object_key, index_name)
     );
-    CREATE TABLE IF NOT EXISTS project_constraints (
-        object_key TEXT NOT NULL,
-        constraint_name TEXT,
-        kind TEXT NOT NULL,
-        enforced INTEGER NOT NULL,
-        columns TEXT NOT NULL,
-        ref_object TEXT,
-        ref_columns TEXT,
-        sql_text TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_project_constraints_object_key
-        ON project_constraints(object_key);
     CREATE TABLE IF NOT EXISTS project_grants (
         object_key TEXT NOT NULL,
         privilege TEXT NOT NULL,

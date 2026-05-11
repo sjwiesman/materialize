@@ -49,7 +49,6 @@ use crate::project::ir::{
     compiled,
     graph::{Database, DatabaseObject, Project, Schema, SchemaType},
 };
-use crate::project::resolve::constraint;
 use crate::project::resolve::cte_scope::CteScope;
 use mz_sql_parser::ast::visit::{self, Visit};
 use mz_sql_parser::ast::*;
@@ -99,11 +98,6 @@ struct ProcessedObject {
     typed_object: compiled::DatabaseObject,
     dependencies: BTreeSet<ObjectId>,
     clusters: BTreeSet<Cluster>,
-    constraint_mvs: Vec<(
-        ObjectId,
-        CreateConstraintStatement<Raw>,
-        compiled::DatabaseObject,
-    )>,
     tests: Vec<(ObjectId, crate::unit_test::UnitTest)>,
 }
 
@@ -115,8 +109,8 @@ impl From<compiled::Project> for Project {
     /// 1. **Collect** — Flatten all compiled objects into `TypedObjectTask`s and
     ///    collect defined object IDs for external dependency detection.
     ///
-    /// 2. **Process** — Extract dependencies, clusters, and constraint MVs from
-    ///    each object. This is the CPU-intensive step.
+    /// 2. **Process** — Extract dependencies and clusters from each object.
+    ///    This is the CPU-intensive step.
     ///
     /// 3. **Reassemble** — Merge results into the dependency graph and
     ///    hierarchical `Project` structure.
@@ -188,19 +182,6 @@ impl From<compiled::Project> for Project {
                 let (dependencies, clusters) =
                     extract_dependencies(&task.typed_obj.stmt, &task.db_name, &task.schema_name);
 
-                // Constraint lowering: enforced constraints become companion MVs
-                let mut constraint_mvs = Vec::new();
-                for c in &task.typed_obj.constraints {
-                    if let Some(mv_obj) = constraint::lower_to_materialized_view(
-                        c,
-                        &task.typed_obj.stmt.ident().object,
-                        &task.db_name,
-                        &task.schema_name,
-                    ) {
-                        constraint_mvs.push((object_id.clone(), c.clone(), mv_obj));
-                    }
-                }
-
                 // Collect tests
                 let tests: Vec<_> = task
                     .typed_obj
@@ -220,7 +201,6 @@ impl From<compiled::Project> for Project {
                     typed_object: task.typed_obj,
                     dependencies,
                     clusters,
-                    constraint_mvs,
                     tests,
                 }
             })
@@ -259,51 +239,7 @@ impl From<compiled::Project> for Project {
                     id: po.object_id,
                     typed_object: po.typed_object,
                     dependencies: po.dependencies,
-                    is_constraint_mv: false,
                 });
-
-            // Process lowered constraint MVs
-            for (parent_id, constraint_stmt, mv_obj) in po.constraint_mvs {
-                let mv_id = ObjectId::new(
-                    po.db_name.clone(),
-                    po.schema_name.clone(),
-                    mv_obj.stmt.ident().object.clone(),
-                );
-
-                let (mut mv_deps, mv_clusters) =
-                    extract_dependencies(&mv_obj.stmt, &po.db_name, &po.schema_name);
-
-                for cluster in mv_clusters {
-                    cluster_dependencies.insert(cluster);
-                }
-
-                mv_deps.insert(parent_id);
-
-                if let Some(ref refs) = constraint_stmt.references {
-                    let ref_id =
-                        ObjectId::from_raw_item_name(&refs.object, &po.db_name, &po.schema_name);
-                    mv_deps.insert(ref_id);
-                }
-
-                for dep in &mv_deps {
-                    if !defined_objects.contains(dep) {
-                        external_dependencies.insert(dep.clone());
-                    }
-                }
-
-                defined_objects.insert(mv_id.clone());
-                dependency_graph.insert(mv_id.clone(), mv_deps.clone());
-
-                objects_by_location
-                    .entry((po.db_name.clone(), po.schema_name.clone()))
-                    .or_default()
-                    .push(DatabaseObject {
-                        id: mv_id,
-                        typed_object: mv_obj,
-                        dependencies: mv_deps,
-                        is_constraint_mv: true,
-                    });
-            }
         }
 
         // Reassemble into hierarchical structure

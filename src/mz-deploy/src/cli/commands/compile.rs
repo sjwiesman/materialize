@@ -12,28 +12,18 @@
 //! Compiles the project through a multi-stage pipeline:
 //!
 //! 1. **Parse** — Load and parse SQL files from the project directory.
-//! 2. **Validate** — Check project structure, dependencies, and constraints.
+//! 2. **Validate** — Check project structure and dependencies.
 //! 3. **Build graph** — Assemble the dependency-aware project graph.
 //! 4. **Typecheck** — Incrementally validate SQL against Materialize. Only
 //!    objects whose definitions changed since the last build are re-validated;
 //!    unchanged builds skip typechecking entirely.
-//! 5. **Post-validate** — Run constraint column validation with full type
-//!    metadata now available.
-//! 6. **Display** — Print the deployment plan with dependencies and SQL.
-//!
-//! **Key behavior:** Constraint validation is split across stages. FK target
-//! *types* are validated before typechecking (stage 2), while FK *column names*
-//! are validated after typechecking (stage 5) once complete column metadata is
-//! available.
+//! 5. **Display** — Print the deployment plan with dependencies and SQL.
 
 use crate::cli::CliError;
 use crate::cli::progress;
 use crate::config::Settings;
-use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::graph::Project;
-use crate::project::ir::object_id::ObjectId;
 use crate::{project, verbose};
-use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 /// Compile and validate the project, showing the deployment plan.
@@ -129,56 +119,8 @@ fn run_inner(
         return Err(CliError::UndeclaredDependencies { undeclared });
     }
 
-    let types_lock = crate::types::load_types_lock(directory).unwrap_or_default();
-
-    let tc = ProjectCache::open(
-        directory,
-        settings.profile_name().unwrap_or(""),
-        settings.profile_suffix(),
-        settings.variables(),
-    )
-    .ok()
-    .flatten();
-
-    validate_constraints_with_types(&planned_project, &types_lock, tc.as_ref())?;
-
     if !skip_typecheck {
         typecheck_project(settings, &planned_project)?;
-
-        // Post-typecheck column validation: two-tier lookup (TypesCache then types_lock)
-        {
-            let tc = ProjectCache::open(
-                directory,
-                settings.profile_name().unwrap_or(""),
-                settings.profile_suffix(),
-                settings.variables(),
-            )
-            .ok()
-            .flatten();
-
-            let constraint_ids = collect_constraint_fqns(&planned_project);
-            let mut column_map = tc
-                .as_ref()
-                .map(|cache| cache.get_column_names(&constraint_ids.iter().collect::<Vec<_>>()))
-                .unwrap_or_default();
-            // Add types_lock columns for any objects not in the cache
-            for id in &constraint_ids {
-                let key = id.to_string().to_lowercase();
-                if !column_map.contains_key(&key) {
-                    if let Some(cols) = types_lock.get_table(id) {
-                        column_map.insert(key, cols.keys().map(|c| c.to_lowercase()).collect());
-                    }
-                }
-            }
-            let col_errors =
-                project::compiler::validate_constraint_columns(&planned_project, &column_map);
-            if !col_errors.is_empty() {
-                return Err(project::error::ProjectError::from(
-                    project::error::ValidationErrors::new(col_errors),
-                )
-                .into());
-            }
-        }
     }
 
     if show_progress && crate::log::verbose_enabled() {
@@ -217,77 +159,6 @@ fn typecheck_project(settings: &Settings, planned_project: &Project) -> Result<(
     );
 
     Ok(())
-}
-
-/// Validate FK constraints before runtime typecheck.
-///
-/// FK target types are validated using all available type information.
-/// Column name validation is partial at this stage — only objects with
-/// known schemas are checked. Full column validation runs after typecheck
-/// produces complete metadata.
-fn validate_constraints_with_types(
-    planned_project: &Project,
-    types_lock: &crate::types::Types,
-    types_cache: Option<&ProjectCache>,
-) -> Result<(), CliError> {
-    let get_kind = |id: &ObjectId| -> crate::types::ObjectKind {
-        types_cache
-            .and_then(|tc| tc.get_kind(id))
-            .or_else(|| types_lock.kinds.get(id).copied())
-            .unwrap_or(crate::types::ObjectKind::Table)
-    };
-    let fk_errors = project::compiler::validate_constraint_fk_targets(planned_project, get_kind);
-    if !fk_errors.is_empty() {
-        return Err(
-            project::error::ProjectError::from(project::error::ValidationErrors::new(fk_errors))
-                .into(),
-        );
-    }
-
-    // Pre-typecheck column validation uses types_lock only
-    let column_map: BTreeMap<String, BTreeSet<String>> = types_lock
-        .tables
-        .iter()
-        .map(|(id, columns)| {
-            let col_names = columns.keys().map(|c| c.to_lowercase()).collect();
-            (id.to_string().to_lowercase(), col_names)
-        })
-        .collect();
-    let col_errors = project::compiler::validate_constraint_columns(planned_project, &column_map);
-    if !col_errors.is_empty() {
-        return Err(
-            project::error::ProjectError::from(project::error::ValidationErrors::new(col_errors))
-                .into(),
-        );
-    }
-
-    Ok(())
-}
-
-/// Collect all object IDs referenced by constraints in the project.
-///
-/// Returns IDs for both parent objects (that have constraints) and FK
-/// reference targets, enabling targeted column validation.
-fn collect_constraint_fqns(planned_project: &Project) -> Vec<ObjectId> {
-    let mut ids = BTreeSet::new();
-    for obj in planned_project.iter_objects() {
-        if !obj.typed_object.constraints.is_empty() {
-            ids.insert(obj.id.clone());
-        }
-        for constraint in &obj.typed_object.constraints {
-            if let Some(refs) = &constraint.references {
-                let ref_name = refs.object.name();
-                if ref_name.0.len() == 3 {
-                    ids.insert(ObjectId::new(
-                        ref_name.0[0].to_string(),
-                        ref_name.0[1].to_string(),
-                        ref_name.0[2].to_string(),
-                    ));
-                }
-            }
-        }
-    }
-    ids.into_iter().collect()
 }
 
 /// Print verbose details about the project (only shown with VERBOSE env var)
