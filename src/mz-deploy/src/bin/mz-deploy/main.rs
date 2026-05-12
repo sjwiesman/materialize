@@ -299,7 +299,11 @@ enum Command {
         hide = true,
         after_help = "Run 'mz-deploy help setup' for a detailed usage guide."
     )]
-    Setup,
+    Setup {
+        /// Size for the `_mz_deploy_server` cluster.
+        #[arg(long, value_name = "SIZE", default_value = "25cc")]
+        cluster_size: String,
+    },
 
     /// Test database connection and display environment information
     ///
@@ -951,7 +955,9 @@ async fn run(args: Args) -> Result<(), CliError> {
         Some(Command::Dev { down, dry_run }) => {
             cli::commands::dev::run(&settings, down, dry_run).await
         }
-        Some(Command::Setup) => cli::commands::setup::run(&settings).await,
+        Some(Command::Setup { cluster_size }) => {
+            cli::commands::setup::run(&settings, &cluster_size).await
+        }
         Some(Command::Debug) => cli::commands::debug::run(&settings).await,
         Some(Command::Sql { psql_args }) => cli::commands::sql::run(&settings, psql_args),
         Some(Command::Mcp { .. }) => unreachable!("handled above"),

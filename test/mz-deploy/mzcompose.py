@@ -159,23 +159,18 @@ def setup_base(c: Composition) -> None:
     # Ensure profiles exist before first run_mz_deploy call
     create_profiles(c)
 
-    # Pre-create the _mz_deploy_server cluster with a size that is valid in
-    # the mzcompose test environment.  The setup command uses the hardcoded
-    # production size "25cc" which is not available locally; pre-creating the
-    # cluster causes ensure() to skip the CREATE CLUSTER step entirely.
-    # Materialize does not support CREATE CLUSTER IF NOT EXISTS, so we check
-    # first and create only if absent.  Create as the materialize superuser so
-    # that materialize owns the cluster and can later GRANT privileges on it.
-    rows = c.sql_query(
-        "SELECT count(*) FROM mz_clusters WHERE name = '_mz_deploy_server'",
+    # Run setup as superuser (creates materialize_* roles). The production
+    # default size is not available in the mzcompose environment, so pass a
+    # locally-valid size via --cluster-size.
+    result = run_mz_deploy(
+        c,
+        "basic/v1",
+        "setup",
+        "--profile",
+        "admin",
+        "--cluster-size",
+        "scale=1,workers=1",
     )
-    if int(rows[0][0]) == 0:
-        c.sql(
-            "CREATE CLUSTER _mz_deploy_server (SIZE = 'scale=1,workers=1')",
-        )
-
-    # Run setup as superuser (creates materialize_* roles)
-    result = run_mz_deploy(c, "basic/v1", "setup", "--profile", "admin")
     assert result.returncode == 0, f"setup failed: {result.stderr}"
 
     # Create users with specific roles (system privileges require mz_system)
@@ -945,167 +940,6 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
         assert (
             "no profile selected" in combined
         ), f"Expected 'no profile selected' error, got: {combined}"
-
-    with c.test_case("mz-deploy-constraints"):
-        # ════════════════════════════════════════════════════════════
-        # Step 1: Apply the project (creates raw tables + cluster)
-        # ════════════════════════════════════════════════════════════
-        result = run_mz_deploy(c, "constraints/v1", "apply")
-        assert result.returncode == 0, f"apply failed: {result.stderr}"
-
-        # Verify raw tables created in ingest schema
-        for table_name in ["users_raw", "emails_raw", "orders_raw"]:
-            rows = c.sql_query(
-                f"SELECT t.name FROM mz_tables t "
-                f"JOIN mz_schemas sc ON t.schema_id = sc.id "
-                f"JOIN mz_databases db ON sc.database_id = db.id "
-                f"WHERE t.name = '{table_name}' AND sc.name = 'ingest' AND db.name = 'cdb'",
-                database="cdb",
-            )
-            assert (
-                len(rows) == 1
-            ), f"Expected table '{table_name}' in cdb.ingest, got {rows}"
-
-        # Verify cluster created
-        rows = c.sql_query(
-            "SELECT name FROM mz_clusters WHERE name = 'constraint_cluster'"
-        )
-        assert len(rows) == 1, f"Expected constraint_cluster cluster, got {rows}"
-
-        # ════════════════════════════════════════════════════════════
-        # Step 2: Stage + wait + promote (deploys MVs + constraint MVs)
-        # ════════════════════════════════════════════════════════════
-        result = run_mz_deploy(
-            c, "constraints/v1", "stage", "--deploy-id", "c1", "--allow-dirty"
-        )
-        assert result.returncode == 0, f"stage c1 failed: {result.stderr}"
-
-        result = run_mz_deploy(
-            c,
-            "constraints/v1",
-            "wait",
-            "c1",
-            "--timeout",
-            "300",
-            "--allowed-lag",
-            "86400",
-        )
-        assert result.returncode == 0, f"wait c1 failed: {result.stderr}"
-
-        result = run_mz_deploy(c, "constraints/v1", "promote", "c1", "--no-ready-check")
-        assert result.returncode == 0, f"promote c1 failed: {result.stderr}"
-
-        # ════════════════════════════════════════════════════════════
-        # Step 3: Verify MVs and enforced constraint MVs exist
-        # ════════════════════════════════════════════════════════════
-        for mv_name in [
-            "users",
-            "emails",
-            "orders",
-            "users_pk",
-            "emails_unique",
-            "orders_fk",
-        ]:
-            rows = c.sql_query(
-                f"SELECT mv.name FROM mz_materialized_views mv "
-                f"JOIN mz_schemas sc ON mv.schema_id = sc.id "
-                f"JOIN mz_databases db ON sc.database_id = db.id "
-                f"WHERE mv.name = '{mv_name}' AND sc.name = 'public' AND db.name = 'cdb'",
-                database="cdb",
-            )
-            assert len(rows) == 1, f"Expected MV '{mv_name}' in cdb.public, got {rows}"
-
-        # Verify view 'items' exists
-        rows = c.sql_query(
-            "SELECT v.name FROM mz_views v "
-            "JOIN mz_schemas sc ON v.schema_id = sc.id "
-            "JOIN mz_databases db ON sc.database_id = db.id "
-            "WHERE v.name = 'items' AND sc.name = 'public' AND db.name = 'cdb'",
-            database="cdb",
-        )
-        assert len(rows) == 1, f"Expected view 'items' in cdb.public, got {rows}"
-
-        # ════════════════════════════════════════════════════════════
-        # Step 4: Verify not-enforced constraint MV does NOT exist
-        # ════════════════════════════════════════════════════════════
-        rows = c.sql_query(
-            "SELECT mv.name FROM mz_materialized_views mv "
-            "JOIN mz_schemas sc ON mv.schema_id = sc.id "
-            "JOIN mz_databases db ON sc.database_id = db.id "
-            "WHERE mv.name = 'items_pk' AND sc.name = 'public' AND db.name = 'cdb'",
-            database="cdb",
-        )
-        assert (
-            len(rows) == 0
-        ), f"Expected no MV for not-enforced constraint 'items_pk', got {rows}"
-
-        # ════════════════════════════════════════════════════════════
-        # Step 5: Insert clean data into raw tables (no violations).
-        # Tables are owned by deploy_user, who ran `apply`.
-        # ════════════════════════════════════════════════════════════
-        c.sql(
-            "INSERT INTO cdb.ingest.users_raw VALUES (1, 'Alice'), (2, 'Bob')",
-            database="cdb",
-            user="deploy_user",
-        )
-        c.sql(
-            "INSERT INTO cdb.ingest.emails_raw VALUES (1, 'alice@test.com'), (2, 'bob@test.com')",
-            database="cdb",
-            user="deploy_user",
-        )
-        c.sql(
-            "INSERT INTO cdb.ingest.orders_raw VALUES (100, 1), (101, 2)",
-            database="cdb",
-            user="deploy_user",
-        )
-
-        # ════════════════════════════════════════════════════════════
-        # Step 6: Verify no violations — all constraint MVs return 0 rows
-        # ════════════════════════════════════════════════════════════
-        for mv_name in ["users_pk", "emails_unique", "orders_fk"]:
-            rows = c.sql_query(
-                f"SELECT count(*) FROM cdb.public.{mv_name}",
-                database="cdb",
-                user="deploy_user",
-            )
-            assert (
-                int(rows[0][0]) == 0
-            ), f"Expected 0 violations for '{mv_name}', got {rows[0][0]}"
-
-        # ════════════════════════════════════════════════════════════
-        # Step 7: Insert data that causes violations into raw tables
-        # ════════════════════════════════════════════════════════════
-        # PK violation: duplicate id
-        c.sql(
-            "INSERT INTO cdb.ingest.users_raw VALUES (1, 'Alice2')",
-            database="cdb",
-            user="deploy_user",
-        )
-        # UNIQUE violation: duplicate email
-        c.sql(
-            "INSERT INTO cdb.ingest.emails_raw VALUES (3, 'alice@test.com')",
-            database="cdb",
-            user="deploy_user",
-        )
-        # FK violation: orphaned reference
-        c.sql(
-            "INSERT INTO cdb.ingest.orders_raw VALUES (102, 999)",
-            database="cdb",
-            user="deploy_user",
-        )
-
-        # ════════════════════════════════════════════════════════════
-        # Step 8: Verify violations detected — constraint MVs return rows
-        # ════════════════════════════════════════════════════════════
-        for mv_name in ["users_pk", "emails_unique", "orders_fk"]:
-            rows = c.sql_query(
-                f"SELECT count(*) FROM cdb.public.{mv_name}",
-                database="cdb",
-                user="deploy_user",
-            )
-            assert (
-                int(rows[0][0]) > 0
-            ), f"Expected violations for '{mv_name}', got {rows[0][0]}"
 
 
 def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:

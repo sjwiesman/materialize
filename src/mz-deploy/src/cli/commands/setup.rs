@@ -26,7 +26,7 @@
 use crate::cli::CliError;
 use crate::cli::error::MissingObject;
 use crate::client::{
-    Client, ConnectionError, SERVER_CLUSTER_NAME, SERVER_CLUSTER_SIZE, quote_identifier,
+    Client, ConnectionError, SERVER_CLUSTER_NAME, quote_identifier,
 };
 use crate::config::Settings;
 use crate::info;
@@ -99,7 +99,7 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
 /// Ordinary commands do **not** call this function — they call
 /// [`verify`] and surface [`CliError::SetupRequired`] if it fails. See the
 /// module docs for the full model.
-pub async fn setup(client: &Client) -> Result<(), CliError> {
+pub async fn setup(client: &Client, cluster_size: &str) -> Result<(), CliError> {
     require_superuser(client).await?;
 
     // Phase 1: server cluster. `CREATE CLUSTER` has no `IF NOT EXISTS` form,
@@ -114,7 +114,7 @@ pub async fn setup(client: &Client) -> Result<(), CliError> {
         let sql = format!(
             "CREATE CLUSTER {} (SIZE = '{}')",
             quote_identifier(SERVER_CLUSTER_NAME),
-            SERVER_CLUSTER_SIZE,
+            cluster_size,
         );
         client.execute(&sql, &[]).await?;
     }
@@ -453,13 +453,15 @@ pub async fn require_createdb(
 ///
 /// # Errors
 /// Returns `CliError::Connection` if the database connection fails
-pub async fn run(settings: &Settings) -> Result<(), CliError> {
+pub async fn run(settings: &Settings, cluster_size: &str) -> Result<(), CliError> {
     let profile = settings.connection();
-    let client = Client::connect_with_profile(profile.clone())
+    // `setup` itself creates `_mz_deploy_server`, so the session cannot be
+    // pinned to it during connect — that's the cluster we're about to make.
+    let client = Client::connect_with_profile_no_pin(profile.clone())
         .await
         .map_err(CliError::Connection)?;
 
-    setup(&client).await?;
+    setup(&client, cluster_size).await?;
 
     info!("Deployment tracking initialized in _mz_deploy database");
     Ok(())

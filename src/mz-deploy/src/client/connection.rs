@@ -112,10 +112,12 @@ impl Client {
 
     /// Connect without pinning the session cluster to `_mz_deploy_server`.
     ///
-    /// Intended for the ephemeral Docker container used by unit-test
-    /// execution, where `_mz_deploy_server` does not exist. Uses whatever
-    /// cluster the profile or server default selects.
+    /// Used in two places where `_mz_deploy_server` is not yet (or never)
+    /// present:
+    /// - The ephemeral Docker container used by unit-test execution.
+    /// - `setup::run`, which is the command that creates the cluster.
     ///
+    /// Uses whatever cluster the profile or server default selects.
     /// Deliberately `pub(crate)` so nothing outside the crate can bypass
     /// the production session-cluster pin.
     pub(crate) async fn connect_with_profile_no_pin(

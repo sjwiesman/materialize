@@ -48,9 +48,6 @@ mod validation;
 /// pins every connection to via libpq options.
 pub const SERVER_CLUSTER_NAME: &str = "_mz_deploy_server";
 
-/// Size of the dedicated mz-deploy cluster created during `setup`.
-pub const SERVER_CLUSTER_SIZE: &str = "25cc";
-
 pub use crate::config::Profile;
 pub use connection::{Client, DevOverlaysClient};
 pub(crate) use connection::{build_options_string, default_sslmode, is_loopback_host};
