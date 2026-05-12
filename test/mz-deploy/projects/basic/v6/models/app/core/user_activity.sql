@@ -22,7 +22,7 @@ MOCK app.ingest.users(user_id integer, name text, email text) AS (
 ),
 MOCK app.ingest.orders(order_id integer, user_id integer, amount numeric, status text) AS (
     SELECT * FROM (VALUES (1, 1, 50.00, 'completed'), (2, 1, 75.00, 'pending'))
-),
+)
 EXPECTED(user_id integer, name text, order_count bigint) AS (
     SELECT * FROM (VALUES (1, 'Alice', 2))
 );
@@ -34,7 +34,7 @@ MOCK app.ingest.users(user_id integer, name text, email text) AS (
 ),
 MOCK app.ingest.orders(order_id integer, user_id integer, amount numeric, status text) AS (
     SELECT * FROM (VALUES (1, 1, 50.00, 'completed'))
-),
+)
 EXPECTED(user_id integer, name text, order_count bigint) AS (
     SELECT * FROM (VALUES (1, 'Alice', 999))
 );
