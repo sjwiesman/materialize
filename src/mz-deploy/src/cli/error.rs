@@ -12,6 +12,7 @@
 //! This module provides error types for high-level CLI commands that wrap
 //! lower-level errors from the client and project modules.
 
+use crate::cli::commands::test::TestValidationError;
 use crate::client::{
     ConflictRecord, ConnectionError, DatabaseValidationError, ProductionClusterRecord,
 };
@@ -22,7 +23,6 @@ use crate::project::error::{DependencyError, ProjectError};
 use crate::project::ir::object_id::ObjectId;
 use crate::secret_resolver::SecretResolveError;
 use crate::types::TypesError;
-use crate::unit_test::TestValidationError;
 use chrono::{DateTime, Local};
 use owo_colors::{OwoColorize, Stream, Style};
 use thiserror::Error;

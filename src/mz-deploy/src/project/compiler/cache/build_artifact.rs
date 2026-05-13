@@ -49,14 +49,46 @@ const OBJECT_STATE_TABLE: &str = "object_state";
 const TYPECHECK_OBJECTS_TABLE: &str = "typecheck_objects";
 const TYPECHECK_COLUMNS_TABLE: &str = "typecheck_columns";
 
-/// A cached file entry returned by [`BuildArtifact::load_file_entries`].
-#[derive(Debug, Clone)]
-pub(crate) struct FileEntry {
-    /// SHA-256 hex digest of the file contents.
-    pub content_hash: String,
-    /// Cached source text. Only populated when `include_contents` was true and
-    /// the caller needs the file body for parsing.
-    pub contents: Option<String>,
+fn db_err(path: &Path) -> impl Fn(rusqlite::Error) -> CacheError + '_ {
+    move |source| CacheError::DatabaseOperationFailed {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+fn file_read_err(path: &Path) -> impl Fn(std::io::Error) -> CacheError + '_ {
+    move |source| CacheError::FileReadFailed {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+const FILE_STATE_UPSERT: &str = "
+    INSERT INTO file_state(path, size, mtime_ns, content_hash, contents)
+    VALUES(?1, ?2, ?3, ?4, ?5)
+    ON CONFLICT(path) DO UPDATE SET
+        size = excluded.size,
+        mtime_ns = excluded.mtime_ns,
+        content_hash = excluded.content_hash,
+        contents = excluded.contents
+";
+
+/// Read the file at `path`, compute its hash, and upsert the row into
+/// `file_state`. Returns the hash and contents.
+fn read_and_upsert_file(
+    upsert: &mut rusqlite::Statement<'_>,
+    path: &Path,
+    path_str: &str,
+    size: i64,
+    mtime_ns: i64,
+    db_path: &Path,
+) -> Result<(String, String), CacheError> {
+    let contents = fs::read_to_string(path).map_err(file_read_err(path))?;
+    let content_hash = hex_digest(Sha256::digest(contents.as_bytes()));
+    upsert
+        .execute(params![path_str, size, mtime_ns, &content_hash, &contents])
+        .map_err(db_err(db_path))?;
+    Ok((content_hash, contents))
 }
 
 /// A persisted compile artifact for one logical object.
@@ -124,10 +156,7 @@ fn prepare_delete<'tx>(
     path: &Path,
 ) -> Result<rusqlite::Statement<'tx>, CacheError> {
     tx.prepare(&format!("DELETE FROM {table} WHERE object_key = ?1"))
-        .map_err(|source| CacheError::DatabaseOperationFailed {
-            path: path.to_path_buf(),
-            source,
-        })
+        .map_err(db_err(path))
 }
 
 fn prepare_fragment_insert<'tx>(
@@ -138,10 +167,7 @@ fn prepare_fragment_insert<'tx>(
     tx.prepare(&format!(
         "INSERT INTO {table}(object_key, position, sql_text) VALUES(?1, ?2, ?3)"
     ))
-    .map_err(|source| CacheError::DatabaseOperationFailed {
-        path: path.to_path_buf(),
-        source,
-    })
+    .map_err(db_err(path))
 }
 
 fn run_execute(
@@ -149,12 +175,7 @@ fn run_execute(
     params: impl rusqlite::Params,
     path: &Path,
 ) -> Result<(), CacheError> {
-    stmt.execute(params)
-        .map(|_| ())
-        .map_err(|source| CacheError::DatabaseOperationFailed {
-            path: path.to_path_buf(),
-            source,
-        })
+    stmt.execute(params).map(|_| ()).map_err(db_err(path))
 }
 
 fn write_fragments(
@@ -166,10 +187,7 @@ fn write_fragments(
     for (position, sql) in fragments.iter().enumerate() {
         let position = i64::try_from(position).unwrap_or(i64::MAX);
         stmt.execute(params![object_key, position, sql])
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: path.to_path_buf(),
-                source,
-            })?;
+            .map_err(db_err(path))?;
     }
     Ok(())
 }
@@ -181,16 +199,10 @@ fn collect_fragments(
 ) -> Result<Vec<String>, CacheError> {
     let rows = stmt
         .query_map(params![object_key], |row| row.get::<_, String>(0))
-        .map_err(|source| CacheError::DatabaseOperationFailed {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(db_err(path))?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(|source| CacheError::DatabaseOperationFailed {
-            path: path.to_path_buf(),
-            source,
-        })?);
+        out.push(row.map_err(db_err(path))?);
     }
     Ok(out)
 }
@@ -245,12 +257,9 @@ impl BuildArtifact {
             PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES};
             ",
         );
-        self.conn.execute_batch(&pragmas).map_err(|source| {
-            CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            }
-        })?;
+        self.conn
+            .execute_batch(&pragmas)
+            .map_err(db_err(&self.path))?;
         self.conn
             .execute_batch(
                 "
@@ -260,10 +269,7 @@ impl BuildArtifact {
                 );
                 ",
             )
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
 
         let version: Option<i64> = self
             .conn
@@ -276,18 +282,12 @@ impl BuildArtifact {
                 },
             )
             .optional()
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
 
         if version != Some(schema::SCHEMA_VERSION) {
             self.conn
                 .execute_batch(schema::DROP_SQL)
-                .map_err(|source| CacheError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+                .map_err(db_err(&self.path))?;
         }
 
         self.create_schema()?;
@@ -297,191 +297,129 @@ impl BuildArtifact {
     fn create_schema(&self) -> Result<(), CacheError> {
         self.conn
             .execute_batch(schema::CREATE_SQL)
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
 
         self.conn
             .execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?1)",
                 params![schema::SCHEMA_VERSION.to_string()],
             )
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
         Ok(())
     }
 
-    /// Load file metadata and content hashes for the requested source paths.
-    ///
-    /// Returns cached metadata when the file is unchanged since the last build.
-    /// Stale or missing entries are transparently refreshed from the filesystem.
-    ///
-    /// When `include_contents` is true the source text is also returned — this
-    /// is used for compile misses that need to parse the file. When false, only
-    /// the content hash is returned, which is sufficient for fingerprinting
-    /// during the plan phase.
-    pub(crate) fn load_file_entries(
+    /// Load content hashes for the requested source paths. Stale or missing
+    /// cache entries are transparently refreshed from disk.
+    pub(crate) fn load_file_hashes(
         &mut self,
         fs: &crate::fs::FileSystem,
         paths: &BTreeSet<PathBuf>,
-        include_contents: bool,
-    ) -> Result<BTreeMap<PathBuf, FileEntry>, CacheError> {
-        let tx = self
-            .conn
-            .transaction()
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
-        // Skip the (potentially large) contents column when the caller doesn't
-        // need the source text — the plan phase only needs size, mtime, hash.
-        let select_sql = if include_contents {
-            "SELECT size, mtime_ns, content_hash, contents FROM file_state WHERE path = ?1"
-        } else {
-            "SELECT size, mtime_ns, content_hash FROM file_state WHERE path = ?1"
-        };
-        let mut select =
-            tx.prepare(select_sql)
-                .map_err(|source| CacheError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
-        let mut upsert = tx
-            .prepare(
-                "
-                INSERT INTO file_state(path, size, mtime_ns, content_hash, contents)
-                VALUES(?1, ?2, ?3, ?4, ?5)
-                ON CONFLICT(path) DO UPDATE SET
-                    size = excluded.size,
-                    mtime_ns = excluded.mtime_ns,
-                    content_hash = excluded.content_hash,
-                    contents = excluded.contents
-                ",
-            )
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+    ) -> Result<BTreeMap<PathBuf, String>, CacheError> {
+        let tx = self.conn.transaction().map_err(db_err(&self.path))?;
+        let mut select = tx
+            .prepare("SELECT size, mtime_ns, content_hash FROM file_state WHERE path = ?1")
+            .map_err(db_err(&self.path))?;
+        let mut upsert = tx.prepare(FILE_STATE_UPSERT).map_err(db_err(&self.path))?;
 
         let mut results = BTreeMap::new();
         for path in paths {
             // Overlay-covered paths bypass the disk-keyed content cache:
             // disk size+mtime are unchanged while the in-memory buffer can
-            // differ, so a cache hit would serve stale disk bytes. Read the
-            // overlay content fresh, recompute its hash, and skip the
-            // upsert (the cache should reflect disk state for next session).
+            // differ, so a cache hit would serve stale disk bytes.
             if fs.is_overlay(path) {
-                let contents =
-                    fs.read_to_string(path)
-                        .map_err(|source| CacheError::FileReadFailed {
-                            path: path.clone(),
-                            source,
-                        })?;
-                let content_hash = hex_digest(Sha256::digest(contents.as_bytes()));
+                let contents = fs.read_to_string(path).map_err(file_read_err(path))?;
                 results.insert(
                     path.clone(),
-                    FileEntry {
-                        content_hash,
-                        contents: include_contents.then_some(contents),
-                    },
+                    hex_digest(Sha256::digest(contents.as_bytes())),
                 );
                 continue;
             }
 
             let (size, mtime_ns) = file_metadata_signature(path)?;
-
-            let row: Option<(i64, i64, String, Option<String>)> = select
-                .query_row([path.to_string_lossy().to_string()], |row| {
-                    let size: i64 = row.get(0)?;
-                    let mtime: i64 = row.get(1)?;
-                    let hash: String = row.get(2)?;
-                    let contents: Option<String> =
-                        if include_contents { row.get(3)? } else { None };
-                    Ok((size, mtime, hash, contents))
+            let path_str = path.to_string_lossy().to_string();
+            let cached: Option<(i64, i64, String)> = select
+                .query_row([&path_str], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })
                 .optional()
-                .map_err(|source| CacheError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+                .map_err(db_err(&self.path))?;
 
-            let entry = if let Some((cached_size, cached_mtime, content_hash, cached_contents)) =
-                row
-                && cached_size == size
-                && cached_mtime == mtime_ns
-            {
-                match (include_contents, cached_contents) {
-                    (true, Some(contents)) => FileEntry {
-                        content_hash,
-                        contents: Some(contents),
-                    },
-                    (true, None) => {
-                        let contents = fs.read_to_string(path).map_err(|source| {
-                            CacheError::FileReadFailed {
-                                path: path.clone(),
-                                source,
-                            }
-                        })?;
-                        upsert
-                            .execute(params![
-                                path.to_string_lossy().to_string(),
-                                size,
-                                mtime_ns,
-                                content_hash,
-                                &contents,
-                            ])
-                            .map_err(|source| CacheError::DatabaseOperationFailed {
-                                path: self.path.clone(),
-                                source,
-                            })?;
-                        FileEntry {
-                            content_hash,
-                            contents: Some(contents),
-                        }
-                    }
-                    (false, _) => FileEntry {
-                        content_hash,
-                        contents: None,
-                    },
-                }
-            } else {
-                let contents =
-                    fs::read_to_string(path).map_err(|source| CacheError::FileReadFailed {
-                        path: path.clone(),
-                        source,
-                    })?;
-                let content_hash = hex_digest(Sha256::digest(contents.as_bytes()));
-                upsert
-                    .execute(params![
-                        path.to_string_lossy().to_string(),
+            let hash = match cached {
+                Some((s, m, h)) if s == size && m == mtime_ns => h,
+                _ => {
+                    let (h, _) = read_and_upsert_file(
+                        &mut upsert,
+                        path,
+                        &path_str,
                         size,
                         mtime_ns,
-                        &content_hash,
-                        &contents,
-                    ])
-                    .map_err(|source| CacheError::DatabaseOperationFailed {
-                        path: self.path.clone(),
-                        source,
-                    })?;
-                FileEntry {
-                    content_hash,
-                    contents: include_contents.then_some(contents),
+                        &self.path,
+                    )?;
+                    h
                 }
             };
-
-            results.insert(path.clone(), entry);
+            results.insert(path.clone(), hash);
         }
 
         drop(select);
         drop(upsert);
-        tx.commit()
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+        tx.commit().map_err(db_err(&self.path))?;
+        Ok(results)
+    }
+
+    /// Load file contents for the requested source paths. Stale, missing,
+    /// or contents-NULL cache entries are transparently refreshed from disk.
+    pub(crate) fn load_file_contents(
+        &mut self,
+        fs: &crate::fs::FileSystem,
+        paths: &BTreeSet<PathBuf>,
+    ) -> Result<BTreeMap<PathBuf, String>, CacheError> {
+        let tx = self.conn.transaction().map_err(db_err(&self.path))?;
+        let mut select = tx
+            .prepare(
+                "SELECT size, mtime_ns, contents \
+                 FROM file_state WHERE path = ?1",
+            )
+            .map_err(db_err(&self.path))?;
+        let mut upsert = tx.prepare(FILE_STATE_UPSERT).map_err(db_err(&self.path))?;
+
+        let mut results = BTreeMap::new();
+        for path in paths {
+            if fs.is_overlay(path) {
+                let contents = fs.read_to_string(path).map_err(file_read_err(path))?;
+                results.insert(path.clone(), contents);
+                continue;
+            }
+
+            let (size, mtime_ns) = file_metadata_signature(path)?;
+            let path_str = path.to_string_lossy().to_string();
+            let cached: Option<(i64, i64, Option<String>)> = select
+                .query_row([&path_str], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .optional()
+                .map_err(db_err(&self.path))?;
+
+            let contents = match cached {
+                Some((s, m, Some(c))) if s == size && m == mtime_ns => c,
+                _ => {
+                    let (_, contents) = read_and_upsert_file(
+                        &mut upsert,
+                        path,
+                        &path_str,
+                        size,
+                        mtime_ns,
+                        &self.path,
+                    )?;
+                    contents
+                }
+            };
+            results.insert(path.clone(), contents);
+        }
+
+        drop(select);
+        drop(upsert);
+        tx.commit().map_err(db_err(&self.path))?;
         Ok(results)
     }
 
@@ -493,35 +431,23 @@ impl BuildArtifact {
         let mut stmt = self
             .conn
             .prepare("SELECT object_key, fingerprint FROM object_state")
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
 
         let mut result = BTreeMap::new();
         for row in rows {
-            let (key, fingerprint) = row.map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            let (key, fingerprint) = row.map_err(db_err(&self.path))?;
             result.insert(key, fingerprint);
         }
         Ok(result)
     }
 
-    /// Load full compile artifacts for the requested object keys.
-    ///
-    /// Returns an entry only for keys present in `object_state`. Skipped
-    /// objects come back as [`CompiledObjectArtifact::Skipped`]; objects with
-    /// payload data come back as [`CompiledObjectArtifact::Object`].
+    /// Load full compile artifacts for the requested object keys. Only keys
+    /// present in `object_state` produce an entry.
     pub(crate) fn load_object_artifacts(
         &self,
         keys: &BTreeSet<String>,
@@ -537,10 +463,7 @@ impl BuildArtifact {
                 "SELECT kind, db_name, schema_name, file_path, stmt_sql \
                  FROM object_state WHERE object_key = ?1",
             )
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
         let mut indexes = self.prepare_fragment_select("object_state_indexes")?;
         let mut grants = self.prepare_fragment_select("object_state_grants")?;
         let mut comments = self.prepare_fragment_select("object_state_comments")?;
@@ -558,10 +481,7 @@ impl BuildArtifact {
                     ))
                 })
                 .optional()
-                .map_err(|source| CacheError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+                .map_err(db_err(&self.path))?;
             let Some((kind, db_name, schema_name, file_path, stmt_sql)) = row else {
                 continue;
             };
@@ -589,26 +509,13 @@ impl BuildArtifact {
             .prepare(&format!(
                 "SELECT sql_text FROM {table} WHERE object_key = ?1 ORDER BY position"
             ))
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })
+            .map_err(db_err(&self.path))
     }
 
-    /// Persist newly compiled object artifacts into `object_state` and the
-    /// per-fragment child tables.
-    ///
-    /// Each object's previous fragment rows are removed before the new ones are
-    /// written so a row count change in any list (e.g., a removed index) is
-    /// reflected exactly.
+    /// Replace each object's fragment rows so row-count changes (e.g., a
+    /// removed index) are reflected exactly.
     pub(crate) fn upsert_object_rows(&mut self, rows: &[ObjectStateRow]) -> Result<(), CacheError> {
-        let tx = self
-            .conn
-            .transaction()
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+        let tx = self.conn.transaction().map_err(db_err(&self.path))?;
         {
             let mut upsert_header = tx
                 .prepare(
@@ -626,10 +533,7 @@ impl BuildArtifact {
                         stmt_sql = excluded.stmt_sql
                     ",
                 )
-                .map_err(|source| CacheError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+                .map_err(db_err(&self.path))?;
             let mut delete_indexes = prepare_delete(&tx, "object_state_indexes", &self.path)?;
             let mut delete_grants = prepare_delete(&tx, "object_state_grants", &self.path)?;
             let mut delete_comments = prepare_delete(&tx, "object_state_comments", &self.path)?;
@@ -654,10 +558,7 @@ impl BuildArtifact {
                         header.file_path,
                         header.stmt_sql,
                     ])
-                    .map_err(|source| CacheError::DatabaseOperationFailed {
-                        path: self.path.clone(),
-                        source,
-                    })?;
+                    .map_err(db_err(&self.path))?;
 
                 run_execute(&mut delete_indexes, params![row.object_key], &self.path)?;
                 run_execute(&mut delete_grants, params![row.object_key], &self.path)?;
@@ -692,11 +593,7 @@ impl BuildArtifact {
                 }
             }
         }
-        tx.commit()
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })
+        tx.commit().map_err(db_err(&self.path))
     }
 
     /// Remove `object_state` rows for objects no longer in the current project.
@@ -711,13 +608,7 @@ impl BuildArtifact {
         &mut self,
         rows: &[(String, String, BTreeMap<String, ColumnType>)],
     ) -> Result<(), CacheError> {
-        let tx = self
-            .conn
-            .transaction()
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+        let tx = self.conn.transaction().map_err(db_err(&self.path))?;
         {
             let mut upsert_obj = tx
                 .prepare(
@@ -728,39 +619,22 @@ impl BuildArtifact {
                         object_kind = excluded.object_kind
                     ",
                 )
-                .map_err(|source| CacheError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+                .map_err(db_err(&self.path))?;
             let mut delete_cols = tx
                 .prepare("DELETE FROM typecheck_columns WHERE object_key = ?1")
-                .map_err(|source| CacheError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+                .map_err(db_err(&self.path))?;
             let mut insert_col = tx
                 .prepare(
                     "INSERT INTO typecheck_columns(object_key, column_name, column_type, nullable, position)
                      VALUES(?1, ?2, ?3, ?4, ?5)",
                 )
-                .map_err(|source| CacheError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+                .map_err(db_err(&self.path))?;
 
             for (key, kind, columns) in rows {
-                upsert_obj.execute(params![key, kind]).map_err(|source| {
-                    CacheError::DatabaseOperationFailed {
-                        path: self.path.clone(),
-                        source,
-                    }
-                })?;
-                delete_cols.execute([key]).map_err(|source| {
-                    CacheError::DatabaseOperationFailed {
-                        path: self.path.clone(),
-                        source,
-                    }
-                })?;
+                upsert_obj
+                    .execute(params![key, kind])
+                    .map_err(db_err(&self.path))?;
+                delete_cols.execute([key]).map_err(db_err(&self.path))?;
                 for (col_name, col_type) in columns {
                     insert_col
                         .execute(params![
@@ -770,18 +644,11 @@ impl BuildArtifact {
                             i32::from(col_type.nullable),
                             i64::try_from(col_type.position).unwrap_or(0),
                         ])
-                        .map_err(|source| CacheError::DatabaseOperationFailed {
-                            path: self.path.clone(),
-                            source,
-                        })?;
+                        .map_err(db_err(&self.path))?;
                 }
             }
         }
-        tx.commit()
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })
+        tx.commit().map_err(db_err(&self.path))
     }
 
     /// Remove stale typecheck artifacts for objects no longer in the current
@@ -796,9 +663,8 @@ impl BuildArtifact {
 
     /// Load every cached typecheck column row, grouped by object key.
     ///
-    /// One round-trip; returns an empty map if the table is empty. Used by
-    /// `typecheck::run` to seed the incremental decision for each node
-    /// without holding a live SQLite connection inside the parallel DAG.
+    /// Single round-trip so the parallel typecheck DAG can run without
+    /// holding a live SQLite connection.
     pub(crate) fn load_typecheck_columns(
         &self,
     ) -> Result<BTreeMap<String, BTreeMap<String, ColumnType>>, CacheError> {
@@ -808,10 +674,7 @@ impl BuildArtifact {
                 "SELECT object_key, column_name, column_type, nullable, position \
                  FROM typecheck_columns",
             )
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -825,16 +688,10 @@ impl BuildArtifact {
                     },
                 ))
             })
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
         let mut out: BTreeMap<String, BTreeMap<String, ColumnType>> = BTreeMap::new();
         for row in rows {
-            let (key, name, ty) = row.map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            let (key, name, ty) = row.map_err(db_err(&self.path))?;
             out.entry(key).or_default().insert(name, ty);
         }
         Ok(out)
@@ -847,24 +704,15 @@ impl BuildArtifact {
         let mut stmt = self
             .conn
             .prepare("SELECT object_key, digest FROM external_type_digest")
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
         let mut out = BTreeMap::new();
         for row in rows {
-            let (key, digest) = row.map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            let (key, digest) = row.map_err(db_err(&self.path))?;
             out.insert(key, digest);
         }
         Ok(out)
@@ -876,11 +724,7 @@ impl BuildArtifact {
         &mut self,
         digests: &BTreeMap<String, String>,
     ) -> Result<(), CacheError> {
-        let db_path = self.path.clone();
-        let db_err = |source: rusqlite::Error| CacheError::DatabaseOperationFailed {
-            path: db_path.clone(),
-            source,
-        };
+        let db_err = db_err(&self.path);
         let tx = self.conn.transaction().map_err(&db_err)?;
         tx.execute("DELETE FROM external_type_digest", [])
             .map_err(&db_err)?;
@@ -916,11 +760,7 @@ impl BuildArtifact {
             "project_infrastructure_properties",
         ];
 
-        let db_path = self.path.clone();
-        let db_err = |source: rusqlite::Error| CacheError::DatabaseOperationFailed {
-            path: db_path.clone(),
-            source,
-        };
+        let db_err = db_err(&self.path);
 
         let tx = self.conn.transaction().map_err(&db_err)?;
 
@@ -997,65 +837,35 @@ impl BuildArtifact {
         let mut stmt = self
             .conn
             .prepare(&format!("SELECT object_key FROM {table}"))
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
         let rows = stmt
             .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+            .map_err(db_err(&self.path))?;
         let mut keys = BTreeSet::new();
         for row in rows {
-            keys.insert(row.map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?);
+            keys.insert(row.map_err(db_err(&self.path))?);
         }
         Ok(keys)
     }
 
     fn prune_rows(&mut self, table: &str, keep: &BTreeSet<String>) -> Result<(), CacheError> {
         let existing = self.load_row_keys(table)?;
-        let tx = self
-            .conn
-            .transaction()
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })?;
+        let tx = self.conn.transaction().map_err(db_err(&self.path))?;
         {
             let mut stmt = tx
                 .prepare(&format!("DELETE FROM {table} WHERE object_key = ?1"))
-                .map_err(|source| CacheError::DatabaseOperationFailed {
-                    path: self.path.clone(),
-                    source,
-                })?;
+                .map_err(db_err(&self.path))?;
             for key in &existing {
                 if !keep.contains(key) {
-                    stmt.execute([key])
-                        .map_err(|source| CacheError::DatabaseOperationFailed {
-                            path: self.path.clone(),
-                            source,
-                        })?;
+                    stmt.execute([key]).map_err(db_err(&self.path))?;
                 }
             }
         }
-        tx.commit()
-            .map_err(|source| CacheError::DatabaseOperationFailed {
-                path: self.path.clone(),
-                source,
-            })
+        tx.commit().map_err(db_err(&self.path))
     }
 }
 
-/// Bundle of prepared INSERT statements for [`BuildArtifact::write_project`].
-///
-/// Groups all prepared statements needed to persist a project snapshot so they
-/// can be created and dropped as a unit. Methods on this struct handle the
-/// per-entity serialization logic that was previously inline in `write_project`.
+/// Prepared INSERT statements for [`BuildArtifact::write_project`].
 struct ProjectStatements<'tx> {
     ins_db: rusqlite::Statement<'tx>,
     ins_schema: rusqlite::Statement<'tx>,
@@ -1410,12 +1220,8 @@ pub(crate) struct ObjectStateRow {
     pub artifact: CompiledObjectArtifact,
 }
 
-/// AST visitor that collects FROM-clause table aliases.
-///
-/// Overrides `visit_query` for CTE scope management and `visit_table_factor`
-/// to collect both explicit aliases (`FROM t AS alias`) and implicit bare
-/// names (`FROM t` → `t`). Does not recurse into derived subqueries or
-/// table functions — only direct table references produce aliases.
+/// AST visitor that collects FROM-clause table aliases. Only direct table
+/// references; derived subqueries and table functions are skipped.
 struct AliasVisitor<'a> {
     default_db: &'a str,
     default_schema: &'a str,
@@ -1504,7 +1310,7 @@ mod tests {
     }
 
     #[test]
-    fn load_file_entries_repairs_missing_cached_contents() {
+    fn load_file_contents_treats_null_contents_as_miss() {
         let temp = tempdir().unwrap();
         let file = temp.path().join("model.sql");
         fs::write(&file, "CREATE VIEW v AS SELECT 1;").unwrap();
@@ -1512,7 +1318,7 @@ mod tests {
         let mut db = open_db(temp.path());
         let paths = BTreeSet::from([file.clone()]);
         let fs = crate::fs::FileSystem::new();
-        db.load_file_entries(&fs, &paths, false).unwrap();
+        db.load_file_hashes(&fs, &paths).unwrap();
         db.conn
             .execute(
                 "UPDATE file_state SET contents = NULL WHERE path = ?1",
@@ -1520,11 +1326,9 @@ mod tests {
             )
             .unwrap();
 
-        let entries = db.load_file_entries(&fs, &paths, true).unwrap();
+        let entries = db.load_file_contents(&fs, &paths).unwrap();
         assert_eq!(
-            entries
-                .get(&file)
-                .and_then(|entry| entry.contents.as_deref()),
+            entries.get(&file).map(String::as_str),
             Some("CREATE VIEW v AS SELECT 1;")
         );
 
@@ -1650,7 +1454,6 @@ mod tests {
         db.write_project(&project, &changed, &BTreeSet::new(), temp.path())
             .unwrap();
 
-        // Query the aliases table.
         let rows: Vec<(String, String, String)> = db
             .conn
             .prepare("SELECT object_key, alias, target_fqn FROM project_aliases ORDER BY alias")
@@ -1660,8 +1463,6 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
 
-        // "orders" is the bare name alias, "o" is the explicit alias.
-        // Both should map to the FQN "mydb.public.orders".
         assert_eq!(rows.len(), 2);
 
         let o_row = rows.iter().find(|(_, alias, _)| alias == "o").unwrap();

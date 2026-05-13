@@ -7,15 +7,11 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-//! Unit test parsing and desugaring for SQL views.
+//! Validate a [`UnitTest`] and lower it into SQL Materialize can execute.
 //!
-//! This module provides functionality to parse custom unit test syntax and desugar it
-//! into executable SQL statements that create temporary views and run test assertions.
-//!
-//! Tests are defined inline within the same SQL file as the view definition using
-//! the EXECUTE UNIT TEST syntax.
-//!
-//! # Syntax
+//! The lowered form is a sequence of `CREATE TEMPORARY VIEW` statements
+//! (mocks, expected, target) followed by an assertion query whose rows
+//! describe mismatches. An empty result means the test passed.
 //!
 //! ```sql
 //! EXECUTE UNIT TEST test_name
@@ -26,28 +22,16 @@
 //! ),
 //! MOCK database.schema.mock2(col TYPE) AS (
 //!   SELECT * FROM VALUES (...)
-//! ),
+//! )
 //! EXPECTED(col1 TYPE1, col2 TYPE2) AS (
 //!   SELECT * FROM VALUES (...)
 //! );
 //! ```
-//!
-//! The `AT TIME` clause is optional. When provided, it specifies the timestamp value
-//! that `mz_now()` will return during test execution. This is useful for testing
-//! views that use temporal filters based on `mz_now()`.
-//!
-//! # Output
-//!
-//! The test is desugared into:
-//! 1. CREATE TEMPORARY VIEW for each mock
-//! 2. CREATE TEMPORARY VIEW for expected results
-//! 3. CREATE TEMPORARY VIEW for the target (using flattened naming)
-//! 4. Test query that returns rows with status column indicating failures
-//!    (includes AS OF clause when AT TIME is specified)
 
 use crate::project::ast::Statement;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::object_id::ObjectId;
+use crate::project::ir::unit_test::{ExpectedResult, MockView, UnitTest};
 use crate::project::resolve::normalize::NormalizingVisitor;
 use crate::types::ColumnType;
 #[cfg(test)]
@@ -58,108 +42,6 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use thiserror::Error;
-
-/// Represents a parsed unit test definition.
-#[derive(Debug, Clone)]
-pub struct UnitTest {
-    /// Name of the test (e.g., "test_flippers")
-    pub name: String,
-    /// Fully qualified name of the target view being tested
-    pub target_view: String,
-    /// Optional timestamp for mz_now() during test execution
-    pub at_time: Option<String>,
-    /// Mock views to create for dependencies
-    pub mocks: Vec<MockView>,
-    /// Expected results definition
-    pub expected: ExpectedResult,
-}
-
-impl UnitTest {
-    /// Convert an ExecuteUnitTestStatement from the AST into a UnitTest.
-    pub fn from_execute_statement(
-        stmt: &mz_sql_parser::ast::ExecuteUnitTestStatement<mz_sql_parser::ast::Raw>,
-    ) -> Self {
-        use mz_sql_parser::ast::display::{AstDisplay, FormatMode};
-
-        let name = stmt.name.to_string();
-        let target_view = stmt.target.to_ast_string(FormatMode::Simple);
-
-        // Convert at_time if present
-        let at_time = stmt
-            .at_time
-            .as_ref()
-            .map(|expr| expr.to_ast_string(FormatMode::Simple));
-
-        // Convert mocks
-        let mocks = stmt
-            .mocks
-            .iter()
-            .map(|mock| {
-                let fqn = mock.name.to_ast_string(FormatMode::Simple);
-                let columns = mock
-                    .columns
-                    .iter()
-                    .map(|col| {
-                        (
-                            col.name.to_string(),
-                            col.data_type.to_ast_string(FormatMode::Simple),
-                        )
-                    })
-                    .collect();
-                let query = mock.query.to_ast_string(FormatMode::Simple);
-                MockView {
-                    fqn,
-                    columns,
-                    query,
-                }
-            })
-            .collect();
-
-        // Convert expected
-        let expected = ExpectedResult {
-            columns: stmt
-                .expected
-                .columns
-                .iter()
-                .map(|col| {
-                    (
-                        col.name.to_string(),
-                        col.data_type.to_ast_string(FormatMode::Simple),
-                    )
-                })
-                .collect(),
-            query: stmt.expected.query.to_ast_string(FormatMode::Simple),
-        };
-
-        UnitTest {
-            name,
-            target_view,
-            at_time,
-            mocks,
-            expected,
-        }
-    }
-}
-
-/// A mock view definition that replaces a real dependency.
-#[derive(Debug, Clone)]
-pub struct MockView {
-    /// Fully qualified name (e.g., "materialize.public.flipper_activity")
-    pub fqn: String,
-    /// Column definitions as (name, type) pairs
-    pub columns: Vec<(String, String)>,
-    /// SQL query body (the part after AS)
-    pub query: String,
-}
-
-/// Expected results for the test.
-#[derive(Debug, Clone)]
-pub struct ExpectedResult {
-    /// Column definitions as (name, type) pairs
-    pub columns: Vec<(String, String)>,
-    /// SQL query body (the part after AS)
-    pub query: String,
-}
 
 /// Errors that can occur during unit test validation.
 #[derive(Debug, Error, Serialize)]
@@ -331,7 +213,6 @@ impl fmt::Display for MockSchemaMismatchError {
 
         writeln!(f)?;
 
-        // Show the expected mock signature
         if !self.actual_schema.is_empty() {
             writeln!(
                 f,
@@ -451,7 +332,6 @@ impl fmt::Display for ExpectedSchemaMismatchError {
 
         writeln!(f)?;
 
-        // Show the expected signature
         if !self.actual_schema.is_empty() {
             writeln!(
                 f,
@@ -509,9 +389,8 @@ impl fmt::Display for InvalidAtTimeError {
         )?;
         writeln!(f)?;
 
-        // Extract the useful part of the error message
-        // DB errors like: "Error: invalid input syntax for type mz_timestamp: ..."
-        // We want to show from "invalid input syntax..." forward
+        // Show the useful tail of DB errors like:
+        //   "Error: invalid input syntax for type mz_timestamp: ..."
         let display_error = self
             .db_error
             .find("invalid input syntax")
@@ -551,12 +430,11 @@ impl std::error::Error for InvalidAtTimeError {}
 /// # Arguments
 /// * `test` - The unit test to validate
 /// * `target_id` - The ObjectId of the target view
-/// * `types` - Combined types from types.lock (external) and the build artifact database (internal)
-/// * `dependencies` - Dependencies of the target view from the project's dependency graph
-///
-/// # Returns
-/// Ok(()) if validation passes, Err with detailed error messages if validation fails
-pub(crate) fn validate_unit_test(
+/// * `get_columns` - Lookup for the column schema of an object, sourced from
+///   types.lock (external) and the build artifact database (internal)
+/// * `dependencies` - Dependencies of the target view from the project's
+///   dependency graph
+pub(super) fn validate_unit_test(
     test: &UnitTest,
     target_id: &ObjectId,
     get_columns: &dyn Fn(&ObjectId) -> Option<BTreeMap<String, ColumnType>>,
@@ -568,7 +446,6 @@ pub(crate) fn validate_unit_test(
         .map(|m| normalize_fqn(&m.fqn, target_id))
         .collect();
 
-    // 1. Check that all dependencies are mocked
     let missing_mocks: Vec<String> = dependencies
         .iter()
         .filter(|dep| !mocked_ids.contains(*dep))
@@ -585,7 +462,6 @@ pub(crate) fn validate_unit_test(
         ));
     }
 
-    // 2. Validate each mock's schema against the actual types
     for mock in &test.mocks {
         let mock_id = normalize_fqn(&mock.fqn, target_id);
 
@@ -610,17 +486,16 @@ pub(crate) fn validate_unit_test(
                 ));
             }
         }
-        // If the mock isn't in types, it might be an external dependency not in types.lock
-        // We allow this to be permissive - the database will catch it during execution
+        // Mocks not present in types are likely external dependencies not in
+        // types.lock; allow them through and let the database surface any
+        // mismatch at execution time.
     }
 
-    // 3. Validate expected output schema against target view
     if let Some(target_columns) = get_columns(target_id) {
         let (extra, missing, type_mismatches) =
             compare_columns(&test.expected.columns, &target_columns);
 
         if !extra.is_empty() || !missing.is_empty() || !type_mismatches.is_empty() {
-            // Extract actual schema for error message
             let actual_schema: Vec<(String, String)> = target_columns
                 .iter()
                 .map(|(name, col_type)| (name.clone(), col_type.r#type.clone()))
@@ -638,7 +513,7 @@ pub(crate) fn validate_unit_test(
             ));
         }
     }
-    // If target isn't in types, we'll catch it during test execution
+    // If target isn't in types, we'll catch it during test execution.
 
     Ok(())
 }
@@ -680,13 +555,11 @@ fn compare_columns(
     let test_col_names: BTreeSet<&str> = test_columns.iter().map(|(n, _)| n.as_str()).collect();
     let actual_col_names: BTreeSet<&str> = actual_columns.keys().map(|s| s.as_str()).collect();
 
-    // Extra columns in test but not in actual
     let extra: Vec<String> = test_col_names
         .difference(&actual_col_names)
         .map(|s| (*s).to_string())
         .collect();
 
-    // Missing columns in actual but not in test (with their types)
     let missing: Vec<(String, String)> = actual_col_names
         .difference(&test_col_names)
         .map(|s| {
@@ -698,18 +571,17 @@ fn compare_columns(
         })
         .collect();
 
-    // Type mismatches for columns present in both
     let type_mismatches: Vec<(String, String, String)> = test_columns
         .iter()
         .filter_map(|(name, test_type)| {
             actual_columns.get(name).and_then(|actual| {
-                // Normalize types for comparison (case-insensitive, strip whitespace)
                 let test_normalized = normalize_type(test_type);
                 let actual_normalized = normalize_type(&actual.r#type);
 
                 if test_normalized != actual_normalized {
-                    // SHOW COLUMNS returns bare container types (e.g. "list" instead of "int8 list").
-                    // Treat bare containers as matching any parameterized variant.
+                    // SHOW COLUMNS returns bare container types (e.g. "list"
+                    // instead of "int8 list"); treat bare containers as matching
+                    // any parameterized variant.
                     if types_match_with_bare_containers(&test_normalized, &actual_normalized) {
                         None
                     } else {
@@ -725,51 +597,43 @@ fn compare_columns(
     (extra, missing, type_mismatches)
 }
 
-/// Normalize a SQL type for comparison.
-///
-/// This handles Materialize type aliases so that equivalent types compare equal.
-/// Based on: https://materialize.com/docs/sql/types/
 /// Check if two normalized types match when accounting for bare container types.
 ///
 /// SHOW COLUMNS returns bare container types (e.g. "list" instead of "int8 list"),
 /// stripping the element type. This function treats bare containers as matching
 /// any parameterized variant of the same container.
 fn types_match_with_bare_containers(a: &str, b: &str) -> bool {
-    // list variants: "list" matches "bigint list", "text list", etc.
     if a == "list" && b.ends_with(" list") || b == "list" && a.ends_with(" list") {
         return true;
     }
-    // array variants: "[]" as bare type matches "bigint[]", etc.
     if a == "[]" && b.ends_with("[]") || b == "[]" && a.ends_with("[]") {
         return true;
     }
-    // map variants: "map" matches "map[text=>bigint]", etc.
     if a == "map" && b.starts_with("map[") || b == "map" && a.starts_with("map[") {
         return true;
     }
     false
 }
 
+/// Normalize a SQL type for comparison.
+///
+/// Handles Materialize type aliases so that equivalent types compare equal.
+/// See: https://materialize.com/docs/sql/types/
 fn normalize_type(t: &str) -> String {
     let normalized = t.trim().to_lowercase();
 
-    // Handle container type suffixes before scalar matching.
-
-    // List types: "int8 list" -> normalize element, return "{element} list"
     if let Some(element) = normalized.strip_suffix(" list") {
         if !element.is_empty() {
             return format!("{} list", normalize_type(element));
         }
     }
 
-    // Array types: "int8[]" -> normalize element, return "{element}[]"
     if let Some(element) = normalized.strip_suffix("[]") {
         if !element.is_empty() {
             return format!("{}[]", normalize_type(element));
         }
     }
 
-    // Map types: "map[text=>int8]" -> normalize key and value
     if let Some(inner) = normalized
         .strip_prefix("map[")
         .and_then(|s| s.strip_suffix(']'))
@@ -779,36 +643,27 @@ fn normalize_type(t: &str) -> String {
         }
     }
 
-    // Map Materialize type aliases to canonical forms
     match normalized.as_str() {
-        // Integer types
         "int" | "int4" | "integer" => "integer".to_string(),
         "int8" | "bigint" => "bigint".to_string(),
         "int2" | "smallint" => "smallint".to_string(),
 
-        // Floating point types
         "float4" | "real" => "real".to_string(),
         "float" | "float8" | "double" | "double precision" => "double precision".to_string(),
 
-        // Boolean
         "bool" | "boolean" => "boolean".to_string(),
 
-        // Text/String types
         "string" | "text" => "text".to_string(),
         "varchar" | "character varying" => "text".to_string(),
 
-        // Numeric/Decimal
         "decimal" | "numeric" => "numeric".to_string(),
 
-        // JSON types
         "json" | "jsonb" => "jsonb".to_string(),
 
-        // Timestamp types
         "timestamp" | "timestamp without time zone" => "timestamp without time zone".to_string(),
         "timestamptz" | "timestamp with time zone" => "timestamp with time zone".to_string(),
 
         _ => {
-            // Handle parameterized types like varchar(255) -> text, numeric(10,2) -> numeric
             if normalized.starts_with("varchar") || normalized.starts_with("character varying") {
                 "text".to_string()
             } else if normalized.starts_with("numeric") || normalized.starts_with("decimal") {
@@ -828,40 +683,29 @@ fn normalize_type(t: &str) -> String {
     }
 }
 
-/// Desugar unit test into executable SQL statements.
+/// Lower a unit test into executable SQL statements.
 ///
 /// Returns a vector of SQL strings in order:
 /// 1. CREATE TEMPORARY VIEW for each mock
 /// 2. CREATE TEMPORARY VIEW for expected
 /// 3. CREATE TEMPORARY VIEW for the target (flattened)
 /// 4. Test query with status column
-///
-/// # Arguments
-///
-/// * `test` - The parsed unit test
-/// * `target_stmt` - The statement defining the target view
-/// * `target_fqn` - Fully qualified name of the target view
-pub(crate) fn desugar_unit_test(
+pub(super) fn lower_unit_test(
     test: &UnitTest,
     target_stmt: &Statement,
     target_fqn: &FullyQualifiedName,
 ) -> Result<Vec<String>, String> {
     let mut statements = Vec::new();
 
-    // 1. Create temporary views for mocks
-    // Qualify mock names with target's database and schema if not already qualified
     for mock in &test.mocks {
         let qualified_mock = qualify_mock_name(mock, target_fqn);
         statements.push(create_mock_view_sql(&qualified_mock));
     }
 
-    // 2. Create temporary view for expected
     statements.push(create_expected_view_sql(&test.expected));
 
-    // 3. Create temporary view for target (flattened)
     statements.push(create_target_view_sql(target_stmt, target_fqn)?);
 
-    // 4. Create test query
     let target_fqn_str = format!(
         "{}.{}.{}",
         target_fqn.database(),
@@ -878,44 +722,23 @@ pub(crate) fn desugar_unit_test(
 }
 
 /// Quote a fully qualified name as a single identifier with dots.
-///
-/// # Example
-///
-/// ```ignore
-/// assert_eq!(flatten_fqn("materialize.public.flippers"), "\"materialize.public.flippers\"");
-/// ```
 fn flatten_fqn(fqn: &str) -> String {
     format!("\"{}\"", fqn)
 }
 
 /// Qualify a mock name with the target's FQN context if it's not already qualified.
 fn qualify_mock_name(mock: &MockView, target_fqn: &FullyQualifiedName) -> MockView {
-    // Count the number of parts in the FQN (parts = dots + 1)
-    // 1 part: object
-    // 2 parts: schema.object
-    // 3 parts: database.schema.object
     let parts = mock.fqn.matches('.').count() + 1;
 
     let qualified_fqn = match parts {
-        1 => {
-            // Unqualified: object only
-            // Prepend database.schema
-            format!(
-                "{}.{}.{}",
-                target_fqn.database(),
-                target_fqn.schema(),
-                mock.fqn
-            )
-        }
-        2 => {
-            // Partially qualified: schema.object
-            // Prepend database
-            format!("{}.{}", target_fqn.database(), mock.fqn)
-        }
-        _ => {
-            // Fully qualified (3+ parts)
-            mock.fqn.clone()
-        }
+        1 => format!(
+            "{}.{}.{}",
+            target_fqn.database(),
+            target_fqn.schema(),
+            mock.fqn
+        ),
+        2 => format!("{}.{}", target_fqn.database(), mock.fqn),
+        _ => mock.fqn.clone(),
     };
 
     MockView {
@@ -925,7 +748,6 @@ fn qualify_mock_name(mock: &MockView, target_fqn: &FullyQualifiedName) -> MockVi
     }
 }
 
-/// Create SQL for a mock temporary view.
 fn create_mock_view_sql(mock: &MockView) -> String {
     let flattened_name = flatten_fqn(&mock.fqn);
     let columns_def = mock
@@ -941,7 +763,6 @@ fn create_mock_view_sql(mock: &MockView) -> String {
     )
 }
 
-/// Create SQL for the expected temporary view.
 fn create_expected_view_sql(expected: &ExpectedResult) -> String {
     let columns_def = expected
         .columns
@@ -998,7 +819,7 @@ fn create_target_view_sql(stmt: &Statement, fqn: &FullyQualifiedName) -> Result<
 
 /// Create the test assertion query that returns failures.
 ///
-/// Returns rows with a 'status' column that indicates the type of failure:
+/// Returns rows with a 'status' column indicating the failure mode:
 /// - 'MISSING': Expected rows not found in actual results
 /// - 'UNEXPECTED': Actual rows not found in expected results
 ///
@@ -1087,7 +908,7 @@ mod tests {
         assert!(sql.contains("SELECT 'UNEXPECTED', * FROM expected"));
         assert!(sql.contains("UNION ALL"));
         assert!(sql.contains("EXCEPT"));
-        assert!(!sql.contains("AS OF")); // No AS OF when at_time is None
+        assert!(!sql.contains("AS OF"));
     }
 
     #[test]
@@ -1102,7 +923,6 @@ mod tests {
     fn make_test_types() -> Types {
         let mut objects = BTreeMap::new();
 
-        // Add users table schema
         let mut users_cols = BTreeMap::new();
         users_cols.insert(
             "id".to_string(),
@@ -1136,7 +956,6 @@ mod tests {
             users_cols,
         );
 
-        // Add orders table schema
         let mut orders_cols = BTreeMap::new();
         orders_cols.insert(
             "id".to_string(),
@@ -1170,7 +989,6 @@ mod tests {
             orders_cols,
         );
 
-        // Add target view schema (user_order_summary)
         let mut summary_cols = BTreeMap::new();
         summary_cols.insert(
             "user_id".to_string(),
@@ -1292,18 +1110,15 @@ mod tests {
             name: "test_user_summary".to_string(),
             target_view: "materialize.public.user_order_summary".to_string(),
             at_time: None,
-            mocks: vec![
-                // Only mocking users, not orders
-                MockView {
-                    fqn: "materialize.public.users".to_string(),
-                    columns: vec![
-                        ("id".to_string(), "bigint".to_string()),
-                        ("name".to_string(), "text".to_string()),
-                        ("email".to_string(), "text".to_string()),
-                    ],
-                    query: "SELECT * FROM VALUES (1, 'alice', 'alice@example.com')".to_string(),
-                },
-            ],
+            mocks: vec![MockView {
+                fqn: "materialize.public.users".to_string(),
+                columns: vec![
+                    ("id".to_string(), "bigint".to_string()),
+                    ("name".to_string(), "text".to_string()),
+                    ("email".to_string(), "text".to_string()),
+                ],
+                query: "SELECT * FROM VALUES (1, 'alice', 'alice@example.com')".to_string(),
+            }],
             expected: ExpectedResult {
                 columns: vec![
                     ("user_id".to_string(), "bigint".to_string()),
@@ -1350,7 +1165,6 @@ mod tests {
                     columns: vec![
                         ("id".to_string(), "bigint".to_string()),
                         ("name".to_string(), "text".to_string()),
-                        // Missing 'email' column
                     ],
                     query: "SELECT * FROM VALUES (1, 'alice')".to_string(),
                 },
@@ -1410,7 +1224,7 @@ mod tests {
                         ("id".to_string(), "bigint".to_string()),
                         ("name".to_string(), "text".to_string()),
                         ("email".to_string(), "text".to_string()),
-                        ("extra_column".to_string(), "int".to_string()), // Extra column
+                        ("extra_column".to_string(), "int".to_string()),
                     ],
                     query: "SELECT * FROM VALUES (1, 'alice', 'alice@example.com', 42)".to_string(),
                 },
@@ -1466,7 +1280,7 @@ mod tests {
                 MockView {
                     fqn: "materialize.public.users".to_string(),
                     columns: vec![
-                        ("id".to_string(), "text".to_string()), // Wrong type: should be bigint
+                        ("id".to_string(), "text".to_string()),
                         ("name".to_string(), "text".to_string()),
                         ("email".to_string(), "text".to_string()),
                     ],
@@ -1546,7 +1360,6 @@ mod tests {
             expected: ExpectedResult {
                 columns: vec![
                     ("user_id".to_string(), "bigint".to_string()),
-                    // Missing 'user_name' column
                     ("total_orders".to_string(), "bigint".to_string()),
                 ],
                 query: "SELECT * FROM VALUES (1, 1)".to_string(),
@@ -1608,7 +1421,7 @@ mod tests {
             expected: ExpectedResult {
                 columns: vec![
                     ("user_id".to_string(), "bigint".to_string()),
-                    ("user_name".to_string(), "bigint".to_string()), // Wrong type: should be text
+                    ("user_name".to_string(), "bigint".to_string()),
                     ("total_orders".to_string(), "bigint".to_string()),
                 ],
                 query: "SELECT * FROM VALUES (1, 1, 1)".to_string(),
@@ -1677,7 +1490,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_integer_aliases() {
-        // integer = int = int4
         assert_eq!(normalize_type("INT"), "integer");
         assert_eq!(normalize_type("int4"), "integer");
         assert_eq!(normalize_type("integer"), "integer");
@@ -1686,7 +1498,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_bigint_aliases() {
-        // bigint = int8
         assert_eq!(normalize_type("INT8"), "bigint");
         assert_eq!(normalize_type("bigint"), "bigint");
         assert_eq!(normalize_type("BIGINT"), "bigint");
@@ -1694,7 +1505,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_smallint_aliases() {
-        // smallint = int2
         assert_eq!(normalize_type("INT2"), "smallint");
         assert_eq!(normalize_type("smallint"), "smallint");
         assert_eq!(normalize_type("SMALLINT"), "smallint");
@@ -1702,7 +1512,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_real_aliases() {
-        // real = float4
         assert_eq!(normalize_type("float4"), "real");
         assert_eq!(normalize_type("FLOAT4"), "real");
         assert_eq!(normalize_type("real"), "real");
@@ -1711,7 +1520,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_double_precision_aliases() {
-        // double precision = float = float8 = double
         assert_eq!(normalize_type("float"), "double precision");
         assert_eq!(normalize_type("FLOAT"), "double precision");
         assert_eq!(normalize_type("float8"), "double precision");
@@ -1724,7 +1532,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_boolean_aliases() {
-        // boolean = bool
         assert_eq!(normalize_type("bool"), "boolean");
         assert_eq!(normalize_type("boolean"), "boolean");
         assert_eq!(normalize_type("BOOL"), "boolean");
@@ -1733,7 +1540,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_text_aliases() {
-        // text = string = varchar = character varying
         assert_eq!(normalize_type("text"), "text");
         assert_eq!(normalize_type("TEXT"), "text");
         assert_eq!(normalize_type("string"), "text");
@@ -1747,7 +1553,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_numeric_aliases() {
-        // numeric = decimal
         assert_eq!(normalize_type("numeric"), "numeric");
         assert_eq!(normalize_type("NUMERIC"), "numeric");
         assert_eq!(normalize_type("decimal"), "numeric");
@@ -1758,7 +1563,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_jsonb_aliases() {
-        // jsonb = json
         assert_eq!(normalize_type("json"), "jsonb");
         assert_eq!(normalize_type("JSON"), "jsonb");
         assert_eq!(normalize_type("jsonb"), "jsonb");
@@ -1767,7 +1571,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_timestamptz_aliases() {
-        // timestamp with time zone = timestamptz
         assert_eq!(normalize_type("timestamptz"), "timestamp with time zone");
         assert_eq!(normalize_type("TIMESTAMPTZ"), "timestamp with time zone");
         assert_eq!(
@@ -1782,7 +1585,6 @@ mod tests {
 
     #[test]
     fn test_normalize_type_preserves_other_types() {
-        // Types without aliases should be preserved as-is (lowercased)
         assert_eq!(normalize_type("timestamp"), "timestamp without time zone");
         assert_eq!(normalize_type("TIMESTAMP"), "timestamp without time zone");
         assert_eq!(normalize_type("date"), "date");
@@ -1805,37 +1607,30 @@ mod tests {
 
     #[test]
     fn test_normalize_type_case_insensitive() {
-        // Validation should be completely case-agnostic
-        // integer variants
         assert_eq!(normalize_type("integer"), normalize_type("INTEGER"));
         assert_eq!(normalize_type("integer"), normalize_type("Integer"));
         assert_eq!(normalize_type("integer"), normalize_type("iNtEgEr"));
         assert_eq!(normalize_type("int"), normalize_type("INT"));
         assert_eq!(normalize_type("int"), normalize_type("Int"));
 
-        // bigint variants
         assert_eq!(normalize_type("bigint"), normalize_type("BIGINT"));
         assert_eq!(normalize_type("bigint"), normalize_type("BigInt"));
         assert_eq!(normalize_type("int8"), normalize_type("INT8"));
 
-        // text variants
         assert_eq!(normalize_type("text"), normalize_type("TEXT"));
         assert_eq!(normalize_type("text"), normalize_type("Text"));
         assert_eq!(normalize_type("string"), normalize_type("STRING"));
         assert_eq!(normalize_type("string"), normalize_type("String"));
 
-        // boolean variants
         assert_eq!(normalize_type("boolean"), normalize_type("BOOLEAN"));
         assert_eq!(normalize_type("boolean"), normalize_type("Boolean"));
         assert_eq!(normalize_type("bool"), normalize_type("BOOL"));
         assert_eq!(normalize_type("bool"), normalize_type("Bool"));
 
-        // numeric variants
         assert_eq!(normalize_type("numeric"), normalize_type("NUMERIC"));
         assert_eq!(normalize_type("numeric"), normalize_type("Numeric"));
         assert_eq!(normalize_type("decimal"), normalize_type("DECIMAL"));
 
-        // double precision variants
         assert_eq!(
             normalize_type("double precision"),
             normalize_type("DOUBLE PRECISION")
@@ -1845,7 +1640,6 @@ mod tests {
             normalize_type("Double Precision")
         );
 
-        // timestamp with time zone variants
         assert_eq!(
             normalize_type("timestamp with time zone"),
             normalize_type("TIMESTAMP WITH TIME ZONE")
@@ -1853,7 +1647,6 @@ mod tests {
         assert_eq!(normalize_type("timestamptz"), normalize_type("TIMESTAMPTZ"));
         assert_eq!(normalize_type("timestamptz"), normalize_type("TimestampTZ"));
 
-        // jsonb variants
         assert_eq!(normalize_type("jsonb"), normalize_type("JSONB"));
         assert_eq!(normalize_type("jsonb"), normalize_type("JsonB"));
         assert_eq!(normalize_type("json"), normalize_type("JSON"));
@@ -1895,8 +1688,8 @@ mod tests {
     #[test]
     fn test_compare_columns_with_type_aliases() {
         let test_columns = vec![
-            ("id".to_string(), "INT".to_string()), // Should match "integer"
-            ("count".to_string(), "INT8".to_string()), // Should match "bigint"
+            ("id".to_string(), "INT".to_string()),
+            ("count".to_string(), "INT8".to_string()),
         ];
 
         let mut actual_columns = BTreeMap::new();
@@ -2001,14 +1794,13 @@ mod tests {
 
     #[test]
     fn test_validate_with_unqualified_mock_name() {
-        // Test that unqualified mock names get resolved correctly
         let test = UnitTest {
             name: "test_partial_fqn".to_string(),
             target_view: "materialize.public.user_order_summary".to_string(),
             at_time: None,
             mocks: vec![
                 MockView {
-                    fqn: "users".to_string(), // Unqualified - should resolve to materialize.public.users
+                    fqn: "users".to_string(),
                     columns: vec![
                         ("id".to_string(), "bigint".to_string()),
                         ("name".to_string(), "text".to_string()),
@@ -2017,7 +1809,7 @@ mod tests {
                     query: "SELECT * FROM VALUES (1, 'alice', 'alice@example.com')".to_string(),
                 },
                 MockView {
-                    fqn: "public.orders".to_string(), // Schema qualified - should resolve to materialize.public.orders
+                    fqn: "public.orders".to_string(),
                     columns: vec![
                         ("id".to_string(), "bigint".to_string()),
                         ("user_id".to_string(), "bigint".to_string()),
@@ -2068,7 +1860,7 @@ mod tests {
             "public".to_string(),
             "my_view".to_string(),
         );
-        let dependencies = BTreeSet::new(); // No dependencies
+        let dependencies = BTreeSet::new();
 
         let result = validate_unit_test(
             &test,
@@ -2081,7 +1873,6 @@ mod tests {
 
     #[test]
     fn test_validate_skips_unknown_mock() {
-        // If a mock isn't in types, validation should be permissive
         let test = UnitTest {
             name: "test_unknown_mock".to_string(),
             target_view: "materialize.public.my_view".to_string(),
@@ -2097,14 +1888,13 @@ mod tests {
             },
         };
 
-        let types = Types::default(); // Empty types - unknown_table not in types
+        let types = Types::default();
         let target_id = ObjectId::new(
             "materialize".to_string(),
             "public".to_string(),
             "my_view".to_string(),
         );
 
-        // Dependency is present but not in types
         let mut dependencies = BTreeSet::new();
         dependencies.insert(ObjectId::new(
             "materialize".to_string(),
@@ -2112,7 +1902,6 @@ mod tests {
             "unknown_table".to_string(),
         ));
 
-        // Should pass because mock covers the dependency, even though type info is missing
         let result = validate_unit_test(
             &test,
             &target_id,
@@ -2151,7 +1940,6 @@ mod tests {
 
     #[test]
     fn test_compare_columns_list_matches_bare() {
-        // Core bug scenario: user writes "int8 list", SHOW COLUMNS returns "list"
         let test_columns = vec![("ids".to_string(), "int8 list".to_string())];
 
         let mut actual_columns = BTreeMap::new();

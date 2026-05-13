@@ -144,7 +144,7 @@ pub struct Project {
     /// Cluster dependencies: clusters referenced by indexes and materialized views
     pub cluster_dependencies: BTreeSet<Cluster>,
     /// Unit tests defined in the project, organized by the object they test
-    pub tests: Vec<(ObjectId, crate::unit_test::UnitTest)>,
+    pub tests: Vec<(ObjectId, crate::project::ir::unit_test::UnitTest)>,
     /// Schemas that use replacement materialized views, derived from
     /// `SET api = stable` statements.
     pub replacement_schemas: BTreeSet<SchemaQualifier>,

@@ -152,6 +152,22 @@ impl ProjectCache {
         Ok(Some(Self { conn }))
     }
 
+    /// Run a query and collect mapped rows. Returns an empty `Vec` if the
+    /// statement fails to prepare or execute — the cache is advisory.
+    fn query_vec<T, P, F>(&self, sql: &str, params: P, map: F) -> Vec<T>
+    where
+        P: rusqlite::Params,
+        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        let Ok(mut stmt) = self.conn.prepare(sql) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map(params, map) else {
+            return Vec::new();
+        };
+        rows.filter_map(|r| r.ok()).collect()
+    }
+
     /// Get the column schema for an object.
     pub fn get_columns(&self, id: &ObjectId) -> Option<BTreeMap<String, ColumnType>> {
         let mut stmt = self
@@ -241,10 +257,6 @@ impl ProjectCache {
     }
 
     /// Get full metadata for a project object by fully-qualified name.
-    ///
-    /// Queries the object row plus all associated comments, indexes,
-    /// grants, and infrastructure. Returns `None` if the object doesn't
-    /// exist in the cache.
     pub fn get_object(&self, id: &ObjectId) -> Option<CachedObject> {
         let fqn = id.to_string();
         // object_key is the WHERE filter — no need to read it back.
@@ -311,56 +323,40 @@ impl ProjectCache {
 
     /// List all project objects as lightweight summaries.
     pub fn list_objects(&self) -> Vec<CachedObjectSummary> {
-        let mut stmt = match self.conn.prepare(
+        self.query_vec(
             "SELECT object_key, database, schema, name, object_kind, cluster, \
              file_path FROM project_objects",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let rows = match stmt.query_map([], |row| {
-            Ok(CachedObjectSummary {
-                fqn: row.get(0)?,
-                database: row.get(1)?,
-                schema: row.get(2)?,
-                name: row.get(3)?,
-                kind: ObjectKind::from_db_str(&row.get::<_, String>(4)?),
-                cluster: row.get(5)?,
-                file_path: row.get(6)?,
-            })
-        }) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
-        rows.filter_map(|r| r.ok()).collect()
+            [],
+            |row| {
+                Ok(CachedObjectSummary {
+                    fqn: row.get(0)?,
+                    database: row.get(1)?,
+                    schema: row.get(2)?,
+                    name: row.get(3)?,
+                    kind: ObjectKind::from_db_str(&row.get::<_, String>(4)?),
+                    cluster: row.get(5)?,
+                    file_path: row.get(6)?,
+                })
+            },
+        )
     }
 
     /// Returns a complete project catalog — all databases, schemas, and objects
     /// with full metadata (comments, indexes, grants, infrastructure).
     pub fn list_databases_with_objects(&self) -> Vec<CachedDatabase> {
-        let mut db_stmt = match self.conn.prepare("SELECT name FROM project_databases") {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let db_names: Vec<String> = match db_stmt.query_map([], |row| row.get(0)) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => return Vec::new(),
-        };
+        let db_names: Vec<String> =
+            self.query_vec("SELECT name FROM project_databases", [], |row| row.get(0));
 
-        let mut result = Vec::new();
-        for db_name in db_names {
-            let mut schema_stmt = match self
-                .conn
-                .prepare("SELECT name, schema_type FROM project_schemas WHERE database = ?1")
-            {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let schemas: Vec<CachedSchema> = match schema_stmt.query_map(params![&db_name], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            }) {
-                Ok(r) => r
-                    .filter_map(|r| r.ok())
+        db_names
+            .into_iter()
+            .map(|db_name| {
+                let schema_rows: Vec<(String, String)> = self.query_vec(
+                    "SELECT name, schema_type FROM project_schemas WHERE database = ?1",
+                    params![&db_name],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                );
+                let schemas = schema_rows
+                    .into_iter()
                     .map(|(schema_name, schema_type)| {
                         let object_ids = self.query_object_keys_in_schema(&db_name, &schema_name);
                         let objects = object_ids
@@ -373,167 +369,121 @@ impl ProjectCache {
                             objects,
                         }
                     })
-                    .collect(),
-                Err(_) => Vec::new(),
-            };
-            result.push(CachedDatabase {
-                name: db_name,
-                schemas,
-            });
-        }
-        result
+                    .collect();
+                CachedDatabase {
+                    name: db_name,
+                    schemas,
+                }
+            })
+            .collect()
     }
 
     /// List all external dependencies.
     pub fn list_external_dependencies(&self) -> Vec<ObjectId> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT object_key FROM project_external_dependencies")
-        {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map([], |row| row.get::<_, String>(0)) {
-            Ok(r) => r
-                .filter_map(|r| r.ok())
-                .filter_map(|s| s.parse::<ObjectId>().ok())
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        self.query_vec(
+            "SELECT object_key FROM project_external_dependencies",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .into_iter()
+        .filter_map(|s| s.parse().ok())
+        .collect()
     }
 
     /// Get the objects that `id` depends on.
     pub fn get_dependencies(&self, id: &ObjectId) -> Vec<ObjectId> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT dependency_key FROM project_dependencies WHERE object_key = ?1")
-        {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![id.to_string()], |row| row.get::<_, String>(0)) {
-            Ok(r) => r
-                .filter_map(|r| r.ok())
-                .filter_map(|s| s.parse::<ObjectId>().ok())
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        self.query_vec(
+            "SELECT dependency_key FROM project_dependencies WHERE object_key = ?1",
+            params![id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .into_iter()
+        .filter_map(|s| s.parse().ok())
+        .collect()
     }
 
     /// Get the objects that depend on `id` (reverse lookup).
     pub fn get_dependents(&self, id: &ObjectId) -> Vec<ObjectId> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT object_key FROM project_dependencies WHERE dependency_key = ?1")
-        {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![id.to_string()], |row| row.get::<_, String>(0)) {
-            Ok(r) => r
-                .filter_map(|r| r.ok())
-                .filter_map(|s| s.parse::<ObjectId>().ok())
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        self.query_vec(
+            "SELECT object_key FROM project_dependencies WHERE dependency_key = ?1",
+            params![id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .into_iter()
+        .filter_map(|s| s.parse().ok())
+        .collect()
     }
 
     /// Get unit tests associated with an object.
     pub fn get_tests(&self, id: &ObjectId) -> Vec<CachedTest> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT test_name, sql_text FROM project_tests WHERE object_key = ?1")
-        {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![id.to_string()], |row| {
-            Ok(CachedTest {
-                name: row.get(0)?,
-                sql_text: row.get(1)?,
-            })
-        }) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+        self.query_vec(
+            "SELECT test_name, sql_text FROM project_tests WHERE object_key = ?1",
+            params![id.to_string()],
+            |row| {
+                Ok(CachedTest {
+                    name: row.get(0)?,
+                    sql_text: row.get(1)?,
+                })
+            },
+        )
     }
 
     /// Get mod statements for a database/schema, ordered by position.
     pub fn get_mod_statements(&self, database: &str, schema: Option<&str>) -> Vec<String> {
-        let mut stmt = match self.conn.prepare(
+        self.query_vec(
             "SELECT sql_text FROM project_mod_statements \
              WHERE database = ?1 AND schema IS ?2 \
              ORDER BY position",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![database, schema], |row| row.get(0)) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+            params![database, schema],
+            |row| row.get(0),
+        )
     }
 
     fn query_comments(&self, object_key: &str) -> Vec<CachedComment> {
-        let mut stmt = match self.conn.prepare(
+        self.query_vec(
             "SELECT comment_type, target_column, comment_text, sql_text \
              FROM project_comments WHERE object_key = ?1",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![object_key], |row| {
-            Ok(CachedComment {
-                comment_type: row.get(0)?,
-                target_column: row.get(1)?,
-                text: row.get(2)?,
-                sql_text: row.get(3)?,
-            })
-        }) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+            params![object_key],
+            |row| {
+                Ok(CachedComment {
+                    comment_type: row.get(0)?,
+                    target_column: row.get(1)?,
+                    text: row.get(2)?,
+                    sql_text: row.get(3)?,
+                })
+            },
+        )
     }
 
     fn query_indexes(&self, object_key: &str) -> Vec<CachedIndex> {
-        let mut stmt = match self.conn.prepare(
+        self.query_vec(
             "SELECT index_name, cluster, columns, sql_text \
              FROM project_indexes WHERE object_key = ?1",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![object_key], |row| {
-            Ok(CachedIndex {
-                name: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                cluster: row.get(1)?,
-                columns: row.get(2)?,
-                sql_text: row.get(3)?,
-            })
-        }) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+            params![object_key],
+            |row| {
+                Ok(CachedIndex {
+                    name: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    cluster: row.get(1)?,
+                    columns: row.get(2)?,
+                    sql_text: row.get(3)?,
+                })
+            },
+        )
     }
 
     fn query_grants(&self, object_key: &str) -> Vec<CachedGrant> {
-        let mut stmt = match self.conn.prepare(
+        self.query_vec(
             "SELECT privilege, grantee, sql_text \
              FROM project_grants WHERE object_key = ?1",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![object_key], |row| {
-            Ok(CachedGrant {
-                privilege: row.get(0)?,
-                grantee: row.get(1)?,
-                sql_text: row.get(2)?,
-            })
-        }) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+            params![object_key],
+            |row| {
+                Ok(CachedGrant {
+                    privilege: row.get(0)?,
+                    grantee: row.get(1)?,
+                    sql_text: row.get(2)?,
+                })
+            },
+        )
     }
 
     fn query_infrastructure(&self, object_key: &str) -> Option<CachedInfrastructure> {
@@ -569,57 +519,40 @@ impl ProjectCache {
     }
 
     fn query_infrastructure_properties(&self, object_key: &str) -> Vec<CachedProperty> {
-        let mut stmt = match self.conn.prepare(
+        self.query_vec(
             "SELECT property_key, property_value, secret_ref, object_ref \
              FROM project_infrastructure_properties WHERE object_key = ?1",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![object_key], |row| {
-            Ok(CachedProperty {
-                key: row.get(0)?,
-                value: row.get(1)?,
-                secret_ref: row.get(2)?,
-                object_ref: row.get(3)?,
-            })
-        }) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => Vec::new(),
-        }
+            params![object_key],
+            |row| {
+                Ok(CachedProperty {
+                    key: row.get(0)?,
+                    value: row.get(1)?,
+                    secret_ref: row.get(2)?,
+                    object_ref: row.get(3)?,
+                })
+            },
+        )
     }
 
     fn query_aliases(&self, object_key: &str) -> BTreeMap<String, String> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT alias, target_fqn FROM project_aliases WHERE object_key = ?1")
-        {
-            Ok(s) => s,
-            Err(_) => return BTreeMap::new(),
-        };
-        match stmt.query_map(params![object_key], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        }) {
-            Ok(r) => r.filter_map(|r| r.ok()).collect(),
-            Err(_) => BTreeMap::new(),
-        }
+        self.query_vec(
+            "SELECT alias, target_fqn FROM project_aliases WHERE object_key = ?1",
+            params![object_key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .into_iter()
+        .collect()
     }
 
     fn query_object_keys_in_schema(&self, database: &str, schema: &str) -> Vec<ObjectId> {
-        let mut stmt = match self
-            .conn
-            .prepare("SELECT object_key FROM project_objects WHERE database = ?1 AND schema = ?2")
-        {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        match stmt.query_map(params![database, schema], |row| row.get::<_, String>(0)) {
-            Ok(r) => r
-                .filter_map(|r| r.ok())
-                .filter_map(|s| s.parse::<ObjectId>().ok())
-                .collect(),
-            Err(_) => Vec::new(),
-        }
+        self.query_vec(
+            "SELECT object_key FROM project_objects WHERE database = ?1 AND schema = ?2",
+            params![database, schema],
+            |row| row.get::<_, String>(0),
+        )
+        .into_iter()
+        .filter_map(|s| s.parse().ok())
+        .collect()
     }
 }
 
@@ -874,7 +807,6 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let conn = create_test_db(&db_path);
 
-        // Insert two objects with columns
         conn.execute(
             "INSERT INTO typecheck_objects (object_key, object_kind) VALUES (?1, ?2)",
             params!["db.schema.obj_a", "view"],
@@ -957,7 +889,6 @@ mod tests {
             ],
         )
         .unwrap();
-        // Comment
         conn.execute(
             "INSERT INTO project_comments (object_key, comment_type, target_column, comment_text, sql_text) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -970,7 +901,6 @@ mod tests {
             ],
         )
         .unwrap();
-        // Index
         conn.execute(
             "INSERT INTO project_indexes (object_key, index_name, cluster, columns, sql_text) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -983,7 +913,6 @@ mod tests {
             ],
         )
         .unwrap();
-        // Grant
         conn.execute(
             "INSERT INTO project_grants (object_key, privilege, grantee, sql_text) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -995,7 +924,6 @@ mod tests {
             ],
         )
         .unwrap();
-        // Aliases
         conn.execute(
             "INSERT INTO project_aliases (object_key, alias, target_fqn) VALUES (?1, ?2, ?3)",
             params!["mydb.public.orders", "raw_orders", "ext.public.raw_orders"],
@@ -1010,7 +938,6 @@ mod tests {
             ],
         )
         .unwrap();
-        // Infrastructure
         conn.execute(
             "INSERT INTO project_infrastructure (object_key, infra_type, connector_type, connection_ref, source_ref, external_reference) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1036,19 +963,16 @@ mod tests {
             ],
         )
         .unwrap();
-        // Dependencies: orders depends on users
         conn.execute(
             "INSERT INTO project_dependencies (object_key, dependency_key) VALUES (?1, ?2)",
             params!["mydb.public.orders", "mydb.public.users"],
         )
         .unwrap();
-        // External dependency
         conn.execute(
             "INSERT INTO project_external_dependencies (object_key) VALUES (?1)",
             params!["ext.public.raw_data"],
         )
         .unwrap();
-        // Tests
         conn.execute(
             "INSERT INTO project_tests (object_key, test_name, sql_text) VALUES (?1, ?2, ?3)",
             params![
@@ -1058,7 +982,6 @@ mod tests {
             ],
         )
         .unwrap();
-        // Mod statements
         conn.execute(
             "INSERT INTO project_mod_statements (database, schema, position, sql_text) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -1094,26 +1017,21 @@ mod tests {
         assert_eq!(obj.cluster.as_deref(), Some("compute"));
         assert_eq!(obj.file_path, "sql/orders.sql");
 
-        // Comments
         assert_eq!(obj.comments.len(), 1);
         assert_eq!(obj.comments[0].comment_type, "object");
         assert_eq!(obj.comments[0].text, "Order data");
 
-        // Indexes
         assert_eq!(obj.indexes.len(), 1);
         assert_eq!(obj.indexes[0].name, "orders_id_idx");
 
-        // Grants
         assert_eq!(obj.grants.len(), 1);
         assert_eq!(obj.grants[0].privilege, "SELECT");
         assert_eq!(obj.grants[0].grantee, "reader_role");
 
-        // Aliases
         assert_eq!(obj.aliases.len(), 2);
         assert_eq!(obj.aliases["order_items"], "ext.public.order_items");
         assert_eq!(obj.aliases["raw_orders"], "ext.public.raw_orders");
 
-        // Infrastructure
         let infra = obj.infrastructure.unwrap();
         assert_eq!(infra.infra_type, "source");
         assert_eq!(infra.connector_type.as_deref(), Some("postgres"));
@@ -1261,15 +1179,12 @@ mod tests {
 
         let cache = open_cache(&db_path);
 
-        // Database-level mod statement
         let db_mods = cache.get_mod_statements("mydb", None);
         assert_eq!(db_mods, vec!["CREATE DATABASE mydb"]);
 
-        // Schema-level mod statement
         let schema_mods = cache.get_mod_statements("mydb", Some("public"));
         assert_eq!(schema_mods, vec!["CREATE SCHEMA public"]);
 
-        // No statements for unknown
         assert!(cache.get_mod_statements("unknown", None).is_empty());
     }
 }

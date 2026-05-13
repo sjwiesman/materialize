@@ -92,9 +92,7 @@ use crate::project::syntax::parser::parse_statements_with_context;
 use crate::project::syntax::profile_files::collect_all_sql_files;
 use crate::verbose;
 use cache::BuildArtifact;
-use cache::build_artifact::{
-    CompiledObjectArtifact, CompiledObjectArtifactData, FileEntry, ObjectStateRow,
-};
+use cache::build_artifact::{CompiledObjectArtifact, CompiledObjectArtifactData, ObjectStateRow};
 use cache_io::hex_digest;
 use mz_sql_parser::ast::{
     CommentStatement, CreateIndexStatement, ExecuteUnitTestStatement, GrantPrivilegesStatement,
@@ -286,12 +284,9 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
                 .map(|variant| variant.path.clone())
         })
         .collect();
-    let file_hashes: BTreeMap<PathBuf, String> = db
-        .load_file_entries(fs, &variant_paths, false)
-        .map_err(LoadError::from)?
-        .into_iter()
-        .map(|(path, entry)| (path, entry.content_hash))
-        .collect();
+    let file_hashes = db
+        .load_file_hashes(fs, &variant_paths)
+        .map_err(LoadError::from)?;
 
     let existing_fingerprints = db.load_object_fingerprints().map_err(LoadError::from)?;
 
@@ -371,7 +366,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
             })
             .collect();
         let miss_file_entries = db
-            .load_file_entries(fs, &miss_paths, true)
+            .load_file_contents(fs, &miss_paths)
             .map_err(LoadError::from)?;
         let results: Vec<ObjectCompileResult> = misses
             .into_par_iter()
@@ -672,11 +667,10 @@ fn parse_mod_statements(
     }
 
     let mut entries = db
-        .load_file_entries(fs, &BTreeSet::from([path.to_path_buf()]), true)
+        .load_file_contents(fs, &BTreeSet::from([path.to_path_buf()]))
         .map_err(LoadError::from)?;
     let sql = entries
         .remove(path)
-        .and_then(|entry| entry.contents)
         .ok_or_else(|| LoadError::InvalidFileName {
             path: path.to_path_buf(),
         })?;
@@ -833,21 +827,18 @@ fn compile_object_uncached(
     profile: &str,
     variables: &BTreeMap<String, String>,
     profile_set: bool,
-    file_entries: &BTreeMap<PathBuf, FileEntry>,
+    file_entries: &BTreeMap<PathBuf, String>,
 ) -> Result<Option<CachedTypedObject>, ObjectCompileFailure> {
     let mut variants = Vec::new();
     for variant in descriptor.variants {
-        let sql = file_entries
-            .get(&variant.path)
-            .and_then(|entry| entry.contents.clone())
-            .ok_or_else(|| {
-                ObjectCompileFailure::Project(
-                    LoadError::InvalidFileName {
-                        path: variant.path.clone(),
-                    }
-                    .into(),
-                )
-            })?;
+        let sql = file_entries.get(&variant.path).cloned().ok_or_else(|| {
+            ObjectCompileFailure::Project(
+                LoadError::InvalidFileName {
+                    path: variant.path.clone(),
+                }
+                .into(),
+            )
+        })?;
         let statements =
             parse_statements_with_context(&sql, variant.path.clone(), variables, profile_set)
                 .map_err(|err| ObjectCompileFailure::Project(err.into()))?;
@@ -889,7 +880,7 @@ fn compile_object(
     profile: &str,
     variables: &BTreeMap<String, String>,
     profile_set: bool,
-    file_entries: &BTreeMap<PathBuf, FileEntry>,
+    file_entries: &BTreeMap<PathBuf, String>,
 ) -> ObjectCompileResult {
     let compiled =
         match compile_object_uncached(descriptor, profile, variables, profile_set, file_entries) {

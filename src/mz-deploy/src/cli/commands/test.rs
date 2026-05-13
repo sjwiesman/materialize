@@ -40,10 +40,14 @@ use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::graph::Project;
 use crate::project::ir::object_id::ObjectId;
+use crate::project::ir::unit_test;
 use crate::project::{self};
 use crate::types::{self, Types};
-use crate::unit_test;
+
+mod lower;
+
 use crate::{info, info_nonl, verbose};
+pub(crate) use lower::TestValidationError;
 use owo_colors::{OwoColorize, Stream, Style};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -173,8 +177,8 @@ enum TestOutcome {
 /// Pre-execution validation failure in a test definition.
 #[derive(Serialize)]
 enum ValidationFailure {
-    UnitTest(unit_test::TestValidationError),
-    AtTime(unit_test::InvalidAtTimeError),
+    UnitTest(lower::TestValidationError),
+    AtTime(lower::InvalidAtTimeError),
 }
 
 #[derive(Serialize)]
@@ -469,7 +473,7 @@ async fn run_single_test(
             .or_else(|| types_lock.get_table(id).cloned())
     };
 
-    if let Err(e) = unit_test::validate_unit_test(test, object_id, &get_columns, &dependencies) {
+    if let Err(e) = lower::validate_unit_test(test, object_id, &get_columns, &dependencies) {
         return Ok(TestOutcome::ValidationFailed(ValidationFailure::UnitTest(
             e,
         )));
@@ -488,14 +492,12 @@ async fn run_single_test(
     };
 
     let typed_fqn: FullyQualifiedName = object_id.clone().into();
-    let sql_statements =
-        unit_test::desugar_unit_test(test, &target_obj.typed_object.stmt, &typed_fqn).map_err(
-            |reason| CliError::InvalidUnitTestTarget {
-                test_name: test.name.clone(),
-                object_id: object_id.to_string(),
-                reason,
-            },
-        )?;
+    let sql_statements = lower::lower_unit_test(test, &target_obj.typed_object.stmt, &typed_fqn)
+        .map_err(|reason| CliError::InvalidUnitTestTarget {
+            test_name: test.name.clone(),
+            object_id: object_id.to_string(),
+            reason,
+        })?;
 
     for (i, sql) in sql_statements[..sql_statements.len() - 1]
         .iter()
@@ -650,21 +652,21 @@ fn print_test_outcome(name: &str, outcome: &TestOutcome) {
 }
 
 /// Renders validation failures in the standard test output format.
-fn print_test_validation_error(error: &unit_test::TestValidationError) {
+fn print_test_validation_error(error: &lower::TestValidationError) {
     match error {
-        unit_test::TestValidationError::UnmockedDependency(inner) => {
+        lower::TestValidationError::UnmockedDependency(inner) => {
             info!("{}", inner)
         }
-        unit_test::TestValidationError::MockSchemaMismatch(inner) => {
+        lower::TestValidationError::MockSchemaMismatch(inner) => {
             info!("{}", inner)
         }
-        unit_test::TestValidationError::ExpectedSchemaMismatch(inner) => {
+        lower::TestValidationError::ExpectedSchemaMismatch(inner) => {
             info!("{}", inner)
         }
-        unit_test::TestValidationError::InvalidAtTime(inner) => {
+        lower::TestValidationError::InvalidAtTime(inner) => {
             info!("{}", inner)
         }
-        unit_test::TestValidationError::TypesCacheUnavailable { reason } => {
+        lower::TestValidationError::TypesCacheUnavailable { reason } => {
             let style = Style::new().bright_red().bold();
             info!(
                 "{}: types cache unavailable: {}",
@@ -699,11 +701,11 @@ async fn runtime_client(runtime: &DockerRuntime, _empty_types: &Types) -> Result
 async fn validate_at_time(
     client: &Client,
     test: &unit_test::UnitTest,
-) -> Result<Result<(), unit_test::InvalidAtTimeError>, CliError> {
+) -> Result<Result<(), lower::InvalidAtTimeError>, CliError> {
     if let Some(at_time) = &test.at_time {
         let validation_query = format!("SELECT {}::mz_timestamp", at_time);
         if let Err(e) = client.simple_query(&validation_query).await {
-            let error = unit_test::InvalidAtTimeError {
+            let error = lower::InvalidAtTimeError {
                 test_name: test.name.clone(),
                 at_time_value: at_time.clone(),
                 db_error: e.to_string(),

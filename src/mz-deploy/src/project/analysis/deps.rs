@@ -21,7 +21,7 @@
 //!
 //! CTE references must be excluded from the dependency set because they
 //! are query-local names, not database objects. The visitor uses
-//! [`CteScope`](crate::project::resolve::cte_scope::CteScope) to track CTE names
+//! [`CteScope`](CteScope) to track CTE names
 //! across nested queries. All CTE names in a `WITH` block are pushed at
 //! once — this is correct for both simple and mutually recursive CTEs
 //! because self-references in simple CTEs are SQL errors that Materialize
@@ -48,6 +48,7 @@ use crate::project::ir::object_id::ObjectId;
 use crate::project::ir::{
     compiled,
     graph::{Database, DatabaseObject, Project, Schema, SchemaType},
+    unit_test::UnitTest,
 };
 use crate::project::resolve::cte_scope::CteScope;
 use mz_sql_parser::ast::visit::{self, Visit};
@@ -98,7 +99,7 @@ struct ProcessedObject {
     typed_object: compiled::DatabaseObject,
     dependencies: BTreeSet<ObjectId>,
     clusters: BTreeSet<Cluster>,
-    tests: Vec<(ObjectId, crate::unit_test::UnitTest)>,
+    tests: Vec<(ObjectId, UnitTest)>,
 }
 
 impl From<compiled::Project> for Project {
@@ -188,8 +189,7 @@ impl From<compiled::Project> for Project {
                     .tests
                     .iter()
                     .map(|test_stmt| {
-                        let unit_test =
-                            crate::unit_test::UnitTest::from_execute_statement(test_stmt);
+                        let unit_test = UnitTest::from_execute_statement(test_stmt);
                         (object_id.clone(), unit_test)
                     })
                     .collect();

@@ -25,9 +25,7 @@
 
 use crate::cli::CliError;
 use crate::cli::error::MissingObject;
-use crate::client::{
-    Client, ConnectionError, SERVER_CLUSTER_NAME, quote_identifier,
-};
+use crate::client::{Client, ConnectionError, SERVER_CLUSTER_NAME, quote_identifier};
 use crate::config::Settings;
 use crate::info;
 use std::collections::BTreeSet;

@@ -31,8 +31,6 @@
 //! ## Supporting Modules
 //!
 //! - **[`log`]** — Verbose logging and the [`verbose!`] macro.
-//! - **[`unit_test`]** — In-process test runner that validates SQL unit tests
-//!   against cached type information.
 #![deny(clippy::print_stdout)]
 #![deny(clippy::print_stderr)]
 #![warn(unreachable_pub)]
@@ -49,4 +47,3 @@ pub mod lsp;
 pub(crate) mod project;
 pub(crate) mod secret_resolver;
 pub(crate) mod types;
-pub(crate) mod unit_test;
