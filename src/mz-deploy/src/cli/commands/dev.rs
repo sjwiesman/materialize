@@ -43,10 +43,7 @@ async fn refuse_if_targets_production_cluster(
     cluster: &str,
 ) -> Result<(), CliError> {
     let production = client.deployments().list_production_clusters().await?;
-    if let Some(rec) = production
-        .into_iter()
-        .find(|r| r.cluster_name == cluster)
-    {
+    if let Some(rec) = production.into_iter().find(|r| r.cluster_name == cluster) {
         return Err(CliError::DevTargetsProductionCluster { cluster: rec });
     }
     Ok(())

@@ -80,14 +80,7 @@ pub async fn run_without_typecheck(
     let settings = settings.clone();
     mz_ore::task::spawn_blocking(
         || "compile-run",
-        move || {
-            run_inner(
-                &settings,
-                show_progress,
-                true,
-                crate::fs::FileSystem::new(),
-            )
-        },
+        move || run_inner(&settings, show_progress, true, crate::fs::FileSystem::new()),
     )
     .await
 }

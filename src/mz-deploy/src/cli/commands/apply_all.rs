@@ -22,7 +22,7 @@
 //! **Requires:** `materialize_deployer` role (enforced before any phase runs).
 
 use crate::cli::CliError;
-use crate::cli::executor::{ApplyPlan, DeploymentExecutor};
+use crate::cli::executor::{ApplyPlan, DeploymentExecutor, compile_apply_project_and_connect};
 use crate::client::Client;
 use crate::config::Settings;
 use crate::log;
@@ -36,14 +36,7 @@ pub async fn run(
     skip_secrets: bool,
     dry_run: bool,
 ) -> Result<ApplyPlan, CliError> {
-    let show_progress = !log::json_output_enabled();
-    let planned_project = super::compile::run_without_typecheck(settings, show_progress).await?;
-    let client = Client::connect_with_profile(settings.connection().clone())
-        .await
-        .map_err(CliError::Connection)?;
-    crate::cli::commands::setup::verify(&client).await?;
-    let role = crate::cli::commands::setup::validate_connection(&client).await?;
-    crate::cli::commands::setup::require_deployer(role)?;
+    let (planned_project, client) = compile_apply_project_and_connect(&settings).await?;
 
     let mut plan = ApplyPlan::new();
     let executor = DeploymentExecutor::new_dry_run(&client);
