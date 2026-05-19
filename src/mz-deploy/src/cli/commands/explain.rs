@@ -56,6 +56,7 @@ use mz_sql_parser::ast::*;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::Path;
 use tokio_postgres::SimpleQueryMessage;
 
 /// The parsed explain target: an object and optional index name.
@@ -101,11 +102,24 @@ impl fmt::Display for ExplainOutput {
 /// Compiles the project, spins up an ephemeral Materialize Docker container,
 /// stages dependencies in a temporary schema, creates the target object, runs
 /// EXPLAIN, and cleans up.
-pub async fn run(settings: &Settings, target: &str) -> Result<(), CliError> {
+///
+/// `overlay` optionally points to a JSON file mapping absolute paths to
+/// contents that override the on-disk project files during compilation. The
+/// VSCode extension uses this to compile against unsaved editor buffers.
+pub async fn run(
+    settings: &Settings,
+    target: &str,
+    overlay: Option<&Path>,
+) -> Result<(), CliError> {
     let target = parse_target(target)?;
 
-    // Compile with type checking to populate the type cache
-    let project = compile::run(settings, false).await?;
+    let fs = match overlay {
+        Some(p) => crate::fs::FileSystem::from_overlay_file(p).map_err(|e| {
+            CliError::Message(format!("failed to load overlay {}: {}", p.display(), e))
+        })?,
+        None => crate::fs::FileSystem::new(),
+    };
+    let project = compile::run_with_fs(settings, false, fs).await?;
 
     // Find the target object in the planned project
     let planned_obj = project.find_object(&target.object_id).ok_or_else(|| {

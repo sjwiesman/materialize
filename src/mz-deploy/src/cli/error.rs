@@ -107,10 +107,8 @@ pub enum CliError {
     },
 
     /// `dev` would deploy to a cluster that hosts a promoted deployment.
-    #[error("refusing to deploy dev overlay onto production cluster(s)")]
-    DevTargetsProductionCluster {
-        clusters: Vec<ProductionClusterRecord>,
-    },
+    #[error("refusing to deploy dev overlay onto production cluster")]
+    DevTargetsProductionCluster { cluster: ProductionClusterRecord },
 
     /// Required mz-deploy infrastructure is missing or partially installed.
     /// Emitted by every non-`setup` command when `setup::verify` fails.
@@ -441,46 +439,20 @@ impl CliError {
                 "CREATECLUSTER".if_supports_color(Stream::Stderr, |t| t.cyan()),
                 current_role.if_supports_color(Stream::Stderr, |t| t.cyan()),
             )),
-            Self::DevTargetsProductionCluster { clusters } => {
-                let cluster_list = clusters
-                    .iter()
-                    .take(5)
-                    .map(|rec| {
-                        let promoted_local: DateTime<Local> = rec.promoted_at.into();
-                        let promoted_str = promoted_local.format("%b %d, %Y").to_string();
-                        format!(
-                            "  • {}  (hosts {}.{}, promoted {})",
-                            rec.cluster_name.if_supports_color(Stream::Stderr, |t| t.yellow()),
-                            rec.database,
-                            rec.schema,
-                            promoted_str,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let more = if clusters.len() > 5 {
-                    format!("\n  ... and {} more", clusters.len() - 5)
-                } else {
-                    String::new()
-                };
+            Self::DevTargetsProductionCluster { cluster } => {
+                let promoted_local: DateTime<Local> = cluster.promoted_at.into();
+                let promoted_str = promoted_local.format("%b %d, %Y").to_string();
                 Some(format!(
-                    "these clusters host promoted deployments and cannot be \
-                     targeted by dev:\n{}{}\n\n\
-                     point this profile at a non-production cluster by \
-                     parameterizing {} with a {} and setting it per-profile \
-                     in {}:\n\n  \
-                     -- in your .sql file\n  \
-                     CREATE MATERIALIZED VIEW ... IN CLUSTER :\"cluster\" AS ...\n\n  \
-                     # in project.toml\n  \
-                     [profiles.dev.variables]\n  \
-                     cluster = \"dev\"\n\n  \
-                     [profiles.prod.variables]\n  \
-                     cluster = \"prod\"",
-                    cluster_list,
-                    more,
-                    "IN CLUSTER".if_supports_color(Stream::Stderr, |t| t.cyan()),
-                    ":variable".if_supports_color(Stream::Stderr, |t| t.cyan()),
-                    "project.toml".if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    "cluster {} hosts a promoted deployment ({}.{}, promoted {}) \
+                     and cannot be targeted by dev.\n\n\
+                     re-run with a non-production cluster, e.g.:\n\n  \
+                     mz-deploy dev <dev-cluster>",
+                    cluster
+                        .cluster_name
+                        .if_supports_color(Stream::Stderr, |t| t.yellow()),
+                    cluster.database,
+                    cluster.schema,
+                    promoted_str,
                 ))
             }
             Self::DeploymentTableCreationFailed { .. } => Some(

@@ -11,7 +11,9 @@
 //!
 //! Creates per-developer overlay databases (`<base_db>__<profile>`) from
 //! the dirty subset of the project's views, materialized views, and indexes.
-//! The overlay is drop-and-rebuilt on every invocation.
+//! Every overlay materialized view and index is rewritten to run on a single
+//! user-supplied target cluster. The overlay is drop-and-rebuilt on every
+//! invocation.
 //!
 //! Requires the `materialize_developer` role plus `CREATEDB` at run time.
 
@@ -28,56 +30,26 @@ use crate::project::ast::Statement;
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::resolve::normalize::NormalizingVisitor;
 use crate::{info, verbose};
-use mz_sql_parser::ast::RawClusterName;
 
 /// Overlay database name convention: `<base_db>__<profile>`.
 fn overlay_db_name(base_db: &str, profile: &str) -> String {
     format!("{}__{}", base_db, profile)
 }
 
-/// Collect every cluster referenced by the overlay set.
-///
-/// Only the clusters that `create_phase` would actually write to: the
-/// `IN CLUSTER` of each materialized view and of each index. Views have
-/// no cluster.
-fn overlay_cluster_references(objects: &[ObjectRef<'_>]) -> BTreeSet<String> {
-    let mut clusters = BTreeSet::new();
-    for (_, obj) in objects {
-        if let Statement::CreateMaterializedView(mv) = &obj.stmt {
-            if let Some(RawClusterName::Unresolved(name)) = &mv.in_cluster {
-                clusters.insert(name.to_string());
-            }
-        }
-        for index in &obj.indexes {
-            if let Some(RawClusterName::Unresolved(name)) = &index.in_cluster {
-                clusters.insert(name.to_string());
-            }
-        }
-    }
-    clusters
-}
-
-/// Refuse to proceed if any overlay object targets a cluster that hosts a
-/// promoted deployment.
+/// Refuse to proceed if the user-supplied target cluster hosts a promoted
+/// deployment.
 async fn refuse_if_targets_production_cluster(
     client: &Client,
-    overlay_objects: &[ObjectRef<'_>],
+    cluster: &str,
 ) -> Result<(), CliError> {
-    let overlay_clusters = overlay_cluster_references(overlay_objects);
-    if overlay_clusters.is_empty() {
-        return Ok(());
-    }
     let production = client.deployments().list_production_clusters().await?;
-    let conflicting: Vec<_> = production
+    if let Some(rec) = production
         .into_iter()
-        .filter(|rec| overlay_clusters.contains(&rec.cluster_name))
-        .collect();
-    if conflicting.is_empty() {
-        return Ok(());
+        .find(|r| r.cluster_name == cluster)
+    {
+        return Err(CliError::DevTargetsProductionCluster { cluster: rec });
     }
-    Err(CliError::DevTargetsProductionCluster {
-        clusters: conflicting,
-    })
+    Ok(())
 }
 
 /// Top-level entry point for `mz-deploy dev`.
@@ -85,9 +57,16 @@ async fn refuse_if_targets_production_cluster(
 /// Orchestrates role/privilege validation, dirty-set computation, plan
 /// printing, and the drop+create DDL phases.
 ///
+/// * `cluster` — target cluster for every overlay MV and index. Required
+///   unless `down` is set (clap enforces this).
 /// * `down` — when `true`, only run the drop phase and exit immediately.
 /// * `dry_run` — when `true`, print the plan but issue no DDL.
-pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), CliError> {
+pub async fn run(
+    settings: &Settings,
+    cluster: Option<String>,
+    down: bool,
+    dry_run: bool,
+) -> Result<(), CliError> {
     let profile = settings.connection();
     // `dev` always loads with `needs_connection: true`, so a profile must be set.
     let profile_name = settings
@@ -138,6 +117,10 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
         return Ok(());
     }
 
+    // clap guarantees `cluster` is `Some` whenever `down` is false.
+    let target_cluster = cluster.expect("cluster required unless --down");
+    refuse_if_targets_production_cluster(&client, &target_cluster).await?;
+
     let new_snapshot = deployment_snapshot::build_snapshot_from_planned(&planned_project)?;
     let production_snapshot = deployment_snapshot::load_from_database(&client, None).await?;
 
@@ -180,8 +163,6 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
         );
     }
 
-    refuse_if_targets_production_cluster(&client, &overlay_objects).await?;
-
     let dirty_schemas: BTreeSet<SchemaQualifier> = overlay_objects
         .iter()
         .map(|(id, _)| {
@@ -209,6 +190,7 @@ pub async fn run(settings: &Settings, down: bool, dry_run: bool) -> Result<(), C
         &in_project_databases,
         &dirty_schemas,
         &overlay_objects,
+        &target_cluster,
     )
     .await?;
 
@@ -282,10 +264,8 @@ async fn drop_database(client: &Client, database: &str) -> Result<(), CliError> 
 /// Per dirty schema we issue `CREATE DATABASE IF NOT EXISTS <overlay_db>`,
 /// insert a manifest row (so `drop_phase` can always reach it even if we crash
 /// mid-run), then `CREATE SCHEMA IF NOT EXISTS`. Objects are emitted in
-/// dependency order with references rewritten through `OverlayTransformer`.
-///
-/// `normalize_cluster_with` and `normalize_index_clusters` are intentionally
-/// **not** called — `dev` passes `IN CLUSTER` references through unchanged.
+/// dependency order with references rewritten through `OverlayTransformer`
+/// and every `IN CLUSTER` clause rewritten to `target_cluster`.
 pub(crate) async fn create_phase(
     client: &Client,
     profile_name: &str,
@@ -293,6 +273,7 @@ pub(crate) async fn create_phase(
     in_project_databases: &BTreeSet<String>,
     dirty_schemas: &BTreeSet<SchemaQualifier>,
     overlay_objects: &[ObjectRef<'_>],
+    target_cluster: &str,
 ) -> Result<(), CliError> {
     let provisioning = client.provisioning();
     let overlays = client.dev_overlays();
@@ -322,18 +303,21 @@ pub(crate) async fn create_phase(
             profile_name,
             in_project_databases,
             dirty_schemas,
+            target_cluster,
         );
 
         let stmt = typed_object
             .stmt
             .clone()
             .normalize_name_with(&visitor, &original_fqn.to_item_name())
-            .normalize_dependencies_with(&mut visitor);
+            .normalize_dependencies_with(&mut visitor)
+            .normalize_cluster_with(&visitor);
 
         client.execute(&stmt.to_string(), &[]).await?;
 
         let mut indexes = typed_object.indexes.clone();
         visitor.normalize_index_references(&mut indexes);
+        visitor.normalize_index_clusters(&mut indexes);
         for index in &indexes {
             client.execute(&index.to_string(), &[]).await?;
         }

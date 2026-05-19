@@ -177,7 +177,7 @@ enum TestOutcome {
 /// Pre-execution validation failure in a test definition.
 #[derive(Serialize)]
 enum ValidationFailure {
-    UnitTest(lower::TestValidationError),
+    UnitTest(TestValidationError),
     AtTime(lower::InvalidAtTimeError),
 }
 
@@ -336,8 +336,9 @@ pub async fn run(
     settings: &Settings,
     filter: Option<&str>,
     junit_xml: Option<&Path>,
+    overlay: Option<&Path>,
 ) -> Result<(), CliError> {
-    let results = run_tests(settings, filter).await?;
+    let results = run_tests(settings, filter, overlay).await?;
     let test_results = match results {
         Some(results) => results,
         None => {
@@ -376,13 +377,21 @@ pub async fn run(
 async fn run_tests(
     settings: &Settings,
     filter: Option<&str>,
+    overlay: Option<&Path>,
 ) -> Result<Option<TestResults>, CliError> {
     let directory = &settings.directory;
+    let fs = match overlay {
+        Some(p) => crate::fs::FileSystem::from_overlay_file(p).map_err(|e| {
+            CliError::Message(format!("failed to load overlay {}: {}", p.display(), e))
+        })?,
+        None => crate::fs::FileSystem::new(),
+    };
     let planned_project = project::plan(
         directory.clone(),
         settings.profile_name.clone(),
         settings.profile_suffix().map(|s| s.to_owned()),
         settings.variables().clone(),
+        fs,
     )
     .await?;
     let empty_types = Types::default();
@@ -652,21 +661,21 @@ fn print_test_outcome(name: &str, outcome: &TestOutcome) {
 }
 
 /// Renders validation failures in the standard test output format.
-fn print_test_validation_error(error: &lower::TestValidationError) {
+fn print_test_validation_error(error: &TestValidationError) {
     match error {
-        lower::TestValidationError::UnmockedDependency(inner) => {
+        TestValidationError::UnmockedDependency(inner) => {
             info!("{}", inner)
         }
-        lower::TestValidationError::MockSchemaMismatch(inner) => {
+        TestValidationError::MockSchemaMismatch(inner) => {
             info!("{}", inner)
         }
-        lower::TestValidationError::ExpectedSchemaMismatch(inner) => {
+        TestValidationError::ExpectedSchemaMismatch(inner) => {
             info!("{}", inner)
         }
-        lower::TestValidationError::InvalidAtTime(inner) => {
+        TestValidationError::InvalidAtTime(inner) => {
             info!("{}", inner)
         }
-        lower::TestValidationError::TypesCacheUnavailable { reason } => {
+        TestValidationError::TypesCacheUnavailable { reason } => {
             let style = Style::new().bright_red().bold();
             info!(
                 "{}: types cache unavailable: {}",

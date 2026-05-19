@@ -90,11 +90,11 @@ pub(crate) async fn plan(
     profile: Option<String>,
     profile_suffix: Option<String>,
     variables: BTreeMap<String, String>,
+    fs: crate::fs::FileSystem,
 ) -> Result<ir::graph::Project, error::ProjectError> {
     mz_ore::task::spawn_blocking(
         || "project::plan",
         move || {
-            let fs = crate::fs::FileSystem::new();
             plan_sync(
                 &fs,
                 root,
@@ -105,6 +105,53 @@ pub(crate) async fn plan(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    /// Overlay content replaces what's on disk: a project whose disk SQL would
+    /// fail to parse compiles cleanly when an overlay provides valid SQL for
+    /// the same file.
+    #[test]
+    fn plan_sync_uses_overlay_content() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("project.toml"),
+            "[project]\nname = \"t\"\n",
+        )
+        .unwrap();
+        let model_dir = root.path().join("models/mydb/public");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        let sql_path = model_dir.join("foo.sql");
+        // Disk version is unparseable.
+        std::fs::write(&sql_path, "THIS IS NOT VALID SQL").unwrap();
+
+        // Without overlay, planning fails.
+        let fs = crate::fs::FileSystem::new();
+        assert!(
+            plan_sync(&fs, root.path(), None, None, &Default::default()).is_err(),
+            "disk-only plan should fail on unparseable SQL"
+        );
+
+        // With overlay supplying valid SQL for that path, planning succeeds.
+        let mut overlay = BTreeMap::new();
+        overlay.insert(sql_path, "CREATE VIEW foo AS SELECT 1 AS x;\n".to_string());
+        let fs = crate::fs::FileSystem::with_overlay(overlay);
+        let project = plan_sync(&fs, root.path(), None, None, &Default::default())
+            .expect("overlay should supply parseable SQL");
+
+        let id = ir::object_id::ObjectId::new(
+            "mydb".to_string(),
+            "public".to_string(),
+            "foo".to_string(),
+        );
+        assert!(
+            project.find_object(&id).is_some(),
+            "overlay-defined view should be present in planned project"
+        );
+    }
 }
 
 /// Compile a project root into a planned deployment representation.

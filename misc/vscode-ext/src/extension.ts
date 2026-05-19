@@ -15,6 +15,10 @@
  * `mz-deploy.runExplain`); a third (`mz-deploy.switchProfile`) is user-facing
  * and powers the status-bar profile switcher.
  *
+ * Code-lens commands snapshot every dirty editor buffer in the workspace into
+ * a temp JSON file and pass it to the CLI via `--overlay`, so test/explain
+ * run against the editor's live state without first writing to disk.
+ *
  * The binary is resolved via the `mz-deploy.path` setting, which defaults to
  * `"mz-deploy"` (looked up through `$PATH` at spawn time). On activation the
  * extension verifies that the configured binary is actually runnable and
@@ -25,6 +29,7 @@ import { LanguageClient, ServerOptions, LanguageClientOptions } from "vscode-lan
 import * as vscode from "vscode";
 import { execFile } from "child_process";
 import { promises as fs } from "fs";
+import * as os from "os";
 import * as path from "path";
 
 let client: LanguageClient | undefined;
@@ -105,8 +110,15 @@ function plainEnv(): NodeJS.ProcessEnv {
  * Run `mz-deploy <args>` as a VSCode task. Output streams to a managed
  * terminal pane; the process is spawned directly so there's no shell-prompt
  * race that swallows the first character.
+ *
+ * If `overlayPath` is provided, registers a one-shot listener that deletes
+ * the file when the task ends so we don't leak temp overlays.
  */
-async function runMzDeployTask(name: string, args: string[]): Promise<void> {
+async function runMzDeployTask(
+  name: string,
+  args: string[],
+  overlayPath?: string,
+): Promise<void> {
   const cwd = getWorkspacePath();
   const execution = new vscode.ProcessExecution(resolveBinaryPath(), args, cwd ? { cwd } : {});
   const task = new vscode.Task(
@@ -121,7 +133,60 @@ async function runMzDeployTask(name: string, args: string[]): Promise<void> {
     panel: vscode.TaskPanelKind.Dedicated,
     clear: true,
   };
+  if (overlayPath) {
+    const sub = vscode.tasks.onDidEndTask((e) => {
+      if (e.execution.task === task) {
+        sub.dispose();
+        // Best-effort cleanup; ignore failures (e.g., already gone).
+        void fs.unlink(overlayPath).catch(() => undefined);
+      }
+    });
+  }
   await vscode.tasks.executeTask(task);
+}
+
+/**
+ * Build the argv for a code-lens-triggered command, appending `--overlay <file>`
+ * when there are dirty buffers worth surfacing. Returns the temp overlay path
+ * (or undefined) so the caller can register cleanup once the task ends.
+ */
+async function buildArgs(
+  base: string[],
+): Promise<{ args: string[]; overlayPath?: string }> {
+  const workspace = getWorkspacePath();
+  if (!workspace) return { args: base };
+  const overlayPath = await writeOverlay(workspace);
+  if (!overlayPath) return { args: base };
+  return { args: [...base, "--overlay", overlayPath], overlayPath };
+}
+
+/**
+ * Snapshot every dirty file-backed editor buffer in the workspace to a temp
+ * JSON file: `{ "<abs-path>": "<contents>", ... }`. Returns the temp path,
+ * or null if no buffers are dirty (so the caller can omit `--overlay`
+ * entirely and the CLI reads straight from disk).
+ *
+ * Clean tabs are skipped because disk and buffer agree — reading from disk
+ * yields the same content the overlay would have supplied.
+ */
+async function writeOverlay(workspace: string): Promise<string | null> {
+  const overlay: Record<string, string> = {};
+  const workspacePrefix = workspace.endsWith(path.sep) ? workspace : workspace + path.sep;
+  for (const doc of vscode.workspace.textDocuments) {
+    if (!doc.isDirty) continue;
+    if (doc.uri.scheme !== "file") continue;
+    const fsPath = doc.uri.fsPath;
+    if (!fsPath.startsWith(workspacePrefix) && fsPath !== workspace) continue;
+    overlay[fsPath] = doc.getText();
+  }
+  if (Object.keys(overlay).length === 0) return null;
+
+  const tmpFile = path.join(
+    os.tmpdir(),
+    `mz-overlay-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`,
+  );
+  await fs.writeFile(tmpFile, JSON.stringify(overlay), "utf8");
+  return tmpFile;
 }
 
 interface ProfileListing {
@@ -195,21 +260,15 @@ async function refreshProfileStatusBar(item: vscode.StatusBarItem): Promise<void
 function registerCommands(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("mz-deploy.runTest", async (filter: string) => {
-      const activeEditor = vscode.window.activeTextEditor;
-      if (activeEditor) {
-        await activeEditor.document.save();
-      }
-      await runMzDeployTask("test", ["test", filter]);
+      const { args, overlayPath } = await buildArgs(["test", filter]);
+      await runMzDeployTask("test", args, overlayPath);
     }),
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("mz-deploy.runExplain", async (target: string) => {
-      const activeEditor = vscode.window.activeTextEditor;
-      if (activeEditor) {
-        await activeEditor.document.save();
-      }
-      await runMzDeployTask("explain", ["explain", target]);
+      const { args, overlayPath } = await buildArgs(["explain", target]);
+      await runMzDeployTask("explain", args, overlayPath);
     }),
   );
 

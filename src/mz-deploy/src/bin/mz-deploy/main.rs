@@ -53,7 +53,7 @@ Develop:
   compile              Compile and validate SQL without connecting to database
   test                 Run SQL unit tests defined in test files
   explain              Show the EXPLAIN plan for a materialized view or index
-  dev                  Rebuild the developer overlay against the current dirty set
+  dev                  Iterate on your dirty views in a per-developer overlay
   lsp                  Start Language Server Protocol server for editor integration
   sql                  Launch an interactive psql session using the active profile
   mcp                  Connect an AI agent to Materialize's developer MCP server
@@ -159,6 +159,12 @@ enum Command {
     Explain {
         /// Fully qualified object path: database.schema.object[#index_name]
         target: String,
+        /// Path to a JSON file of `{ "<abs-path>": "<contents>", ... }` whose
+        /// entries override the on-disk project files during compilation.
+        /// Used by the VSCode extension to surface unsaved buffers without
+        /// forcing a save. Hidden because it's an editor-integration affordance.
+        #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath, hide = true)]
+        overlay: Option<PathBuf>,
     },
 
     /// Apply infrastructure objects to Materialize (Terraform-like)
@@ -359,27 +365,41 @@ enum Command {
         deploy_id: String,
     },
 
-    /// Rebuild the developer overlay against the current dirty set
+    /// Iterate on your dirty views in a per-developer overlay
     ///
-    /// Creates or refreshes a personal developer overlay: isolated schemas and
-    /// clusters prefixed with your Materialize username, containing only the
-    /// objects that differ from the live production schemas. Use this for
-    /// fast, isolated local iteration without staging a full deployment.
+    /// `dev` is the inner-loop command. It rebuilds a throwaway overlay
+    /// database containing only the views and materialized views you've
+    /// changed since the last promoted production deployment, and points
+    /// every overlay materialized view and index at the dev cluster you
+    /// pass as CLUSTER. Unchanged references resolve to production, so you
+    /// can validate a change against real production data without staging
+    /// a full deployment. The overlay is drop-and-rebuilt on every run.
+    ///
+    /// CLUSTER is required for any rebuild and may be omitted only with
+    /// `--down`. `dev` refuses to proceed if CLUSTER hosts a promoted
+    /// production deployment.
     ///
     /// Examples:
-    ///   mz-deploy dev                  # Rebuild the overlay
-    ///   mz-deploy dev --dry-run        # Preview what would be created
-    ///   mz-deploy dev --down           # Tear down the overlay
+    ///   mz-deploy dev quickstart_dev            Rebuild on `quickstart_dev`
+    ///   mz-deploy dev quickstart_dev --dry-run  Show the plan; touch nothing
+    ///   mz-deploy dev --down                    Tear down the overlay
     #[command(
         hide = true,
         after_help = "Run 'mz-deploy help dev' for a detailed usage guide."
     )]
     Dev {
-        /// Tear down the overlay databases and exit (no rebuild).
+        /// Cluster every overlay materialized view and index runs on. Required
+        /// unless `--down`. Must not host a promoted production deployment.
+        #[arg(value_name = "CLUSTER", required_unless_present = "down")]
+        cluster: Option<String>,
+
+        /// Drop every overlay database for this profile + project and exit.
+        /// Safe to run even when no overlay exists.
         #[arg(long)]
         down: bool,
 
-        /// Compute the plan and print it, but issue no DDL.
+        /// Print the dirty schemas and target overlay databases without
+        /// issuing any DDL.
         #[arg(long)]
         dry_run: bool,
     },
@@ -410,6 +430,12 @@ enum Command {
         /// Write test results to a JUnit XML file
         #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
         junit_xml: Option<PathBuf>,
+        /// Path to a JSON file of `{ "<abs-path>": "<contents>", ... }` whose
+        /// entries override the on-disk project files during compilation.
+        /// Used by the VSCode extension to surface unsaved buffers without
+        /// forcing a save. Hidden because it's an editor-integration affordance.
+        #[arg(long, value_name = "FILE", value_hint = clap::ValueHint::FilePath, hide = true)]
+        overlay: Option<PathBuf>,
     },
 
     /// Clean up a staging deployment by dropping all resources
@@ -894,7 +920,9 @@ async fn run(args: Args) -> Result<(), CliError> {
                 .await
                 .map(|_| ())
         }
-        Some(Command::Explain { target }) => cli::commands::explain::run(&settings, &target).await,
+        Some(Command::Explain { target, overlay }) => {
+            cli::commands::explain::run(&settings, &target, overlay.as_deref()).await
+        }
         Some(Command::Apply {
             skip_secrets,
             dry_run,
@@ -952,9 +980,11 @@ async fn run(args: Args) -> Result<(), CliError> {
             )
             .await
         }
-        Some(Command::Dev { down, dry_run }) => {
-            cli::commands::dev::run(&settings, down, dry_run).await
-        }
+        Some(Command::Dev {
+            cluster,
+            down,
+            dry_run,
+        }) => cli::commands::dev::run(&settings, cluster, down, dry_run).await,
         Some(Command::Setup { cluster_size }) => {
             cli::commands::setup::run(&settings, &cluster_size).await
         }
@@ -972,13 +1002,23 @@ async fn run(args: Args) -> Result<(), CliError> {
             }
             cli::commands::lock::run(&settings).await
         }
-        Some(Command::Test { filter, junit_xml }) => {
+        Some(Command::Test {
+            filter,
+            junit_xml,
+            overlay,
+        }) => {
             if log::json_output_enabled() {
                 return Err(CliError::Message(
                     "--output json is not supported for the 'test' command".to_string(),
                 ));
             }
-            cli::commands::test::run(&settings, filter.as_deref(), junit_xml.as_deref()).await
+            cli::commands::test::run(
+                &settings,
+                filter.as_deref(),
+                junit_xml.as_deref(),
+                overlay.as_deref(),
+            )
+            .await
         }
         Some(Command::Abort { deploy_id }) => {
             cli::commands::abort::run(&settings, &deploy_id).await

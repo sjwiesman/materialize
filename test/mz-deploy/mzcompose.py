@@ -64,7 +64,6 @@ def create_profiles(c: Composition) -> None:
             f'[default]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"\n\n'
             f'[staging]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"\n\n'
             f'[dev]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "dev_user"\n\n'
-            f'[dev_unsafe]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "dev_user"\n\n'
             f'[monitor]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "monitor_user"\n'
         )
 
@@ -1014,8 +1013,11 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
     )
 
     with c.test_case("mz-deploy-dev-happy-path"):
-        # Run dev against v2 (the edited project with an extra column).
-        result = run_mz_deploy(c, "dev-basic/v2", "dev", "--profile", "dev")
+        # Run dev against v2 (the edited project with an extra column),
+        # targeting the dedicated dev cluster.
+        result = run_mz_deploy(
+            c, "dev-basic/v2", "dev", "compute_dev", "--profile", "dev"
+        )
         assert result.returncode == 0, f"dev failed: {result.stderr}"
 
         # Overlay database exists.
@@ -1027,6 +1029,8 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
         rows = c.sql_query(
             "SELECT overlay_db FROM _mz_deploy.tables.dev_overlays "
             "WHERE profile = 'dev' AND project = 'v2'",
+            user="mz_system",
+            port=6877,
         )
         assert rows == [("app__dev",)], f"unexpected manifest: {rows}"
 
@@ -1039,12 +1043,16 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
 
     with c.test_case("mz-deploy-dev-rerun-rebuilds"):
         # Re-run dev with no changes. Overlay is drop-and-rebuilt; final state identical.
-        result = run_mz_deploy(c, "dev-basic/v2", "dev", "--profile", "dev")
+        result = run_mz_deploy(
+            c, "dev-basic/v2", "dev", "compute_dev", "--profile", "dev"
+        )
         assert result.returncode == 0, f"second dev run failed: {result.stderr}"
 
         rows = c.sql_query(
             "SELECT overlay_db FROM _mz_deploy.tables.dev_overlays "
             "WHERE profile = 'dev' AND project = 'v2'",
+            user="mz_system",
+            port=6877,
         )
         assert rows == [("app__dev",)], f"manifest drifted on re-run: {rows}"
 
@@ -1072,20 +1080,23 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
         rows = c.sql_query(
             "SELECT overlay_db FROM _mz_deploy.tables.dev_overlays "
             "WHERE profile = 'dev' AND project = 'v2'",
+            user="mz_system",
+            port=6877,
         )
         assert rows == [], f"manifest should be empty after --down, got {rows}"
 
     with c.test_case("mz-deploy-dev-refuses-production-cluster"):
-        # `dev_unsafe` resolves `compute_cluster = "compute"`, which is the
-        # cluster seeded as promoted. The dev-time guard must refuse before
-        # any DDL runs — so we use `check=False` and inspect the result
-        # instead of letting `run_mz_deploy` raise on non-zero exit.
+        # Passing `compute` (the promoted cluster) as the positional target
+        # must trip the dev-time guard before any DDL runs — so we use
+        # `check=False` and inspect the result instead of letting
+        # `run_mz_deploy` raise on non-zero exit.
         result = run_mz_deploy(
             c,
             "dev-basic/v2",
             "dev",
+            "compute",
             "--profile",
-            "dev_unsafe",
+            "dev",
             check=False,
         )
         assert result.returncode != 0, (
@@ -1096,7 +1107,7 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
         # The `#[error]` message is color-free and unique to this variant;
         # match on it to make sure we hit the right guard and not some other
         # failure that happens to mention `compute`. Also sanity-check that
-        # the cluster list and the word "promoted" both appear.
+        # the cluster name and the word "promoted" both appear.
         assert (
             "refusing to deploy dev overlay onto production cluster" in combined
         ), f"expected DevTargetsProductionCluster error; got: {combined}"
@@ -1107,17 +1118,20 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
             "promoted" in combined.lower()
         ), f"error should explain the cluster is promoted; got: {combined}"
 
-        # The guard must fire before any overlay state is created, so no
-        # overlay database should exist for this profile.
+        # The guard must fire before any overlay state is created. The
+        # teardown case above removed `app__dev`; the refused run must not
+        # bring it back, nor reinsert a manifest row.
         rows = c.sql_query(
-            "SELECT name FROM mz_databases WHERE name = 'app__dev_unsafe'",
+            "SELECT name FROM mz_databases WHERE name = 'app__dev'",
         )
         assert (
             len(rows) == 0
         ), f"refused dev run must not create an overlay database, got: {rows}"
         rows = c.sql_query(
             "SELECT overlay_db FROM _mz_deploy.tables.dev_overlays "
-            "WHERE profile = 'dev_unsafe' AND project = 'v2'",
+            "WHERE profile = 'dev' AND project = 'v2'",
+            user="mz_system",
+            port=6877,
         )
         assert (
             rows == []

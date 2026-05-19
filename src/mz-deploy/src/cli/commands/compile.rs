@@ -48,10 +48,21 @@ use std::time::Instant;
 /// # Errors
 /// Returns `CliError::Project` if compilation or validation fails
 pub async fn run(settings: &Settings, show_progress: bool) -> Result<Project, CliError> {
+    run_with_fs(settings, show_progress, crate::fs::FileSystem::new()).await
+}
+
+/// Like [`run`] but uses the provided [`crate::fs::FileSystem`] (typically an
+/// overlay built from unsaved editor buffers) instead of constructing a
+/// disk-only one.
+pub(crate) async fn run_with_fs(
+    settings: &Settings,
+    show_progress: bool,
+    fs: crate::fs::FileSystem,
+) -> Result<Project, CliError> {
     let settings = settings.clone();
     mz_ore::task::spawn_blocking(
         || "compile-run",
-        move || run_inner(&settings, show_progress, false),
+        move || run_inner(&settings, show_progress, false, fs),
     )
     .await
 }
@@ -69,7 +80,14 @@ pub async fn run_without_typecheck(
     let settings = settings.clone();
     mz_ore::task::spawn_blocking(
         || "compile-run",
-        move || run_inner(&settings, show_progress, false),
+        move || {
+            run_inner(
+                &settings,
+                show_progress,
+                true,
+                crate::fs::FileSystem::new(),
+            )
+        },
     )
     .await
 }
@@ -78,6 +96,7 @@ fn run_inner(
     settings: &Settings,
     show_progress: bool,
     skip_typecheck: bool,
+    fs: crate::fs::FileSystem,
 ) -> Result<Project, CliError> {
     let start_time = Instant::now();
     let directory = &settings.directory;
@@ -88,7 +107,6 @@ fn run_inner(
         progress::action("Compiling", &shown.display().to_string());
     }
 
-    let fs = crate::fs::FileSystem::new();
     let planned_project = project::plan_sync(
         &fs,
         directory.clone(),

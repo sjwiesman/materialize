@@ -421,17 +421,21 @@ impl<'a> NormalizingVisitor<OverlayTransformer<'a>> {
     ///   to databases outside this set are treated as external and emitted
     ///   verbatim.
     /// * `dirty_schemas` - Dirty `(database, schema)` pairs.
+    /// * `target_cluster` - Cluster name to rewrite every `IN CLUSTER` clause
+    ///   on overlay materialized views and indexes to.
     pub fn overlay(
         fqn: &'a FullyQualifiedName,
         profile_name: &'a str,
         in_project_databases: &'a std::collections::BTreeSet<String>,
         dirty_schemas: &'a std::collections::BTreeSet<crate::project::SchemaQualifier>,
+        target_cluster: &'a str,
     ) -> Self {
         Self::new(OverlayTransformer {
             fqn,
             profile_name,
             in_project_databases,
             dirty_schemas,
+            target_cluster,
         })
     }
 }
@@ -496,7 +500,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let visitor = NormalizingVisitor::overlay(&fqn, "alice", &in_project, &dirty);
+        let visitor =
+            NormalizingVisitor::overlay(&fqn, "alice", &in_project, &dirty, "quickstart_dev");
 
         let mut name = UnresolvedItemName(vec![
             Ident::new("app").unwrap(),

@@ -31,7 +31,7 @@ use mz_sql_parser::ast::{Ident, UnresolvedItemName};
 
 use crate::project::SchemaQualifier;
 use crate::project::ir::compiled::FullyQualifiedName;
-use crate::project::resolve::normalize::transformers::NameTransformer;
+use crate::project::resolve::normalize::transformers::{ClusterTransformer, NameTransformer};
 use mz_repr::namespaces::is_system_schema;
 
 /// Transforms references for `mz-deploy dev` overlay compilation.
@@ -51,6 +51,7 @@ pub(crate) struct OverlayTransformer<'a> {
     pub(crate) profile_name: &'a str,
     pub(crate) in_project_databases: &'a BTreeSet<String>,
     pub(crate) dirty_schemas: &'a BTreeSet<SchemaQualifier>,
+    pub(crate) target_cluster: &'a str,
 }
 
 impl<'a> NameTransformer for OverlayTransformer<'a> {
@@ -114,6 +115,16 @@ impl<'a> NameTransformer for OverlayTransformer<'a> {
     }
 }
 
+impl<'a> ClusterTransformer for OverlayTransformer<'a> {
+    fn transform_cluster(&self, _: &Ident) -> Ident {
+        Ident::new(self.target_cluster).expect("valid cluster identifier")
+    }
+
+    fn get_original_cluster_name(&self, name: &str) -> String {
+        name.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +156,7 @@ mod tests {
             profile_name,
             in_project_databases,
             dirty_schemas,
+            target_cluster: "quickstart_dev",
         }
     }
 
@@ -240,6 +252,23 @@ mod tests {
         assert_eq!(result.0[0].as_str(), "mydb__alice");
         assert_eq!(result.0[1].as_str(), "public");
         assert_eq!(result.0[2].as_str(), "orders");
+    }
+
+    // Cluster rewrite: any input cluster name → target_cluster.
+    #[test]
+    fn transform_cluster_rewrites_to_target() {
+        let fqn = make_fqn("mydb", "public", "ctx");
+        let in_project = BTreeSet::from(["mydb".to_string()]);
+        let dirty: BTreeSet<SchemaQualifier> = BTreeSet::new();
+        let t = make_transformer(&fqn, "alice", &in_project, &dirty);
+
+        let input = Ident::new("prod").expect("valid identifier");
+        let out = t.transform_cluster(&input);
+        assert_eq!(out.as_str(), "quickstart_dev");
+
+        let input2 = Ident::new("anything_else").expect("valid identifier");
+        let out2 = t.transform_cluster(&input2);
+        assert_eq!(out2.as_str(), "quickstart_dev");
     }
 
     // Schema-qualified (2-part) name: fqn database prepended, then

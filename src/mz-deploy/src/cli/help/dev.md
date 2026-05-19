@@ -1,74 +1,150 @@
-# dev — Rebuild a per-developer overlay of your dirty views
+# dev — Iterate on your dirty views in a per-developer overlay
 
-`dev` is the inner-loop command. It creates a throwaway overlay database
-per developer that contains only the views and materialized views you've
-changed since the last promoted production deployment. Unchanged
-dependencies resolve to production; external dependencies resolve as
-normal; clusters pass through unchanged.
+`dev` is the inner-loop command. Edit a view or materialized view, run
+`dev`, and a personal overlay database is rebuilt that contains *only*
+your changes. Everything you didn't touch resolves to production. Typical
+iterations finish in seconds.
 
-Every run drops the overlay and rebuilds it from scratch — there is no
-incremental state to maintain. Typical iterations are seconds.
+Reach for `dev` when you want to validate a change against real production
+data without staging a full deployment. When you're ready to ship the
+change, switch to `stage`.
 
-    project db `app`  +  profile `alice`  →  overlay db `app__alice`
+## At a glance
 
-Use `dev` to query results of a change against real production data. Use
-`stage` when you're ready to prepare a deployment candidate for promotion.
+```text
+    your edit               cluster you pass         result
+    ──────────              ─────────────────        ──────────────────
+    customer_ltv.sql   +    compute_dev        →     app__alice.ops.customer_ltv
+                                                     running on compute_dev,
+                                                     reading prod data for
+                                                     everything else
+```
 
 ## Usage
 
-    mz-deploy dev [FLAGS]
+```text
+mz-deploy dev <CLUSTER> [--dry-run]
+mz-deploy dev --down
+```
 
-## Supported objects
+## The CLUSTER argument
 
-`dev` overlays **views and materialized views only**. Tables, sources,
-sinks, connections, and secrets are silently skipped — `apply` owns
-those, and overlays are meant to be throwaway.
+`CLUSTER` is the cluster every overlay materialized view and index runs
+on. The `IN CLUSTER` clause written in your `.sql` source is **ignored**
+for the overlay — `dev` rewrites it to `CLUSTER` before issuing DDL.
 
-## Behavior
+`dev` refuses to proceed if `CLUSTER` hosts a promoted production
+deployment. Create a dedicated dev cluster up front and reuse it across
+runs, for example:
 
-`dev` deploys the views and materialized views you've changed to your
-overlay database and rewrites their references so unchanged dependencies
-resolve to production. External dependencies and `IN CLUSTER` clauses
-pass through unchanged.
+```sql
+CREATE CLUSTER compute_dev (SIZE = '25cc');
+GRANT USAGE, CREATE ON CLUSTER compute_dev TO alice;
+```
+
+`CLUSTER` is required for every rebuild and may be omitted only when
+passing `--down`.
+
+## How the overlay is built
+
+For each in-project database that has dirty schemas, `dev` creates an
+overlay database named `<base_db>__<profile>` (so `app` becomes
+`app__alice` for the `alice` profile). The dirty schemas are recreated
+inside the overlay; references inside them are rewritten as follows:
+
+| Reference target                | Rewrites to                       |
+| ------------------------------- | --------------------------------- |
+| In-project, dirty schema        | `<base_db>__<profile>.<schema>.…` |
+| In-project, clean schema        | Production (`<base_db>.<schema>.…`) |
+| External database               | Unchanged                         |
+| `IN CLUSTER <name>` on MV/index | `IN CLUSTER <CLUSTER>` (argument) |
+
+## What `dev` overlays
+
+Only **views and materialized views**. Tables, sources, sinks,
+connections, and secrets are silently skipped — overlays are throwaway,
+and `apply` owns the long-lived infrastructure.
+
+## Lifecycle
+
+Every run is a full **drop + rebuild**. There is no incremental state to
+maintain; the previous overlay databases are dropped before the new ones
+are created. A manifest in `_mz_deploy.tables.dev_overlays` tracks what
+exists for each `(profile, project)` pair so the next drop phase can
+always reach it, even after a crash.
 
 ## Flags
 
-- `--down` — Drop every overlay database for this `(profile, project)`
-  and exit. Safe to run even when no overlay exists.
-- `--dry-run` — Print the dirty schemas and target overlay database
-  names without executing any DDL.
+- `--down` — Drop every overlay database recorded for this
+  `(profile, project)` and exit. `CLUSTER` is not required. Safe to run
+  even when no overlay exists.
+- `--dry-run` — Print the dirty schemas and target overlay databases.
+  No DDL runs.
 
-## Examples
+## Recipes
 
-    mz-deploy dev                   # Rebuild the overlay for this profile
-    mz-deploy dev --dry-run         # Show the plan without touching the DB
-    mz-deploy dev --down            # Tear down the overlay
+```text
+# Standard inner loop
+mz-deploy dev compute_dev
 
-## Error Recovery
+# Preview a rebuild before touching the catalog
+mz-deploy dev compute_dev --dry-run
 
-- **`materialize_developer` required** — Ask an administrator to grant
-  the role:
+# Throw away today's overlay
+mz-deploy dev --down
 
-        GRANT materialize_developer TO <user>;
+# Move the overlay to a bigger cluster
+mz-deploy dev --down
+mz-deploy dev compute_dev_xl
+```
 
-- **Stale overlay after crash or manual DROP** — Re-run `mz-deploy dev`.
-  The sweep at the start of every run reconciles the manifest with the
-  live catalog.
+## Troubleshooting
+
+- **`materialize_developer` role required** — Ask an administrator:
+
+  ```sql
+  GRANT materialize_developer TO <user>;
+  ```
+
+- **`refusing to deploy dev overlay onto production cluster`** — You
+  passed a `CLUSTER` that hosts a promoted deployment. Provision a
+  dedicated dev cluster (see the section above) and re-run with that
+  name. To list promoted clusters:
+
+  ```sql
+  SELECT cluster_name, database, schema, promoted_at
+  FROM _mz_deploy.public.production;
+  ```
+
+- **`CREATEDB` privilege required** — `dev` creates overlay databases.
+  An administrator can grant it:
+
+  ```sql
+  GRANT CREATEDB ON SYSTEM TO <user>;
+  ```
+
+- **Stale overlay after a crash or manual `DROP`** — Re-run
+  `mz-deploy dev <CLUSTER>`. The sweep at the start of every run
+  reconciles the manifest with the live catalog.
 
 - **Manifest drift** — `mz-deploy dev --down` drops everything the
-  manifest knows about plus any leftover `<db>__<profile>` names. If
-  you need to scorch further, drop the overlay databases directly with
-  `DROP DATABASE <name> CASCADE`.
+  manifest knows about plus any leftover `<base_db>__<profile>` names.
+  To scorch further, drop the overlay databases directly:
 
-## Exit Codes
+  ```sql
+  DROP DATABASE <name> CASCADE;
+  ```
 
-- **0** — Overlay rebuilt, `--down` succeeded, or dry-run completed.
-- **1** — Role or privilege check failed, compilation error, or DDL
-  execution error.
+## Exit codes
 
-## Related Commands
+- **0** — Overlay rebuilt, `--down` succeeded, or `--dry-run` completed.
+- **1** — Role/privilege check failed, cluster is a production cluster,
+  compilation error, or DDL execution error.
+
+## See also
 
 - `mz-deploy compile` — Validate SQL without touching the database.
-- `mz-deploy stage` — Create a promotable staging deployment.
-- `mz-deploy apply` — Create tables, sources, and other infra that `dev`
-  does not manage.
+- `mz-deploy stage` — Create a promotable staging deployment when
+  you're done iterating.
+- `mz-deploy apply` — Manage the long-lived infrastructure (tables,
+  sources, sinks) that `dev` does not overlay.
