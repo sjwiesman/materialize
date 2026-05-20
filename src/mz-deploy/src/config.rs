@@ -85,7 +85,6 @@ pub struct ProfileConfig {
 /// `MZ_DEPLOY_PROFILE`, or the per-project `.mzprofile` file. See
 /// [`read_mzprofile`].
 #[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectSettings {
     pub mz_version: Option<String>,
     pub profiles: Option<BTreeMap<String, ProfileConfig>>,
