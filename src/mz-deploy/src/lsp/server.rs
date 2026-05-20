@@ -703,9 +703,7 @@ impl LanguageServer for Backend {
         // Try variable hover first (pure).
         let variables = self.variables.read().await;
         let profile = self.profile_name.read().await;
-        if let Some(h) =
-            hover::resolve_variable_hover(&text, byte_offset, &variables, profile.as_deref())
-        {
+        if let Some(h) = hover::resolve_variable_hover(&text, byte_offset, &variables) {
             return Ok(Some(h));
         }
         drop(variables);

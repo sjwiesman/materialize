@@ -475,12 +475,10 @@ impl fmt::Display for DatabaseValidationError {
             DatabaseValidationError::MissingTableDependencies {
                 objects_needing_tables,
             } => {
-                let error_style = Style::new().bright_red().bold();
                 let help_style = Style::new().bright_cyan().bold();
                 writeln!(
                     f,
-                    "{}: Objects depend on tables that don't exist in the database",
-                    "error".if_supports_color(Stream::Stderr, |t| error_style.style(t))
+                    "Objects depend on tables that don't exist in the database",
                 )?;
                 writeln!(f)?;
                 for (object, missing_tables) in objects_needing_tables {

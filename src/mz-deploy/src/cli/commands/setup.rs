@@ -35,6 +35,8 @@ use std::collections::BTreeSet;
 /// one of these three roles. Having zero or multiple memberships is an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MzDeployRole {
+    /// A superuser that can run any action
+    Superuser,
     /// Can apply infrastructure, delete objects, and stage/promote/abort deployments.
     Deployer,
     /// Read-only access to deployment state (list, describe, log).
@@ -47,6 +49,7 @@ impl MzDeployRole {
     /// Role name as it appears in Materialize.
     pub fn role_name(&self) -> &'static str {
         match self {
+            Self::Superuser => "superuser",
             Self::Deployer => "materialize_deployer",
             Self::Developer => "materialize_developer",
             Self::Monitor => "materialize_monitor",
@@ -319,15 +322,13 @@ async fn discover_missing(client: &Client) -> Result<Vec<MissingObject>, Connect
     Ok(missing)
 }
 
-/// Validate that the current role has a valid mz-deploy role membership.
-///
-/// The cluster-side checks (`replication_factor`, `USAGE`) are gone because
-/// every connection is pinned to `_mz_deploy_server` by `connection.rs`.
-/// A missing or unhealthy cluster is surfaced as a connection/query error;
-/// `debug` is the diagnostic tool.
-///
+/// Validate that the current role has a valid mz-deploy role membership or is a superuser.
 /// Returns the detected role on success.
 pub async fn validate_connection(client: &Client) -> Result<MzDeployRole, CliError> {
+    if let Ok(()) = require_superuser(client).await {
+        return Ok(MzDeployRole::Superuser);
+    }
+
     let mut matched_roles = Vec::new();
     for (role_enum, role_name) in ALL_ROLES {
         let row = client
@@ -356,7 +357,7 @@ pub async fn validate_connection(client: &Client) -> Result<MzDeployRole, CliErr
 /// Used by all state-mutating commands: `stage`, `promote`, `abort`,
 /// all `apply` variants, and `delete`.
 pub fn require_deployer(role: MzDeployRole) -> Result<(), CliError> {
-    if role != MzDeployRole::Deployer {
+    if role != MzDeployRole::Deployer && role != MzDeployRole::Superuser {
         return Err(CliError::RoleNotAuthorized {
             current_role: role.to_string(),
             required_role: "materialize_deployer".to_string(),
@@ -370,7 +371,7 @@ pub fn require_deployer(role: MzDeployRole) -> Result<(), CliError> {
 /// Used by `mz-deploy dev`. Strict — only accepts `Developer`; deployers
 /// should use `stage` instead.
 pub fn require_developer(role: MzDeployRole) -> Result<(), CliError> {
-    if role != MzDeployRole::Developer {
+    if role != MzDeployRole::Developer && role != MzDeployRole::Superuser {
         return Err(CliError::RoleNotAuthorized {
             current_role: role.to_string(),
             required_role: "materialize_developer".to_string(),
