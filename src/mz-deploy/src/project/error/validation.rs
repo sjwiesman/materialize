@@ -14,6 +14,7 @@
 //! and constraint violations. Errors carry rich contextual information
 //! (file path, SQL statement) for user-friendly diagnostics.
 
+use crate::types::ObjectKind;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -261,7 +262,7 @@ pub enum ValidationErrorKind {
         database: String,
         schema: String,
         object_name: String,
-        object_type: String,
+        object_type: ObjectKind,
     },
     /// Invalid statement type in cluster definition file
     InvalidClusterStatement {
@@ -589,11 +590,11 @@ impl ValidationErrorKind {
                 database,
                 schema,
                 object_name,
-                object_type,
+                object_type: kind,
             } => {
                 format!(
-                    "replacement schema '{}.{}' contains non-materialized-view object '{}' (type: {})",
-                    database, schema, object_name, object_type
+                    "replacement schema '{}.{}' contains non-materialized-view object '{}' (kind: {})",
+                    database, schema, object_name, kind
                 )
             }
             Self::InvalidClusterStatement {

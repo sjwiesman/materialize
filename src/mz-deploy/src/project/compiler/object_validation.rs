@@ -636,7 +636,6 @@ fn validate_replacement_schemas(
         return;
     }
 
-    // Check replacement schemas only contain MVs
     for db in databases {
         for schema in &db.schemas {
             if !replacement_schemas
@@ -648,22 +647,12 @@ fn validate_replacement_schemas(
 
             for obj in &schema.objects {
                 if !matches!(obj.stmt, Statement::CreateMaterializedView(_)) {
-                    let object_type = match &obj.stmt {
-                        Statement::CreateView(_) => "view",
-                        Statement::CreateTable(_) => "table",
-                        Statement::CreateTableFromSource(_) => "table from source",
-                        Statement::CreateSink(_) => "sink",
-                        Statement::CreateSource(_) => "source",
-                        Statement::CreateSecret(_) => "secret",
-                        Statement::CreateConnection(_) => "connection",
-                        Statement::CreateMaterializedView(_) => unreachable!(),
-                    };
                     errors.push(ValidationError::with_file(
                         ValidationErrorKind::ReplacementSchemaNonMvObject {
                             database: db.name.clone(),
                             schema: schema.name.clone(),
                             object_name: obj.stmt.ident().object.clone(),
-                            object_type: object_type.to_string(),
+                            object_type: obj.stmt.kind(),
                         },
                         PathBuf::from(format!("{}/{}.sql", db.name, schema.name)),
                     ));

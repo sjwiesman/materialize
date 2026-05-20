@@ -23,11 +23,10 @@
 //!   has exactly one mz-deploy role membership.
 //! - **`run()`** — The `setup` CLI command entry point.
 
-use crate::cli::CliError;
 use crate::cli::error::MissingObject;
+use crate::cli::{CliError, progress};
 use crate::client::{Client, ConnectionError, SERVER_CLUSTER_NAME, quote_identifier};
 use crate::config::Settings;
-use crate::info;
 use std::collections::BTreeSet;
 
 /// The mz-deploy role assigned to the current database user.
@@ -453,14 +452,12 @@ pub async fn require_createdb(
 /// Returns `CliError::Connection` if the database connection fails
 pub async fn run(settings: &Settings, cluster_size: &str) -> Result<(), CliError> {
     let profile = settings.connection();
-    // `setup` itself creates `_mz_deploy_server`, so the session cannot be
-    // pinned to it during connect — that's the cluster we're about to make.
     let client = Client::connect_with_profile_no_pin(profile.clone())
         .await
         .map_err(CliError::Connection)?;
 
     setup(&client, cluster_size).await?;
 
-    info!("Deployment tracking initialized in _mz_deploy database");
+    progress::success("mz_deploy configuration successful");
     Ok(())
 }

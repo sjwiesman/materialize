@@ -723,7 +723,7 @@ impl CatalogRuntime {
         let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast)
             .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
         let pcx = PlanContext::new(Utc::now());
-        let plan = mz_sql::plan::plan(
+        let (plan, _) = mz_sql::plan::plan(
             Some(&pcx),
             &*self,
             resolved,
@@ -1829,7 +1829,7 @@ impl TaskCatalog {
         let (resolved, resolved_ids) = mz_sql::names::resolve(&*self, ast)
             .map_err(|e| build_error(object_id, ObjectTypeCheckErrorKind::Plan(Arc::new(e))))?;
         let pcx = PlanContext::new(Utc::now());
-        let plan = mz_sql::plan::plan(
+        let (plan, _) = mz_sql::plan::plan(
             Some(&pcx),
             &*self,
             resolved,

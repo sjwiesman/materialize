@@ -23,9 +23,7 @@
 
 use crate::cli::CliError;
 use crate::cli::executor::{ApplyPlan, DeploymentExecutor, compile_apply_project_and_connect};
-use crate::client::Client;
 use crate::config::Settings;
-use crate::log;
 
 /// Run all infrastructure apply steps in dependency order.
 ///

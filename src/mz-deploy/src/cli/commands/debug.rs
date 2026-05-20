@@ -44,15 +44,23 @@ async fn check_server_cluster(client: &Client) -> Result<ServerClusterHealth, Cl
 }
 
 #[derive(serde::Serialize)]
+enum RemoteOutput {
+    Success {
+        environment_id: String,
+        server_cluster_health: ServerClusterHealth,
+    },
+
+    Failure {
+        host: String,
+        port: u16,
+    },
+}
+
+#[derive(serde::Serialize)]
 struct DebugOutput {
     profile: String,
-    host: String,
-    port: u16,
-    environment_id: String,
-    server_cluster_health: ServerClusterHealth,
-    version: String,
-    role: String,
     docker_status: String,
+    remote: RemoteOutput,
 }
 
 impl fmt::Display for DebugOutput {
@@ -63,67 +71,16 @@ impl fmt::Display for DebugOutput {
             "Profile".if_supports_color(Stream::Stderr, |t| t.green()),
             self.profile.if_supports_color(Stream::Stderr, |t| t.cyan())
         )?;
-        writeln!(
-            f,
-            "{} {}:{}",
-            "Connected to".if_supports_color(Stream::Stderr, |t| t.green()),
-            self.host.if_supports_color(Stream::Stderr, |t| t.cyan()),
-            self.port
-                .to_string()
-                .if_supports_color(Stream::Stderr, |t| t.cyan())
-        )?;
-        writeln!(
-            f,
-            "  {}: {}",
-            "Environment".if_supports_color(Stream::Stderr, |t| t.dimmed()),
-            self.environment_id
-        )?;
-        writeln!(
-            f,
-            "  {}: {}",
-            "Version".if_supports_color(Stream::Stderr, |t| t.dimmed()),
-            self.version
-        )?;
-        writeln!(
-            f,
-            "  {}: {}",
-            "Role".if_supports_color(Stream::Stderr, |t| t.dimmed()),
-            self.role.if_supports_color(Stream::Stderr, |t| t.yellow())
-        )?;
-
-        let cluster_line = match &self.server_cluster_health {
-            ServerClusterHealth::Healthy => format!(
-                "{}: {} ({})",
-                "Server cluster".if_supports_color(Stream::Stderr, |t| t.green()),
-                SERVER_CLUSTER_NAME.if_supports_color(Stream::Stderr, |t| t.cyan()),
-                "healthy".if_supports_color(Stream::Stderr, |t| t.green()),
-            ),
-            ServerClusterHealth::NotReady { reason } => format!(
-                "{}: {} ({}: {})\n  hint: run `mz-deploy setup`",
-                "Server cluster".if_supports_color(Stream::Stderr, |t| t.green()),
-                SERVER_CLUSTER_NAME.if_supports_color(Stream::Stderr, |t| t.cyan()),
-                "not ready".if_supports_color(Stream::Stderr, |t| t.yellow()),
-                reason,
-            ),
-            ServerClusterHealth::Missing => format!(
-                "{}: {} ({})\n  hint: run `mz-deploy setup`",
-                "Server cluster".if_supports_color(Stream::Stderr, |t| t.green()),
-                SERVER_CLUSTER_NAME.if_supports_color(Stream::Stderr, |t| t.cyan()),
-                "missing".if_supports_color(Stream::Stderr, |t| t.red()),
-            ),
-        };
-        writeln!(f, "{}", cluster_line)?;
-
         let docker_label = match self.docker_status.as_str() {
             "running" => format!(
                 "{}: {}",
                 "Docker".if_supports_color(Stream::Stderr, |t| t.green()),
-                "installed, daemon running".if_supports_color(Stream::Stderr, |t| t.green())
+                "daemon running".if_supports_color(Stream::Stderr, |t| t.green())
             ),
             "not_running" => format!(
                 "{}: {}",
                 "Docker".if_supports_color(Stream::Stderr, |t| t.green()),
-                "installed, daemon not running".if_supports_color(Stream::Stderr, |t| t.yellow())
+                "daemon not running".if_supports_color(Stream::Stderr, |t| t.yellow())
             ),
             _ => format!(
                 "{}: {}",
@@ -131,7 +88,53 @@ impl fmt::Display for DebugOutput {
                 "not installed".if_supports_color(Stream::Stderr, |t| t.yellow())
             ),
         };
-        write!(f, "{}", docker_label)?;
+        writeln!(f, "{}", docker_label)?;
+
+        match &self.remote {
+            RemoteOutput::Success {
+                environment_id,
+                server_cluster_health,
+            } => {
+                writeln!(
+                    f,
+                    "{}: {}",
+                    "Environment".if_supports_color(Stream::Stderr, |t| t.green()),
+                    environment_id.if_supports_color(Stream::Stderr, |t| t.cyan())
+                )?;
+                let cluster_line = match server_cluster_health {
+                    ServerClusterHealth::Healthy => format!(
+                        "{}: {} ({})",
+                        "Server cluster".if_supports_color(Stream::Stderr, |t| t.green()),
+                        SERVER_CLUSTER_NAME.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                        "healthy"
+                    ),
+                    ServerClusterHealth::NotReady { reason } => format!(
+                        "{}: {} ({}: {})\n  hint: run `mz-deploy setup`",
+                        "Server cluster".if_supports_color(Stream::Stderr, |t| t.green()),
+                        SERVER_CLUSTER_NAME.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                        "not ready".if_supports_color(Stream::Stderr, |t| t.yellow()),
+                        reason,
+                    ),
+                    ServerClusterHealth::Missing => format!(
+                        "{}: {} ({})\n  hint: run `mz-deploy setup`",
+                        "Server cluster".if_supports_color(Stream::Stderr, |t| t.green()),
+                        SERVER_CLUSTER_NAME.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                        "missing".if_supports_color(Stream::Stderr, |t| t.red()),
+                    ),
+                };
+                write!(f, "{}", cluster_line)?;
+            }
+            RemoteOutput::Failure { host, port } => {
+                write!(
+                    f,
+                    "{} {}:{}",
+                    "Failed to connect to".if_supports_color(Stream::Stderr, |t| t.red()),
+                    host.if_supports_color(Stream::Stderr, |t| t.cyan()),
+                    port.to_string()
+                        .if_supports_color(Stream::Stderr, |t| t.cyan())
+                )?;
+            }
+        }
 
         Ok(())
     }
@@ -149,59 +152,51 @@ impl fmt::Display for DebugOutput {
 /// Returns `CliError::Connection` if connection fails
 pub async fn run(settings: &Settings) -> Result<(), CliError> {
     let profile = settings.connection();
-
-    // Connect once, then run DB-side queries (version/env/role + cluster health)
-    // in parallel with the Docker check.
-    let client = Client::connect_with_profile(profile.clone())
-        .await
-        .map_err(CliError::Connection)?;
-
-    let (session_result, cluster_result, docker_status) = tokio::join!(
-        query_session_info(&client),
-        check_server_cluster(&client),
-        DockerRuntime::check_availability(),
-    );
-
-    let (version, environment_id, role) = session_result?;
-    let cluster_health = cluster_result?;
-
+    let docker_status = DockerRuntime::check_availability().await;
     let docker_status_str = match docker_status {
         DockerStatus::Running => "running",
         DockerStatus::NotRunning => "not_running",
         DockerStatus::NotInstalled => "not_installed",
     };
 
+    let client = Client::connect_with_profile(profile.clone()).await;
+
+    let remote = match client {
+        Ok(client) => {
+            let (environment_id, cluster_result) =
+                tokio::join!(query_session_info(&client), check_server_cluster(&client),);
+
+            let environment_id = environment_id?;
+            let server_cluster_health = cluster_result?;
+
+            RemoteOutput::Success {
+                environment_id,
+                server_cluster_health,
+            }
+        }
+        Err(_) => RemoteOutput::Failure {
+            host: profile.require_host()?.to_string(),
+            port: profile.port,
+        },
+    };
+
     let output = DebugOutput {
         profile: profile.name.clone(),
-        // Connect succeeded above, so `require_host` will succeed too.
-        host: profile.require_host()?.to_string(),
-        port: profile.port,
-        environment_id,
-        server_cluster_health: cluster_health,
-        version,
-        role,
         docker_status: docker_status_str.to_string(),
+        remote,
     };
+
     log::output(&output);
 
     Ok(())
 }
 
-async fn query_session_info(client: &Client) -> Result<(String, String, String), CliError> {
+async fn query_session_info(client: &Client) -> Result<String, CliError> {
     let row = client
-        .query_one(
-            r#"
-        SELECT
-            mz_version() AS version,
-            mz_environment_id() AS environment_id,
-            current_role() as role"#,
-            &[],
-        )
+        .query_one("SELECT mz_environment_id() AS environment_id", &[])
         .await?;
 
-    let version: String = row.get("version");
     let environment_id: String = row.get("environment_id");
-    let role: String = row.get("role");
 
-    Ok((version, environment_id, role))
+    Ok(environment_id)
 }
