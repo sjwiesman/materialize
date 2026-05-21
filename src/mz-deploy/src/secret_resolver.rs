@@ -34,6 +34,7 @@ use aws_secret::{AwsSecretProvider, UnconfiguredAwsProvider};
 use env_var::EnvVarProvider;
 use mz_sql_parser::ast::{CreateSecretStatement, Expr, FunctionArgs, Raw, RawItemName, Value};
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 use thiserror::Error;
 
 /// Errors that can occur during secret resolution.
@@ -43,7 +44,7 @@ pub enum SecretResolveError {
     #[error("function '{name}' expects {expected} argument(s), got {got}")]
     WrongArgCount {
         name: String,
-        expected: usize,
+        expected: String,
         got: usize,
     },
     /// A known provider was called with a non-literal argument.
@@ -59,10 +60,24 @@ pub enum SecretResolveError {
 pub(crate) trait SecretProvider: Send + Sync {
     /// The function name this provider handles (e.g. `"env_var"`).
     fn name(&self) -> &str;
-    /// The number of arguments this provider expects.
-    fn expected_args(&self) -> usize;
+    /// The argument counts this provider accepts.
+    fn accepted_args(&self) -> RangeInclusive<usize>;
     /// Resolve the secret value from the given arguments.
     async fn resolve(&self, args: &[String]) -> Result<String, SecretResolveError>;
+}
+
+/// Render an accepted-args range for error messages.
+///
+/// `1..=1` → `"1"`, `1..=2` → `"1 or 2"`, otherwise `"N..=M"`.
+fn format_arg_range(range: &RangeInclusive<usize>) -> String {
+    let (start, end) = (*range.start(), *range.end());
+    if start == end {
+        start.to_string()
+    } else if end == start + 1 {
+        format!("{} or {}", start, end)
+    } else {
+        format!("{}..={}", start, end)
+    }
 }
 
 /// Resolves client-side secret provider functions in SQL expressions.
@@ -126,21 +141,22 @@ impl SecretResolver {
                 };
 
                 // Validate args
+                let accepted = provider.accepted_args();
                 let arg_exprs = match &func.args {
                     FunctionArgs::Star => {
                         return Err(SecretResolveError::WrongArgCount {
                             name: func_name,
-                            expected: provider.expected_args(),
+                            expected: format_arg_range(&accepted),
                             got: 0,
                         });
                     }
                     FunctionArgs::Args { args, .. } => args,
                 };
 
-                if arg_exprs.len() != provider.expected_args() {
+                if !accepted.contains(&arg_exprs.len()) {
                     return Err(SecretResolveError::WrongArgCount {
                         name: func_name,
-                        expected: provider.expected_args(),
+                        expected: format_arg_range(&accepted),
                         got: arg_exprs.len(),
                     });
                 }
@@ -304,7 +320,7 @@ mod tests {
                 got,
             } => {
                 assert_eq!(name, "env_var");
-                assert_eq!(expected, 1);
+                assert_eq!(expected, "1");
                 assert_eq!(got, 0);
             }
             other => panic!("expected WrongArgCount, got: {:?}", other),
@@ -329,8 +345,50 @@ mod tests {
                 got,
             } => {
                 assert_eq!(name, "env_var");
-                assert_eq!(expected, 1);
+                assert_eq!(expected, "1");
                 assert_eq!(got, 2);
+            }
+            other => panic!("expected WrongArgCount, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_aws_secret_wrong_arg_count() {
+        // aws_secret accepts 1 or 2 args; zero and three should both error
+        // with a message that reflects the range.
+        let resolver = SecretResolver::new(&Default::default());
+
+        let expr = make_function_expr("aws_secret", vec![]);
+        match resolver.resolve_expr(expr).await.unwrap_err() {
+            SecretResolveError::WrongArgCount {
+                name,
+                expected,
+                got,
+            } => {
+                assert_eq!(name, "aws_secret");
+                assert_eq!(expected, "1 or 2");
+                assert_eq!(got, 0);
+            }
+            other => panic!("expected WrongArgCount, got: {:?}", other),
+        }
+
+        let expr = make_function_expr(
+            "aws_secret",
+            vec![
+                Expr::Value(Value::String("a".into())),
+                Expr::Value(Value::String("b".into())),
+                Expr::Value(Value::String("c".into())),
+            ],
+        );
+        match resolver.resolve_expr(expr).await.unwrap_err() {
+            SecretResolveError::WrongArgCount {
+                name,
+                expected,
+                got,
+            } => {
+                assert_eq!(name, "aws_secret");
+                assert_eq!(expected, "1 or 2");
+                assert_eq!(got, 3);
             }
             other => panic!("expected WrongArgCount, got: {:?}", other),
         }

@@ -13,6 +13,7 @@
 
 use super::{SecretProvider, SecretResolveError};
 use async_trait::async_trait;
+use std::ops::RangeInclusive;
 
 /// Resolves secrets from environment variables.
 ///
@@ -25,8 +26,8 @@ impl SecretProvider for EnvVarProvider {
         "env_var"
     }
 
-    fn expected_args(&self) -> usize {
-        1
+    fn accepted_args(&self) -> RangeInclusive<usize> {
+        1..=1
     }
 
     async fn resolve(&self, args: &[String]) -> Result<String, SecretResolveError> {
