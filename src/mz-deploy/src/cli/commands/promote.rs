@@ -492,10 +492,6 @@ pub async fn run(
     cleanup_apply_state(&client, &plan.deploy_id).await?;
 
     progress::success("Deployment completed successfully!");
-    progress::info(&format!(
-        "Staging deployment '{}' is now in production",
-        deploy_id
-    ));
 
     Ok(())
 }
