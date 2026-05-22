@@ -10,7 +10,6 @@
 //! Abort command - cleanup a staged deployment.
 
 use crate::cli::CliError;
-use crate::cli::progress;
 use crate::client::{Client, ConnectionError};
 use crate::config::Settings;
 use crate::log;
@@ -56,7 +55,6 @@ impl fmt::Display for AbortResult {
 /// Returns `CliError::RoleNotAuthorized` if the user lacks the required role
 pub async fn run(settings: &Settings, deploy_id: &str) -> Result<(), CliError> {
     let profile = settings.connection();
-    progress::info(&format!("Aborting staged deployment: {}", deploy_id));
 
     let client = Client::connect_with_profile(profile.clone())
         .await

@@ -37,7 +37,6 @@ pub struct ScaffoldOpts {
 pub fn run(name: &str, opts: ScaffoldOpts) -> Result<(), CliError> {
     let project_dir = Path::new(name);
 
-    progress::info(&format!("Creating project {name}..."));
     if project_dir.exists() {
         return Err(CliError::Message(format!(
             "destination `{}` already exists",
@@ -63,7 +62,6 @@ pub fn init(opts: ScaffoldOpts) -> Result<(), CliError> {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "my-project".to_string());
 
-    progress::info("Initializing project in current directory...");
     scaffold(project_dir, &name, &opts)?;
     progress::success(&format!("Initialized project `{}`", name));
     prompt_default_profile(project_dir)?;
@@ -199,7 +197,6 @@ fn scaffold(project_dir: &Path, name: &str, opts: &ScaffoldOpts) -> Result<(), C
     )?;
 
     if opts.init_git {
-        progress::info("Initializing git repository");
         let dir_arg = project_dir.as_os_str();
         let status = Command::new("git")
             .arg("init")

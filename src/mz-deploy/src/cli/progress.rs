@@ -38,15 +38,6 @@ pub fn stage_success(message: &str, duration: Duration) {
     );
 }
 
-/// Print an informational message with blue info symbol.
-pub fn info(message: &str) {
-    info!(
-        "  {} {}",
-        "ℹ".if_supports_color(Stream::Stderr, |t| t.blue()),
-        message
-    );
-}
-
 /// Print a success message with green checkmark.
 pub fn success(message: &str) {
     info!(

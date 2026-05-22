@@ -186,14 +186,6 @@ impl DeploymentPlan {
         }
         drops
     }
-
-    fn has_work(&self) -> bool {
-        !self.staging_schemas.is_empty()
-            || !self.staging_clusters.is_empty()
-            || !self.pending_statements.is_empty()
-            || !self.replacement_mvs.is_empty()
-            || !self.dependent_sinks.is_empty()
-    }
 }
 
 impl serde::Serialize for DeploymentPlan {
@@ -439,12 +431,6 @@ pub async fn run(
 ) -> Result<(), CliError> {
     let profile = settings.connection();
 
-    if dry_run {
-        progress::info(&format!("Previewing deployment plan for '{}'", deploy_id));
-    } else {
-        progress::info(&format!("Promoting '{}' to production", deploy_id));
-    }
-
     let client = Client::connect_with_profile(profile.clone())
         .await
         .map_err(CliError::Connection)?;
@@ -470,16 +456,6 @@ pub async fn run(
 
     if dry_run {
         log::output(&plan);
-        if !log::json_output_enabled() {
-            if plan.has_work() {
-                progress::info(&format!(
-                    "To execute this plan, run: mz-deploy promote {}",
-                    deploy_id
-                ));
-            } else {
-                progress::info("Nothing to do.");
-            }
-        }
         return Ok(());
     }
 
@@ -548,7 +524,6 @@ async fn run_post_swap_steps(client: &Client, plan: &DeploymentPlan) -> Result<(
         .map_err(|source| CliError::DeploymentStateWriteFailed { source })?;
 
     if !plan.staging_schemas.is_empty() || !plan.staging_clusters.is_empty() {
-        progress::info("Dropping old production objects...");
         drop_old_resources(client, plan).await;
     }
     Ok(())
@@ -861,26 +836,16 @@ async fn execute_pending_sinks(client: &Client, plan: &DeploymentPlan) -> Result
 
     // Log skipped sinks
     if !existing_sinks.is_empty() {
-        progress::info("Sinks that already exist (skipping):");
         let mut existing_list: Vec<_> = existing_sinks.iter().collect();
         existing_list.sort_by_key(|obj| obj.to_string());
         for sink_id in existing_list {
-            progress::info(&format!("  - {}", sink_id));
+            verbose!("  - {}", sink_id);
         }
     }
 
-    // If all sinks exist, exit early
     if sinks_to_create.is_empty() {
-        if !existing_sinks.is_empty() {
-            progress::info(&format!(
-                "All {} sink(s) already exist. Nothing to create.",
-                sink_ids.len()
-            ));
-        }
         return Ok(());
     }
-
-    progress::info(&format!("Creating {} sink(s)...", sinks_to_create.len()));
 
     for stmt in sinks_to_create {
         verbose!(
@@ -925,11 +890,6 @@ async fn apply_replacement_mvs(client: &Client, plan: &DeploymentPlan) -> Result
         verbose!("No replacement MVs to apply");
         return Ok(());
     }
-
-    progress::info(&format!(
-        "Applying {} replacement materialized view(s)...",
-        plan.replacement_mvs.len()
-    ));
 
     for record in &plan.replacement_mvs {
         let alter_sql = format!(
@@ -1011,11 +971,6 @@ async fn repoint_dependent_sinks(client: &Client, plan: &DeploymentPlan) -> Resu
         verbose!("No sinks depend on objects in schemas being dropped");
         return Ok(());
     }
-
-    progress::info(&format!(
-        "Repointing {} sink(s) to new upstream objects...",
-        dependent_sinks.len()
-    ));
 
     // Batch check which replacement objects exist
     let replacement_ids: BTreeSet<ObjectId> = dependent_sinks

@@ -31,6 +31,7 @@ works without access to secret values.
 
     CREATE SECRET my_secret AS env_var('MY_SECRET_VAR');
     CREATE SECRET my_secret AS aws_secret('my-secret-name');
+    CREATE SECRET db_pw     AS aws_secret('rds-creds', 'password');
 
 Supported providers:
 
@@ -40,6 +41,10 @@ Supported providers:
 
       [profiles.default.security]
       aws_profile = "my-aws-profile"
+
+- `aws_secret('NAME', 'FIELD')` — Reads from AWS Secrets Manager, parses
+  the secret as JSON, and returns the top-level string `FIELD` (e.g. for
+  RDS-style credentials).
 
 Other expressions are passed through to Materialize unchanged.
 

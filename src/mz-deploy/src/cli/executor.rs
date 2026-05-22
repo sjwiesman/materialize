@@ -150,26 +150,10 @@ impl fmt::Display for ApplyResult {
         let label = &self.phase;
         let mut lines = Vec::new();
 
-        if created > 0 {
-            lines.push(format!(
-                "  {} Creating {} new {}...",
-                "ℹ".if_supports_color(Stream::Stderr, |t| t.blue()),
-                created,
-                label
-            ));
-        }
-        if altered > 0 {
-            lines.push(format!(
-                "  {} Altering {} {}...",
-                "ℹ".if_supports_color(Stream::Stderr, |t| t.blue()),
-                altered,
-                label
-            ));
-        }
         if up_to_date > 0 && created == 0 && altered == 0 {
             lines.push(format!(
                 "  {} {} {} up to date",
-                "ℹ".if_supports_color(Stream::Stderr, |t| t.blue()),
+                "✓".if_supports_color(Stream::Stderr, |t| t.green()),
                 up_to_date,
                 label
             ));

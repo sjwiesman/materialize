@@ -203,8 +203,6 @@ pub async fn run(
         .or_else(|| git::get_git_commit(directory).map(|sha| sha.chars().take(7).collect()))
         .unwrap_or_else(executor::generate_random_env_name);
 
-    progress::info(&format!("Deploying to staging environment: {}", stage_name));
-
     let planned_project = super::compile::run(settings, true).await?;
     let staging_suffix = format!("_{}", stage_name);
 
@@ -384,7 +382,7 @@ async fn analyze_project_changes<'a>(
 
     let objects = select_stage_objects(planned_project, change_set.as_ref())?;
     if objects.is_empty() && change_set.as_ref().is_some_and(ChangeSet::is_empty) {
-        progress::info("No changes detected compared to production, skipping deployment");
+        progress::success("No changes detected compared to production, skipping deployment");
         return Ok(None);
     }
 
@@ -757,7 +755,7 @@ async fn create_resources_with_rollback<'a>(
             let (schemas, clusters) = rollback_staging_resources(client, stage_name).await;
 
             if schemas > 0 || clusters > 0 {
-                progress::info(&format!(
+                progress::success(&format!(
                     "Rolled back: {} schema(s), {} cluster(s)",
                     schemas, clusters
                 ));
@@ -780,7 +778,6 @@ async fn create_databases_and_schemas(
 ) -> Result<(), CliError> {
     // Create project databases that aren't in schema_set
     // (schema_set databases will be created by prepare_databases_and_schemas)
-    progress::info("Creating project databases if not exists");
     let schema_set_dbs: BTreeSet<&str> = schema_set.iter().map(|sq| sq.database.as_str()).collect();
     for db in &planned_project.databases {
         if !schema_set_dbs.contains(db.name.as_str()) {
@@ -806,7 +803,6 @@ async fn create_databases_and_schemas(
 
     // Create production schemas for swap
     if !executor.is_dry_run() {
-        progress::info("Creating production schemas if not exists");
         for sq in schema_set {
             executor.ensure_schema(&sq.database, &sq.schema).await?;
             verbose!("  Ensured schema {}.{} exists", sq.database, sq.schema);

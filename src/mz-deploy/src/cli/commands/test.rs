@@ -342,7 +342,7 @@ pub async fn run(
     let test_results = match results {
         Some(results) => results,
         None => {
-            progress::info("No tests found");
+            progress::success("No tests found");
             return Ok(());
         }
     };

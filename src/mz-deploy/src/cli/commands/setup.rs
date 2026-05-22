@@ -11,11 +11,12 @@
 //!
 //! Provides three concerns:
 //! - **`setup()`** — Idempotent, self-healing creation of the `_mz_deploy`
-//!   database, tables, views, indexes, and roles. The **only** function that
-//!   writes to `_mz_deploy`. Invoked exclusively by the explicit `setup` CLI
-//!   command. When RBAC is enabled, must run as a superuser: phase 4 issues
-//!   `GRANT ... ON SYSTEM` statements (CREATEDB, CREATECLUSTER) that only a
-//!   superuser can execute under RBAC. Safe to re-run.
+//!   database, tables, views, indexes, and (when RBAC is enabled) roles. The
+//!   **only** function that writes to `_mz_deploy`. Invoked exclusively by the
+//!   explicit `setup` CLI command. When RBAC is enabled, must run as a
+//!   superuser: phase 4 issues `GRANT ... ON SYSTEM` statements (CREATEDB,
+//!   CREATECLUSTER) that only a superuser can execute under RBAC. When RBAC
+//!   is disabled, the role/grant phase is skipped entirely. Safe to re-run.
 //! - **`verify()`** — Read-only existence check. Every non-`setup` command
 //!   calls this and surfaces `CliError::SetupRequired` if the infrastructure
 //!   is missing or partially installed. Never writes.
@@ -74,23 +75,25 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
 ///
 /// The only function in this crate that mutates `_mz_deploy`. Every statement
 /// is idempotent so re-running `setup` against an existing installation
-/// heals drift (missing tables, missing roles, missing grants) without
-/// losing data.
+/// heals drift (missing tables, missing grants) without losing data.
 ///
-/// Four phases:
+/// Phases:
 /// 1. Create the `_mz_deploy_server` cluster if missing.
 /// 2. Create the `_mz_deploy` database (`IF NOT EXISTS`).
 /// 3. Run every statement in [`super::setup_schema::SETUP_STATEMENTS`] —
 ///    each uses `IF NOT EXISTS` so existing objects are left alone. Seed the
 ///    version row with a pre-check (no `INSERT IF NOT EXISTS` form).
-/// 4. Create the three `materialize_*` roles if missing and re-apply grants.
+/// 4. **RBAC-enabled clusters only**: create the three `materialize_*` roles
+///    if missing and re-apply grants.
 ///
-/// Must be run by a **superuser** when RBAC is enabled. Phase 4 issues
-/// `GRANT ... ON SYSTEM` statements (CREATEDB, CREATECLUSTER) which only
-/// superusers can execute under RBAC, so the function refuses early via
-/// [`require_superuser`] when invoked by an ordinary role. With RBAC
-/// disabled, [`require_superuser`] is a no-op since system grants are
-/// permitted unconditionally. The superuser also needs:
+/// When RBAC is disabled, the role/grant phase is skipped entirely — no
+/// roles are created, no grants are issued, no ownership check is performed.
+/// Without RBAC, `GRANT` statements would have no effect anyway and downstream
+/// commands fall through to the superuser path in [`validate_connection`].
+///
+/// When RBAC is enabled, [`require_superuser`] gates phase 4 because the
+/// `GRANT ... ON SYSTEM` statements (CREATEDB, CREATECLUSTER) and `CREATE ROLE`
+/// require it. The superuser also needs:
 /// - Ownership of `_mz_deploy_server` (granted at creation in phase 1) to
 ///   `GRANT USAGE` on it.
 /// - `CREATEDB` to create the database.
@@ -100,7 +103,10 @@ const ALL_ROLES: &[(MzDeployRole, &str)] = &[
 /// [`verify`] and surface [`CliError::SetupRequired`] if it fails. See the
 /// module docs for the full model.
 pub async fn setup(client: &Client, cluster_size: &str) -> Result<(), CliError> {
-    require_superuser(client).await?;
+    let rbac_enabled = is_rbac_enabled(client).await?;
+    if rbac_enabled {
+        require_superuser(client).await?;
+    }
 
     // Phase 1: server cluster. `CREATE CLUSTER` has no `IF NOT EXISTS` form,
     // so pre-check. The first create is what makes the calling role the owner,
@@ -124,27 +130,6 @@ pub async fn setup(client: &Client, cluster_size: &str) -> Result<(), CliError> 
         .execute("CREATE DATABASE IF NOT EXISTS _mz_deploy", &[])
         .await?;
 
-    // Only the database owner can re-run `setup` — the GRANTs in phase 4
-    // require ownership. Refuse early with a message naming the owner so
-    // a second admin knows exactly whose hands to transfer ownership from.
-    let owner_row = client
-        .query_one(
-            "SELECT r.name AS owner, current_user() AS current_role \
-             FROM mz_databases d \
-             JOIN mz_roles r ON d.owner_id = r.id \
-             WHERE d.name = '_mz_deploy'",
-            &[],
-        )
-        .await?;
-    let owner: String = owner_row.get("owner");
-    let current_role: String = owner_row.get("current_role");
-    if owner != current_role {
-        return Err(CliError::SetupNotDatabaseOwner {
-            owner,
-            current_role,
-        });
-    }
-
     // Phase 3: schema DDL. Each statement uses `IF NOT EXISTS`. Executed one
     // at a time — `batch_execute` wraps multi-statement input in an implicit
     // transaction, which Materialize rejects for DDL.
@@ -165,6 +150,34 @@ pub async fn setup(client: &Client, cluster_size: &str) -> Result<(), CliError> 
         client
             .execute("INSERT INTO _mz_deploy.tables.version VALUES (1)", &[])
             .await?;
+    }
+
+    if !rbac_enabled {
+        // RBAC disabled: skip role creation, ownership check, and grants.
+        // Every role can already do everything; the GRANTs would be no-ops
+        // and would reference roles we deliberately did not create.
+        return Ok(());
+    }
+
+    // Only the database owner can re-run `setup` — the GRANTs below require
+    // ownership. Refuse early with a message naming the owner so a second
+    // admin knows exactly whose hands to transfer ownership from.
+    let owner_row = client
+        .query_one(
+            "SELECT r.name AS owner, current_user() AS current_role \
+             FROM mz_databases d \
+             JOIN mz_roles r ON d.owner_id = r.id \
+             WHERE d.name = '_mz_deploy'",
+            &[],
+        )
+        .await?;
+    let owner: String = owner_row.get("owner");
+    let current_role: String = owner_row.get("current_role");
+    if owner != current_role {
+        return Err(CliError::SetupNotDatabaseOwner {
+            owner,
+            current_role,
+        });
     }
 
     // Phase 4: roles + grants. GRANTs are safe to re-run.
@@ -313,9 +326,14 @@ async fn discover_missing(client: &Client) -> Result<Vec<MissingObject>, Connect
         }
     }
 
-    for (_role, role_name) in ALL_ROLES {
-        if !client.introspection().role_exists(role_name).await? {
-            missing.push(MissingObject::Role(role_name.to_string()));
+    // `setup` only creates the materialize_* roles when RBAC is enabled, so
+    // only check for them in that mode. Without RBAC, their absence is the
+    // expected state.
+    if is_rbac_enabled(client).await? {
+        for (_role, role_name) in ALL_ROLES {
+            if !client.introspection().role_exists(role_name).await? {
+                missing.push(MissingObject::Role(role_name.to_string()));
+            }
         }
     }
 
@@ -324,8 +342,16 @@ async fn discover_missing(client: &Client) -> Result<Vec<MissingObject>, Connect
 
 /// Validate that the current role has a valid mz-deploy role membership or is a superuser.
 /// Returns the detected role on success.
+///
+/// When RBAC is disabled the role machinery is meaningless — `setup` never
+/// created the `materialize_*` roles, and every role can already do
+/// everything — so this short-circuits to [`MzDeployRole::Superuser`].
 pub async fn validate_connection(client: &Client) -> Result<MzDeployRole, CliError> {
-    if let Ok(()) = require_superuser(client).await {
+    if !is_rbac_enabled(client).await? {
+        return Ok(MzDeployRole::Superuser);
+    }
+
+    if is_superuser(client).await? {
         return Ok(MzDeployRole::Superuser);
     }
 
@@ -380,33 +406,52 @@ pub fn require_developer(role: MzDeployRole) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Verify the connecting role is a superuser.
+/// Whether RBAC is enforced on the connected cluster.
 ///
-/// `setup` issues `GRANT ... ON SYSTEM` statements (CREATEDB, CREATECLUSTER)
-/// which only a superuser can execute when RBAC is enforced. Materialize
-/// cloud admin users satisfy this through the cloud RBAC layer; on a
-/// self-hosted cluster only `mz_system` qualifies.
-///
-/// When RBAC is disabled (neither the global `enable_rbac_checks` nor the
-/// session-level `enable_session_rbac_checks` is on), Materialize allows
-/// any role to issue system grants, so the check is skipped. See
+/// Both the global `enable_rbac_checks` and the session-level
+/// `enable_session_rbac_checks` must be on for grants and role membership
+/// checks to have any effect. When either is off Materialize allows any role
+/// to do anything, so callers that gate behavior on RBAC use this to decide
+/// whether the role/grant machinery is meaningful. See
 /// <https://materialize.com/docs/security/self-managed/access-control/#enabling-rbac>.
-async fn require_superuser(client: &Client) -> Result<(), CliError> {
+pub async fn is_rbac_enabled(client: &Client) -> Result<bool, ConnectionError> {
     let row = client
         .query_one(
-            "SELECT \
-                current_setting('enable_rbac_checks')::bool \
-                  OR current_setting('enable_session_rbac_checks')::bool \
-                  AS rbac_enabled, \
-                mz_is_superuser() AS is_superuser, \
-                current_user() AS current_role",
+            "SELECT current_setting('enable_rbac_checks')::bool \
+                AND current_setting('enable_session_rbac_checks')::bool \
+                AS rbac_enabled",
             &[],
         )
         .await?;
-    let rbac_enabled: bool = row.get("rbac_enabled");
-    if !rbac_enabled {
-        return Ok(());
-    }
+    Ok(row.get("rbac_enabled"))
+}
+
+/// Whether the connected role is a superuser (`mz_is_superuser()`).
+async fn is_superuser(client: &Client) -> Result<bool, ConnectionError> {
+    let row = client
+        .query_one("SELECT mz_is_superuser() AS is_superuser", &[])
+        .await?;
+    Ok(row.get("is_superuser"))
+}
+
+/// Require the connecting role be a superuser.
+///
+/// `setup` calls this when RBAC is enabled — phase 4 issues `CREATE ROLE`
+/// and `GRANT ... ON SYSTEM` (CREATEDB, CREATECLUSTER), both of which require
+/// superuser under RBAC. Materialize cloud admin users satisfy this through
+/// the cloud RBAC layer; on a self-hosted cluster only `mz_system` qualifies.
+///
+/// Strict — does not consult RBAC state. Callers that should skip the
+/// superuser check when RBAC is off must gate this call themselves with
+/// [`is_rbac_enabled`].
+async fn require_superuser(client: &Client) -> Result<(), CliError> {
+    let row = client
+        .query_one(
+            "SELECT mz_is_superuser() AS is_superuser, \
+                    current_user() AS current_role",
+            &[],
+        )
+        .await?;
     let is_superuser: bool = row.get("is_superuser");
     if !is_superuser {
         let current_role: String = row.get("current_role");
