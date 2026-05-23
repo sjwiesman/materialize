@@ -81,6 +81,7 @@ See 'mz-deploy help <command>' for detailed usage guides.";
 #[command(disable_help_subcommand = true)]
 #[command(override_usage = "mz-deploy [OPTIONS] <COMMAND>")]
 #[command(after_help = GROUPED_HELP)]
+#[command(subcommand_required = true, arg_required_else_help = true)]
 #[command(help_template = "\
 {about}
 
@@ -89,6 +90,15 @@ See 'mz-deploy help <command>' for detailed usage guides.";
 {all-args}
 {after-help}")]
 struct Args {
+    #[command(flatten)]
+    global: GlobalArgs,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(clap::Args, Debug)]
+struct GlobalArgs {
     /// Path to the project root directory containing database schemas
     #[arg(short, long, default_value = ".", global = true, value_hint = clap::ValueHint::DirPath)]
     directory: PathBuf,
@@ -122,9 +132,6 @@ struct Args {
     /// Output format (text or json)
     #[arg(long, global = true, default_value = "text")]
     output: OutputFormat,
-
-    #[command(subcommand)]
-    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -807,9 +814,9 @@ enum DeleteCommand {
 async fn main() {
     let args = Args::parse();
 
-    log::set_verbose(args.verbose);
-    log::set_quiet(args.quiet);
-    log::set_json_output(matches!(args.output, OutputFormat::Json));
+    log::set_verbose(args.global.verbose);
+    log::set_quiet(args.global.quiet);
+    log::set_json_output(matches!(args.global.output, OutputFormat::Json));
 
     if let Err(e) = run(args).await {
         if log::json_output_enabled() {
@@ -825,92 +832,76 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<(), CliError> {
-    // Handle completions before anything else
-    if let Some(Command::Completions { shell }) = &args.command {
-        clap_complete::generate(
-            *shell,
-            &mut Args::command(),
-            "mz-deploy",
-            &mut std::io::stdout(),
-        );
-        return Ok(());
-    }
-
-    // Handle commands that don't require an existing project
-    if let Some(Command::Help { command, all }) = &args.command {
-        if *all {
-            eprint!("{}", cli::extended_help::all_help());
-        } else if let Some(cmd) = command {
-            match cli::extended_help::help_for(cmd) {
-                Some(text) => eprint!("{text}"),
-                None => {
-                    cli::extended_help::print_unknown_command(cmd);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            Args::command().print_help().unwrap();
-        }
-        return Ok(());
-    }
-
-    if args.command.is_none() {
-        Args::command().print_help().unwrap();
-        return Ok(());
-    }
-
-    if let Some(Command::New { name, no_git }) = &args.command {
-        return cli::commands::new_project::run(name, ScaffoldOpts { init_git: !no_git });
-    }
-
-    if let Some(Command::Init { no_git }) = &args.command {
-        return cli::commands::new_project::init(ScaffoldOpts { init_git: !no_git });
-    }
-
-    if let Some(Command::Profile { subcommand }) = &args.command {
-        return match subcommand {
-            ProfileCommand::List => cli::commands::profile::list(
-                &args.directory,
-                args.profile.as_deref(),
-                args.profiles_dir.as_deref(),
-            ),
-            ProfileCommand::Set { name } => {
-                cli::commands::profile::set(&args.directory, args.profiles_dir.as_deref(), name)
-            }
-            ProfileCommand::Current => {
-                cli::commands::profile::current(&args.directory, args.profile.as_deref())
-            }
-        };
-    }
-
-    if let Some(Command::Lsp) = &args.command {
-        return mz_deploy::lsp::run(args.directory).await;
-    }
-
-    if let Some(Command::Mcp) = &args.command {
-        return cli::commands::mcp::run(
-            &args.directory,
-            args.profile.as_deref(),
-            args.profiles_dir.as_deref(),
+    let Args { global, command } = args;
+    let load_settings = |needs_connection| {
+        Settings::load(
+            global.directory.clone(),
+            global.profile.as_deref(),
+            global.docker_image.as_deref(),
+            needs_connection,
+            global.profiles_dir.as_deref(),
         )
-        .await;
-    }
+        .map_err(CliError::Config)
+    };
 
-    let needs_connection = !matches!(
-        &args.command,
-        Some(Command::Compile { .. }) | Some(Command::Test { .. }) | Some(Command::Explain { .. })
-    );
-    let settings = Settings::load(
-        args.directory,
-        args.profile.as_deref(),
-        args.docker_image.as_deref(),
-        needs_connection,
-        args.profiles_dir.as_deref(),
-    )
-    .map_err(CliError::Config)?;
-
-    match args.command {
-        Some(Command::Compile {}) => {
+    match command {
+        Command::Completions { shell } => {
+            clap_complete::generate(
+                shell,
+                &mut Args::command(),
+                "mz-deploy",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        }
+        Command::Help { command, all } => {
+            if all {
+                eprint!("{}", cli::extended_help::all_help());
+            } else if let Some(cmd) = command {
+                match cli::extended_help::help_for(&cmd) {
+                    Some(text) => eprint!("{text}"),
+                    None => {
+                        cli::extended_help::print_unknown_command(&cmd);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                Args::command().print_help().unwrap();
+            }
+            Ok(())
+        }
+        Command::New { name, no_git } => {
+            cli::commands::new_project::run(&name, ScaffoldOpts { init_git: !no_git })
+        }
+        Command::Init { no_git } => {
+            cli::commands::new_project::init(ScaffoldOpts { init_git: !no_git })
+        }
+        Command::Profile { subcommand } => match subcommand {
+            ProfileCommand::List => cli::commands::profile::list(
+                &global.directory,
+                global.profile.as_deref(),
+                global.profiles_dir.as_deref(),
+            ),
+            ProfileCommand::Set { name } => cli::commands::profile::set(
+                &global.directory,
+                global.profiles_dir.as_deref(),
+                &name,
+            ),
+            ProfileCommand::Current => {
+                cli::commands::profile::current(&global.directory, global.profile.as_deref())
+            }
+        },
+        Command::Lsp => mz_deploy::lsp::run(global.directory).await,
+        Command::Mcp => {
+            cli::commands::mcp::run(
+                &global.directory,
+                global.profile.as_deref(),
+                global.profiles_dir.as_deref(),
+            )
+            .await
+        }
+        Command::Compile {} => {
+            let settings = load_settings(false)?;
             if log::json_output_enabled() {
                 return Err(CliError::Message(
                     "--output json is not supported for the 'compile' command".to_string(),
@@ -920,14 +911,16 @@ async fn run(args: Args) -> Result<(), CliError> {
                 .await
                 .map(|_| ())
         }
-        Some(Command::Explain { target, overlay }) => {
+        Command::Explain { target, overlay } => {
+            let settings = load_settings(false)?;
             cli::commands::explain::run(&settings, &target, overlay.as_deref()).await
         }
-        Some(Command::Apply {
+        Command::Apply {
             skip_secrets,
             dry_run,
             subcommand,
-        }) => {
+        } => {
+            let settings = load_settings(true)?;
             let plan = match subcommand {
                 Some(ApplyCommand::Clusters) => {
                     cli::commands::clusters::run(&settings, dry_run).await?
@@ -953,24 +946,26 @@ async fn run(args: Args) -> Result<(), CliError> {
             log::output(&plan);
             Ok(())
         }
-        Some(Command::Promote {
+        Command::Promote {
             deploy_id,
             force,
             no_ready_check,
             allowed_lag,
             dry_run,
-        }) => {
+        } => {
+            let settings = load_settings(true)?;
             if !no_ready_check && !dry_run {
                 cli::commands::wait::run(&settings, &deploy_id, true, None, allowed_lag).await?;
             }
             cli::commands::promote::run(&settings, &deploy_id, force, dry_run).await
         }
-        Some(Command::Stage {
+        Command::Stage {
             deploy_id,
             allow_dirty,
             no_rollback,
             dry_run,
-        }) => {
+        } => {
+            let settings = load_settings(true)?;
             cli::commands::stage::run(
                 &settings,
                 deploy_id.as_deref(),
@@ -980,21 +975,32 @@ async fn run(args: Args) -> Result<(), CliError> {
             )
             .await
         }
-        Some(Command::Dev {
+        Command::Dev {
             cluster,
             down,
             dry_run,
-        }) => cli::commands::dev::run(&settings, cluster, down, dry_run).await,
-        Some(Command::Setup { cluster_size }) => {
+        } => {
+            let settings = load_settings(true)?;
+            cli::commands::dev::run(&settings, cluster, down, dry_run).await
+        }
+        Command::Setup { cluster_size } => {
+            let settings = load_settings(true)?;
             cli::commands::setup::run(&settings, &cluster_size).await
         }
-        Some(Command::Debug) => cli::commands::debug::run(&settings).await,
-        Some(Command::Sql { psql_args }) => cli::commands::sql::run(&settings, psql_args),
-        Some(Command::Mcp { .. }) => unreachable!("handled above"),
-        Some(Command::Describe { deploy_id }) => {
+        Command::Debug => {
+            let settings = load_settings(true)?;
+            cli::commands::debug::run(&settings).await
+        }
+        Command::Sql { psql_args } => {
+            let settings = load_settings(true)?;
+            cli::commands::sql::run(&settings, psql_args)
+        }
+        Command::Describe { deploy_id } => {
+            let settings = load_settings(true)?;
             cli::commands::describe::run(&settings, &deploy_id).await
         }
-        Some(Command::Lock) => {
+        Command::Lock => {
+            let settings = load_settings(true)?;
             if log::json_output_enabled() {
                 return Err(CliError::Message(
                     "--output json is not supported for the 'lock' command".to_string(),
@@ -1002,11 +1008,12 @@ async fn run(args: Args) -> Result<(), CliError> {
             }
             cli::commands::lock::run(&settings).await
         }
-        Some(Command::Test {
+        Command::Test {
             filter,
             junit_xml,
             overlay,
-        }) => {
+        } => {
+            let settings = load_settings(false)?;
             if log::json_output_enabled() {
                 return Err(CliError::Message(
                     "--output json is not supported for the 'test' command".to_string(),
@@ -1020,20 +1027,29 @@ async fn run(args: Args) -> Result<(), CliError> {
             )
             .await
         }
-        Some(Command::Abort { deploy_id }) => {
+        Command::Abort { deploy_id } => {
+            let settings = load_settings(true)?;
             cli::commands::abort::run(&settings, &deploy_id).await
         }
-        Some(Command::List { allowed_lag }) => {
+        Command::List { allowed_lag } => {
+            let settings = load_settings(true)?;
             cli::commands::list::run(&settings, allowed_lag).await
         }
-        Some(Command::Log { limit }) => cli::commands::log::run(&settings, limit).await,
-        Some(Command::Wait {
+        Command::Log { limit } => {
+            let settings = load_settings(true)?;
+            cli::commands::log::run(&settings, limit).await
+        }
+        Command::Wait {
             name,
             once,
             timeout,
             allowed_lag,
-        }) => cli::commands::wait::run(&settings, &name, once, timeout, allowed_lag).await,
-        Some(Command::Delete { yes, subcommand }) => {
+        } => {
+            let settings = load_settings(true)?;
+            cli::commands::wait::run(&settings, &name, once, timeout, allowed_lag).await
+        }
+        Command::Delete { yes, subcommand } => {
+            let settings = load_settings(true)?;
             let (kind, name) = match subcommand {
                 DeleteCommand::Cluster { name } => (delete::ObjectKind::Cluster, name),
                 DeleteCommand::Connection { name } => (delete::ObjectKind::Connection, name),
@@ -1045,13 +1061,6 @@ async fn run(args: Args) -> Result<(), CliError> {
             };
             delete::run(&settings, kind, &name, yes).await
         }
-        Some(Command::Lsp) => unreachable!("handled above"),
-        Some(Command::Completions { .. }) => unreachable!("handled above"),
-        Some(Command::Help { .. }) => unreachable!("handled above"),
-        Some(Command::New { .. }) => unreachable!("handled above"),
-        Some(Command::Init { .. }) => unreachable!("handled above"),
-        Some(Command::Profile { .. }) => unreachable!("handled above"),
-        None => unreachable!("handled above"),
     }
 }
 
