@@ -146,7 +146,7 @@ impl DockerRuntime {
     }
 
     async fn container_is_healthy(&self) -> bool {
-        Client::connect_with_profile(Self::make_profile())
+        Client::connect_with_profile_no_pin(Self::make_profile())
             .await
             .is_ok()
     }
