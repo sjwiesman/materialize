@@ -83,6 +83,7 @@ use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::object_id::ObjectId;
 use crate::types::{ColumnType, ObjectKind, Types};
 use mz_sql_lexer::keywords::KEYWORDS;
+use ropey::Rope;
 use std::collections::BTreeMap;
 use std::path::Path;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, Url};
@@ -159,18 +160,12 @@ fn resolve_context<'a>(
 /// Scans backward from `position` through identifier characters (alphanumeric,
 /// underscore) and dots to determine what the user has typed so far.
 pub(super) fn prefix_context(text: &str, position: Position) -> PrefixContext<'_> {
-    let pos_line = usize::try_from(position.line).unwrap_or(0);
-    let pos_char = usize::try_from(position.character).unwrap_or(0);
-    let mut byte_offset = 0;
-    for (i, line) in text.split('\n').enumerate() {
-        if i == pos_line {
-            byte_offset += pos_char;
-            break;
-        }
-        byte_offset += line.len() + 1;
-    }
+    let rope = Rope::from_str(text);
+    let byte_offset = crate::lsp::diagnostics::position_to_offset(position, &rope)
+        .unwrap_or(text.len())
+        .min(text.len());
 
-    let prefix_bytes = &text.as_bytes()[..byte_offset.min(text.len())];
+    let prefix_bytes = &text.as_bytes()[..byte_offset];
     let mut start = prefix_bytes.len();
     while start > 0 {
         let ch = char::from(prefix_bytes[start - 1]);
@@ -181,7 +176,7 @@ pub(super) fn prefix_context(text: &str, position: Position) -> PrefixContext<'_
         }
     }
 
-    let prefix = &text[start..byte_offset.min(text.len())];
+    let prefix = &text[start..byte_offset];
     let dots = prefix.chars().filter(|&c| c == '.').count();
 
     PrefixContext { dots, text: prefix }
@@ -1723,6 +1718,14 @@ mod tests {
             "expected empty for non-query statement self-reference, got: {:?}",
             items.iter().map(|i| &i.label).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn prefix_context_uses_utf16_cursor_positions() {
+        let text = "SELECT 😀foo";
+        let ctx = prefix_context(text, Position::new(0, 12));
+        assert_eq!(ctx.dots, 0);
+        assert_eq!(ctx.text, "foo");
     }
 
     #[test]

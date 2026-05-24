@@ -276,10 +276,7 @@ impl Backend {
         let (byte_offset, text) = {
             let docs = self.documents.lock().await;
             let rope = docs.get(uri)?;
-            let line_start = rope
-                .try_line_to_char(usize::try_from(position.line).unwrap_or(0))
-                .ok()?;
-            let offset = line_start + usize::try_from(position.character).unwrap_or(0);
+            let offset = diagnostics::position_to_offset(position, rope)?;
             (offset, rope.to_string())
         };
 
@@ -578,6 +575,8 @@ impl LanguageServer for Backend {
         self.documents.lock().await.remove(&uri);
         self.parse_diagnostics.lock().await.remove(&uri);
         self.publish_merged(uri).await;
+        self.edit_version.fetch_add(1, Ordering::SeqCst);
+        self.maybe_rebuild().await;
     }
 
     async fn did_save(&self, _params: DidSaveTextDocumentParams) {
@@ -806,6 +805,22 @@ impl LanguageServer for Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    fn capture_client_with_root(root: PathBuf) -> (Client, tower_lsp::LspService<Backend>) {
+        let captured_client: Arc<StdMutex<Option<Client>>> = Arc::new(StdMutex::new(None));
+        let captured_client_clone = Arc::clone(&captured_client);
+        let (service, _socket) = tower_lsp::LspService::new(move |client| {
+            *captured_client_clone.lock().unwrap() = Some(client.clone());
+            Backend::new_with_root(client, root.clone())
+        });
+        let client = captured_client.lock().unwrap().take().unwrap();
+        (client, service)
+    }
+
+    fn write_project_toml(root: &Path) {
+        std::fs::write(root.join("project.toml"), "[project]\nname = \"test\"\n").unwrap();
+    }
 
     #[test]
     fn try_open_project_cache_returns_none_for_missing_db() {
@@ -831,24 +846,7 @@ mod tests {
     /// tasks can actually make progress concurrently.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_publish_diagnostics_do_not_deadlock() {
-        use std::sync::Mutex as StdMutex;
-
-        // `LspService::new` hands the init closure a `Client`, but only
-        // `inner()` (which returns `&Backend`) is publicly accessible on the
-        // service. Capture a clone of the client out of the closure so we can
-        // build an independent `Arc<Backend>` that outlives the service
-        // reference.
-        let captured_client: Arc<StdMutex<Option<Client>>> = Arc::new(StdMutex::new(None));
-        let captured_client_clone = Arc::clone(&captured_client);
-        let (_service, _socket) = tower_lsp::LspService::new(move |client| {
-            *captured_client_clone.lock().unwrap() = Some(client.clone());
-            Backend::new_with_root(client, std::env::temp_dir())
-        });
-        let client = captured_client
-            .lock()
-            .unwrap()
-            .take()
-            .expect("init closure ran and captured a Client");
+        let (client, _service) = capture_client_with_root(std::env::temp_dir());
 
         let backend = Arc::new(Backend::new_with_root(client, std::env::temp_dir()));
 
@@ -878,20 +876,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn code_action_returns_quickfix_for_unknown_column_diagnostic() {
         use crate::lsp::code_action::QuickFixData;
-        use std::sync::Mutex as StdMutex;
         use tower_lsp::lsp_types::{
             CodeActionContext, CodeActionKind, CodeActionOrCommand, CodeActionParams, Diagnostic,
             DiagnosticSeverity, PartialResultParams, Position, Range, TextDocumentIdentifier,
             WorkDoneProgressParams,
         };
 
-        let captured_client: Arc<StdMutex<Option<Client>>> = Arc::new(StdMutex::new(None));
-        let captured_client_clone = Arc::clone(&captured_client);
-        let (_service, _socket) = tower_lsp::LspService::new(move |client| {
-            *captured_client_clone.lock().unwrap() = Some(client.clone());
-            Backend::new_with_root(client, std::env::temp_dir())
-        });
-        let client = captured_client.lock().unwrap().take().unwrap();
+        let (client, _service) = capture_client_with_root(std::env::temp_dir());
         let backend = Backend::new_with_root(client, std::env::temp_dir());
 
         let uri = Url::from_file_path(std::env::temp_dir().join("qf.sql")).unwrap();
@@ -943,5 +934,44 @@ mod tests {
             .get(&uri)
             .unwrap();
         assert_eq!(edits[0].new_text, "customer_name");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn did_close_rebuilds_immediately_against_disk_state() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path().join("models/mydb/public");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("foo.sql"), "CREATE VIEW foo AS SELECT 1 AS id;").unwrap();
+        write_project_toml(root.path());
+
+        let (client, _service) = capture_client_with_root(root.path().to_path_buf());
+        let backend = Backend::new_with_root(client, root.path().to_path_buf());
+        let uri = Url::from_file_path(models.join("foo.sql")).unwrap();
+
+        backend
+            .publish_diagnostics(uri.clone(), "CREATE VIEW foo AS SELECT * FROM missing;")
+            .await;
+        backend.edit_version.fetch_add(1, Ordering::SeqCst);
+        backend.maybe_rebuild().await;
+
+        assert!(
+            backend.project_diagnostics.lock().await.contains_key(&uri),
+            "unsaved overlay should have produced project diagnostics"
+        );
+
+        backend
+            .did_close(DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            })
+            .await;
+
+        assert!(!backend.documents.lock().await.contains_key(&uri));
+        assert!(!backend.parse_diagnostics.lock().await.contains_key(&uri));
+        assert!(!backend.project_diagnostics.lock().await.contains_key(&uri));
+        assert_eq!(
+            backend.edit_version.load(Ordering::SeqCst),
+            backend.rebuilt_through.load(Ordering::SeqCst),
+            "close should rebuild immediately instead of leaving stale overlay state behind"
+        );
     }
 }

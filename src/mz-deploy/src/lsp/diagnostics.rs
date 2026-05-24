@@ -328,14 +328,45 @@ fn to_lsp(pd: &PositionalDiagnostic, rope: &Rope) -> Diagnostic {
 
 /// Convert a byte offset to an LSP [`Position`] (line, column) using a [`Rope`].
 pub(crate) fn offset_to_position(offset: usize, rope: &Rope) -> Option<Position> {
-    let line = rope.try_char_to_line(offset).ok()?;
+    let char_offset = rope.try_byte_to_char(offset).ok()?;
+    let line = rope.try_char_to_line(char_offset).ok()?;
     let first_char_of_line = rope.try_line_to_char(line).ok()?;
-    let column = offset - first_char_of_line;
+    let line_start_byte = rope.try_char_to_byte(first_char_of_line).ok()?;
+    let column = utf16_len(rope.byte_slice(line_start_byte..offset).as_str()?);
 
     let line_u32 = line.try_into().ok()?;
     let column_u32 = column.try_into().ok()?;
 
     Some(Position::new(line_u32, column_u32))
+}
+
+/// Convert an LSP [`Position`] into a byte offset using a [`Rope`].
+pub(crate) fn position_to_offset(position: Position, rope: &Rope) -> Option<usize> {
+    let line = usize::try_from(position.line).ok()?;
+    let target_col = usize::try_from(position.character).ok()?;
+    let line_start_char = rope.try_line_to_char(line).ok()?;
+    let line_text = rope.line(line);
+
+    let mut utf16_col = 0usize;
+    let mut char_delta = 0usize;
+    for ch in line_text.chars() {
+        if utf16_col >= target_col {
+            break;
+        }
+        let next = utf16_col + ch.len_utf16();
+        if next > target_col {
+            break;
+        }
+        utf16_col = next;
+        char_delta += 1;
+    }
+
+    let char_offset = line_start_char + char_delta;
+    rope.try_char_to_byte(char_offset).ok()
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.chars().map(char::len_utf16).sum()
 }
 
 #[cfg(test)]
@@ -375,6 +406,26 @@ mod tests {
         let text = "";
         let rope = Rope::from_str(text);
         assert!(diagnose(text, &rope, &BTreeMap::new(), None).is_empty());
+    }
+
+    #[test]
+    fn offset_to_position_uses_utf16_columns() {
+        let text = "SELECT 😀FROM";
+        let rope = Rope::from_str(text);
+        // `FROM` starts after 7 ASCII code units plus 2 UTF-16 code units for 😀.
+        assert_eq!(offset_to_position(11, &rope), Some(Position::new(0, 9)));
+    }
+
+    #[test]
+    fn position_to_offset_uses_utf16_columns() {
+        let text = "SELECT 😀foo";
+        let rope = Rope::from_str(text);
+        // `foo` begins after 7 ASCII code units plus 2 UTF-16 code units for 😀.
+        assert_eq!(position_to_offset(Position::new(0, 9), &rope), Some(11));
+        assert_eq!(
+            position_to_offset(Position::new(0, 12), &rope),
+            Some(text.len())
+        );
     }
 
     #[test]
