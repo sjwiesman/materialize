@@ -17,3 +17,4 @@ CREATE TABLE products (product_id INT PRIMARY KEY, name TEXT, price NUMERIC);
 INSERT INTO products VALUES (1, 'Widget', 9.99), (2, 'Gadget', 24.99);
 ALTER TABLE products REPLICA IDENTITY FULL;
 CREATE PUBLICATION mz_source FOR ALL TABLES;
+CREATE ROLE mz_alt_user WITH LOGIN;

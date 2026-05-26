@@ -54,17 +54,26 @@ SERVICES = [
 def create_profiles(c: Composition) -> None:
     """Write profiles.toml into the projects directory, pointing at the
     mzcompose Materialized instance.  Every project under projects/ can
-    then use ``--profiles-dir <PROJECTS_DIR>``."""
+    then use ``--profiles-dir <PROJECTS_DIR>``.
+
+    Every profile sets ``enable_session_rbac_checks = true`` via the
+    libpq-style ``options`` map. Materialize's compiled session default is
+    ``false``, and ``mz-deploy setup``'s ``is_rbac_enabled`` check ANDs the
+    global and session flags — without this override, setup silently skips
+    the role/grant phase in the local mzcompose environment and downstream
+    GRANTs fail with "unknown role 'materialize_deployer'". Production
+    deployments have the session flag flipped at the server level."""
     mz_port = c.default_port("materialized")
     # `setup` issues GRANT ... ON SYSTEM, which only mz_system can perform.
     mz_system_port = c.port("materialized", 6877)
+    rbac_options = '\noptions = { enable_session_rbac_checks = "true" }'
     with open(PROJECTS_DIR / "profiles.toml", "w") as f:
         f.write(
-            f'[admin]\nhost = "127.0.0.1"\nport = {mz_system_port}\nusername = "mz_system"\n\n'
-            f'[default]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"\n\n'
-            f'[staging]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"\n\n'
-            f'[dev]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "dev_user"\n\n'
-            f'[monitor]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "monitor_user"\n'
+            f'[admin]\nhost = "127.0.0.1"\nport = {mz_system_port}\nusername = "mz_system"{rbac_options}\n\n'
+            f'[default]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"{rbac_options}\n\n'
+            f'[staging]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "deploy_user"{rbac_options}\n\n'
+            f'[dev]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "dev_user"{rbac_options}\n\n'
+            f'[monitor]\nhost = "127.0.0.1"\nport = {mz_port}\nusername = "monitor_user"{rbac_options}\n'
         )
 
 
@@ -1194,3 +1203,156 @@ def workflow_system_deps(c: Composition, parser: WorkflowArgumentParser) -> None
         ), f"expected invalid-dependency error, got stderr:\n{result.stderr}"
     finally:
         project_toml.write_text(original_toml)
+
+
+def workflow_connection_updates(
+    c: Composition, parser: WorkflowArgumentParser
+) -> None:
+    """Exercise `apply` re-runs for CONNECTION objects.
+
+    For each scenario the workflow:
+      1. Applies ``connection-updates/baseline`` to put the catalog in a
+         known state (creates ``pg_conn`` on the first run, otherwise
+         resets it back to the baseline shape).
+      2. Dry-runs the variant and asserts the ``connections`` phase plans
+         exactly one ``altered`` action.
+      3. Executes the variant and queries ``SHOW CREATE CONNECTION`` to
+         confirm the option change is persisted in the catalog.
+      4. Re-runs the variant in dry-run mode and asserts the
+         ``connections`` phase plans zero altered actions and at least
+         one ``up_to_date`` — i.e. apply is idempotent after the update.
+
+    Covers the four shapes of connection drift handled by
+    ``apply_connections.rs``:
+
+    * add-option   — desired SQL contains an option the catalog lacks.
+    * drop-port    — catalog has an option the desired SQL lacks.
+    * change-user  — both sides have the option; the value differs.
+    * change-secret— ``SECRET`` reference name differs (structural diff).
+    """
+    setup_base(c)
+
+    def show_create(name: str = "pg_conn") -> str:
+        rows = c.sql_query(
+            f"SHOW CREATE CONNECTION app.public.{name}",
+            database="app",
+        )
+        return rows[0][1]
+
+    def assert_alter_plan(project: str, expected_altered: int) -> None:
+        result = run_mz_deploy(
+            c, project, "apply", "--dry-run", "--output", "json"
+        )
+        dry_run = parse_dry_run_json(result)
+        conn_phase = find_phase(dry_run["phases"], "connections")
+        altered = phase_actions(conn_phase, "altered")
+        assert len(altered) == expected_altered, (
+            f"[{project}] expected {expected_altered} altered connection(s) "
+            f"in dry-run, got {len(altered)}: {altered}"
+        )
+
+    def assert_idempotent_after_update(project: str) -> None:
+        result = run_mz_deploy(
+            c, project, "apply", "--dry-run", "--output", "json"
+        )
+        dry_run = parse_dry_run_json(result)
+        conn_phase = find_phase(dry_run["phases"], "connections")
+        altered = phase_actions(conn_phase, "altered")
+        up_to_date = phase_actions(conn_phase, "up_to_date")
+        assert len(altered) == 0, (
+            f"[{project}] re-apply should be a no-op, "
+            f"got {len(altered)} altered: {altered}"
+        )
+        assert len(up_to_date) >= 1, (
+            f"[{project}] re-apply should report up_to_date, "
+            f"got {len(up_to_date)}"
+        )
+
+    # ── 1. Initial baseline apply ────────────────────────────────────────
+    # First baseline apply also creates the `app` database, secrets, and the
+    # connection — every subsequent baseline apply is a reset to that shape.
+    result = run_mz_deploy(c, "connection-updates/baseline", "apply")
+    assert result.returncode == 0, (
+        f"initial baseline apply failed: {result.stderr}"
+    )
+    assert "PORT = 5432" in show_create()
+
+    with c.test_case("connection-add-option"):
+        # Baseline lacks SSL MODE; add-option adds it. Exercises the SET
+        # branch of the SET/DROP diff for an option absent from the catalog.
+        assert_alter_plan("connection-updates/add-option", expected_altered=1)
+        result = run_mz_deploy(c, "connection-updates/add-option", "apply")
+        assert result.returncode == 0, (
+            f"add-option apply failed: {result.stderr}"
+        )
+        assert "ssl mode" in show_create().lower(), (
+            f"expected SSL MODE in SHOW CREATE after add, got:\n{show_create()}"
+        )
+        assert_idempotent_after_update("connection-updates/add-option")
+
+    with c.test_case("connection-drop-option"):
+        # Reset to baseline (which has PORT and lacks SSL MODE), then drop
+        # PORT. The reset itself drops SSL MODE — sanity check the reset
+        # also reports altered=1.
+        assert_alter_plan(
+            "connection-updates/baseline", expected_altered=1
+        )
+        result = run_mz_deploy(c, "connection-updates/baseline", "apply")
+        assert result.returncode == 0, (
+            f"baseline reset apply failed: {result.stderr}"
+        )
+        assert "ssl mode" not in show_create().lower()
+
+        # Now drop PORT.
+        assert_alter_plan("connection-updates/drop-port", expected_altered=1)
+        result = run_mz_deploy(c, "connection-updates/drop-port", "apply")
+        assert result.returncode == 0, (
+            f"drop-port apply failed: {result.stderr}"
+        )
+        assert "PORT = 5432" not in show_create(), (
+            f"expected PORT removed from SHOW CREATE, got:\n{show_create()}"
+        )
+        assert_idempotent_after_update("connection-updates/drop-port")
+
+    with c.test_case("connection-change-option-value"):
+        # Reset to baseline (re-adds PORT), then change USER value. The
+        # presence/absence of the substring `mz_alt_user` is the unambiguous
+        # signal — the literal `postgres` also appears in HOST and DATABASE,
+        # and the SHOW CREATE output's exact quoting around USER is
+        # version-sensitive.
+        run_mz_deploy(c, "connection-updates/baseline", "apply")
+        assert "mz_alt_user" not in show_create(), (
+            f"expected no mz_alt_user in baseline SHOW CREATE, got:\n{show_create()}"
+        )
+
+        assert_alter_plan("connection-updates/change-user", expected_altered=1)
+        result = run_mz_deploy(c, "connection-updates/change-user", "apply")
+        assert result.returncode == 0, (
+            f"change-user apply failed: {result.stderr}"
+        )
+        assert "mz_alt_user" in show_create(), (
+            f"expected mz_alt_user in SHOW CREATE after change, got:\n{show_create()}"
+        )
+        assert_idempotent_after_update("connection-updates/change-user")
+
+    with c.test_case("connection-change-secret-ref"):
+        # Reset to baseline (which references pgpass), then switch to
+        # pgpass_v2. The two secrets resolve to the same plaintext value;
+        # apply must still issue an ALTER because the diff is structural.
+        run_mz_deploy(c, "connection-updates/baseline", "apply")
+        assert "SECRET app.public.pgpass" in show_create()
+        assert "SECRET app.public.pgpass_v2" not in show_create()
+
+        assert_alter_plan(
+            "connection-updates/change-secret", expected_altered=1
+        )
+        result = run_mz_deploy(c, "connection-updates/change-secret", "apply")
+        assert result.returncode == 0, (
+            f"change-secret apply failed: {result.stderr}"
+        )
+        sql = show_create()
+        assert "SECRET app.public.pgpass_v2" in sql, (
+            f"expected pgpass_v2 in SHOW CREATE after secret change, "
+            f"got:\n{sql}"
+        )
+        assert_idempotent_after_update("connection-updates/change-secret")
