@@ -20,6 +20,7 @@
 # Part III — Concepts That Change How You Think
 
 - [Stable API schemas](./ch10-stable-api.md)
+- [Profiles & environments](./ch11-profiles.md)
 
 # Reference
 
