@@ -21,7 +21,7 @@ New users adopting `mz-deploy`. They have working SQL knowledge and have used Ma
 
 ## Mental model the book teaches
 
-Lifecycle first: **write → compile → stage → promote**. Each phase is a chapter; each chapter names one mechanism and explains why it exists. Concepts that change project design (stable API, profiles, testing) come after the lifecycle is grounded.
+Lifecycle first: **write → apply → compile → test → stage → promote**. Each phase is a chapter; each chapter names one mechanism and explains why it exists. The lifecycle splits cleanly in two: `apply` declaratively converges *infrastructure* (clusters, roles, sources, tables) toward declared state; `stage`+`promote` immutably swap in new versions of *views, materialized views, indexes, and sinks*. Concepts that change project design (stable API, profiles, variables) come after the lifecycle is grounded.
 
 ## Location and build
 
@@ -45,15 +45,17 @@ Lifecycle first: **write → compile → stage → promote**. Each phase is a ch
 ### Part II — The Lifecycle
 
 4. **Writing** — project layout, files-as-schemas, directory-to-namespace mapping, schema modifier files (introduces the *idea* of `SET api = stable` without diving in yet).
-5. **Compiling** — what `compile` validates, the kinds of errors it surfaces, how hints work.
-6. **Staging** — partial deployments: only changed objects ship. Suffixed schemas/clusters. Deploy IDs. Deferred sinks. Rollback behavior.
-7. **Promoting** — atomic schema swap, replacement-MV application order, and a clearly-marked subsection on **concurrent deploys and promote conflicts** (first-promote-wins, re-stage flow).
+5. **Managing infrastructure (`apply`)** — the layer underneath staging. Clusters, roles, network policies, secrets, connections, sources, tables. Idempotent, dependency-ordered, declarative diff against live state. Why infra is `apply` (converge to declared state) and views/MVs are `stage`+`promote` (immutable swap). Subcommand granularity (`apply clusters`, `apply secrets`, etc.).
+6. **Compiling** — what `compile` validates, the kinds of errors it surfaces, how hints work.
+7. **Testing** — `mz-deploy test`, how assertions are written, what test isolation looks like. Placed here because tests run against the compiled project before staging.
+8. **Staging** — partial deployments: only changed objects ship. Suffixed schemas/clusters. Deploy IDs. Deferred sinks. Rollback behavior.
+9. **Promoting** — atomic schema swap, replacement-MV application order, and a clearly-marked subsection on **concurrent deploys and promote conflicts** (first-promote-wins, re-stage flow).
 
 ### Part III — Concepts that change how you think
 
-8. **Stable API schemas (`SET api = stable`)** — the most non-obvious idea in the tool. Why replacement instead of swap. What it costs (MV-only schemas). When to reach for it.
-9. **Profiles & environments** — connection profiles, `__staging` / `__dev` file overrides, secret resolvers (env, file, AWS Secrets Manager, GCP Secret Manager).
-10. **Testing SQL** — `mz-deploy test`, how assertions are written, what test isolation looks like.
+10. **Stable API schemas (`SET api = stable`)** — the most non-obvious idea in the tool. Why replacement instead of swap. What it costs (MV-only schemas). When to reach for it.
+11. **Profiles & environments** — connection profiles, `__staging` / `__dev` file overrides, secret resolvers (env, file, AWS Secrets Manager, GCP Secret Manager).
+12. **Variables** — psql-style `:name`, `:'name'`, `:"name"` substitution in SQL files. Defined per-profile in `[<profile>.variables]` in `project.toml`. Three forms (raw / literal / identifier) and when to use each. `PRAGMA WARN_ON_MISSING_VARIABLES` for tolerated absence. Why this lives in Part III: it's the tool for parameterizing the same project across environments once profiles aren't enough.
 
 ### Part IV — Reference
 
@@ -84,7 +86,7 @@ The reference appendix mirrors the per-command help files that ship with the CLI
 
 ## Content sourcing
 
-- Lifecycle chapters draw on the existing `src/cli/help/{compile,stage,promote,apply,test}.md` files for accuracy but rewrite them in narrative form. The help files are the source of truth for behavior; the book is the source of truth for *teaching*.
+- Lifecycle chapters draw on the existing `src/cli/help/{apply,apply-*,compile,test,stage,promote}.md` files for accuracy but rewrite them in narrative form. The variables chapter draws on the module docs in `src/project/syntax/variables.rs` and `src/cli/help/profiles.md`. The help files are the source of truth for behavior; the book is the source of truth for *teaching*.
 - The "Your first project" walkthrough uses a fresh example project authored for the book — kept under `src/mz-deploy/book/examples/first-project/` so it can be sanity-tested against a real cluster.
 - Example domain: NOT analytics (positioning conflict per project standards). Use an operational/event-driven example — e.g., support-ticket SLA tracking, IoT device status, or similar.
 
@@ -99,8 +101,9 @@ The reference appendix mirrors the per-command help files that ship with the CLI
 ## Success criteria
 
 - A new user can read Part I and ship a real `stage` → `promote` in under an hour.
-- After Part II, a user can predict what `stage` will do without running `--dry-run`.
-- After Chapter 8, a user can explain in their own words when `SET api = stable` is worth the constraints.
+- After Part II, a user can predict what `stage` will do without running `--dry-run`, and can articulate why infra goes through `apply` while views go through `stage`+`promote`.
+- After Chapter 10, a user can explain in their own words when `SET api = stable` is worth the constraints.
+- After Chapter 12, a user can parameterize the same project across environments using profile-scoped variables.
 - Appendix A is byte-identical to `src/cli/help/*.md` after running the generator. CI enforces SUMMARY consistency.
 
 ## Open questions
