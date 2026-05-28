@@ -15,6 +15,7 @@
 - [Compiling](./ch06-compiling.md)
 - [Testing](./ch07-testing.md)
 - [Staging](./ch08-staging.md)
+- [Promoting](./ch09-promoting.md)
 
 # Reference
 
