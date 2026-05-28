@@ -13,6 +13,7 @@
 - [Writing](./ch04-writing.md)
 - [Managing infrastructure](./ch05-managing-infrastructure.md)
 - [Compiling](./ch06-compiling.md)
+- [Testing](./ch07-testing.md)
 
 # Reference
 
