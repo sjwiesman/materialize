@@ -17,3 +17,4 @@ set -euo pipefail
 
 ci/test/lint-clippy-doc.sh
 ci/test/lint-cargo-doc-test.sh
+ci/test/lint-mz-deploy-book.sh
