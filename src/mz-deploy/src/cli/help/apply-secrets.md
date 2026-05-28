@@ -37,9 +37,9 @@ Supported providers:
 
 - `env_var('NAME')` — Reads from the environment variable `NAME`.
 - `aws_secret('NAME')` — Reads from AWS Secrets Manager. Requires
-  `aws_profile` to be set under `[profiles.<name>.security]` in `project.toml`:
+  `aws_profile` to be set under `[<name>.security]` in `project.toml`:
 
-      [profiles.default.security]
+      [default.security]
       aws_profile = "my-aws-profile"
 
 - `aws_secret('NAME', 'FIELD')` — Reads from AWS Secrets Manager, parses

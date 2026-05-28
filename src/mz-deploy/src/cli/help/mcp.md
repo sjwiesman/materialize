@@ -20,7 +20,7 @@ two aren't always on the same hostname. Profiles used only for MCP can omit
 `host` entirely.
 
 ```toml
-[profiles.prod]
+[prod]
 http_host = "console.prod.example.materialize.com"
 username  = "materialize_internal"
 password  = "${MZ_PROFILE_PROD_PASSWORD}"

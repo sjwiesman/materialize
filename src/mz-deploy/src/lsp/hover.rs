@@ -238,25 +238,12 @@ mod tests {
     }
 
     #[test]
-    fn variable_hover_resolved_with_profile() {
-        let variables = vars(&[("cluster", "analytics")]);
+    fn variable_hover_resolved() {
+        let variables = vars(&[("cluster", "ontology")]);
         let sql = "IN CLUSTER :cluster AS";
         let hover = resolve_variable_hover(sql, 11, &variables).unwrap();
         let text = extract_markdown(&hover);
-        assert!(text.contains("**variable** `:cluster`"));
-        assert!(text.contains("**Value:** `analytics`"));
-        assert!(text.contains("**Profile:** `staging`"));
-    }
-
-    #[test]
-    fn variable_hover_resolved_without_profile() {
-        let variables = vars(&[("cluster", "analytics")]);
-        let sql = "IN CLUSTER :cluster AS";
-        let hover = resolve_variable_hover(sql, 11, &variables).unwrap();
-        let text = extract_markdown(&hover);
-        assert!(text.contains("**variable** `:cluster`"));
-        assert!(text.contains("**Value:** `analytics`"));
-        assert!(!text.contains("**Profile:**"));
+        assert_eq!(text, "ontology");
     }
 
     #[test]

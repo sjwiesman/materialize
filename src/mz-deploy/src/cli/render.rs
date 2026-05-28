@@ -142,10 +142,10 @@ fn unresolved_variables_to_positional(
 ) -> Vec<PositionalDiagnostic> {
     let source = std::fs::read_to_string(&error.path).unwrap_or_default();
     let footer = if error.profile_set {
-        "define this variable in [profiles.<name>.variables] in project.toml".to_string()
+        "define this variable in [<profile>.variables] in project.toml".to_string()
     } else {
         "no profile is selected; run `mz-deploy profile set <name>` and define \
-         this variable in [profiles.<name>.variables] in project.toml"
+         this variable in [<profile>.variables] in project.toml"
             .to_string()
     };
     error

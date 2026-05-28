@@ -69,10 +69,9 @@ The active profile (the one used by commands) is resolved in this order:
 
 1. **`--profile` CLI flag** — Highest priority. Overrides everything.
 2. **`MZ_DEPLOY_PROFILE` env variable** — Useful for CI environments.
-3. **`profile` field in `project.toml`** — The project default.
-
-For example, if `project.toml` contains `profile = "default"` but you run
-`mz-deploy debug --profile staging`, the `staging` profile is used.
+3. **`.mzprofile` file in the project root** — Per-checkout default written
+   by `mz-deploy profile set <name>`. Gitignored so each teammate can pick
+   their own without touching shared config.
 
 ## Password resolution
 
@@ -189,9 +188,7 @@ In `project.toml`, you can configure a per-profile suffix that renames
 both databases and clusters at compile time:
 
 ```toml
-profile = "default"
-
-[profiles.staging]
+[staging]
 profile_suffix = "_staging"
 ```
 
@@ -213,7 +210,7 @@ Variables let you parameterize SQL files with values that differ per profile,
 using psql-compatible syntax. Define variables in `project.toml`:
 
 ```toml
-[profiles.staging.variables]
+[staging.variables]
 cluster = "staging_cluster"
 pg_host = "staging-replica.internal"
 ```
@@ -245,21 +242,19 @@ explicitly selected), the active profile is required.
 
 ## Per-profile secret configuration
 
-In `project.toml`, you can configure secret resolution settings per profile
-under `[profiles.<name>]`:
+In `project.toml`, you can configure secret resolution settings under a
+per-profile `[<name>.security]` table:
 
 ```toml
-profile = "default"
-
-[profiles.production.security]
+[production.security]
 aws_profile = "prod-account"
 
-[profiles.staging.security]
+[staging.security]
 aws_profile = "staging-account"
 ```
 
-The `aws_profile` field under `[profiles.<name>.security]` sets the AWS
-profile used when resolving secrets from AWS Secrets Manager via the
+The `aws_profile` field under `[<name>.security]` sets the AWS profile
+used when resolving secrets from AWS Secrets Manager via the
 `aws_secret()` provider.
 
 ## Per-profile SQL file overrides

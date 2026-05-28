@@ -17,7 +17,7 @@ profile has two halves:
 - **Connection details** — host, port, credentials, TLS settings — live in
   `~/.mz/profiles.toml` and are shared across all your projects.
 - **Project-side overrides** — database/cluster suffixes, psql-style
-  variables, AWS secret provider — live under `[profiles.<name>]` in
+  variables, AWS secret provider — live under `[<profile>]` in
   `project.toml`.
 
 Most commands resolve the active profile in this order: `--profile <name>`

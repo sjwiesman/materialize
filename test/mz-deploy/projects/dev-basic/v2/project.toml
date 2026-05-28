@@ -1,5 +1,5 @@
-[profiles.default.variables]
+[default.variables]
 compute_cluster = "compute"
 
-[profiles.dev.variables]
+[dev.variables]
 compute_cluster = "compute_dev"

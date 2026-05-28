@@ -69,7 +69,7 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub security: SecurityConfig,
     /// psql-style variables resolved in SQL files before parsing.
-    /// Defined per profile as `[profiles.<name>.variables]` in `project.toml`.
+    /// Defined per profile as `[<profile>.variables]` in `project.toml`.
     #[serde(default)]
     pub variables: BTreeMap<String, String>,
 }
@@ -84,10 +84,11 @@ pub struct ProfileConfig {
 /// `MZ_DEPLOY_PROFILE`, or the per-project `.mzprofile` file. See
 /// [`read_mzprofile`].
 #[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
 pub struct ProjectSettings {
     pub mz_version: Option<String>,
-    pub profiles: Option<BTreeMap<String, ProfileConfig>>,
+
+    #[serde(flatten)]
+    pub profiles: BTreeMap<String, ProfileConfig>,
     /// Raw dependency strings from the `dependencies` array in `project.toml`.
     /// Each entry must be a fully qualified `database.schema.object` name.
     #[serde(default, rename = "dependencies")]
@@ -161,18 +162,13 @@ impl ProjectSettings {
     /// Returns the profile config for the given profile name.
     /// Falls back to `ProfileConfig::default()` if no entry exists.
     pub fn config_for_profile(&self, profile_name: &str) -> ProfileConfig {
-        self.profiles
-            .as_ref()
-            .and_then(|p| p.get(profile_name))
-            .cloned()
-            .unwrap_or_default()
+        self.profiles.get(profile_name).cloned().unwrap_or_default()
     }
 
     /// Returns the profile suffix for the given profile name, if configured.
     pub fn suffix_for_profile(&self, profile_name: &str) -> Option<&str> {
         self.profiles
-            .as_ref()
-            .and_then(|p| p.get(profile_name))
+            .get(profile_name)
             .and_then(|c| c.profile_suffix.as_deref())
     }
 
@@ -676,7 +672,7 @@ mod tests {
     fn test_profile_config_deserializes_profile_suffix() {
         let toml = r#"
 
-            [profiles.staging]
+            [staging]
             profile_suffix = "_staging"
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
@@ -688,7 +684,7 @@ mod tests {
     fn test_profile_config_profile_suffix_optional() {
         let toml = r#"
 
-            [profiles.prod.security]
+            [prod.security]
             aws_profile = "prod-aws"
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
@@ -701,7 +697,7 @@ mod tests {
     fn test_suffix_for_profile_returns_suffix() {
         let toml = r#"
 
-            [profiles.staging]
+            [staging]
             profile_suffix = "_staging"
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
@@ -712,7 +708,7 @@ mod tests {
     fn test_suffix_for_profile_missing_profile() {
         let toml = r#"
 
-            [profiles.staging]
+            [staging]
             profile_suffix = "_staging"
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
@@ -731,7 +727,7 @@ mod tests {
     fn test_config_for_profile_without_security_section() {
         let toml = r#"
 
-            [profiles.prod]
+            [prod]
             profile_suffix = "_prod"
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
@@ -744,7 +740,7 @@ mod tests {
     fn test_profile_config_deserializes_variables() {
         let toml = r#"
 
-            [profiles.staging.variables]
+            [staging.variables]
             cluster = "staging_cluster"
             pg_host = "staging-replica.internal"
         "#;
@@ -764,7 +760,7 @@ mod tests {
     fn test_profile_config_variables_default_empty() {
         let toml = r#"
 
-            [profiles.prod]
+            [prod]
             profile_suffix = "_prod"
         "#;
         let settings: ProjectSettings = toml::from_str(toml).unwrap();
@@ -943,12 +939,12 @@ mod tests {
     }
 
     #[test]
-    fn project_toml_rejects_unknown_profile_field() {
-        // `profile = "..."` in project.toml is gone; strict deserialization
-        // makes leftover fields a parse error, forcing users to migrate to
-        // `mz-deploy profile set`.
+    fn project_toml_rejects_string_under_profile_key() {
         let err = toml::from_str::<ProjectSettings>(r#"profile = "default""#).unwrap_err();
-        assert!(err.to_string().contains("unknown field"), "got: {err}");
+        assert!(
+            err.to_string().contains("expected struct ProfileConfig"),
+            "got: {err}"
+        );
     }
 
     #[test]

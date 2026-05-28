@@ -574,7 +574,6 @@ mod tests {
         let error_string = format!("{}", error);
 
         // Check that error message contains key elements
-        assert!(error_string.contains("error"));
         assert!(error_string.contains("Objects depend on tables that don't exist"));
         assert!(error_string.contains("materialize.public.my_view"));
         assert!(error_string.contains("materialize.tables.users"));

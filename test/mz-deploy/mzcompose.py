@@ -908,7 +908,7 @@ def workflow_default(c: Composition, parser: WorkflowArgumentParser) -> None:
     with c.test_case("mz-deploy-no-profile-with-variable"):
         # When a project references a variable and no profile is selected,
         # compile fails with a hint pointing the user at `mz-deploy profile set`
-        # rather than the generic [profiles.<name>.variables] hint.
+        # rather than the generic [<name>.variables] hint.
         result = run_mz_deploy(
             c,
             "no-profile-var/v1",
@@ -1007,7 +1007,7 @@ def workflow_dev(c: Composition, parser: WorkflowArgumentParser) -> None:
         )
 
     # Provision a dedicated dev cluster that the `dev` profile routes to
-    # via [profiles.dev.variables].compute_cluster = "compute_dev". The
+    # via [dev.variables].compute_cluster = "compute_dev". The
     # `compute` cluster is promoted, so targeting it directly is blocked
     # by the dev-time production-cluster guard (exercised below).
     c.sql(

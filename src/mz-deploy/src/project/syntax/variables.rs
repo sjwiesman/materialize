@@ -11,7 +11,7 @@
 //!
 //! Resolves `:foo`, `:'foo'`, and `:"foo"` syntax in raw SQL text before
 //! it reaches the SQL parser. Variables are defined per-profile in
-//! `[profiles.<name>.variables]` in `project.toml`.
+//! `[<profile>.variables]` in `project.toml`.
 //!
 //! ## Variable Syntax
 //!
@@ -25,7 +25,7 @@
 //!
 //! 1. Variables are looked up in the `BTreeMap<String, String>` passed to
 //!    [`resolve_variables`]. This map is populated from `project.toml`'s
-//!    `[profiles.<name>.variables]` section.
+//!    `[<profile>.variables]` section.
 //! 2. If a referenced variable has no definition, it is left as-is in the
 //!    output and an [`UnresolvedVariable`] (with byte offset and length) is
 //!    recorded in `ResolvedSql::unresolved`. Each occurrence is tracked

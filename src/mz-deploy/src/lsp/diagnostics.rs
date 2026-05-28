@@ -96,11 +96,11 @@ fn parse_positional(
     for uv in &resolved.unresolved {
         let message = match profile_name {
             Some(name) => format!(
-                "undefined variable ':{}'  — define in [profiles.{}.variables] in project.toml",
+                "undefined variable ':{}'  — define in [{}.variables] in project.toml",
                 uv.name, name
             ),
             None => format!(
-                "undefined variable ':{}'  — no profile is selected; run `mz-deploy profile set <name>` and define in [profiles.<name>.variables] in project.toml",
+                "undefined variable ':{}'  — no profile is selected; run `mz-deploy profile set <name>` and define in [<profile>.variables] in project.toml",
                 uv.name
             ),
         };
