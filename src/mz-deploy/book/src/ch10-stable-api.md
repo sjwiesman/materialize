@@ -4,7 +4,7 @@
 
 ## The problem: schema swaps break external consumers
 
-When you `stage` and `promote` a change to a materialized view, mz-deploy's default behavior is a full schema swap. The staging schema — containing rebuilt versions of every changed object and their dependents — atomically replaces the production schema. This is safe and efficient within a single project: mz-deploy knows which objects depend on which, so it redeployes everything that needs rebuilding.
+When you `stage` and `promote` a change to a materialized view, mz-deploy's default behavior is a full schema swap. The staging schema — containing rebuilt versions of every changed object and their dependents — atomically replaces the production schema. This is safe and efficient within a single project: mz-deploy knows which objects depend on which, so it redeploys everything that needs rebuilding.
 
 The problem surfaces at project boundaries. If another team's project builds a view or sink on top of your `ticket_sla` MV, mz-deploy does not know about that. When you ship a change and the schema swap occurs, your MV gets dropped and recreated under a new identity. The other team's object, which referenced the old identity, breaks. They have to redeploy to pick up the new version — and they may not even know a deployment happened.
 

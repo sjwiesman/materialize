@@ -101,27 +101,27 @@ AT TIME '2024-06-01T12:00:00Z'
 MOCK materialize.public.tickets(
     id bigint,
     opened_at timestamptz,
-    sla_minutes bigint,
+    sla_minutes integer,
     closed_at timestamptz
 ) AS (
     SELECT * FROM VALUES (
         1::bigint,
         '2024-06-01T10:00:00Z'::timestamptz,
-        60::bigint,
+        60::integer,
         NULL::timestamptz
     )
 ),
 EXPECTED(
     id bigint,
     opened_at timestamptz,
-    sla_minutes bigint,
+    sla_minutes integer,
     closed_at timestamptz,
     status text
 ) AS (
     SELECT * FROM VALUES (
         1::bigint,
         '2024-06-01T10:00:00Z'::timestamptz,
-        60::bigint,
+        60::integer,
         NULL::timestamptz,
         'breached'::text
     )
@@ -139,27 +139,27 @@ AT TIME '2024-06-01T12:00:00Z'
 MOCK materialize.public.tickets(
     id bigint,
     opened_at timestamptz,
-    sla_minutes bigint,
+    sla_minutes integer,
     closed_at timestamptz
 ) AS (
     SELECT * FROM VALUES (
         2::bigint,
         '2024-06-01T11:30:00Z'::timestamptz,
-        60::bigint,
+        60::integer,
         NULL::timestamptz
     )
 ),
 EXPECTED(
     id bigint,
     opened_at timestamptz,
-    sla_minutes bigint,
+    sla_minutes integer,
     closed_at timestamptz,
     status text
 ) AS (
     SELECT * FROM VALUES (
         2::bigint,
         '2024-06-01T11:30:00Z'::timestamptz,
-        60::bigint,
+        60::integer,
         NULL::timestamptz,
         'on_time'::text
     )
@@ -177,27 +177,27 @@ AT TIME '2024-06-01T12:00:00Z'
 MOCK materialize.public.tickets(
     id bigint,
     opened_at timestamptz,
-    sla_minutes bigint,
+    sla_minutes integer,
     closed_at timestamptz
 ) AS (
     SELECT * FROM VALUES (
         3::bigint,
         '2024-06-01T10:00:00Z'::timestamptz,
-        60::bigint,
+        60::integer,
         '2024-06-01T11:30:00Z'::timestamptz
     )
 ),
 EXPECTED(
     id bigint,
     opened_at timestamptz,
-    sla_minutes bigint,
+    sla_minutes integer,
     closed_at timestamptz,
     status text
 ) AS (
     SELECT * FROM VALUES (
         3::bigint,
         '2024-06-01T10:00:00Z'::timestamptz,
-        60::bigint,
+        60::integer,
         '2024-06-01T11:30:00Z'::timestamptz,
         'closed_breached'::text
     )

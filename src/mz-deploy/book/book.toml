@@ -13,4 +13,4 @@ create-missing = false
 default-theme = "rust"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/MaterializeInc/materialize"
-edit-url-template = "https://github.com/MaterializeInc/materialize/edit/main/src/mz-deploy/book/{path}"
+edit-url-template = "https://github.com/MaterializeInc/materialize/edit/main/src/mz-deploy/book/src/{path}"
