@@ -14,6 +14,7 @@
 - [Managing infrastructure](./ch05-managing-infrastructure.md)
 - [Compiling](./ch06-compiling.md)
 - [Testing](./ch07-testing.md)
+- [Staging](./ch08-staging.md)
 
 # Reference
 
