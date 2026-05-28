@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3
+
+- Run `mz-deploy test` and `mz-deploy explain` against the editor's live
+  state. Dirty buffers in the workspace are snapshotted to a temp file
+  and passed via `--overlay`, so the code lenses no longer force-save
+  the active editor before running.
+
 ## 0.1.2
 
 - Recognize `types.lock` as a TOML file so it picks up TOML syntax
