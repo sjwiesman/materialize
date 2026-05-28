@@ -11,6 +11,7 @@
 # Part II — The Lifecycle
 
 - [Writing](./ch04-writing.md)
+- [Managing infrastructure](./ch05-managing-infrastructure.md)
 
 # Reference
 
