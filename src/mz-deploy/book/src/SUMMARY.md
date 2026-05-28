@@ -8,6 +8,7 @@
 
 <!-- BEGIN REFERENCE -->
 - [abort](./reference/abort.md)
+- [apply](./reference/apply.md)
 - [apply-clusters](./reference/apply-clusters.md)
 - [apply-connections](./reference/apply-connections.md)
 - [apply-network-policies](./reference/apply-network-policies.md)
@@ -15,7 +16,6 @@
 - [apply-secrets](./reference/apply-secrets.md)
 - [apply-sources](./reference/apply-sources.md)
 - [apply-tables](./reference/apply-tables.md)
-- [apply](./reference/apply.md)
 - [clean](./reference/clean.md)
 - [compile](./reference/compile.md)
 - [debug](./reference/debug.md)

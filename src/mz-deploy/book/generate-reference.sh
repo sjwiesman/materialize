@@ -42,7 +42,15 @@ trap 'rm -f "$BLOCK"' EXIT
     for f in "$REF_DIR"/*.md; do
         name="$(basename "$f" .md)"
         printf -- '- [%s](./reference/%s.md)\n' "$name" "$name"
-    done | LC_ALL=C sort
+    done \
+        | sed 's/-/~/g' \
+        | LC_ALL=C sort \
+        | sed 's/~/-/g'
+    # Sort rationale: LC_ALL=C byte-sorts '-' (0x2D) before '.' (0x2E), which
+    # puts "apply-clusters" before "apply" when bare command names are mixed
+    # with subcommands.  Replacing '-' with '~' (0x7E > all alphanumerics)
+    # before sorting makes "apply" sort before "apply~clusters", then we
+    # restore '-' afterwards.
     echo '<!-- END REFERENCE -->'
 } > "$BLOCK"
 

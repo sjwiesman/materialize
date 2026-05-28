@@ -55,7 +55,7 @@ grep -q '\- \[stage\](./reference/stage.md)'     "$WORK/book/src/SUMMARY.md" \
 # Entries must be alphabetical.
 LINES="$(sed -n '/BEGIN REFERENCE/,/END REFERENCE/p' "$WORK/book/src/SUMMARY.md" \
         | grep -oE '\(./reference/[a-z-]+\.md\)' || true)"
-SORTED="$(printf '%s\n' "$LINES" | LC_ALL=C sort)"
+SORTED="$(printf '%s\n' "$LINES" | sed 's/-/~/g' | LC_ALL=C sort | sed 's/~/-/g')"
 [ "$LINES" = "$SORTED" ] || { echo "FAIL: reference entries not alphabetical"; exit 1; }
 
 echo "OK"
