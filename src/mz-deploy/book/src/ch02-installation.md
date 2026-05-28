@@ -2,6 +2,11 @@
 
 *What you'll learn: how to install mz-deploy, configure your first connection profile, and initialize the deployment infrastructure.*
 
+> **Alpha software — do not use in production.** `mz-deploy` is under
+> active development. Its commands, file formats, and on-disk state are
+> subject to breaking changes. Use it against experimental or scratch
+> Materialize regions only.
+
 ## Installing the binary
 
 The easiest way to install mz-deploy on macOS is via the Homebrew tap:
