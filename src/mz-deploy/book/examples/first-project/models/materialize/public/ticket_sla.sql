@@ -15,4 +15,4 @@ SELECT
         THEN 'closed_breached'
         ELSE 'on_time'
     END AS status
-FROM tickets;
+FROM raw.tickets;

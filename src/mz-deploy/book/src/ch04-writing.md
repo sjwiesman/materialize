@@ -4,9 +4,7 @@
 
 ## The project as a directory tree
 
-An mz-deploy project is a directory on disk. At its root sits `project.toml`, which names the project and holds your default profile settings. Everything else lives in subdirectories whose names map directly to object types in Materialize.
-
-The full-project example from the previous chapter looks like this:
+An mz-deploy project is a directory on disk. At its root sits `project.toml`, which names the project and holds your default profile settings. Everything else lives in four subdirectories:
 
 ```text
 first-project/
@@ -15,41 +13,42 @@ first-project/
 │   └── app.sql
 ├── models/
 │   └── materialize/
+│       ├── raw/
+│       │   └── tickets.sql
 │       └── public/
 │           └── ticket_sla.sql
-└── tables/
-    └── tickets.sql
-```
-
-A real project will grow to include more directories as you add more object types. The complete set of top-level directories mz-deploy recognizes is:
-
-```text
-my-project/
-├── project.toml
-├── clusters/
-├── connections/
-├── models/
-├── network-policies/
 ├── roles/
-├── secrets/
-├── sources/
-└── tables/
+└── network-policies/
 ```
+
+`clusters/`, `roles/`, and `network-policies/` are flat: one file per object, no nesting. `models/` is different — it uses a three-level path to encode a fully-qualified name, and it is where all schema-scoped objects live.
 
 You do not need to create every directory upfront. mz-deploy silently skips any directory that does not exist.
 
 ## Files become objects
 
-The mapping from file to object is direct: the file's stem becomes the object's name.
+For the flat directories, the mapping from file to object is direct: the file's stem becomes the object's name.
 
 ```text
-tables/tickets.sql   →   TABLE tickets
 clusters/app.sql     →   CLUSTER app
+roles/analyst.sql    →   ROLE analyst
 ```
 
-The file must contain valid SQL that creates the object. For `tables/tickets.sql`:
+For `models/`, the path encodes the fully-qualified name:
+
+```text
+models/materialize/raw/tickets.sql   →   TABLE materialize.raw.tickets
+models/materialize/public/ticket_sla.sql   →   MATERIALIZED VIEW materialize.public.ticket_sla
+```
+
+Each file must contain valid SQL that creates the object. The object name comes from the filename, not from the `CREATE` statement — they must agree. If they differ, compilation fails with an error that points you to the mismatch.
+
+## `models/` and schemas
+
+`models/<database>/<schema>/<object>.sql` is where all schema-scoped objects go: tables, sources, secrets, connections, sinks, views, materialized views. The database and schema are read from the path, not from the SQL itself. The SQL inside the file does not use a three-part name:
 
 ```sql
+-- models/materialize/raw/tickets.sql
 CREATE TABLE tickets (
     id               bigint        NOT NULL,
     opened_at        timestamptz   NOT NULL,
@@ -58,28 +57,8 @@ CREATE TABLE tickets (
 );
 ```
 
-mz-deploy reads the SQL, validates it, and tracks the result as the `tickets` table. The object name comes from the filename, not from the `CREATE TABLE` statement — they must agree. If they differ, compilation fails with an error that points you to the mismatch.
-
-## `models/` and schemas
-
-The directories in the previous section (`clusters/`, `tables/`, and the others) are flat: one level, one name, one object. The `models/` directory is different. It is three levels deep and encodes a fully-qualified name:
-
-```text
-models/<database>/<schema>/<object>.sql
-```
-
-The canonical layout for a project targeting the built-in `materialize` database and `public` schema is:
-
-```text
-models/
-└── materialize/
-    └── public/
-        └── ticket_sla.sql
-```
-
-This file declares the object `materialize.public.ticket_sla`. The database and schema are read from the path, not from the SQL itself. The SQL inside the file does not need a three-part name:
-
 ```sql
+-- models/materialize/public/ticket_sla.sql
 CREATE MATERIALIZED VIEW ticket_sla
 IN CLUSTER app
 AS
@@ -97,10 +76,25 @@ SELECT
         THEN 'closed_breached'
         ELSE 'on_time'
     END AS status
-FROM tickets;
+FROM raw.tickets;
 ```
 
-The `models/` directory holds views, materialized views, indexes, and sinks — any object that lives inside a schema and depends on other objects.
+### The separate-schemas constraint
+
+A single schema cannot mix data-layer objects (tables, sources, secrets, connections, sinks) with view-layer objects (views, materialized views). If you try to place a `CREATE TABLE` and a `CREATE MATERIALIZED VIEW` in the same schema directory, compilation fails.
+
+Pick dedicated schemas for each layer. In the example above, `raw` holds the table and `public` holds the materialized view. A cross-schema reference like `FROM raw.tickets` in the MV is how you connect them.
+
+A common pattern for larger projects:
+
+```text
+models/
+└── mydb/
+    ├── ingest/    ← tables sourced from external systems
+    ├── secrets/   ← CREATE SECRET objects
+    ├── public/    ← stable API: views and MVs exposed to consumers
+    └── internal/  ← views and MVs for intermediate computation
+```
 
 ## Schema modifier files
 
@@ -127,7 +121,7 @@ That single line marks every object in the schema as part of your stable public 
 Most files have a fixed name: `tickets.sql` is always `tickets.sql`. But you can provide an alternate version of any file that is selected only when a specific profile is active. The convention uses a double-underscore separator:
 
 ```text
-tables/
+models/materialize/raw/
 ├── tickets.sql              ← default
 └── tickets__staging.sql     ← used only when profile = staging
 ```
@@ -142,6 +136,7 @@ Profile variants let you point a staging environment at a smaller dataset or a d
 
 You can now:
 
-- Lay out a new project tree.
+- Lay out a new project tree with the correct four top-level directories.
 - Predict which database object each file in your project will produce.
+- Separate data-layer objects (tables, sources, secrets, connections, sinks) from view-layer objects (views, MVs) into different schemas.
 - Recognize the file-naming conventions for schema modifiers and profile variants.

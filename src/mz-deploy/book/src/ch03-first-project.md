@@ -30,7 +30,7 @@ SELECT
         THEN 'closed_breached'
         ELSE 'on_time'
     END AS status
-FROM tickets;
+FROM raw.tickets;
 ```
 
 The `mz_now()` call is what makes this genuinely real-time: Materialize re-evaluates the expression as time advances, so a ticket can transition from `on_time` to `breached` without any external trigger.
@@ -51,13 +51,14 @@ first-project/
 ├── models/
 │   └── materialize/
 │       └── public/    # SQL files for views, MVs, etc.
+├── network-policies/  # Network policy definitions
 ├── roles/             # Role definitions
 ├── project.toml       # Project configuration
 ├── .gitignore
 └── README.md
 ```
 
-A `tables/` directory is not created by the scaffold — you add it manually when you need it. The `clusters/`, `roles/`, and `models/` directories are there immediately.
+All schema-scoped objects — tables, sources, secrets, connections, sinks, views, and materialized views — live under `models/<database>/<schema>/`. You will add schema subdirectories there as your project grows.
 
 Open `project.toml`. It contains the project name and a `[default]` section for connection settings. Fill in the connection details you configured in [Installation & setup](./ch02-installation.md) before continuing.
 
@@ -77,7 +78,7 @@ Create the three SQL files shown below. The path shown above each block is the p
 CREATE CLUSTER app (SIZE = '25cc', REPLICATION FACTOR = 1);
 ```
 
-**`tables/tickets.sql`**
+**`models/materialize/raw/tickets.sql`**
 
 ```sql
 CREATE TABLE tickets (
@@ -87,6 +88,8 @@ CREATE TABLE tickets (
     closed_at        timestamptz
 );
 ```
+
+The path `models/materialize/raw/` tells mz-deploy this table lives in the `raw` schema of the `materialize` database. Tables, sources, secrets, and connections must be in a separate schema from views and materialized views — mixing them in the same schema is not allowed.
 
 **`models/materialize/public/ticket_sla.sql`**
 
@@ -108,8 +111,10 @@ SELECT
         THEN 'closed_breached'
         ELSE 'on_time'
     END AS status
-FROM tickets;
+FROM raw.tickets;
 ```
+
+The MV lives in `public` and references the table with a schema-qualified name `raw.tickets`.
 
 Your project tree now looks like this:
 
@@ -119,17 +124,17 @@ first-project/
 │   └── app.sql
 ├── models/
 │   └── materialize/
+│       ├── raw/
+│       │   └── tickets.sql
 │       └── public/
 │           └── ticket_sla.sql
 ├── roles/
-├── tables/
-│   └── tickets.sql
 └── project.toml
 ```
 
 ## `mz-deploy apply`
 
-Before you can stage or promote the materialized view, the cluster and the table must exist in Materialize. `apply` is the command for that — it reads your `clusters/` and `tables/` directories, diffs them against what is already in the database, and creates anything that is missing.
+Before you can stage or promote the materialized view, the cluster and the table must exist in Materialize. `apply` is the command for that — it reads your `clusters/` directory and all infrastructure objects under `models/`, diffs them against what is already in the database, and creates anything that is missing.
 
 ```bash
 mz-deploy apply

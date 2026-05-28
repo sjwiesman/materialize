@@ -41,7 +41,7 @@ One file can contain a `CREATE VIEW` or `CREATE MATERIALIZED VIEW` followed by a
 | `MOCK fqn(cols) AS (query)` | Yes\* | One per dependency of the target |
 | `EXPECTED(cols) AS (query)` | Yes | Expected output rows and types |
 
-\*Every dependency of the target view must have a corresponding `MOCK`. Mock names can be unqualified (`tickets`), schema-qualified (`public.tickets`), or fully qualified (`materialize.public.tickets`). Partial names are resolved relative to the target view.
+\*Every dependency of the target view must have a corresponding `MOCK`. Mock names can be unqualified (`tickets`), schema-qualified (`raw.tickets`), or fully qualified (`materialize.raw.tickets`). Partial names are resolved relative to the target view.
 
 ### `AT TIME`
 
@@ -79,7 +79,7 @@ SELECT
         THEN 'closed_breached'
         ELSE 'on_time'
     END AS status
-FROM tickets;
+FROM raw.tickets;
 ```
 
 The three outcomes are:
@@ -98,7 +98,7 @@ Ticket opened at 10:00, SLA is 60 minutes. Deadline is 11:00. The pinned clock r
 EXECUTE UNIT TEST test_open_breached
 FOR materialize.public.ticket_sla
 AT TIME '2024-06-01T12:00:00Z'
-MOCK materialize.public.tickets(
+MOCK materialize.raw.tickets(
     id bigint,
     opened_at timestamptz,
     sla_minutes integer,
@@ -136,7 +136,7 @@ Ticket opened at 11:30, SLA is 60 minutes. Deadline is 12:30. The clock reads 12
 EXECUTE UNIT TEST test_open_on_time
 FOR materialize.public.ticket_sla
 AT TIME '2024-06-01T12:00:00Z'
-MOCK materialize.public.tickets(
+MOCK materialize.raw.tickets(
     id bigint,
     opened_at timestamptz,
     sla_minutes integer,
@@ -174,7 +174,7 @@ Ticket opened at 10:00, SLA is 60 minutes. Deadline is 11:00. Ticket was closed 
 EXECUTE UNIT TEST test_closed_breached
 FOR materialize.public.ticket_sla
 AT TIME '2024-06-01T12:00:00Z'
-MOCK materialize.public.tickets(
+MOCK materialize.raw.tickets(
     id bigint,
     opened_at timestamptz,
     sla_minutes integer,
