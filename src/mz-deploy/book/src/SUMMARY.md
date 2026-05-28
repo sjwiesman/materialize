@@ -8,6 +8,10 @@
 - [Installation & setup](./ch02-installation.md)
 - [Your first project](./ch03-first-project.md)
 
+# Part II — The Lifecycle
+
+- [Writing](./ch04-writing.md)
+
 # Reference
 
 - [Command reference](./appendix-a-reference.md)
