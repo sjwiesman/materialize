@@ -46,11 +46,19 @@ pub fn default_docker_image() -> String {
 pub struct SecurityConfig {
     /// AWS profile name for loading secrets from AWS Secrets Manager.
     aws_profile: Option<String>,
+    /// GCP project ID used as the default for bare-name `gcp_secret(...)` calls.
+    /// Optional: calls that pass a full `projects/.../secrets/...` resource path
+    /// work without this set.
+    gcp_project: Option<String>,
 }
 
 impl SecurityConfig {
     pub fn aws_profile(&self) -> Option<&str> {
         self.aws_profile.as_deref()
+    }
+
+    pub fn gcp_project(&self) -> Option<&str> {
+        self.gcp_project.as_deref()
     }
 }
 
@@ -691,6 +699,33 @@ mod tests {
         let config = settings.config_for_profile("prod");
         assert!(config.profile_suffix.is_none());
         assert_eq!(config.security.aws_profile(), Some("prod-aws"));
+    }
+
+    #[test]
+    fn test_security_config_deserializes_gcp_project() {
+        let toml = r#"
+
+            [prod.security]
+            gcp_project = "my-gcp-project"
+        "#;
+        let settings: ProjectSettings = toml::from_str(toml).unwrap();
+        let config = settings.config_for_profile("prod");
+        assert_eq!(config.security.gcp_project(), Some("my-gcp-project"));
+        assert_eq!(config.security.aws_profile(), None);
+    }
+
+    #[test]
+    fn test_security_config_both_aws_and_gcp() {
+        let toml = r#"
+
+            [prod.security]
+            aws_profile = "prod-aws"
+            gcp_project = "my-gcp-project"
+        "#;
+        let settings: ProjectSettings = toml::from_str(toml).unwrap();
+        let config = settings.config_for_profile("prod");
+        assert_eq!(config.security.aws_profile(), Some("prod-aws"));
+        assert_eq!(config.security.gcp_project(), Some("my-gcp-project"));
     }
 
     #[test]

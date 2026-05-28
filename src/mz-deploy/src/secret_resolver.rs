@@ -22,9 +22,14 @@
 //! - `env_var::EnvVarProvider` — reads from environment variables
 //! - `aws_secret::AwsSecretProvider` — reads from AWS Secrets Manager
 //! - `aws_secret::UnconfiguredAwsProvider` — placeholder when `aws_profile` is not set
+//! - `gcp_secret::GcpSecretProvider` — reads from Google Cloud Secret Manager;
+//!   `gcp_project` is optional (full `projects/.../secrets/...` paths work
+//!   without it)
 
 mod aws_secret;
 mod env_var;
+mod gcp_secret;
+mod json_field;
 
 use crate::cli::CliError;
 use crate::config::SecurityConfig;
@@ -32,6 +37,7 @@ use crate::project::ast::Statement;
 use async_trait::async_trait;
 use aws_secret::{AwsSecretProvider, UnconfiguredAwsProvider};
 use env_var::EnvVarProvider;
+use gcp_secret::GcpSecretProvider;
 use mz_sql_parser::ast::{CreateSecretStatement, Expr, FunctionArgs, Raw, RawItemName, Value};
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -89,11 +95,14 @@ pub(crate) struct SecretResolver {
 }
 
 impl SecretResolver {
-    /// Creates a new resolver with providers configured from the given AWS profile.
+    /// Creates a new resolver with providers configured from the given security config.
     ///
-    /// Always registers `env_var`. If `aws_profile` is `Some`, registers the
-    /// real AWS Secrets Manager provider (credentials are loaded lazily on
-    /// first use); otherwise registers a placeholder that gives a clear error.
+    /// Always registers `env_var` and `gcp_secret`. For AWS, registers the
+    /// real Secrets Manager provider when `aws_profile` is set, or a
+    /// placeholder that errors clearly when it isn't. GCP doesn't need a
+    /// placeholder — full-path calls work without `gcp_project`, and the
+    /// real provider surfaces a helpful error for bare-name calls when the
+    /// project is unconfigured. All credentials are loaded lazily.
     pub(crate) fn new(config: &SecurityConfig) -> Self {
         let mut resolver = Self {
             providers: BTreeMap::new(),
@@ -105,6 +114,8 @@ impl SecretResolver {
         } else {
             resolver.register(Box::new(UnconfiguredAwsProvider));
         }
+
+        resolver.register(Box::new(GcpSecretProvider::new(config.gcp_project())));
 
         resolver
     }
@@ -466,6 +477,74 @@ mod tests {
                 assert!(
                     reason.contains("aws_profile"),
                     "error should mention aws_profile, got: {}",
+                    reason
+                );
+            }
+            other => panic!("expected ResolutionFailed, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_gcp_secret_wrong_arg_count() {
+        let resolver = SecretResolver::new(&Default::default());
+
+        let expr = make_function_expr("gcp_secret", vec![]);
+        match resolver.resolve_expr(expr).await.unwrap_err() {
+            SecretResolveError::WrongArgCount {
+                name,
+                expected,
+                got,
+            } => {
+                assert_eq!(name, "gcp_secret");
+                assert_eq!(expected, "1 or 2");
+                assert_eq!(got, 0);
+            }
+            other => panic!("expected WrongArgCount, got: {:?}", other),
+        }
+
+        let expr = make_function_expr(
+            "gcp_secret",
+            vec![
+                Expr::Value(Value::String("a".into())),
+                Expr::Value(Value::String("b".into())),
+                Expr::Value(Value::String("c".into())),
+            ],
+        );
+        match resolver.resolve_expr(expr).await.unwrap_err() {
+            SecretResolveError::WrongArgCount {
+                name,
+                expected,
+                got,
+            } => {
+                assert_eq!(name, "gcp_secret");
+                assert_eq!(expected, "1 or 2");
+                assert_eq!(got, 3);
+            }
+            other => panic!("expected WrongArgCount, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_gcp_secret_unconfigured_bare_name_error() {
+        // With no `gcp_project` configured, a bare-name call should fail
+        // before any network access with a message pointing the user at
+        // both the config option and the full-path alternative.
+        let resolver = SecretResolver::new(&Default::default());
+        let expr = make_function_expr(
+            "gcp_secret",
+            vec![Expr::Value(Value::String("my-secret".into()))],
+        );
+        match resolver.resolve_expr(expr).await.unwrap_err() {
+            SecretResolveError::ResolutionFailed { name, reason } => {
+                assert_eq!(name, "gcp_secret");
+                assert!(
+                    reason.contains("gcp_project"),
+                    "error should mention gcp_project, got: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("projects/"),
+                    "error should mention full-path alternative, got: {}",
                     reason
                 );
             }

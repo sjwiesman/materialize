@@ -16,6 +16,7 @@
 //!
 //! Requires `aws_profile` to be set in `project.toml`.
 
+use super::json_field::extract_json_field;
 use super::{SecretProvider, SecretResolveError};
 use async_trait::async_trait;
 use aws_sdk_secretsmanager::Client;
@@ -112,35 +113,6 @@ impl SecretProvider for AwsSecretProvider {
     }
 }
 
-/// Extract a top-level string field from a JSON secret.
-///
-/// Returns the field's string content on success. On failure, returns a
-/// reason string suitable for [`SecretResolveError::ResolutionFailed`].
-fn extract_json_field(
-    secret_string: &str,
-    json_key: &str,
-    secret_name: &str,
-) -> Result<String, String> {
-    let value: serde_json::Value = serde_json::from_str(secret_string).map_err(|e| {
-        format!(
-            "secret '{}' is not valid JSON; cannot extract field '{}': {}",
-            secret_name, json_key, e
-        )
-    })?;
-
-    let field = value
-        .get(json_key)
-        .ok_or_else(|| format!("secret '{}' has no field '{}'", secret_name, json_key))?;
-
-    match field {
-        serde_json::Value::String(s) => Ok(s.clone()),
-        _ => Err(format!(
-            "field '{}' in secret '{}' is not a string",
-            json_key, secret_name
-        )),
-    }
-}
-
 /// Placeholder provider registered when `aws_profile` is not set in `project.toml`.
 ///
 /// Always returns an error directing the user to configure `aws_profile`.
@@ -161,48 +133,5 @@ impl SecretProvider for UnconfiguredAwsProvider {
             name: self.name().to_string(),
             reason: "AWS Secrets Manager is not configured. Set 'aws_profile' under [<profile>.security] in project.toml to enable aws_secret().".to_string(),
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extract_json_field_returns_string_value() {
-        let secret = r#"{"username":"alice","password":"s3cr3t"}"#;
-        assert_eq!(
-            extract_json_field(secret, "password", "rds-creds").unwrap(),
-            "s3cr3t"
-        );
-        assert_eq!(
-            extract_json_field(secret, "username", "rds-creds").unwrap(),
-            "alice"
-        );
-    }
-
-    #[test]
-    fn extract_json_field_errors_on_missing_key() {
-        let secret = r#"{"username":"alice"}"#;
-        let err = extract_json_field(secret, "password", "rds-creds").unwrap_err();
-        assert!(err.contains("rds-creds"));
-        assert!(err.contains("password"));
-    }
-
-    #[test]
-    fn extract_json_field_errors_on_non_string_value() {
-        let secret = r#"{"port":5432}"#;
-        let err = extract_json_field(secret, "port", "rds-creds").unwrap_err();
-        assert!(err.contains("rds-creds"));
-        assert!(err.contains("port"));
-        assert!(err.contains("not a string"));
-    }
-
-    #[test]
-    fn extract_json_field_errors_on_invalid_json() {
-        let secret = "not json at all";
-        let err = extract_json_field(secret, "password", "rds-creds").unwrap_err();
-        assert!(err.contains("rds-creds"));
-        assert!(err.contains("not valid JSON"));
     }
 }
