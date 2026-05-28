@@ -4,7 +4,7 @@
 
 ## The problem variables solve
 
-[Profiles](./ch11-profiles.md) handle the connection layer: which host, which credentials, which TLS settings. But sometimes the SQL itself needs to vary by environment. Consider a materialized view that reads from a cluster — the cluster name might be `quickstart` in your local setup and `sla_prod_xlarge` in production. Or a connection that points to a different external host depending on the environment.
+[Profiles](./ch11-profiles.md) handle the connection layer: which host, which credentials, which TLS settings. But sometimes the SQL itself needs to vary by environment. Consider a materialized view that reads from a cluster — the cluster name might be `quickstart` in your local setup and `app` in production. Or a view that should filter to a specific region in production but include all rows in staging.
 
 You could duplicate the SQL file with a `name__<profile>.sql` override, but that means maintaining two copies of the same logic. Variables give you a lighter option: keep one SQL file, mark the parts that differ with `:name` placeholders, and define the values per profile in `project.toml`.
 
@@ -36,68 +36,93 @@ Variables are defined per profile in `project.toml`, under a `[<profile>.variabl
 ```toml
 [default.variables]
 cluster = "quickstart"
-ticket_schema = "public"
+warehouse_region = "US"
 
 [staging.variables]
-cluster = "sla_staging"
-ticket_schema = "staging"
+cluster = "app_staging"
+warehouse_region = "ALL"
 
 [production.variables]
-cluster = "sla_prod_xlarge"
-ticket_schema = "public"
+cluster = "app"
+warehouse_region = "US"
 ```
 
-When `mz-deploy compile --profile staging` runs, every SQL file in your project sees `cluster = "sla_staging"` and `ticket_schema = "staging"`. The `production` profile gets its own values, and `default` picks up the base definitions.
+When `mz-deploy compile --profile staging` runs, every SQL file in your project sees `cluster = "app_staging"` and `warehouse_region = "ALL"`. The `production` profile gets its own values, and `default` picks up the base definitions.
 
 ## A worked example
 
-The ticket-SLA project measures how long issues stay open before hitting SLA thresholds. The materialized view joins raw ticket data with SLA targets. The cluster that hosts the view should be sized for the environment.
+The customer project defines a `customer` materialized view that joins accounts, addresses, and contact methods. Different environments filter the view to different regions: production serves only US-based accounts, while staging includes all regions so new markets can be tested before full rollout.
+
+Three substitution forms are used:
+
+- `:cluster` — raw token, expands to the cluster name without quotes.
+- `:'warehouse_region'` — SQL literal, expands to a quoted string for the `WHERE` clause comparison.
+- `:"source_db"` — SQL identifier, expands to a double-quoted database name for the cross-database table reference.
 
 **`project.toml`**
 
 ```toml
 [default.variables]
 cluster = "quickstart"
-tickets_db = "ticket_data"
+warehouse_region = "US"
+source_db = "materialize"
 
 [staging.variables]
-cluster = "sla_staging"
-tickets_db = "ticket_data_staging"
+cluster = "app_staging"
+warehouse_region = "ALL"
+source_db = "materialize"
 
 [production.variables]
-cluster = "sla_xlarge"
-tickets_db = "ticket_data"
+cluster = "app"
+warehouse_region = "US"
+source_db = "materialize"
 ```
 
-**`models/materialize/public/sla_breaches.sql`**
+**`models/materialize/public/customer.sql`**
 
 ```sql
-CREATE MATERIALIZED VIEW sla_breaches
-  IN CLUSTER :cluster AS
+CREATE MATERIALIZED VIEW customer
+IN CLUSTER :cluster
+AS
 SELECT
-    t.id,
-    t.opened_at,
-    t.resolved_at,
-    s.threshold_hours,
-    EXTRACT(EPOCH FROM (t.resolved_at - t.opened_at)) / 3600 AS hours_open
-FROM :"tickets_db".public.tickets t
-JOIN sla_targets s ON t.priority = s.priority
-WHERE EXTRACT(EPOCH FROM (t.resolved_at - t.opened_at)) / 3600 > s.threshold_hours;
+    a.id              AS account_id,
+    a.signed_up_at,
+    a.status,
+    addr.line1        AS address_line1,
+    addr.city         AS address_city,
+    addr.region       AS address_region,
+    addr.country      AS address_country,
+    email.value       AS primary_email,
+    phone.value       AS phone_number
+FROM :"source_db".raw.accounts a
+LEFT JOIN :"source_db".raw.addresses addr
+       ON addr.account_id = a.id
+LEFT JOIN :"source_db".raw.contact_methods email
+       ON email.account_id = a.id AND email.kind = 'email'
+LEFT JOIN :"source_db".raw.contact_methods phone
+       ON phone.account_id = a.id AND phone.kind = 'phone'
+WHERE :'warehouse_region' = 'ALL'
+   OR addr.country = :'warehouse_region';
 ```
 
-When compiled with `--profile staging`, this produces:
+When compiled with `--profile production`, this produces:
 
 ```sql
-CREATE MATERIALIZED VIEW sla_breaches
-  IN CLUSTER sla_staging AS
+CREATE MATERIALIZED VIEW customer
+IN CLUSTER app
+AS
 SELECT
-    t.id,
+    a.id              AS account_id,
     ...
-FROM "ticket_data_staging".public.tickets t
+FROM "materialize".raw.accounts a
 ...
+WHERE 'US' = 'ALL'
+   OR addr.country = 'US';
 ```
 
-The `:cluster` reference expands as a raw token — no quotes. The `:"tickets_db"` reference expands as a double-quoted identifier, so the SQL parser treats it correctly as a database name.
+When compiled with `--profile staging`, the `:cluster` token expands to `app_staging` (no quotes) and `:'warehouse_region'` expands to `'ALL'`, so the `WHERE` clause passes all rows through.
+
+The `:cluster` reference expands as a raw token — appropriate for a cluster name used as a SQL keyword position. The `:'warehouse_region'` reference expands as a SQL string literal — safe for comparing to a text column. The `:"source_db"` reference expands as a double-quoted identifier, so the SQL parser treats it correctly as a database name.
 
 ## Unresolved variables
 

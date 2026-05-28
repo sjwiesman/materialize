@@ -18,11 +18,11 @@ mz-deploy stage
 When you want a memorable name — useful for shared team environments or long-running experiments — pass `--deploy-id`:
 
 ```bash
-mz-deploy stage --deploy-id sla-fix
-# staging schemas named public_sla-fix, app_sla-fix, ...
+mz-deploy stage --deploy-id add-phone-field
+# staging schemas named public_add-phone-field, app_add-phone-field, ...
 ```
 
-The deploy ID must contain only alphanumeric characters, hyphens, and underscores. It is appended with an underscore separator to every schema and cluster that the deployment touches. So a project with a `public` schema on an `app` cluster produces `public_sla-fix` and `app_sla-fix`.
+The deploy ID must contain only alphanumeric characters, hyphens, and underscores. It is appended with an underscore separator to every schema and cluster that the deployment touches. So a project with a `public` schema on an `app` cluster produces `public_add-phone-field` and `app_add-phone-field`.
 
 If you try to stage with an ID that already exists, `stage` exits with an error. Run `mz-deploy abort <ID>` to remove the existing deployment first, or choose a different ID.
 
@@ -34,16 +34,18 @@ Before staging, mz-deploy computes a hash of each object's SQL definition and co
 
 Dependency tainting extends this: if object X changes, any object that directly or transitively depends on X is also marked dirty and redeployed, even if its own SQL is unchanged. This ensures that downstream objects always run against the updated version of their dependencies.
 
-Consider a ticket SLA pipeline:
+Consider a customer pipeline with two dependent views:
 
 ```
-tickets (source)
-  └─ ticket_sla (MV) ← depends on tickets
-       └─ sla_summary (MV) ← depends on ticket_sla
-            └─ breached_alerts (view) ← depends on sla_summary
+accounts (table)
+addresses (table)
+contact_methods (table)
+  └─ customer (MV) ← depends on all three tables
+       └─ customer_summary (MV) ← depends on customer
+            └─ active_customers (view) ← depends on customer_summary
 ```
 
-If you change only `ticket_sla`, `stage` marks `ticket_sla`, `sla_summary`, and `breached_alerts` as dirty and redeploys all three. The `tickets` source and any unrelated MVs in other branches are left alone.
+If you change only `customer`, `stage` marks `customer`, `customer_summary`, and `active_customers` as dirty and redeploys all three. The raw tables and any unrelated MVs in other branches are left alone.
 
 On the very first `stage` after a project is initialized, there is no previous snapshot to compare against, so every object is treated as new and the full project is deployed.
 
@@ -72,7 +74,7 @@ If `stage` fails partway through — for example, a view has a SQL error that on
 
 ```bash
 mz-deploy stage
-# SQL error in sla_summary — rolling back staging schemas and clusters...
+# SQL error in customer — rolling back staging schemas and clusters...
 # Rollback complete. Fix the error and re-stage.
 ```
 
@@ -123,16 +125,16 @@ This is the equivalent of `git branch` for staging deployments. Use it to see wh
 To remove a staging deployment without promoting it, use `abort`:
 
 ```bash
-mz-deploy abort sla-fix
+mz-deploy abort add-phone-field
 ```
 
-`abort` drops all staging schemas and clusters with the `_sla-fix` suffix and removes the deployment tracking records. The command is idempotent: if a previous abort left some resources behind, running it again picks up where it left off. You cannot abort a deployment that has already been promoted — those resources have been swapped into production.
+`abort` drops all staging schemas and clusters with the `_add-phone-field` suffix and removes the deployment tracking records. The command is idempotent: if a previous abort left some resources behind, running it again picks up where it left off. You cannot abort a deployment that has already been promoted — those resources have been swapped into production.
 
 Use `--output json` with either command when you need machine-readable output:
 
 ```bash
 mz-deploy list --output json
-mz-deploy abort sla-fix --output json
+mz-deploy abort add-phone-field --output json
 ```
 
 ## What comes next

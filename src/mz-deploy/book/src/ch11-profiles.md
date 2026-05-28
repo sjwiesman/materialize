@@ -89,7 +89,7 @@ mz-deploy profile set staging
 
 Profile names also participate in *file-level overrides*: a file named `name__<profile>.sql` (double underscore) is used in place of the default `name.sql` whenever that profile is active. This is the idiomatic way to vary a connection definition or cluster spec between environments without duplicating view logic.
 
-[Chapter 4 — Writing](./ch04-writing.md) covers how these files are laid out and validated at compile time. The short version for a ticket-SLA project:
+[Chapter 4 — Writing](./ch04-writing.md) covers how these files are laid out and validated at compile time. The short version for the customer project:
 
 ```text
 models/materialize/public/
@@ -184,10 +184,10 @@ Use the secret name as-is for string secrets, or pass a second argument to extra
 
 ```sql
 -- plain string secret
-CREATE SECRET api_key AS aws_secret('ticket-sla/api-key');
+CREATE SECRET api_key AS aws_secret('customer-data/api-key');
 
 -- RDS-style JSON: {"username":"…","password":"…"}
-CREATE SECRET db_pw AS aws_secret('ticket-sla/rds-creds', 'password');
+CREATE SECRET db_pw AS aws_secret('customer-data/rds-creds', 'password');
 ```
 
 ### `gcp_secret`

@@ -41,7 +41,7 @@ One file can contain a `CREATE VIEW` or `CREATE MATERIALIZED VIEW` followed by a
 | `MOCK fqn(cols) AS (query)` | Yes\* | One per dependency of the target |
 | `EXPECTED(cols) AS (query)` | Yes | Expected output rows and types |
 
-\*Every dependency of the target view must have a corresponding `MOCK`. Mock names can be unqualified (`tickets`), schema-qualified (`raw.tickets`), or fully qualified (`materialize.raw.tickets`). Partial names are resolved relative to the target view.
+\*Every dependency of the target view must have a corresponding `MOCK`. Mock names can be unqualified (`accounts`), schema-qualified (`raw.accounts`), or fully qualified (`materialize.raw.accounts`). Partial names are resolved relative to the target view.
 
 ### `AT TIME`
 
@@ -59,147 +59,225 @@ Without `AT TIME`, `mz_now()` returns the wall clock at test execution. Tests th
 
 ## A worked example
 
-The `ticket_sla` view from [Your first project](./ch03-first-project.md) assigns a status to each open or closed ticket based on whether it met its SLA:
+The `customer` view from [Your first project](./ch03-first-project.md) joins three raw tables into a single canonical customer entity:
 
 ```sql
-CREATE MATERIALIZED VIEW ticket_sla
+CREATE MATERIALIZED VIEW customer
 IN CLUSTER app
 AS
 SELECT
-    id,
-    opened_at,
-    sla_minutes,
-    closed_at,
-    CASE
-        WHEN closed_at IS NULL
-             AND mz_now() > opened_at + (sla_minutes * INTERVAL '1 minute')
-        THEN 'breached'
-        WHEN closed_at IS NOT NULL
-             AND closed_at > opened_at + (sla_minutes * INTERVAL '1 minute')
-        THEN 'closed_breached'
-        ELSE 'on_time'
-    END AS status
-FROM raw.tickets;
+    a.id              AS account_id,
+    a.signed_up_at,
+    a.status,
+    addr.line1        AS address_line1,
+    addr.city         AS address_city,
+    addr.region       AS address_region,
+    addr.country      AS address_country,
+    email.value       AS primary_email,
+    phone.value       AS phone_number
+FROM raw.accounts a
+LEFT JOIN raw.addresses addr
+       ON addr.account_id = a.id
+LEFT JOIN raw.contact_methods email
+       ON email.account_id = a.id AND email.kind = 'email'
+LEFT JOIN raw.contact_methods phone
+       ON phone.account_id = a.id AND phone.kind = 'phone';
 ```
 
-The three outcomes are:
+All joins are LEFT JOINs, so an account that has no address or no contact methods still appears in the output — with NULL in the missing columns. The three test cases below pin each of those outcomes.
 
-- **`breached`** — ticket is still open and the deadline has passed.
-- **`closed_breached`** — ticket was closed, but only after the deadline.
-- **`on_time`** — everything else: closed in time, or still open with time to spare.
+The `customer` MV does not call `mz_now()`, so no `AT TIME` clause is needed.
 
-Because `mz_now()` appears in the logic, all tests pin the clock with `AT TIME '2024-06-01T12:00:00Z'`.
+### Test case 1 — account with full data
 
-### Test case 1 — open ticket past its deadline (`breached`)
-
-Ticket opened at 10:00, SLA is 60 minutes. Deadline is 11:00. The pinned clock reads 12:00, which is past the deadline, and `closed_at` is NULL.
+An account exists with one address row, one email contact method, and one phone contact method. The expected output is one row with all nine columns populated.
 
 ```sql
-EXECUTE UNIT TEST test_open_breached
-FOR materialize.public.ticket_sla
-AT TIME '2024-06-01T12:00:00Z'
-MOCK materialize.raw.tickets(
-    id bigint,
-    opened_at timestamptz,
-    sla_minutes integer,
-    closed_at timestamptz
+EXECUTE UNIT TEST test_account_with_full_data
+FOR materialize.public.customer
+MOCK materialize.raw.accounts(
+    id           bigint,
+    signed_up_at timestamptz,
+    status       text
 ) AS (
     SELECT * FROM VALUES (
         1::bigint,
-        '2024-06-01T10:00:00Z'::timestamptz,
-        60::integer,
-        NULL::timestamptz
+        '2024-01-15T09:00:00Z'::timestamptz,
+        'active'::text
     )
 ),
-EXPECTED(
-    id bigint,
-    opened_at timestamptz,
-    sla_minutes integer,
-    closed_at timestamptz,
-    status text
+MOCK materialize.raw.addresses(
+    account_id bigint,
+    line1      text,
+    city       text,
+    region     text,
+    country    text
 ) AS (
     SELECT * FROM VALUES (
         1::bigint,
-        '2024-06-01T10:00:00Z'::timestamptz,
-        60::integer,
-        NULL::timestamptz,
-        'breached'::text
+        '123 Main St'::text,
+        'Springfield'::text,
+        'IL'::text,
+        'US'::text
+    )
+),
+MOCK materialize.raw.contact_methods(
+    account_id bigint,
+    kind       text,
+    value      text
+) AS (
+    SELECT * FROM VALUES
+        (1::bigint, 'email'::text, 'alice@example.com'::text),
+        (1::bigint, 'phone'::text, '+1-555-0100'::text)
+),
+EXPECTED(
+    account_id    bigint,
+    signed_up_at  timestamptz,
+    status        text,
+    address_line1 text,
+    address_city  text,
+    address_region text,
+    address_country text,
+    primary_email text,
+    phone_number  text
+) AS (
+    SELECT * FROM VALUES (
+        1::bigint,
+        '2024-01-15T09:00:00Z'::timestamptz,
+        'active'::text,
+        '123 Main St'::text,
+        'Springfield'::text,
+        'IL'::text,
+        'US'::text,
+        'alice@example.com'::text,
+        '+1-555-0100'::text
     )
 );
 ```
 
-### Test case 2 — open ticket within its window (`on_time`)
+### Test case 2 — account with no address
 
-Ticket opened at 11:30, SLA is 60 minutes. Deadline is 12:30. The clock reads 12:00, so the ticket still has 30 minutes.
+An account exists but has no row in `raw.addresses`. The address columns should be NULL; contact method columns are still populated.
 
 ```sql
-EXECUTE UNIT TEST test_open_on_time
-FOR materialize.public.ticket_sla
-AT TIME '2024-06-01T12:00:00Z'
-MOCK materialize.raw.tickets(
-    id bigint,
-    opened_at timestamptz,
-    sla_minutes integer,
-    closed_at timestamptz
+EXECUTE UNIT TEST test_account_with_no_address
+FOR materialize.public.customer
+MOCK materialize.raw.accounts(
+    id           bigint,
+    signed_up_at timestamptz,
+    status       text
 ) AS (
     SELECT * FROM VALUES (
         2::bigint,
-        '2024-06-01T11:30:00Z'::timestamptz,
-        60::integer,
-        NULL::timestamptz
+        '2024-03-01T14:00:00Z'::timestamptz,
+        'active'::text
     )
 ),
+MOCK materialize.raw.addresses(
+    account_id bigint,
+    line1      text,
+    city       text,
+    region     text,
+    country    text
+) AS (
+    SELECT * FROM VALUES (NULL::bigint, NULL::text, NULL::text, NULL::text, NULL::text)
+    WHERE false
+),
+MOCK materialize.raw.contact_methods(
+    account_id bigint,
+    kind       text,
+    value      text
+) AS (
+    SELECT * FROM VALUES
+        (2::bigint, 'email'::text, 'bob@example.com'::text)
+),
 EXPECTED(
-    id bigint,
-    opened_at timestamptz,
-    sla_minutes integer,
-    closed_at timestamptz,
-    status text
+    account_id    bigint,
+    signed_up_at  timestamptz,
+    status        text,
+    address_line1 text,
+    address_city  text,
+    address_region text,
+    address_country text,
+    primary_email text,
+    phone_number  text
 ) AS (
     SELECT * FROM VALUES (
         2::bigint,
-        '2024-06-01T11:30:00Z'::timestamptz,
-        60::integer,
-        NULL::timestamptz,
-        'on_time'::text
+        '2024-03-01T14:00:00Z'::timestamptz,
+        'active'::text,
+        NULL::text,
+        NULL::text,
+        NULL::text,
+        NULL::text,
+        'bob@example.com'::text,
+        NULL::text
     )
 );
 ```
 
-### Test case 3 — closed ticket that exceeded its SLA (`closed_breached`)
+### Test case 3 — account with no contact methods
 
-Ticket opened at 10:00, SLA is 60 minutes. Deadline is 11:00. Ticket was closed at 11:30, which is after the deadline.
+An account exists with an address but no rows in `raw.contact_methods`. Both `primary_email` and `phone_number` should be NULL.
 
 ```sql
-EXECUTE UNIT TEST test_closed_breached
-FOR materialize.public.ticket_sla
-AT TIME '2024-06-01T12:00:00Z'
-MOCK materialize.raw.tickets(
-    id bigint,
-    opened_at timestamptz,
-    sla_minutes integer,
-    closed_at timestamptz
+EXECUTE UNIT TEST test_account_with_no_contact_methods
+FOR materialize.public.customer
+MOCK materialize.raw.accounts(
+    id           bigint,
+    signed_up_at timestamptz,
+    status       text
 ) AS (
     SELECT * FROM VALUES (
         3::bigint,
-        '2024-06-01T10:00:00Z'::timestamptz,
-        60::integer,
-        '2024-06-01T11:30:00Z'::timestamptz
+        '2024-06-10T08:30:00Z'::timestamptz,
+        'pending'::text
     )
 ),
-EXPECTED(
-    id bigint,
-    opened_at timestamptz,
-    sla_minutes integer,
-    closed_at timestamptz,
-    status text
+MOCK materialize.raw.addresses(
+    account_id bigint,
+    line1      text,
+    city       text,
+    region     text,
+    country    text
 ) AS (
     SELECT * FROM VALUES (
         3::bigint,
-        '2024-06-01T10:00:00Z'::timestamptz,
-        60::integer,
-        '2024-06-01T11:30:00Z'::timestamptz,
-        'closed_breached'::text
+        '456 Oak Ave'::text,
+        'Portland'::text,
+        'OR'::text,
+        'US'::text
+    )
+),
+MOCK materialize.raw.contact_methods(
+    account_id bigint,
+    kind       text,
+    value      text
+) AS (
+    SELECT * FROM VALUES (NULL::bigint, NULL::text, NULL::text)
+    WHERE false
+),
+EXPECTED(
+    account_id    bigint,
+    signed_up_at  timestamptz,
+    status        text,
+    address_line1 text,
+    address_city  text,
+    address_region text,
+    address_country text,
+    primary_email text,
+    phone_number  text
+) AS (
+    SELECT * FROM VALUES (
+        3::bigint,
+        '2024-06-10T08:30:00Z'::timestamptz,
+        'pending'::text,
+        '456 Oak Ave'::text,
+        'Portland'::text,
+        'OR'::text,
+        'US'::text,
+        NULL::text,
+        NULL::text
     )
 );
 ```
@@ -231,13 +309,13 @@ mz-deploy test
 Run tests for a specific view:
 
 ```bash
-mz-deploy test 'materialize.public.ticket_sla'
+mz-deploy test 'materialize.public.customer'
 ```
 
 Run a single named test:
 
 ```bash
-mz-deploy test 'materialize.public.ticket_sla#test_open_breached'
+mz-deploy test 'materialize.public.customer#test_account_with_full_data'
 ```
 
 Run all tests in a schema:

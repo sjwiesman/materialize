@@ -7,7 +7,7 @@
 Running `mz-deploy compile` performs a full local validation of your project without connecting to any remote database:
 
 1. **Parse** — every `.sql` file in `models/` is parsed. A syntax error in any file fails immediately.
-2. **Dependency resolution** — object references across files are resolved. If `ticket_sla.sql` references a table called `tickets`, compile confirms that `tickets` is declared somewhere in the project.
+2. **Dependency resolution** — object references across files are resolved. If `customer.sql` references a table called `raw.accounts`, compile confirms that `accounts` is declared somewhere in the project.
 3. **Topological sort** — the full dependency graph is sorted into a valid deployment order. Circular dependencies are rejected with an error that identifies the cycle.
 4. **Type-check** — column types, function signatures, and dependency schemas are verified using the information in `types.lock`. This mirrors what Materialize would report if you ran the SQL live.
 
@@ -36,11 +36,11 @@ If your project has:
 models/
 └── materialize/
     └── public/
-        ├── ticket_sla.sql
-        └── ticket_sla__staging.sql
+        ├── customer.sql
+        └── customer__staging.sql
 ```
 
-Then `mz-deploy compile --profile production` validates **both** files. A syntax error in `ticket_sla__staging.sql` fails the compile even though that variant will never be deployed to production.
+Then `mz-deploy compile --profile production` validates **both** files. A syntax error in `customer__staging.sql` fails the compile even though that variant will never be deployed to production.
 
 This is intentional. A broken staging variant that is never caught in CI will break the first developer who runs with the staging profile. Compile validates your whole project, not just the slice that is active today.
 
@@ -49,25 +49,25 @@ This is intentional. A broken staging variant that is never caught in CI will br
 Compile errors use annotated output to point directly at the problem. For a type mismatch:
 
 ```text
-error: column "closed_at" has type timestamptz, but expression has type text
-  --> models/materialize/public/ticket_sla.sql:12:12
+error: column "signed_up_at" has type timestamptz, but expression has type text
+  --> models/materialize/public/customer.sql:6:5
    |
-12 |     closed_at = 'not-a-timestamp',
-   |                 ^^^^^^^^^^^^^^^^^ expected timestamptz, found text
+ 6 |     a.signed_up_at = 'not-a-timestamp',
+   |                      ^^^^^^^^^^^^^^^^^ expected timestamptz, found text
    |
-   = hint: cast the expression: closed_at = 'not-a-timestamp'::timestamptz
+   = hint: cast the expression: a.signed_up_at = 'not-a-timestamp'::timestamptz
 ```
 
 For a missing dependency:
 
 ```text
-error: unresolved object "tickets"
-  --> models/materialize/public/ticket_sla.sql:18:6
+error: unresolved object "raw.acounts"
+  --> models/materialize/public/customer.sql:14:6
    |
-18 | FROM tickets
-   |      ^^^^^^^ not found in project
+14 | FROM raw.acounts a
+   |      ^^^^^^^^^^^ not found in project
    |
-   = hint: declare "tickets" in tables/ or add it to dependencies in project.toml
+   = hint: declare "acounts" in models/materialize/raw/ or check for a typo
 ```
 
 The file, line, and column are always included. The `hint:` line suggests a concrete next step.
@@ -117,19 +117,33 @@ mz-deploy compile -v
 
 ```text
 Dependency graph:
-  ticket_sla
-    └── tickets (table)
+  customer
+    ├── accounts (table)
+    ├── addresses (table)
+    └── contact_methods (table)
 
 Deployment order:
-  1. materialize.public.ticket_sla
+  1. materialize.public.customer
 
 SQL plan:
--- materialize.public.ticket_sla
-CREATE MATERIALIZED VIEW ticket_sla
+-- materialize.public.customer
+CREATE MATERIALIZED VIEW customer
 IN CLUSTER app
 AS
-SELECT id, opened_at, sla_minutes, closed_at, ...
-FROM tickets;
+SELECT
+    a.id              AS account_id,
+    a.signed_up_at,
+    a.status,
+    addr.line1        AS address_line1,
+    addr.city         AS address_city,
+    addr.region       AS address_region,
+    addr.country      AS address_country,
+    email.value       AS primary_email,
+    phone.value       AS phone_number
+FROM raw.accounts a
+LEFT JOIN raw.addresses addr ON addr.account_id = a.id
+LEFT JOIN raw.contact_methods email ON email.account_id = a.id AND email.kind = 'email'
+LEFT JOIN raw.contact_methods phone ON phone.account_id = a.id AND phone.kind = 'phone';
 
 OK
 ```
@@ -141,13 +155,13 @@ Use `-v` when you want to confirm the deployment order before running `stage`, o
 `explain` lets you inspect the query plan for a single materialized view or index without deploying anything to your live environment. It compiles the project, spins up a local Materialize Docker container, stages the object's dependencies as stubs, and runs `EXPLAIN`:
 
 ```bash
-mz-deploy explain materialize.public.ticket_sla
+mz-deploy explain materialize.public.customer
 ```
 
 To explain a specific index:
 
 ```bash
-mz-deploy explain materialize.public.ticket_sla#sla_by_status_idx
+mz-deploy explain materialize.public.customer#customer_by_account_idx
 ```
 
 The output is the Materialize `EXPLAIN` plan — the same output you would get from running `EXPLAIN MATERIALIZED VIEW` in a SQL shell. Use it to verify that Materialize will plan the query as expected before you commit the deployment.

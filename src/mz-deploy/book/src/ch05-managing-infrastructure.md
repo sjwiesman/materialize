@@ -28,7 +28,7 @@ Running `mz-deploy apply` processes all infrastructure object types in dependenc
 
 Each step is idempotent. If you run `apply` twice in a row on an unchanged project, the second run makes no changes. Objects that already match their declared state are reported as `=` (up-to-date) and left alone.
 
-For a ticket SLA project the typical first run looks like:
+For the customer project the typical first run looks like:
 
 ```bash
 mz-deploy apply
@@ -37,23 +37,21 @@ mz-deploy apply
 Output:
 
 ```
-clusters     + sla_compute (created)
-roles        = analyst (up-to-date)
-secrets      + kafka_password (created)
-connections  + kafka_conn (created)
-sources      + tickets (created)
-tables       = backfill (up-to-date)
+clusters     + app (created)
+roles        = deploy_bot (up-to-date)
+tables       + accounts (created)
+tables       + addresses (created)
+tables       + contact_methods (created)
 ```
 
 On a second run with no changes:
 
 ```
-clusters     = sla_compute (up-to-date)
-roles        = analyst (up-to-date)
-secrets      = kafka_password (up-to-date)
-connections  = kafka_conn (up-to-date)
-sources      = tickets (up-to-date)
-tables       = backfill (up-to-date)
+clusters     = app (up-to-date)
+roles        = deploy_bot (up-to-date)
+tables       = accounts (up-to-date)
+tables       = addresses (up-to-date)
+tables       = contact_methods (up-to-date)
 ```
 
 ## Subcommand granularity
@@ -146,10 +144,10 @@ In short: `apply` converges *definitions*, not *data*.
 To remove an infrastructure object from Materialize and from your project, use `mz-deploy delete`:
 
 ```bash
-mz-deploy delete cluster sla_compute
-mz-deploy delete connection mydb.public.kafka_conn
-mz-deploy delete source mydb.public.tickets
-mz-deploy delete table mydb.public.backfill
+mz-deploy delete cluster app
+mz-deploy delete table mydb.raw.accounts
+mz-deploy delete table mydb.raw.addresses
+mz-deploy delete table mydb.raw.contact_methods
 ```
 
 `delete` drops the object in Materialize using `DROP` (without `CASCADE`) and then removes the corresponding project file. If dependents exist, the drop fails and the project file is preserved — you must remove the dependents first.
@@ -159,7 +157,7 @@ The relationship to `apply`: once you delete an object, `apply` no longer knows 
 Use `--yes` to skip the confirmation prompt in automation:
 
 ```bash
-mz-deploy delete cluster sla_compute --yes
+mz-deploy delete cluster app --yes
 ```
 
 ---

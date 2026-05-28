@@ -6,7 +6,7 @@
 
 When you `stage` and `promote` a change to a materialized view, mz-deploy's default behavior is a full schema swap. The staging schema — containing rebuilt versions of every changed object and their dependents — atomically replaces the production schema. This is safe and efficient within a single project: mz-deploy knows which objects depend on which, so it redeploys everything that needs rebuilding.
 
-The problem surfaces at project boundaries. If another team's project builds a view or sink on top of your `ticket_sla` MV, mz-deploy does not know about that. When you ship a change and the schema swap occurs, your MV gets dropped and recreated under a new identity. The other team's object, which referenced the old identity, breaks. They have to redeploy to pick up the new version — and they may not even know a deployment happened.
+The problem surfaces at project boundaries. If another team's project builds a view or sink on top of your `customer` MV, mz-deploy does not know about that. When you ship a change and the schema swap occurs, your MV gets dropped and recreated under a new identity. The other team's object, which referenced the old identity, breaks. They have to redeploy to pick up the new version — and they may not even know a deployment happened.
 
 As your project becomes a shared surface — a contract that other teams build on — this becomes untenable. You need a way to update materialized views in place rather than swapping them out.
 
@@ -23,11 +23,11 @@ This updates the MV's computation in place. The MV keeps the same identity — t
 You place `SET api = stable` in the schema modifier file for the schema you want to mark:
 
 ```sql
--- models/materialize/api.sql
+-- models/materialize/public.sql
 SET api = stable;
 ```
 
-Every MV under `models/materialize/api/` is then deployed as a replacement when it changes.
+Every MV under `models/materialize/public/` is then deployed as a replacement when it changes.
 
 ## The cost: only materialized views allowed
 
@@ -47,38 +47,56 @@ The implication is that replacement is a stricter operation than a rebuild. If y
 
 ## A worked example
 
-Suppose the ticket-SLA project exposes a summary surface for other teams to report against. You create a stable schema for it:
+The customer project's `public` schema contains a single `customer` MV — the canonical entity that other teams subscribe to for account data. Marking `public` as stable makes explicit what it already is: the shared contract downstream teams rely on.
+
+The project structure:
 
 ```text
 models/
 └── materialize/
-    ├── api.sql          ← stable schema modifier
-    └── api/
-        └── ticket_breach_summary.sql
+    ├── public.sql          ← stable schema modifier
+    ├── public/
+    │   └── customer.sql
+    └── raw/
+        ├── accounts.sql
+        ├── addresses.sql
+        └── contact_methods.sql
 ```
 
 The schema modifier marks the boundary:
 
 ```sql
--- models/materialize/api.sql
+-- models/materialize/public.sql
 SET api = stable;
 ```
 
-The MV aggregates from the internal `ticket_sla` schema into a shape other teams can subscribe to:
+The `customer` MV joins the three raw tables into the shape other teams consume:
 
 ```sql
--- models/materialize/api/ticket_breach_summary.sql
-CREATE MATERIALIZED VIEW ticket_breach_summary AS
+-- models/materialize/public/customer.sql
+CREATE MATERIALIZED VIEW customer
+IN CLUSTER app
+AS
 SELECT
-    team,
-    priority,
-    COUNT(*) FILTER (WHERE breached) AS breach_count,
-    COUNT(*)                         AS total_count
-FROM materialize.public.ticket_sla
-GROUP BY team, priority;
+    a.id              AS account_id,
+    a.signed_up_at,
+    a.status,
+    addr.line1        AS address_line1,
+    addr.city         AS address_city,
+    addr.region       AS address_region,
+    addr.country      AS address_country,
+    email.value       AS primary_email,
+    phone.value       AS phone_number
+FROM raw.accounts a
+LEFT JOIN raw.addresses addr
+       ON addr.account_id = a.id
+LEFT JOIN raw.contact_methods email
+       ON email.account_id = a.id AND email.kind = 'email'
+LEFT JOIN raw.contact_methods phone
+       ON phone.account_id = a.id AND phone.kind = 'phone';
 ```
 
-When you update `ticket_breach_summary` — say, to add a `breach_rate` column — `stage` records it as a pending replacement. `promote` applies it after the main schema swap, updating the MV in place. Any team that has built a sink or dashboard on top of `materialize.api.ticket_breach_summary` continues operating without redeployment.
+The `public` schema contains only this one MV — no tables, views, or sinks — so it satisfies the constraint. When you update `customer` — say, to add a `region` column to the join or to change how `status` is resolved — `stage` records it as a pending replacement. `promote` applies it after the main schema swap, updating the MV in place. Any team that has built a sink or subscription on top of `materialize.public.customer` continues operating without redeployment.
 
 ## When to reach for stable
 

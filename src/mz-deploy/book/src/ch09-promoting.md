@@ -99,7 +99,7 @@ When you run with `--force`, the entire affected production schema is replaced b
 
 Multiple staging deployments can coexist and run in parallel. Each one has its own suffixed schemas and clusters (`public_abc123`, `public_def456`), so they do not interfere with each other during the staging phase.
 
-The constraint comes at promote time. Two deployments "overlap" when they touch any of the same schemas or clusters. Overlap is determined at the schema level, not the object level — if deployment A changes `ticket_sla` in `public` and deployment B changes `sla_summary` in `public`, both touch the `public` schema and they overlap, even though they modified different objects.
+The constraint comes at promote time. Two deployments "overlap" when they touch any of the same schemas or clusters. Overlap is determined at the schema level, not the object level — if deployment A changes `customer` in `public` and deployment B changes `customer_summary` in `public`, both touch the `public` schema and they overlap, even though they modified different objects.
 
 When two overlapping deployments race to promote, the first one to commit wins. The second promote will fail with a conflict error because production was modified after the second deployment was staged:
 
