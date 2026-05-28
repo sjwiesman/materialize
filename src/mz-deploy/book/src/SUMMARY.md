@@ -21,6 +21,7 @@
 
 - [Stable API schemas](./ch10-stable-api.md)
 - [Profiles & environments](./ch11-profiles.md)
+- [Variables](./ch12-variables.md)
 
 # Reference
 
