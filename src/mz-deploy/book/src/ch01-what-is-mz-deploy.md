@@ -75,25 +75,26 @@ to open a `psql` session against your region.
 
 ## Where the rest of this book goes
 
-**Part I — Introduction** (the chapter you are reading) establishes the
-vocabulary and mental model.
+**Part I — Introduction** covers this chapter, installation, and a
+guided first-project walkthrough. By the end of Part I you will have
+`mz-deploy` installed, a project wired to a real Materialize region, and
+every phase of the lifecycle run at least once on a working example.
 
-**Part II — Getting started** walks you from installation through your
-first promoted deployment. You will install `mz-deploy`, initialize a
-project, connect it to a Materialize region, and run every phase of the
-lifecycle end to end on a real support-ticket SLA example.
-
-**Part III — The project lifecycle** covers each phase in depth: writing
+**Part II — The Lifecycle** gives each phase its own chapter: writing
 SQL objects, applying infrastructure, compiling, testing, staging, and
-promoting. Each chapter is a reference for its command once you know the
-basics.
+promoting. Read them in order the first time; come back to individual
+chapters once you know the basics.
 
-**Part IV — Advanced topics** covers the concepts that change how you
-design projects at scale: stable API schemas, profiles and environments,
-and variables.
+**Part III — Concepts that change how you think** covers three ideas that
+shape how you design projects at scale: stable API schemas, profiles and
+environments, and variables.
 
-The **Reference appendix** documents every `mz-deploy` subcommand with
-flags, examples, and error recovery guidance.
+**Appendix A — Command reference** documents every `mz-deploy`
+subcommand — the same help text shown by `mz-deploy help <command>`, with
+flags, examples, and error-recovery guidance collected in one place.
+
+**Appendix B — Glossary** defines the terms used throughout the book so
+you always have a single place to look up an unfamiliar word.
 
 ---
 
