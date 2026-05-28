@@ -1,10 +1,10 @@
-# Chapter 12 — Variables
+# Variables
 
 *What you'll learn: how to parameterize SQL across environments with psql-style `:name` substitution.*
 
 ## The problem variables solve
 
-[Profiles](./ch11-profiles.md) handle the connection layer: which host, which credentials, which TLS settings. But sometimes the SQL itself needs to vary by environment. Consider a materialized view that reads from a cluster — the cluster name might be `quickstart` in your local setup and `app` in production. Or a view that should filter to a specific region in production but include all rows in staging.
+[Profiles](./ch12-profiles.md) handle the connection layer: which host, which credentials, which TLS settings. But sometimes the SQL itself needs to vary by environment. Consider a materialized view that reads from a cluster — the cluster name might be `quickstart` in your local setup and `app` in production. Or a view that should filter to a specific region in production but include all rows in staging.
 
 You could duplicate the SQL file with a `name__<profile>.sql` override, but that means maintaining two copies of the same logic. Variables give you a lighter option: keep one SQL file, mark the parts that differ with `:name` placeholders, and define the values per profile in `project.toml`.
 
@@ -151,9 +151,9 @@ Variables are **text substitution**, not parameter binding. Substitution happens
 
 Variables work well for substituting tokens — cluster names, schema names, connection parameters. They become awkward when entire blocks of logic differ between environments.
 
-If you find yourself wrapping large chunks of SQL in conditional logic expressed through variables, or if two environments need structurally different queries, reach for [profile-named file overrides](./ch11-profiles.md#profile-name-driven-file-overrides) instead: create `name__staging.sql` alongside `name.sql` and let each file contain exactly the SQL for that environment. Both files are validated at compile time regardless of the active profile.
+If you find yourself wrapping large chunks of SQL in conditional logic expressed through variables, or if two environments need structurally different queries, reach for [profile-named file overrides](./ch12-profiles.md#profile-name-driven-file-overrides) instead: create `name__staging.sql` alongside `name.sql` and let each file contain exactly the SQL for that environment. Both files are validated at compile time regardless of the active profile.
 
-For the override naming convention and the types of objects that support it, see [Chapter 4 — Writing](./ch04-writing.md) and [Chapter 11 — Profiles & environments](./ch11-profiles.md).
+For the override naming convention and the types of objects that support it, see [Chapter 4 — Writing](./ch04-writing.md) and [Chapter 12 — Profiles & environments](./ch12-profiles.md).
 
 ---
 

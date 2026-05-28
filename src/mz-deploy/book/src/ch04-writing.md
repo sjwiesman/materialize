@@ -1,4 +1,4 @@
-# Chapter 4 — Writing
+# Writing
 
 *What you'll learn: how mz-deploy reads your repo — which files become which objects, and which file names mean something special.*
 
@@ -117,7 +117,7 @@ models/
 SET api = stable;
 ```
 
-That single line marks every object in the schema as part of your stable public API. The full story is in Chapter 10.
+That single line marks every object in the schema as part of your stable public API. The full story is in Chapter 11.
 
 ## Profile variants
 
@@ -133,7 +133,7 @@ When you run mz-deploy with the `staging` profile active, it reads `accounts__st
 
 The separator is always `__` (two underscores). Because the split happens on the *last* `__` in the filename, object names can contain underscores freely: `my_pg__conn__staging.sql` overrides an object named `my_pg__conn`.
 
-Profile variants let you point a staging environment at a smaller dataset or a different cluster size without duplicating your entire project tree. The full story, including how profiles are declared and activated, is in Chapter 11.
+Profile variants let you point a staging environment at a smaller dataset or a different cluster size without duplicating your entire project tree. The full story, including how profiles are declared and activated, is in Chapter 12.
 
 ---
 

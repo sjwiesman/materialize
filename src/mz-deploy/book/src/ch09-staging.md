@@ -141,7 +141,7 @@ mz-deploy abort add-phone-field --output json
 
 The next chapter covers `promote`, which handles the cutover from staging to production — including how conflicts between concurrent deployments are detected and resolved.
 
-Chapter 10 covers the stable-API path (`SET api = stable`), an alternative deployment strategy that updates materialized views in place using Materialize's replacement protocol, preserving the identity of shared objects so downstream consumers in other projects do not need to be redeployed.
+Chapter 11 covers the stable-API path (`SET api = stable`), an alternative deployment strategy that updates materialized views in place using Materialize's replacement protocol, preserving the identity of shared objects so downstream consumers in other projects do not need to be redeployed.
 
 ---
 

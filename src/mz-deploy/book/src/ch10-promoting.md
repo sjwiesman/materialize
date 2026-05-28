@@ -63,7 +63,7 @@ After the atomic swap commits, `promote` continues with several cleanup and fina
 
 **Deferred sink creation.** Sinks are held back during `stage` because they should not start producing output until the deployment is live. Immediately after the swap, `promote` creates them against the newly-promoted production schemas.
 
-**Replacement MV application.** For schemas marked with `SET api = stable`, changed materialized views are not part of the schema swap. Instead, `promote` applies each one in sequence using `ALTER MATERIALIZED VIEW ... APPLY REPLACEMENT`. This updates the MV's computation in place while preserving its identity, so downstream consumers outside your project do not see a disruption. The application order follows the dependency graph — a replacement MV is always applied before any replacement MVs that depend on it. Chapter 10 covers the stable-API path in full.
+**Replacement MV application.** For schemas marked with `SET api = stable`, changed materialized views are not part of the schema swap. Instead, `promote` applies each one in sequence using `ALTER MATERIALIZED VIEW ... APPLY REPLACEMENT`. This updates the MV's computation in place while preserving its identity, so downstream consumers outside your project do not see a disruption. The application order follows the dependency graph — a replacement MV is always applied before any replacement MVs that depend on it. Chapter 11 covers the stable-API path in full.
 
 **Sink repointing.** Sinks that depended on old production objects are updated to point at the new production schemas after the swap.
 

@@ -1,4 +1,4 @@
-# Chapter 11 — Profiles & environments
+# Profiles & environments
 
 *What you'll learn: how connection profiles work, how secrets get resolved, and how the same project deploys to different environments.*
 

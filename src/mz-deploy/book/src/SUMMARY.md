@@ -13,15 +13,16 @@
 - [Writing](./ch04-writing.md)
 - [Managing infrastructure](./ch05-managing-infrastructure.md)
 - [Compiling](./ch06-compiling.md)
-- [Testing](./ch07-testing.md)
-- [Staging](./ch08-staging.md)
-- [Promoting](./ch09-promoting.md)
+- [External dependencies](./ch07-external-dependencies.md)
+- [Testing](./ch08-testing.md)
+- [Staging](./ch09-staging.md)
+- [Promoting](./ch10-promoting.md)
 
 # Part III — Concepts That Change How You Think
 
-- [Stable API schemas](./ch10-stable-api.md)
-- [Profiles & environments](./ch11-profiles.md)
-- [Variables](./ch12-variables.md)
+- [Stable API schemas](./ch11-stable-api.md)
+- [Profiles & environments](./ch12-profiles.md)
+- [Variables](./ch13-variables.md)
 
 # Reference
 
