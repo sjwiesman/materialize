@@ -47,9 +47,5 @@ Definitions of terms used throughout this book. Entries are alphabetical.
   containing only objects that have changed since the last promoted
   snapshot.
 
-- **types.lock** — A project file that pins external type information
-  used by `compile` for type-checking without contacting a live
-  Materialize.
-
 - **variable** — A psql-style `:name` substitution defined per-profile
   in `project.toml`, resolved before the SQL parser sees the file.

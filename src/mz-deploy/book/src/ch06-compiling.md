@@ -9,7 +9,7 @@ Running `mz-deploy compile` performs a full local validation of your project wit
 1. **Parse** — every `.sql` file in `models/` is parsed. A syntax error in any file fails immediately.
 2. **Dependency resolution** — object references across files are resolved. If `customer.sql` references a table called `raw.accounts`, compile confirms that `accounts` is declared somewhere in the project.
 3. **Topological sort** — the full dependency graph is sorted into a valid deployment order. Circular dependencies are rejected with an error that identifies the cycle.
-4. **Type-check** — column types, function signatures, and dependency schemas are verified using the information in `types.lock`. This mirrors what Materialize would report if you ran the SQL live.
+4. **Type-check** — column types, function signatures, and dependency schemas are verified. This mirrors what Materialize would report if you ran the SQL live.
 
 A passing `compile` guarantees that `stage` and `apply` will not fail at the SQL-parsing stage. The guarantee is limited to parsing and type-checking: `stage` can still fail for operational reasons (cluster unreachable, quota exceeded), but it will not fail because of a SQL syntax error or a missing column that `compile` would have caught.
 
@@ -87,22 +87,6 @@ mz-deploy compile
 
 `clean` removes `target/` and exits. It does not require a database connection and does not touch your Materialize region. Running it on a project that has no `target/` directory is safe.
 
-## `mz-deploy lock`
-
-Type-checking requires schema information for any external objects your project depends on — tables or views that exist in Materialize but are not declared in your project files. This information is stored in `types.lock` at the project root.
-
-You generate or refresh `types.lock` by running:
-
-```bash
-mz-deploy lock
-```
-
-This connects to the database, fetches schemas for all declared external dependencies, and writes `types.lock`. Commit `types.lock` to your repository so that CI and other developers can run `compile` without a live database connection.
-
-Refresh `types.lock` whenever an external dependency changes its schema — a new column added to a source table, a referenced Postgres view that was altered upstream. After refreshing, re-run `compile` to confirm that your project still type-checks against the updated schemas.
-
-`lock` also runs automatically after `mz-deploy apply tables`, since `CREATE TABLE FROM SOURCE` adds new columns that downstream views may depend on.
-
 ## `compile -v`
 
 Adding `-v` prints everything the standard run reports, plus:
@@ -174,5 +158,4 @@ You can now:
 
 - Run `compile` in local dev and in CI.
 - Interpret the most common compile errors.
-- Refresh `types.lock` when external dependencies change.
 - Use `compile -v` and `explain` to inspect the deployment plan.
