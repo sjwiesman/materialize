@@ -2,6 +2,10 @@
 
 [Introduction](./introduction.md)
 
+# Part I — Introduction
+
+- [What is mz-deploy?](./ch01-what-is-mz-deploy.md)
+
 # Reference
 
 - [Command reference](./appendix-a-reference.md)
