@@ -62,6 +62,7 @@ pub mod apply_objects;
 pub mod apply_secrets;
 pub mod apply_sources;
 pub mod apply_tables;
+pub mod clean;
 pub mod clusters;
 pub mod compile;
 pub mod debug;

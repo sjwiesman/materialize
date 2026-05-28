@@ -51,6 +51,7 @@ Getting started:
 
 Develop:
   compile              Compile and validate SQL without connecting to database
+  clean                Delete the project's target/ build directory
   test                 Run SQL unit tests defined in test files
   explain              Show the EXPLAIN plan for a materialized view or index
   dev                  Iterate on your dirty views in a per-developer overlay
@@ -146,6 +147,18 @@ enum Command {
         after_help = "Run 'mz-deploy help compile' for a detailed usage guide."
     )]
     Compile {},
+
+    /// Delete the project's target/ build directory
+    ///
+    /// Removes all locally cached build artifacts (the project's `target/`
+    /// directory). The next `compile`, `test`, or `apply` will rebuild
+    /// from scratch. Safe to run at any time; does not touch the
+    /// Materialize region.
+    #[command(
+        hide = true,
+        after_help = "Run 'mz-deploy help clean' for a detailed usage guide."
+    )]
+    Clean,
 
     /// Show the EXPLAIN plan for a materialized view or index
     ///
@@ -910,6 +923,10 @@ async fn run(args: Args) -> Result<(), CliError> {
             cli::commands::compile::run(&settings, true)
                 .await
                 .map(|_| ())
+        }
+        Command::Clean => {
+            let settings = load_settings(false)?;
+            cli::commands::clean::run(&settings)
         }
         Command::Explain { target, overlay } => {
             let settings = load_settings(false)?;
