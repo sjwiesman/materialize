@@ -892,10 +892,6 @@ fn load_or_generate_types_cache(
     let directory = &settings.directory;
     let external_types = types::load_types_lock(directory).unwrap_or_default();
 
-    info!(
-        "{}",
-        "Running type check...".if_supports_color(Stream::Stderr, |t| t.yellow())
-    );
     typecheck::run(
         directory,
         settings.profile_name().unwrap_or(""),

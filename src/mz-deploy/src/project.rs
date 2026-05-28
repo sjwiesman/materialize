@@ -152,6 +152,118 @@ mod plan_tests {
             "overlay-defined view should be present in planned project"
         );
     }
+
+    /// With a profile_suffix active, an object whose CREATE statement qualifies
+    /// itself with the unsuffixed directory name still validates: the user
+    /// writes the canonical database name in their SQL and the suffix is
+    /// applied during assembly. The compiled statement and its ObjectId both
+    /// carry the suffixed database name.
+    #[test]
+    fn plan_sync_with_profile_suffix_compiles_unsuffixed_qualified_name() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let schema_dir = root.path().join("models/mydb/public");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        // User writes the unsuffixed directory-derived database name.
+        std::fs::write(
+            schema_dir.join("foo.sql"),
+            "CREATE VIEW mydb.public.foo AS SELECT 1 AS x;\n",
+        )
+        .unwrap();
+
+        let fs = crate::fs::FileSystem::new();
+        let project = plan_sync(&fs, root.path(), None, Some("_dev"), &Default::default())
+            .expect("unsuffixed qualified name should validate when suffix is active");
+
+        let id = ir::object_id::ObjectId::new(
+            "mydb_dev".to_string(),
+            "public".to_string(),
+            "foo".to_string(),
+        );
+        let obj = project
+            .find_object(&id)
+            .expect("planned project should expose object under suffixed database");
+        let ident = obj.typed_object.stmt.ident();
+        assert_eq!(
+            ident.database.as_deref(),
+            Some("mydb_dev"),
+            "compiled CREATE statement should carry the suffixed database name",
+        );
+    }
+
+    /// Cross-database references inside a view body that target another
+    /// project-owned database get rewritten to the suffixed form alongside the
+    /// owning database, so the resulting SQL is internally consistent.
+    #[test]
+    fn plan_sync_with_profile_suffix_rewrites_cross_database_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+
+        // Base table in db_a.
+        let a_dir = root.path().join("models/db_a/public");
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::write(
+            a_dir.join("base.sql"),
+            "CREATE TABLE db_a.public.base (id INT);\n",
+        )
+        .unwrap();
+
+        // View in db_b that references db_a.public.base by its unsuffixed name.
+        let b_dir = root.path().join("models/db_b/public");
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(
+            b_dir.join("derived.sql"),
+            "CREATE VIEW db_b.public.derived AS SELECT id FROM db_a.public.base;\n",
+        )
+        .unwrap();
+
+        let fs = crate::fs::FileSystem::new();
+        let project = plan_sync(&fs, root.path(), None, Some("_dev"), &Default::default())
+            .expect("cross-database references should compile under a profile suffix");
+
+        let derived_id = ir::object_id::ObjectId::new(
+            "db_b_dev".to_string(),
+            "public".to_string(),
+            "derived".to_string(),
+        );
+        let derived = project
+            .find_object(&derived_id)
+            .expect("derived view should appear under the suffixed database");
+
+        // The dependency edge should target the *suffixed* db_a, not the
+        // raw name the user wrote in the SELECT body.
+        let base_id = ir::object_id::ObjectId::new(
+            "db_a_dev".to_string(),
+            "public".to_string(),
+            "base".to_string(),
+        );
+        assert!(
+            derived.dependencies.contains(&base_id),
+            "cross-database dependency should be rewritten to the suffixed name; \
+             got {:?}",
+            derived.dependencies,
+        );
+
+        // The serialized statement body should mention the suffixed reference,
+        // not the original one written by the user. (Catches regressions where
+        // the AST rewrite skips the body or the statement's own name.)
+        // The unsuffixed "db_a.public.base" cannot appear as a substring of
+        // "db_a_dev.public.base" — the `_dev` interrupts the match — so a plain
+        // `contains` check is enough to assert the original name is gone.
+        let serialized = derived.typed_object.stmt.to_string();
+        assert!(
+            serialized.contains("db_a_dev.public.base"),
+            "body should reference the suffixed db_a; got: {serialized}",
+        );
+        assert!(
+            !serialized.contains("db_a.public.base"),
+            "body should not retain the original db_a name; got: {serialized}",
+        );
+        assert!(
+            serialized.contains("db_b_dev.public.derived"),
+            "statement's own name should be suffixed; got: {serialized}",
+        );
+    }
 }
 
 /// Compile a project root into a planned deployment representation.

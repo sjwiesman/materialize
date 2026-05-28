@@ -59,7 +59,10 @@ pub struct ObjectVariant {
 pub struct DatabaseObject {
     /// The name of the object (without extension or profile suffix)
     pub name: String,
-    /// The suffixed database name (same as directory name when no suffix is active)
+    /// The directory-derived database name (no profile suffix applied).
+    /// Per-object validation uses this to match the declared database in the
+    /// user's SQL against the directory the file lives under; the suffix is
+    /// reapplied to the compiled statement after assembly.
     pub database: String,
     /// The schema name (directory name)
     pub schema: String,

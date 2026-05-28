@@ -501,20 +501,28 @@ impl DatabaseObject {
     /// Rewrite cross-database references using the given database name map.
     ///
     /// For any 3-part `UnresolvedItemName` where the database part matches an
-    /// original name in the map, replace it with the suffixed name. External
-    /// databases (not in the map) are untouched.
+    /// original name in the map, replace it with the suffixed name. This
+    /// includes the statement's own name (which after per-object validation
+    /// carries the original directory-derived database), supporting statements
+    /// (indexes, grants, comments), and all dependency references in the body.
+    /// External databases (not in the map) are untouched.
     pub fn rewrite_database_references(&mut self, db_map: &BTreeMap<String, String>) {
         let ident = self.stmt.ident();
         let database = ident.database.as_deref().unwrap_or("unknown");
         let schema = ident.schema.as_deref().unwrap_or("unknown");
-        let fqn = FullyQualifiedName::try_from(UnresolvedItemName(vec![
+        let own_name = UnresolvedItemName(vec![
             Ident::new(database).expect("valid ident"),
             Ident::new(schema).expect("valid ident"),
             Ident::new(&ident.object).expect("valid ident"),
-        ]))
-        .expect("database, schema, and object are always present");
+        ]);
+        let fqn = FullyQualifiedName::try_from(own_name.clone())
+            .expect("database, schema, and object are always present");
         let mut visitor = NormalizingVisitor::fully_qualifying_with_db_map(&fqn, Some(db_map));
-        self.stmt = self.stmt.clone().normalize_dependencies_with(&mut visitor);
+        self.stmt = self
+            .stmt
+            .clone()
+            .normalize_name_with(&visitor, &own_name)
+            .normalize_dependencies_with(&mut visitor);
 
         visitor.normalize_index_references(&mut self.indexes);
         visitor.normalize_grant_references(&mut self.grants);

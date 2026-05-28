@@ -59,7 +59,6 @@ impl SecurityConfig {
 /// Each profile can specify a name suffix, security settings, and psql-style
 /// variables that are resolved in SQL files before parsing.
 #[derive(Debug, Deserialize, Clone, Default)]
-#[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
     /// Optional suffix to append to database and cluster names for this profile.
     /// For example, `profile_suffix = "_staging"` would rename `materialize` to
@@ -85,6 +84,7 @@ pub struct ProfileConfig {
 /// `MZ_DEPLOY_PROFILE`, or the per-project `.mzprofile` file. See
 /// [`read_mzprofile`].
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectSettings {
     pub mz_version: Option<String>,
     pub profiles: Option<BTreeMap<String, ProfileConfig>>,

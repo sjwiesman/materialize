@@ -144,7 +144,14 @@ struct Discovery {
 /// compilation: each descriptor is processed independently.
 #[derive(Debug, Clone)]
 struct ObjectDescriptor {
+    /// Database name after profile suffix has been applied (matches the
+    /// database name that will be deployed). Used for grouping, caching,
+    /// fingerprinting, and as the canonical name in the compiled project.
     db_name: String,
+    /// Original directory name without profile suffix. Used to build the FQN
+    /// for per-object validation so that the user's SQL — which references
+    /// the unsuffixed name they wrote in their files — matches the directory.
+    original_db_name: String,
     schema_name: String,
     object_name: String,
     variants: Vec<VariantDescriptor>,
@@ -617,6 +624,7 @@ fn discover_project(
                 }
                 object_descriptors.push(ObjectDescriptor {
                     db_name: db_name.clone(),
+                    original_db_name: original_db_name.clone(),
                     schema_name: schema_name.clone(),
                     object_name: object_files.name,
                     variants,
@@ -849,9 +857,14 @@ fn compile_object_uncached(
         });
     }
 
+    // Build the input with the *original* (directory-derived) database name so
+    // that per-object validation compares the user's declared database against
+    // the directory they wrote it under. The suffixed name is reapplied to
+    // dependencies and the statement's own name post-assembly via
+    // `Project::rewrite_database_references`.
     let raw_object = input::DatabaseObject {
         name: descriptor.object_name,
-        database: descriptor.db_name.clone(),
+        database: descriptor.original_db_name.clone(),
         schema: descriptor.schema_name.clone(),
         variants,
     };
