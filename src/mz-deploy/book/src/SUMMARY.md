@@ -6,6 +6,7 @@
 
 - [What is mz-deploy?](./ch01-what-is-mz-deploy.md)
 - [Installation & setup](./ch02-installation.md)
+- [Your first project](./ch03-first-project.md)
 
 # Reference
 
