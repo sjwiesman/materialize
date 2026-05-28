@@ -141,7 +141,7 @@ The pragma must appear as the first non-whitespace content in the file, in eithe
 
 ## What variables don't do
 
-Variables are **text substitution**, not parameter binding. Substitution happens before SQL parsing, not at query execution time. That means:
+Variables are text substitution, not parameter binding — they are resolved before SQL parsing, not at query execution. That means:
 
 - You cannot use variables to pass data values that change at query runtime. For per-execution values, use parameters, session variables, or source tables.
 - Variables do not protect against injection in the `:name` (raw) form. If the variable value contains SQL syntax, it will be interpreted as SQL. Use `:'name'` or `:"name"` when the variable value comes from outside the project definition.

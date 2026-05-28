@@ -28,11 +28,11 @@ If you try to stage with an ID that already exists, `stage` exits with an error.
 
 ## Partial deployments
 
-The most important property of `stage` is that it does not redeploy objects that have not changed.
+`stage` does not redeploy objects that have not changed — that is its most important property.
 
 Before staging, mz-deploy computes a hash of each object's SQL definition and compares it to the hashes recorded in the last promoted snapshot. Objects whose hashes match are skipped entirely — they already exist in production with the correct definition, so there is nothing to do. Only objects whose definitions differ are recreated in the staging schemas.
 
-Dependency tainting extends this: if object X changes, any object that directly or transitively depends on X is also marked dirty and redeployed, even if its own SQL is unchanged. This ensures that downstream objects always run against the updated version of their dependencies.
+Dependency tainting extends this: if object X changes, any object that directly or transitively depends on X is also marked dirty and redeployed, even if its own SQL is unchanged.
 
 Consider a customer pipeline with two dependent views:
 
@@ -66,7 +66,7 @@ Deployments operate at the schema and cluster level. If one object in a schema c
 
 Tables and sources are infrastructure: they store or ingest data and cannot be safely torn down and recreated as part of a staging deployment. If your project references a table or source that does not exist, `stage` will fail at validation time before making any changes. Run `mz-deploy apply` to create or update infrastructure before staging.
 
-Sinks are deferred because they should not start producing output until the deployment is promoted. Creating a Kafka sink in a staging schema would begin writing data immediately, before you have verified the deployment is correct. Instead, `stage` records which sinks need to be created and `promote` creates them as part of the final cutover.
+Sinks are deferred because they should not start producing output until the deployment is promoted. Creating a Kafka sink in a staging schema would begin writing data immediately, before you have verified the deployment is correct.
 
 ## Rollback
 

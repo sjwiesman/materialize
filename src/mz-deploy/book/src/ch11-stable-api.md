@@ -6,7 +6,7 @@
 
 When you `stage` and `promote` a change to a materialized view, mz-deploy's default behavior is a full schema swap. The staging schema — containing rebuilt versions of every changed object and their dependents — atomically replaces the production schema. This is safe and efficient within a single project: mz-deploy knows which objects depend on which, so it redeploys everything that needs rebuilding.
 
-The problem surfaces at project boundaries. If another team's project builds a view or sink on top of your `customer` MV, mz-deploy does not know about that. When you ship a change and the schema swap occurs, your MV gets dropped and recreated under a new identity. The other team's object, which referenced the old identity, breaks. They have to redeploy to pick up the new version — and they may not even know a deployment happened.
+The problem surfaces at project boundaries. When you ship a change, mz-deploy drops and recreates your MV under a new identity. Any view or sink another team built on top of it — which mz-deploy knows nothing about — breaks. They have to redeploy to pick up the new version — and they may not even know a deployment happened.
 
 As your project becomes a shared surface — a contract that other teams build on — this becomes untenable. You need a way to update materialized views in place rather than swapping them out.
 
@@ -18,7 +18,7 @@ As your project becomes a shared surface — a contract that other teams build o
 ALTER MATERIALIZED VIEW ... APPLY REPLACEMENT ...
 ```
 
-This updates the MV's computation in place. The MV keeps the same identity — the same object ID — so any view, sink, or subscription that references it by name continues to work without interruption. Downstream consumers outside your project do not need to be redeployed and do not need to know anything changed.
+This updates the MV's computation in place. The MV keeps the same identity — the same object ID — so any view, sink, or subscription that references it by name continues to work without interruption.
 
 You place `SET api = stable` in the schema modifier file for the schema you want to mark:
 
@@ -41,7 +41,7 @@ In practice this means a stable schema is a clean read-only surface. It contains
 
 In a regular schema, when an object changes, its dependents are marked dirty and redeployed. That cascade keeps everything consistent. In a stable schema, the same cascade would defeat the purpose: if a replacement MV propagated dirtiness to its dependents, those dependents would be redeployed — breaking the contract you promised to maintain.
 
-Replacement MVs do **not** propagate dirtiness. A changed MV in a stable schema is updated in place; nothing downstream is touched. That is the whole point. External consumers see their objects continue to function, reading from a view whose computation was silently updated.
+Replacement MVs do **not** propagate dirtiness. A changed MV in a stable schema is updated in place; nothing downstream is touched.
 
 The implication is that replacement is a stricter operation than a rebuild. If you change a stable MV in a way that alters its output schema — different columns, different types — downstream consumers may fail at query time rather than at deploy time. mz-deploy does not validate semantic compatibility. Stable schemas work best when changes are additive or preserve the existing interface.
 

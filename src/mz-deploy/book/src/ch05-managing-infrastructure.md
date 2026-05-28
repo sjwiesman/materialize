@@ -6,7 +6,7 @@
 
 mz-deploy divides your project objects into two categories with different deployment paths.
 
-Note on location: even though tables, sources, secrets, and connections are "infrastructure by lifecycle" — managed by `apply`, not by the staging pipeline — they are still schema-scoped objects and live under `models/<database>/<schema>/` just like views and materialized views. Only `clusters/`, `roles/`, and `network-policies/` are top-level directories.
+Note: tables, sources, secrets, and connections are managed by `apply`, not the staging pipeline — but they are still schema-scoped and live under `models/<database>/<schema>/` alongside views and materialized views. Only `clusters/`, `roles/`, and `network-policies/` are top-level directories.
 
 **Infrastructure** — clusters, roles, network policies, secrets, connections, sources, and tables — flows through `apply`. These objects are *mutable*: a cluster can be resized, a connection can have its broker address updated, a role can gain or lose members. `apply` reads your project files and converges live state toward them, making only the changes required.
 

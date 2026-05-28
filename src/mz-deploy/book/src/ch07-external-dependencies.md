@@ -10,7 +10,7 @@ An external dependency is an object that already exists in Materialize but is no
 - A view managed by a different deploy pipeline.
 - A Postgres source table that your project reads from but does not define.
 
-Your project's SQL can reference these objects just like it references any other table or view. The issue is at compile time: `mz-deploy compile` type-checks your SQL offline, without connecting to a database. To do that, it needs to know the schema — the column names and types — of every object your SQL references. For objects defined inside your project, `compile` reads the schema from your own SQL files. For objects that live outside your project, you must tell mz-deploy where they are so it can fetch their schemas and record them locally.
+Your SQL can reference these objects like any other. The problem is compile time: `mz-deploy compile` type-checks offline and needs the column names and types of every object it encounters. For objects defined inside your project, `compile` reads the schema from your own SQL files. For objects that live outside your project, you must tell mz-deploy where they are so it can fetch their schemas and record them locally.
 
 ## Declaring external dependencies
 
