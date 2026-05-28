@@ -4,36 +4,72 @@
 
 ## What we're building
 
-This walkthrough tracks a support ticket SLA. The `tickets` table holds one row per ticket with an `id`, an `opened_at` timestamp, an `sla_minutes` budget, and a `closed_at` timestamp that is `NULL` while the ticket is still open. The `ticket_sla` materialized view reads that table and classifies each ticket in real time:
+This walkthrough builds a canonical `customer` object composed from three raw tables. The `accounts` table holds one row per account. The `addresses` and `contact_methods` tables hold supplementary data keyed by `account_id`. The `customer` materialized view joins them into a single denormalized record that downstream consumers query directly.
 
-- **`breached`** — the ticket is still open and has already exceeded its SLA window.
-- **`closed_breached`** — the ticket was closed, but only after the deadline passed.
-- **`on_time`** — everything else.
+Here are the four SQL files you will deploy by the end of this chapter:
 
-Here is the full view definition you will deploy by the end of this chapter:
+**`clusters/app.sql`**
 
 ```sql
-CREATE MATERIALIZED VIEW ticket_sla
+CREATE CLUSTER app (SIZE = '25cc', REPLICATION FACTOR = 1);
+```
+
+**`models/materialize/raw/accounts.sql`**
+
+```sql
+CREATE TABLE accounts (
+    id            bigint       NOT NULL,
+    signed_up_at  timestamptz  NOT NULL,
+    status        text         NOT NULL
+);
+```
+
+**`models/materialize/raw/addresses.sql`**
+
+```sql
+CREATE TABLE addresses (
+    account_id    bigint       NOT NULL,
+    line1         text         NOT NULL,
+    city          text         NOT NULL,
+    region        text,
+    country       text         NOT NULL
+);
+```
+
+**`models/materialize/raw/contact_methods.sql`**
+
+```sql
+CREATE TABLE contact_methods (
+    account_id    bigint       NOT NULL,
+    kind          text         NOT NULL,
+    value         text         NOT NULL
+);
+```
+
+**`models/materialize/public/customer.sql`**
+
+```sql
+CREATE MATERIALIZED VIEW customer
 IN CLUSTER app
 AS
 SELECT
-    id,
-    opened_at,
-    sla_minutes,
-    closed_at,
-    CASE
-        WHEN closed_at IS NULL
-             AND mz_now() > opened_at + (sla_minutes * INTERVAL '1 minute')
-        THEN 'breached'
-        WHEN closed_at IS NOT NULL
-             AND closed_at > opened_at + (sla_minutes * INTERVAL '1 minute')
-        THEN 'closed_breached'
-        ELSE 'on_time'
-    END AS status
-FROM raw.tickets;
+    a.id              AS account_id,
+    a.signed_up_at,
+    a.status,
+    addr.line1        AS address_line1,
+    addr.city         AS address_city,
+    addr.region       AS address_region,
+    addr.country      AS address_country,
+    email.value       AS primary_email,
+    phone.value       AS phone_number
+FROM raw.accounts a
+LEFT JOIN raw.addresses addr
+       ON addr.account_id = a.id
+LEFT JOIN raw.contact_methods email
+       ON email.account_id = a.id AND email.kind = 'email'
+LEFT JOIN raw.contact_methods phone
+       ON phone.account_id = a.id AND phone.kind = 'phone';
 ```
-
-The `mz_now()` call is what makes this genuinely real-time: Materialize re-evaluates the expression as time advances, so a ticket can transition from `on_time` to `breached` without any external trigger.
 
 ## `mz-deploy new`
 
@@ -68,9 +104,9 @@ Change into the project directory:
 cd first-project
 ```
 
-## Adding the cluster, table, and MV
+## Adding the cluster, tables, and MV
 
-Create the three SQL files shown below. The path shown above each block is the path relative to the project root — create any missing directories as you go.
+Create the five SQL files shown below. The path shown above each block is the path relative to the project root — create any missing directories as you go.
 
 **`clusters/app.sql`**
 
@@ -78,43 +114,66 @@ Create the three SQL files shown below. The path shown above each block is the p
 CREATE CLUSTER app (SIZE = '25cc', REPLICATION FACTOR = 1);
 ```
 
-**`models/materialize/raw/tickets.sql`**
+**`models/materialize/raw/accounts.sql`**
 
 ```sql
-CREATE TABLE tickets (
-    id               bigint        NOT NULL,
-    opened_at        timestamptz   NOT NULL,
-    sla_minutes      integer       NOT NULL,
-    closed_at        timestamptz
+CREATE TABLE accounts (
+    id            bigint       NOT NULL,
+    signed_up_at  timestamptz  NOT NULL,
+    status        text         NOT NULL
 );
 ```
 
-The path `models/materialize/raw/` tells mz-deploy this table lives in the `raw` schema of the `materialize` database. Tables, sources, secrets, and connections must be in a separate schema from views and materialized views — mixing them in the same schema is not allowed.
-
-**`models/materialize/public/ticket_sla.sql`**
+**`models/materialize/raw/addresses.sql`**
 
 ```sql
-CREATE MATERIALIZED VIEW ticket_sla
+CREATE TABLE addresses (
+    account_id    bigint       NOT NULL,
+    line1         text         NOT NULL,
+    city          text         NOT NULL,
+    region        text,
+    country       text         NOT NULL
+);
+```
+
+**`models/materialize/raw/contact_methods.sql`**
+
+```sql
+CREATE TABLE contact_methods (
+    account_id    bigint       NOT NULL,
+    kind          text         NOT NULL,
+    value         text         NOT NULL
+);
+```
+
+The path `models/materialize/raw/` tells mz-deploy these tables live in the `raw` schema of the `materialize` database. Tables, sources, secrets, and connections must be in a separate schema from views and materialized views — mixing them in the same schema is not allowed.
+
+**`models/materialize/public/customer.sql`**
+
+```sql
+CREATE MATERIALIZED VIEW customer
 IN CLUSTER app
 AS
 SELECT
-    id,
-    opened_at,
-    sla_minutes,
-    closed_at,
-    CASE
-        WHEN closed_at IS NULL
-             AND mz_now() > opened_at + (sla_minutes * INTERVAL '1 minute')
-        THEN 'breached'
-        WHEN closed_at IS NOT NULL
-             AND closed_at > opened_at + (sla_minutes * INTERVAL '1 minute')
-        THEN 'closed_breached'
-        ELSE 'on_time'
-    END AS status
-FROM raw.tickets;
+    a.id              AS account_id,
+    a.signed_up_at,
+    a.status,
+    addr.line1        AS address_line1,
+    addr.city         AS address_city,
+    addr.region       AS address_region,
+    addr.country      AS address_country,
+    email.value       AS primary_email,
+    phone.value       AS phone_number
+FROM raw.accounts a
+LEFT JOIN raw.addresses addr
+       ON addr.account_id = a.id
+LEFT JOIN raw.contact_methods email
+       ON email.account_id = a.id AND email.kind = 'email'
+LEFT JOIN raw.contact_methods phone
+       ON phone.account_id = a.id AND phone.kind = 'phone';
 ```
 
-The MV lives in `public` and references the table with a schema-qualified name `raw.tickets`.
+The MV lives in `public` and references the tables with schema-qualified names like `raw.accounts`.
 
 Your project tree now looks like this:
 
@@ -125,22 +184,24 @@ first-project/
 ├── models/
 │   └── materialize/
 │       ├── raw/
-│       │   └── tickets.sql
+│       │   ├── accounts.sql
+│       │   ├── addresses.sql
+│       │   └── contact_methods.sql
 │       └── public/
-│           └── ticket_sla.sql
+│           └── customer.sql
 ├── roles/
 └── project.toml
 ```
 
 ## `mz-deploy apply`
 
-Before you can stage or promote the materialized view, the cluster and the table must exist in Materialize. `apply` is the command for that — it reads your `clusters/` directory and all infrastructure objects under `models/`, diffs them against what is already in the database, and creates anything that is missing.
+Before you can stage or promote the materialized view, the cluster and the tables must exist in Materialize. `apply` is the command for that — it reads your `clusters/` directory and all infrastructure objects under `models/`, diffs them against what is already in the database, and creates anything that is missing.
 
 ```bash
 mz-deploy apply
 ```
 
-`apply` works through object types in dependency order: clusters → roles → network policies → secrets → connections → sources → tables. For this project it creates the `app` cluster and the `tickets` table. Running it again is safe — `apply` is idempotent and will skip objects that already exist.
+`apply` works through object types in dependency order: clusters → roles → network policies → secrets → connections → sources → tables. For this project it creates the `app` cluster and the three tables in the `raw` schema. Running it again is safe — `apply` is idempotent and will skip objects that already exist.
 
 If you only want to preview what SQL would run, pass `--dry-run` before committing:
 
@@ -150,7 +211,7 @@ mz-deploy apply --dry-run
 
 ## `mz-deploy compile`
 
-With the cluster and table in place, validate the SQL in your `models/` directory before touching production:
+With the cluster and tables in place, validate the SQL in your `models/` directory before touching production:
 
 ```bash
 mz-deploy compile
@@ -182,7 +243,7 @@ mz-deploy stage
 
 `mz-deploy stage` requires a clean git working tree. If you have uncommitted changes, commit them first or pass `--allow-dirty` to override.
 
-`stage` compiles the project, diffs it against the last promoted snapshot, creates the suffixed staging schema and cluster, and deploys `ticket_sla` into the staging environment. When it finishes successfully it prints the deploy ID — a short string like `abc1234` derived from your git SHA. Keep that ID; you need it in the next step.
+`stage` compiles the project, diffs it against the last promoted snapshot, creates the suffixed staging schema and cluster, and deploys `customer` into the staging environment. When it finishes successfully it prints the deploy ID — a short string like `abc1234` derived from your git SHA. Keep that ID; you need it in the next step.
 
 If staging fails for any reason it automatically rolls back, removing the staging schema and cluster it created.
 
@@ -203,18 +264,16 @@ If another deployment was promoted between your `stage` and your `promote`, the 
 Query the materialized view from `mz-deploy sql` or any PostgreSQL-compatible client connected to your Materialize environment:
 
 ```sql
-SELECT status, count(*)
-FROM ticket_sla
-GROUP BY status;
+SELECT * FROM customer LIMIT 5;
 ```
 
-The view is continuously maintained — insert a row into `tickets` and the count updates immediately without rerunning a query.
+The view is continuously maintained — insert a row into `accounts` and the result updates immediately without rerunning a query.
 
 ---
 
 You can now:
 
 - Scaffold a new mz-deploy project.
-- Apply a cluster and a table to Materialize.
+- Apply a cluster and tables to Materialize.
 - Compile, stage, and promote a materialized view.
 - Query the result.

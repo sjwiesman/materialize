@@ -14,9 +14,11 @@ first-project/
 ├── models/
 │   └── materialize/
 │       ├── raw/
-│       │   └── tickets.sql
+│       │   ├── accounts.sql
+│       │   ├── addresses.sql
+│       │   └── contact_methods.sql
 │       └── public/
-│           └── ticket_sla.sql
+│           └── customer.sql
 ├── roles/
 └── network-policies/
 ```
@@ -37,8 +39,8 @@ roles/analyst.sql    →   ROLE analyst
 For `models/`, the path encodes the fully-qualified name:
 
 ```text
-models/materialize/raw/tickets.sql   →   TABLE materialize.raw.tickets
-models/materialize/public/ticket_sla.sql   →   MATERIALIZED VIEW materialize.public.ticket_sla
+models/materialize/raw/accounts.sql      →   TABLE materialize.raw.accounts
+models/materialize/public/customer.sql   →   MATERIALIZED VIEW materialize.public.customer
 ```
 
 Each file must contain valid SQL that creates the object. The object name comes from the filename, not from the `CREATE` statement — they must agree. If they differ, compilation fails with an error that points you to the mismatch.
@@ -48,42 +50,43 @@ Each file must contain valid SQL that creates the object. The object name comes 
 `models/<database>/<schema>/<object>.sql` is where all schema-scoped objects go: tables, sources, secrets, connections, sinks, views, materialized views. The database and schema are read from the path, not from the SQL itself. The SQL inside the file does not use a three-part name:
 
 ```sql
--- models/materialize/raw/tickets.sql
-CREATE TABLE tickets (
-    id               bigint        NOT NULL,
-    opened_at        timestamptz   NOT NULL,
-    sla_minutes      integer       NOT NULL,
-    closed_at        timestamptz
+-- models/materialize/raw/accounts.sql
+CREATE TABLE accounts (
+    id            bigint       NOT NULL,
+    signed_up_at  timestamptz  NOT NULL,
+    status        text         NOT NULL
 );
 ```
 
 ```sql
--- models/materialize/public/ticket_sla.sql
-CREATE MATERIALIZED VIEW ticket_sla
+-- models/materialize/public/customer.sql
+CREATE MATERIALIZED VIEW customer
 IN CLUSTER app
 AS
 SELECT
-    id,
-    opened_at,
-    sla_minutes,
-    closed_at,
-    CASE
-        WHEN closed_at IS NULL
-             AND mz_now() > opened_at + (sla_minutes * INTERVAL '1 minute')
-        THEN 'breached'
-        WHEN closed_at IS NOT NULL
-             AND closed_at > opened_at + (sla_minutes * INTERVAL '1 minute')
-        THEN 'closed_breached'
-        ELSE 'on_time'
-    END AS status
-FROM raw.tickets;
+    a.id              AS account_id,
+    a.signed_up_at,
+    a.status,
+    addr.line1        AS address_line1,
+    addr.city         AS address_city,
+    addr.region       AS address_region,
+    addr.country      AS address_country,
+    email.value       AS primary_email,
+    phone.value       AS phone_number
+FROM raw.accounts a
+LEFT JOIN raw.addresses addr
+       ON addr.account_id = a.id
+LEFT JOIN raw.contact_methods email
+       ON email.account_id = a.id AND email.kind = 'email'
+LEFT JOIN raw.contact_methods phone
+       ON phone.account_id = a.id AND phone.kind = 'phone';
 ```
 
 ### The separate-schemas constraint
 
 A single schema cannot mix data-layer objects (tables, sources, secrets, connections, sinks) with view-layer objects (views, materialized views). If you try to place a `CREATE TABLE` and a `CREATE MATERIALIZED VIEW` in the same schema directory, compilation fails.
 
-Pick dedicated schemas for each layer. In the example above, `raw` holds the table and `public` holds the materialized view. A cross-schema reference like `FROM raw.tickets` in the MV is how you connect them.
+Pick dedicated schemas for each layer. In the example above, `raw` holds the tables and `public` holds the materialized view. A cross-schema reference like `FROM raw.accounts` in the MV is how you connect them.
 
 A common pattern for larger projects:
 
@@ -105,7 +108,7 @@ models/
 └── materialize/
     ├── public.sql          ← schema modifier
     └── public/
-        └── ticket_sla.sql  ← object file
+        └── customer.sql    ← object file
 ```
 
 `models/materialize/public.sql` is not a view or materialized view. It is a directive file that configures how mz-deploy treats every object in `materialize.public`. One directive you will encounter later is:
@@ -118,15 +121,15 @@ That single line marks every object in the schema as part of your stable public 
 
 ## Profile variants
 
-Most files have a fixed name: `tickets.sql` is always `tickets.sql`. But you can provide an alternate version of any file that is selected only when a specific profile is active. The convention uses a double-underscore separator:
+Most files have a fixed name: `accounts.sql` is always `accounts.sql`. But you can provide an alternate version of any file that is selected only when a specific profile is active. The convention uses a double-underscore separator:
 
 ```text
 models/materialize/raw/
-├── tickets.sql              ← default
-└── tickets__staging.sql     ← used only when profile = staging
+├── accounts.sql              ← default
+└── accounts__staging.sql     ← used only when profile = staging
 ```
 
-When you run mz-deploy with the `staging` profile active, it reads `tickets__staging.sql` instead of `tickets.sql`. When you run with any other profile — or with no profile specified — it reads `tickets.sql`.
+When you run mz-deploy with the `staging` profile active, it reads `accounts__staging.sql` instead of `accounts.sql`. When you run with any other profile — or with no profile specified — it reads `accounts.sql`.
 
 The separator is always `__` (two underscores). Because the split happens on the *last* `__` in the filename, object names can contain underscores freely: `my_pg__conn__staging.sql` overrides an object named `my_pg__conn`.
 
