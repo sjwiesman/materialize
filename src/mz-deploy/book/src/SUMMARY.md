@@ -17,6 +17,10 @@
 - [Staging](./ch08-staging.md)
 - [Promoting](./ch09-promoting.md)
 
+# Part III — Concepts That Change How You Think
+
+- [Stable API schemas](./ch10-stable-api.md)
+
 # Reference
 
 - [Command reference](./appendix-a-reference.md)
