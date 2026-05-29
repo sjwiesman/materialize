@@ -139,6 +139,22 @@ A common split:
 
 In short: `apply` converges *definitions*, not *data*.
 
+## When source schemas change
+
+Upstream systems evolve. A Postgres publication gains a column; a Kafka topic gets a new field in the schema registry. When that happens, the downstream `CREATE TABLE ... FROM SOURCE` definitions in your project no longer match the upstream shape, and `types.lock` goes stale.
+
+The workflow for an additive upstream change — a column added — is:
+
+1. **Update the project file.** Edit the `CREATE TABLE ... FROM SOURCE` definition under `models/<database>/<schema>/` to include the new column. If the change touches the `CREATE SOURCE` statement itself (for example, a new table in a Postgres publication), update the source file too.
+2. **Run `apply tables` (or bare `apply`).** This creates or reconciles the table in Materialize and automatically regenerates `types.lock`. The regeneration step is why `apply tables` is needed and not just `apply sources`: `apply sources` skips sources that already exist and does not touch `types.lock`.
+3. **Compile.** Run `mz-deploy compile` to confirm that downstream views type-check against the updated `types.lock`. Type errors surface here, not at deploy time.
+
+For destructive upstream changes — a column removed or renamed — the workflow is the same, but you will also need to update downstream views in the same pass. The type error at step 3 points to exactly which views need attention; fix them in the same commit so that `stage` produces a coherent deployment.
+
+Note that `apply sources` does not re-resolve the schema of a source that already exists. Dropping and recreating a source resets its ingestion offset, which is almost never acceptable. The correct path is to update the table-from-source definition and run `apply tables`, leaving the source itself running.
+
+Schema drift is a normal day-two operation; the steps are predictable, but `apply sources` alone doesn't pick up upstream changes — you also need `apply tables` to refresh `types.lock`.
+
 ## Deleting objects
 
 To remove an infrastructure object from Materialize and from your project, use `mz-deploy delete`:

@@ -19,6 +19,18 @@ mz-deploy promote abc123 --dry-run
 mz-deploy promote abc123 --dry-run --output json  # Machine-readable plan for CI
 ```
 
+## What running queries see
+
+Because the swap commits as a single transaction, there is no window where a client can observe names that are partially old and partially new. Between any two SQL statements, a client resolves object names against exactly one schema generation — either the old production schemas or the new ones.
+
+Queries that started before the swap committed finish against the schema version they began on. Materialize holds the query's snapshot stable for its duration, so a long-running query is not interrupted mid-flight by the swap. Queries that start after the swap has committed resolve against the new schemas.
+
+Long-running `SUBSCRIBE` cursors are a different case. A subscription holds an open cursor against a specific object. If the object that cursor points to is dropped during the swap — because the schema it lives in was swapped out — the cursor will terminate with an error at the swap boundary. Clients should be prepared to reconnect and re-establish their subscription against the new schema. This is expected behavior, not a failure of the promotion itself; it is the cost of naming continuity across a schema swap.
+
+For most applications running short-lived queries, promote is invisible: one statement resolves old names, the next resolves new ones, and users never notice. The gap between the two is the duration of the swap transaction, typically under a second.
+
+Most queries see nothing more than the boundary between two statements. Subscriptions across the boundary must reconnect.
+
 ## Readiness checks
 
 Before executing the swap, `promote` verifies that every staging cluster is ready. A cluster is considered ready when:
@@ -121,6 +133,18 @@ mz-deploy promote <new-id>    # Promote the fresh deployment
 Re-staging diffs your project against the current production state — which now includes the first deployment's changes — and rebuilds a staging environment that accounts for both sets of changes. The new staging deployment will not conflict with anything because it is based on the latest snapshot.
 
 Deployments that touch entirely different schemas and clusters can be promoted in any order without conflicts. If your team works in well-separated schema boundaries, concurrent deployments are common and routine.
+
+### Minimizing conflicts through schema ownership
+
+The first-promote-wins rule is mechanically correct, but the structural question is how to design your project's schema boundaries so that conflicts are rare in the first place.
+
+**Coarse-grained schemas** keep most objects in a small number of large schemas. The advantage is lower cognitive overhead: fewer schema names to track, fewer cross-schema references, less `SET api = stable` surface to maintain. The disadvantage is that any change to any object in a schema creates a conflict for every other in-flight deployment that also touches that schema. When a single team ships sequentially this is fine. When multiple teams or pipelines ship concurrently, conflicts become routine and the re-stage tax accumulates.
+
+**Fine-grained schemas** assign a small, focused set of objects to each schema — one schema per logical surface, one per team, or one per independent pipeline. Deployments are unlikely to overlap because each one touches a narrowly scoped schema. The costs are more project files, more explicit cross-schema references, and more `SET api = stable` boundaries to reason about.
+
+The principle: keep schemas coarse where a single team or pipeline owns everything; introduce finer-grained schemas at the boundaries where independent teams or pipelines need to ship without coordinating. Publish the contract between them as a `SET api = stable` schema so that downstream consumers are insulated from the internal churn.
+
+If two teams find themselves regularly stomping each other's deploys, the structural fix is more schemas, not better timing.
 
 ## Aborting after a successful promote
 
