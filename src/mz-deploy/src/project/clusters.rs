@@ -544,7 +544,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            clusters_dir.join("analytics__staging.sql"),
+            clusters_dir.join("analytics#staging.sql"),
             "CREATE CLUSTER analytics (SIZE = '25cc');",
         )
         .unwrap();
@@ -571,7 +571,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            clusters_dir.join("analytics__staging.sql"),
+            clusters_dir.join("analytics#staging.sql"),
             "CREATE CLUSTER analytics (SIZE = '25cc');",
         )
         .unwrap();
@@ -599,7 +599,7 @@ mod tests {
         .unwrap();
         // Invalid staging variant: name mismatch
         fs::write(
-            clusters_dir.join("analytics__staging.sql"),
+            clusters_dir.join("analytics#staging.sql"),
             "CREATE CLUSTER wrong_name (SIZE = '25cc');",
         )
         .unwrap();

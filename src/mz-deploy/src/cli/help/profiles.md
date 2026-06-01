@@ -260,35 +260,36 @@ used when resolving secrets from AWS Secrets Manager via the
 ## Per-profile SQL file overrides
 
 SQL files can be specialized per profile using the naming convention
-`name__<profile>.sql` (note the **double underscore**). When a profile is
-active, its override replaces the default file of the same object name.
+`name#<profile>.sql` (note the **hash**). When a profile is active, its
+override replaces the default file of the same object name.
 
 ### Naming convention
 
     name.sql                → default (used when no override matches)
-    name__<profile>.sql     → used when <profile> is the active profile
+    name#<profile>.sql      → used when <profile> is the active profile
 
-The delimiter is a double underscore (`__`). The split happens on the
-**last** occurrence, so object names may themselves contain underscores.
-For example, `my_pg_conn__staging.sql` splits into object name `my_pg_conn`
-and profile `staging`.
+The delimiter is a hash (`#`). The split happens on the **last**
+occurrence, and because `#` cannot appear in a SQL identifier, the object
+name may freely contain underscores. For example,
+`my_pg_conn#staging.sql` splits into object name `my_pg_conn` and profile
+`staging`.
 
 ### Resolution rules
 
 - **All variants are validated:** Every profile variant of an object is
   loaded and validated at compile time, not just the active one. Invalid
   SQL in a non-active variant is still a compile error.
-- **Profile match wins:** If both `name.sql` and `name__<profile>.sql`
+- **Profile match wins:** If both `name.sql` and `name#<profile>.sql`
   exist and that profile is active, the profile variant is used. Other
   variants are validated but not included in the compiled output.
 - **Type consistency enforced:** All variants of an object must share the
   same primary statement type. For example, if `conn.sql` is a
-  `CREATE CONNECTION`, then `conn__staging.sql` must also be a
+  `CREATE CONNECTION`, then `conn#staging.sql` must also be a
   `CREATE CONNECTION`. A type mismatch is a compile error.
 - **No overrides for views or materialized views:** Views and materialized
   views cannot have profile-specific overrides. Use per-profile SQL
   variables instead (see above).
-- **Profile-only files are valid:** A file like `secret__staging.sql` with
+- **Profile-only files are valid:** A file like `secret#staging.sql` with
   no corresponding `secret.sql` default is loaded when `staging` is active
   and skipped for all other profiles.
 - **Duplicates are errors:** Two files resolving to the same object name
@@ -309,7 +310,7 @@ Profile file overrides apply to all SQL object directories:
 Given a `models/` directory with:
 
     models/materialize/public/pg_conn.sql
-    models/materialize/public/pg_conn__staging.sql
+    models/materialize/public/pg_conn#staging.sql
 
 Where `pg_conn.sql` connects to a production Postgres replica:
 
@@ -319,7 +320,7 @@ Where `pg_conn.sql` connects to a production Postgres replica:
         ...
     );
 
-And `pg_conn__staging.sql` connects to a staging replica:
+And `pg_conn#staging.sql` connects to a staging replica:
 
     CREATE CONNECTION pg_conn TO POSTGRES (
         HOST 'staging-replica.internal',
@@ -329,7 +330,7 @@ And `pg_conn__staging.sql` connects to a staging replica:
 
 Then:
 
-- `mz-deploy compile --profile staging` loads `pg_conn__staging.sql`
+- `mz-deploy compile --profile staging` loads `pg_conn#staging.sql`
 - `mz-deploy compile --profile production` loads `pg_conn.sql`
 - `mz-deploy compile --profile default` loads `pg_conn.sql`
 

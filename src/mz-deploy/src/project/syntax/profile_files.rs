@@ -9,14 +9,14 @@
 
 //! Profile-specific file override resolution.
 //!
-//! Files can be named `name__<profile>.sql` to override `name.sql` when a
-//! particular profile is active. The `__` delimiter is split on the **last**
-//! occurrence (`rsplit_once`) so object names may themselves contain underscores.
+//! Files can be named `name#<profile>.sql` to override `name.sql` when a
+//! particular profile is active. The `#` delimiter is split on the **last**
+//! occurrence (`rsplit_once`).
 //!
 //! ## Resolution Algorithm
 //!
-//! 1. **Parse** each file stem via [`parse_file_stem`] using `rsplit_once("__")`
-//!    to separate `(object_name, profile)`. Files without `__` (or with an
+//! 1. **Parse** each file stem via [`parse_file_stem`] using `rsplit_once('#')`
+//!    to separate `(object_name, profile)`. Files without `#` (or with an
 //!    empty object/profile part) are treated as the default (no profile).
 //! 2. **Group** files by object name into [`ObjectFiles`], recording the default
 //!    file and any profile-specific overrides. Duplicates within the same
@@ -26,9 +26,9 @@
 //! Callers select the active variant themselves by checking
 //! `overrides.get(profile).or(default.as_ref())`.
 //!
-//! **Key Insight:** `rsplit_once` splits on the *last* `__`, so
-//! `my_pg__conn__staging` → `("my_pg__conn", "staging")`. This allows
-//! object names to freely contain underscores.
+//! **Key Insight:** `#` cannot appear in a SQL identifier, so a well-formed
+//! variant filename contains exactly one `#`. This lets object names freely
+//! contain underscores: `my_pg_conn#staging` → `("my_pg_conn", "staging")`.
 
 use crate::project::error::LoadError;
 use std::collections::BTreeMap;
@@ -36,10 +36,10 @@ use std::path::{Path, PathBuf};
 
 /// Split a file stem into `(object_name, optional_profile)`.
 ///
-/// Uses `rsplit_once("__")` so that `pg_conn__staging` → `("pg_conn", Some("staging"))`.
+/// Uses `rsplit_once('#')` so that `pg_conn#staging` → `("pg_conn", Some("staging"))`.
 /// Returns `(stem, None)` if no valid split exists (empty parts).
 pub(crate) fn parse_file_stem(stem: &str) -> (&str, Option<&str>) {
-    if let Some((object_name, profile)) = stem.rsplit_once("__") {
+    if let Some((object_name, profile)) = stem.rsplit_once('#') {
         if !object_name.is_empty() && !profile.is_empty() {
             return (object_name, Some(profile));
         }
@@ -141,29 +141,31 @@ mod tests {
     #[test]
     fn test_parse_with_profile() {
         assert_eq!(
-            parse_file_stem("pg_conn__staging"),
+            parse_file_stem("pg_conn#staging"),
             ("pg_conn", Some("staging"))
         );
     }
 
     #[test]
-    fn test_parse_multiple_underscores() {
+    fn test_parse_object_name_with_underscores() {
+        // Underscores in the object name are preserved; only the `#`
+        // separates the profile.
         assert_eq!(
-            parse_file_stem("my_pg__conn__prod"),
-            ("my_pg__conn", Some("prod"))
+            parse_file_stem("stg_stripe__payments#staging"),
+            ("stg_stripe__payments", Some("staging"))
         );
     }
 
     #[test]
     fn test_parse_empty_profile() {
-        // "pg_conn__" → empty profile part, treated as plain name
-        assert_eq!(parse_file_stem("pg_conn__"), ("pg_conn__", None));
+        // "pg_conn#" → empty profile part, treated as plain name
+        assert_eq!(parse_file_stem("pg_conn#"), ("pg_conn#", None));
     }
 
     #[test]
     fn test_parse_empty_object_name() {
-        // "__staging" → empty object name, treated as plain name
-        assert_eq!(parse_file_stem("__staging"), ("__staging", None));
+        // "#staging" → empty object name, treated as plain name
+        assert_eq!(parse_file_stem("#staging"), ("#staging", None));
     }
 
     #[test]
@@ -182,8 +184,8 @@ mod tests {
     fn test_collect_all_sql_files_basic() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("conn.sql"), "SELECT 1;").unwrap();
-        std::fs::write(dir.path().join("conn__staging.sql"), "SELECT 2;").unwrap();
-        std::fs::write(dir.path().join("conn__prod.sql"), "SELECT 3;").unwrap();
+        std::fs::write(dir.path().join("conn#staging.sql"), "SELECT 2;").unwrap();
+        std::fs::write(dir.path().join("conn#prod.sql"), "SELECT 3;").unwrap();
         std::fs::write(dir.path().join("table.sql"), "SELECT 4;").unwrap();
 
         let result = collect_all_sql_files(dir.path()).unwrap();
@@ -203,7 +205,7 @@ mod tests {
     #[test]
     fn test_collect_all_sql_files_override_only() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("secret__staging.sql"), "SELECT 1;").unwrap();
+        std::fs::write(dir.path().join("secret#staging.sql"), "SELECT 1;").unwrap();
 
         let result = collect_all_sql_files(dir.path()).unwrap();
         assert_eq!(result.len(), 1);

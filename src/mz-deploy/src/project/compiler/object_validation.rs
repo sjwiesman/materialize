@@ -36,7 +36,7 @@
 //! ## Profile Variant Handling
 //!
 //! Objects may have multiple file variants (e.g., `conn.sql` and
-//! `conn__staging.sql`). All variants are classified for type consistency,
+//! `conn#staging.sql`). All variants are classified for type consistency,
 //! then only the active variant (matching profile or default) is fully
 //! validated. Views and materialized views do not allow profile overrides.
 

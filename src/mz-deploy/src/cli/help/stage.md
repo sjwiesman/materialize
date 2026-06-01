@@ -18,7 +18,7 @@ can be promoted with `promote` or cleaned up with `abort`.
 1. Validates the git working tree is clean (unless `--allow-dirty`).
 2. Compiles and validates the project (same as `compile`). The connection
    profile's name is used for file resolution, so `--profile staging` will
-   load `__staging` file overrides. See `mz-deploy help profiles`.
+   load `#staging` file overrides. See `mz-deploy help profiles`.
 3. Diffs the plan against the current production snapshot by comparing
    hashes of each object's SQL against the last promoted snapshot. Only
    objects whose definition changed (or whose dependencies changed) are

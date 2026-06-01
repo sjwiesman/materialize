@@ -161,7 +161,7 @@ struct ObjectDescriptor {
 ///
 /// - `path` — absolute path to the `.sql` file on disk.
 /// - `profile` — `None` for the default variant (`object.sql`), `Some("prod")`
-///   for a profile override (`object__prod.sql`). Used during active-variant
+///   for a profile override (`object#prod.sql`). Used during active-variant
 ///   resolution to select which file to compile for the current profile.
 #[derive(Debug, Clone)]
 struct VariantDescriptor {
@@ -487,7 +487,7 @@ fn build_cluster_name_map(
 ///     <schema>/               ← directory name = schema name
 ///       <schema>.sql          ← optional schema-level mod file
 ///       <object>.sql          ← one file per database object
-///       <object>__<profile>.sql ← optional profile variant override
+///       <object>#<profile>.sql ← optional profile variant override
 /// ```
 ///
 /// For each database directory:

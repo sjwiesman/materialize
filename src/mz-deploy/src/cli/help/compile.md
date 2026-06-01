@@ -12,7 +12,7 @@ development and CI pipelines.
 ## Behavior
 
 1. Loads all `.sql` files from the `models/` directory tree, including every
-   profile variant (`name__<profile>.sql`). All variants are validated, then
+   profile variant (`name#<profile>.sql`). All variants are validated, then
    the active profile determines which variant is used — see
    `mz-deploy help profiles` for details.
 2. Resolves inter-object dependencies and performs a topological sort
@@ -23,7 +23,7 @@ development and CI pipelines.
    signatures, and dependency schemas. Incremental — re-runs are fast.
 
 Every profile variant is validated regardless of `--profile`, so a syntax
-error in `foo__staging.sql` will still fail `compile --profile production`.
+error in `foo#staging.sql` will still fail `compile --profile production`.
 
 With `-v`, also prints the full dependency graph, deployment order, and
 generated SQL plan. A passing `compile` guarantees that `stage` and
