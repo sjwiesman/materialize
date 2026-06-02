@@ -18,7 +18,7 @@ using the `EXECUTE UNIT TEST` syntax:
     FOR database.schema.view_name
     MOCK database.schema.dependency(col1 TYPE, col2 TYPE) AS (
       SELECT * FROM VALUES (val1, val2), (val3, val4)
-    ),
+    )
     EXPECTED(col1 TYPE, col2 TYPE) AS (
       SELECT * FROM VALUES (expected1, expected2)
     );
@@ -58,7 +58,7 @@ Given a view in `models/materialize/public/user_order_summary.sql`:
     ),
     MOCK materialize.public.orders(id bigint, user_id bigint) AS (
       SELECT * FROM VALUES (10, 1)
-    ),
+    )
     EXPECTED(user_id bigint, name text, total_orders bigint) AS (
       SELECT * FROM VALUES (1, 'alice', 1)
     );
