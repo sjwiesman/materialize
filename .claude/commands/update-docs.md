@@ -35,6 +35,26 @@ Compare all `.rs` files under `src/` against the set of documented files.
 Any `.rs` file without a corresponding `.md` is **new**.
 Group new files by crate.
 
+This step is mandatory on every run — staleness detection (step 1) only iterates
+over docs that already exist, so a crate that has never been documented is
+invisible to it and will be skipped forever unless this step runs.
+
+First find crates that have **no** generated docs at all. Compare the workspace
+crates under `src/` against the documented crate directories:
+
+```sh
+comm -23 \
+  <(find src -maxdepth 2 -name Cargo.toml -printf '%h\n' | xargs -n1 basename | sort -u) \
+  <(find doc/developer/generated -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | sort -u)
+```
+
+Each name printed is an undocumented crate. Skip `workspace-hack` (a generated
+cargo-hakari crate with no meaningful source to document). For every other
+result, create the full doc set in step 5, including `_crate.md`.
+
+Then, within crates that *are* documented, list `.rs` files whose path has no
+corresponding `.md` to catch new modules added to an existing crate.
+
 ### 4. Update stale docs
 
 For each stale doc:
