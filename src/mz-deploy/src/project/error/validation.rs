@@ -291,6 +291,11 @@ pub enum ValidationErrorKind {
         target: String,
         cluster_name: String,
     },
+    /// AUTO SCALING STRATEGY in a cluster file violates a server planning rule
+    ClusterInvalidAutoScalingStrategy {
+        cluster_name: String,
+        reason: String,
+    },
     /// Invalid statement type in role definition file
     InvalidRoleStatement {
         statement_type: String,
@@ -658,6 +663,15 @@ impl ValidationErrorKind {
                     cluster_name, target
                 )
             }
+            Self::ClusterInvalidAutoScalingStrategy {
+                cluster_name,
+                reason,
+            } => {
+                format!(
+                    "invalid AUTO SCALING STRATEGY in cluster file '{}': {}",
+                    cluster_name, reason
+                )
+            }
             Self::InvalidRoleStatement {
                 statement_type,
                 role_name,
@@ -911,6 +925,9 @@ impl ValidationErrorKind {
             }
             Self::ClusterCommentTargetMismatch { .. } => {
                 Some("COMMENT statements in a cluster file must target the cluster defined in that file".to_string())
+            }
+            Self::ClusterInvalidAutoScalingStrategy { .. } => {
+                Some("the server enforces the same rule when the statement is applied. Fix the AUTO SCALING STRATEGY option in the cluster file".to_string())
             }
             Self::InvalidRoleStatement { .. } => {
                 Some("role files can only contain CREATE ROLE, ALTER ROLE, GRANT ROLE, and COMMENT ON ROLE statements".to_string())

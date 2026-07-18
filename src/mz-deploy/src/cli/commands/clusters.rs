@@ -14,9 +14,14 @@ use crate::cli::commands::grants;
 use crate::cli::executor::{
     ApplyPlan, ApplyResult, DeploymentExecutor, ObjectAction, ObjectResult, connect_apply_client,
 };
-use crate::client::{Client, ClusterOptions, quote_identifier};
+use crate::client::auto_scaling::strategy_to_cluster_option;
+use crate::client::{Client, ConnectionError, quote_identifier};
 use crate::config::Settings;
-use crate::project::clusters::{self, ClusterDefinition, extract_replication_factor, extract_size};
+use crate::project::clusters::{
+    self, ClusterDefinition, extract_auto_scaling_strategy, extract_replication_factor,
+    extract_size,
+};
+use mz_sql_parser::ast::display::AstDisplay;
 
 /// Plan cluster changes without executing or printing.
 pub async fn plan(
@@ -95,39 +100,65 @@ async fn plan_cluster(
         Some(existing_cluster) => {
             let desired_size = extract_size(&def.create_stmt);
             let desired_rf = extract_replication_factor(&def.create_stmt);
+            // Validated when the definition was loaded, so a failure here is
+            // a bug in loading, not user error.
+            let desired_strategy =
+                extract_auto_scaling_strategy(&def.create_stmt).map_err(|reason| {
+                    CliError::Connection(ConnectionError::Message(format!(
+                        "invalid AUTO SCALING STRATEGY for cluster '{}': {}",
+                        cluster_name, reason
+                    )))
+                })?;
 
-            let needs_alter = {
-                let size_differs = desired_size.as_deref() != existing_cluster.size.as_deref();
-                let rf_differs = desired_rf.map(i64::from) != existing_cluster.replication_factor;
-                size_differs || rf_differs
-            };
+            let size_differs = desired_size.as_deref() != existing_cluster.size.as_deref();
+            let rf_differs = desired_rf.map(i64::from) != existing_cluster.replication_factor;
+            // Policy drift is only diffable when the region exposes the
+            // autoscaling introspection view; on older regions the live
+            // policy is unknowable and reconciliation leaves it alone.
+            let strategy_differs = client.supports_auto_scaling_strategies().await?
+                && desired_strategy != existing_cluster.auto_scaling_strategy;
 
-            if needs_alter {
-                let size = desired_size.unwrap_or_else(|| {
-                    existing_cluster
-                        .size
-                        .clone()
-                        .unwrap_or_else(|| "25cc".to_string())
-                });
-                let rf = desired_rf.unwrap_or_else(|| {
-                    existing_cluster
-                        .replication_factor
-                        .unwrap_or(1)
-                        .try_into()
-                        .unwrap_or(1)
-                });
-
-                let options = ClusterOptions {
-                    size,
-                    replication_factor: rf,
-                };
-                let alter_sql = format!(
-                    "ALTER CLUSTER {} SET (SIZE = '{}', REPLICATION FACTOR = {})",
-                    quote_identifier(cluster_name),
-                    options.size,
-                    options.replication_factor
-                );
-                executor.execute_sql(&alter_sql).await?;
+            if size_differs || rf_differs || strategy_differs {
+                let mut set_parts = Vec::new();
+                if size_differs || rf_differs {
+                    let size = desired_size.unwrap_or_else(|| {
+                        existing_cluster
+                            .size
+                            .clone()
+                            .unwrap_or_else(|| "25cc".to_string())
+                    });
+                    let rf: u32 = desired_rf.unwrap_or_else(|| {
+                        existing_cluster
+                            .replication_factor
+                            .unwrap_or(1)
+                            .try_into()
+                            .unwrap_or(1)
+                    });
+                    set_parts.push(format!("SIZE = '{}'", size));
+                    set_parts.push(format!("REPLICATION FACTOR = {}", rf));
+                }
+                if strategy_differs {
+                    if let Some(strategy) = &desired_strategy {
+                        set_parts.push(strategy_to_cluster_option(strategy).to_ast_string_simple());
+                    }
+                }
+                if !set_parts.is_empty() {
+                    let alter_sql = format!(
+                        "ALTER CLUSTER {} SET ({})",
+                        quote_identifier(cluster_name),
+                        set_parts.join(", ")
+                    );
+                    executor.execute_sql(&alter_sql).await?;
+                }
+                // The file declares no policy but the live cluster has one.
+                // SET and RESET cannot be combined in one statement.
+                if strategy_differs && desired_strategy.is_none() {
+                    let reset_sql = format!(
+                        "ALTER CLUSTER {} RESET (AUTO SCALING STRATEGY)",
+                        quote_identifier(cluster_name)
+                    );
+                    executor.execute_sql(&reset_sql).await?;
+                }
                 ObjectAction::Altered
             } else {
                 ObjectAction::UpToDate

@@ -14,10 +14,16 @@ idempotently.
 1. Loads all `.sql` files from the `clusters/` directory.
 2. For each cluster definition:
    - If the cluster does not exist, creates it.
-   - If the cluster exists but size or replication factor has drifted,
-     alters it to match.
+   - If the cluster exists but size, replication factor, or the
+     `AUTO SCALING STRATEGY` policy has drifted, alters it to match.
    - Applies associated `GRANT` statements.
    - Applies associated `COMMENT` statements.
+
+Reconciliation is declarative: the definition file is the source of truth.
+A cluster file without an `AUTO SCALING STRATEGY` option **resets** any
+autoscaling policy configured on the live cluster, including policies set
+outside of mz-deploy. Declare the policy in the file to keep it. On regions
+that predate autoscaling strategies, the policy is not reconciled.
 3. Reports status per cluster:
    - `+` created
    - `~` altered (drift detected)
