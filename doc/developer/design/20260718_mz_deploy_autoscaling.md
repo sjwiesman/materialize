@@ -129,11 +129,11 @@ deserializes directly into the plan type. `mz-deploy` already depends on
   `HYDRATION SIZE` via `String::try_from_value`, `LINGER DURATION` via
   `Duration::try_from_value`), and reports a validation error on a malformed
   value instead of deferring to apply time.
-- Prefer exposing `mz_sql`'s existing `plan_auto_scaling_strategy` /
-  `unplan_auto_scaling_strategy` (currently private, pure functions in
-  `plan/statement/ddl.rs`) as `pub` and calling them, rather than duplicating
-  the conversion. If we keep them private, the mz-deploy copy must cite them
-  as the source of truth.
+- The conversion logic is copied into mz-deploy rather than exposed from
+  `mz_sql`. `mz_sql`'s `plan_auto_scaling_strategy` /
+  `unplan_auto_scaling_strategy` (private, pure functions in
+  `plan/statement/ddl.rs`) stay private, and the mz-deploy copies cite them
+  as the source of truth so future strategy additions update both.
 
 Shared rendering helper (in `client` next to the SQL emitters):
 
@@ -263,15 +263,14 @@ Integration tests (`test/mz-deploy/mzcompose.py`):
 ## Decisions
 
 - **Absence semantics: declarative.** An option absent from the definition
-  file resets the live policy. This is decided, not open. Ship with a
-  release-note callout that the first `clusters apply` with an updated
-  mz-deploy removes policies that were configured out-of-band.
-
-## Open Questions
-
-1. **Exposing `plan_auto_scaling_strategy`/`unplan_auto_scaling_strategy`
-   from `mz_sql`.** Preferred over duplication, but it widens the `mz_sql`
-   public surface. Needs a quick owner sign-off.
-2. **Profile variants.** Nothing new is needed (`clusters/<name>#<profile>.sql`
-   already selects per-profile definitions), but do we want the docs to
-   recommend smaller or absent burst sizes in staging profiles?
+  file resets the live policy. Ship with a release-note callout that the
+  first `clusters apply` with an updated mz-deploy removes policies that
+  were configured out-of-band.
+- **Copy the conversion logic instead of widening `mz_sql`.**
+  `plan_auto_scaling_strategy` / `unplan_auto_scaling_strategy` stay private
+  in `mz_sql`. mz-deploy carries its own copies, each citing the `mz_sql`
+  original as the source of truth.
+- **No sizing recommendations for profile variants.** The existing
+  `clusters/<name>#<profile>.sql` mechanism covers per-profile policies with
+  no new machinery, and the docs stay neutral on what burst sizes to use in
+  which profile.
