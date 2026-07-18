@@ -165,11 +165,12 @@ Shared rendering helper (in `client` next to the SQL emitters):
     half-applying).
   - `desired` is `None` and `live` is `Some`: emit
     `ALTER CLUSTER ... RESET (AUTO SCALING STRATEGY)` as an additional
-    statement (`SET` and `RESET` cannot be combined). The file is the source
-    of truth, so an undeclared policy is removed, consistent with how grant
-    reconciliation revokes undeclared grants. `RESET` is deliberately not
-    feature-gated server-side, so this also works when the DDL gate was
-    turned off after a policy was created.
+    statement (`SET` and `RESET` cannot be combined). Reconciliation is
+    strictly declarative: the file is the source of truth, so an undeclared
+    policy is removed, consistent with how grant reconciliation revokes
+    undeclared grants. `RESET` is deliberately not feature-gated server-side,
+    so this also works when the DDL gate was turned off after a policy was
+    created.
   - When introspection reported the feature as unsupported (older region),
     skip policy diffing entirely.
 - `ObjectAction` reporting is unchanged: any of the three dimensions drifting
@@ -252,23 +253,25 @@ Integration tests (`test/mz-deploy/mzcompose.py`):
   Decouples mz-deploy from `mz_sql` internals, but mz-deploy already depends
   on `mz_sql` for typechecking, and a mirror type is one more thing to keep in
   sync with the serde shape of the unstable jsonb column.
-- **Leave undeclared policies alone instead of resetting.** Safer for users
-  who set policies out-of-band, but breaks the declarative model and diverges
-  from grant reconciliation. Users who want "no opinion" can keep the option
-  out of scope by not adopting it in files, but once any run of
-  `clusters apply` manages a cluster, the file is authoritative. Flagged as
-  the main behavioral decision below.
+- **Leave undeclared policies alone instead of resetting.** Rejected. It
+  would spare users who set policies out-of-band, but it breaks the
+  declarative model and diverges from grant reconciliation. Once
+  `clusters apply` manages a cluster, the file is authoritative. The first
+  `clusters apply` after adopting this feature strips manually configured
+  policies, which deserves a release-note callout, not a semantics change.
+
+## Decisions
+
+- **Absence semantics: declarative.** An option absent from the definition
+  file resets the live policy. This is decided, not open. Ship with a
+  release-note callout that the first `clusters apply` with an updated
+  mz-deploy removes policies that were configured out-of-band.
 
 ## Open Questions
 
-1. **Absence semantics.** Is "option absent in file resets the live policy"
-   acceptable for existing projects, or does it need a release-note callout
-   (first `clusters apply` after upgrading mz-deploy could strip manually
-   configured policies)? The alternative is requiring an explicit
-   `AUTO SCALING STRATEGY = ()` to reset, treating absence as "unmanaged".
-2. **Exposing `plan_auto_scaling_strategy`/`unplan_auto_scaling_strategy`
+1. **Exposing `plan_auto_scaling_strategy`/`unplan_auto_scaling_strategy`
    from `mz_sql`.** Preferred over duplication, but it widens the `mz_sql`
    public surface. Needs a quick owner sign-off.
-3. **Profile variants.** Nothing new is needed (`clusters/<name>#<profile>.sql`
+2. **Profile variants.** Nothing new is needed (`clusters/<name>#<profile>.sql`
    already selects per-profile definitions), but do we want the docs to
    recommend smaller or absent burst sizes in staging profiles?
