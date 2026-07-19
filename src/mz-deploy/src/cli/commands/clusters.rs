@@ -15,13 +15,14 @@ use crate::cli::executor::{
     ApplyPlan, ApplyResult, DeploymentExecutor, ObjectAction, ObjectResult, connect_apply_client,
 };
 use crate::client::auto_scaling::strategy_to_cluster_option;
-use crate::client::{Client, ConnectionError, quote_identifier};
+use crate::client::{Client, Cluster, ConnectionError, quote_identifier};
 use crate::config::Settings;
 use crate::project::clusters::{
     self, ClusterDefinition, extract_auto_scaling_strategy, extract_replication_factor,
     extract_size,
 };
 use mz_sql_parser::ast::display::AstDisplay;
+use mz_sql_parser::ast::{ClusterOption, ClusterOptionName, CreateClusterStatement, Raw};
 
 /// Plan cluster changes without executing or printing.
 pub async fn plan(
@@ -98,70 +99,51 @@ async fn plan_cluster(
             ObjectAction::Created
         }
         Some(existing_cluster) => {
-            let desired_size = extract_size(&def.create_stmt);
-            let desired_rf = extract_replication_factor(&def.create_stmt);
-            // Validated when the definition was loaded, so a failure here is
-            // a bug in loading, not user error.
-            let desired_strategy =
-                extract_auto_scaling_strategy(&def.create_stmt).map_err(|reason| {
-                    CliError::Connection(ConnectionError::Message(format!(
-                        "invalid AUTO SCALING STRATEGY for cluster '{}': {}",
-                        cluster_name, reason
-                    )))
-                })?;
+            // Policy drift is only diffable when the region supports autoscaling
+            // strategies. On older regions the live policy is unknowable, so
+            // reconciliation leaves it alone.
+            let supports_auto_scaling = client.supports_auto_scaling_strategies().await?;
+            let (to_set, to_reset) =
+                diff_cluster_options(def, &existing_cluster, supports_auto_scaling).map_err(
+                    |reason| {
+                        CliError::Connection(ConnectionError::Message(format!(
+                            "invalid AUTO SCALING STRATEGY for cluster '{}': {}",
+                            cluster_name, reason
+                        )))
+                    },
+                )?;
 
-            let size_differs = desired_size.as_deref() != existing_cluster.size.as_deref();
-            let rf_differs = desired_rf.map(i64::from) != existing_cluster.replication_factor;
-            // Policy drift is only diffable when the region exposes the
-            // autoscaling introspection view; on older regions the live
-            // policy is unknowable and reconciliation leaves it alone.
-            let strategy_differs = client.supports_auto_scaling_strategies().await?
-                && desired_strategy != existing_cluster.auto_scaling_strategy;
-
-            if size_differs || rf_differs || strategy_differs {
-                let mut set_parts = Vec::new();
-                if size_differs || rf_differs {
-                    let size = desired_size.unwrap_or_else(|| {
-                        existing_cluster
-                            .size
-                            .clone()
-                            .unwrap_or_else(|| "25cc".to_string())
-                    });
-                    let rf: u32 = desired_rf.unwrap_or_else(|| {
-                        existing_cluster
-                            .replication_factor
-                            .unwrap_or(1)
-                            .try_into()
-                            .unwrap_or(1)
-                    });
-                    set_parts.push(format!("SIZE = '{}'", size));
-                    set_parts.push(format!("REPLICATION FACTOR = {}", rf));
-                }
-                if strategy_differs {
-                    if let Some(strategy) = &desired_strategy {
-                        set_parts.push(strategy_to_cluster_option(strategy).to_ast_string_simple());
-                    }
-                }
-                if !set_parts.is_empty() {
+            if to_set.is_empty() && to_reset.is_empty() {
+                ObjectAction::UpToDate
+            } else {
+                if !to_set.is_empty() {
+                    let options = to_set
+                        .iter()
+                        .map(AstDisplay::to_ast_string_simple)
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     let alter_sql = format!(
                         "ALTER CLUSTER {} SET ({})",
                         quote_identifier(cluster_name),
-                        set_parts.join(", ")
+                        options
                     );
                     executor.execute_sql(&alter_sql).await?;
                 }
-                // The file declares no policy but the live cluster has one.
                 // SET and RESET cannot be combined in one statement.
-                if strategy_differs && desired_strategy.is_none() {
+                if !to_reset.is_empty() {
+                    let names = to_reset
+                        .iter()
+                        .map(AstDisplay::to_ast_string_simple)
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     let reset_sql = format!(
-                        "ALTER CLUSTER {} RESET (AUTO SCALING STRATEGY)",
-                        quote_identifier(cluster_name)
+                        "ALTER CLUSTER {} RESET ({})",
+                        quote_identifier(cluster_name),
+                        names
                     );
                     executor.execute_sql(&reset_sql).await?;
                 }
                 ObjectAction::Altered
-            } else {
-                ObjectAction::UpToDate
             }
         }
     };
@@ -189,4 +171,164 @@ async fn plan_cluster(
         transaction_group: None,
         post_statements: vec![],
     })
+}
+
+/// The managed cluster options mz-deploy reconciles: `SIZE`, `REPLICATION
+/// FACTOR`, and `AUTO SCALING STRATEGY`. Compares the definition against the
+/// live cluster and returns the options to `SET` and the option names to
+/// `RESET` so the caller can converge live state onto the file.
+///
+/// `SIZE` and `REPLICATION FACTOR` reconcile the values the file declares. `AUTO
+/// SCALING STRATEGY` additionally reconciles removal, a policy dropped from the
+/// file is reset, but only when `supports_auto_scaling` is set, since on older
+/// regions the live policy is unknowable.
+fn diff_cluster_options(
+    def: &ClusterDefinition,
+    existing: &Cluster,
+    supports_auto_scaling: bool,
+) -> Result<(Vec<ClusterOption<Raw>>, Vec<ClusterOptionName>), String> {
+    let create = &def.create_stmt;
+    let mut to_set = Vec::new();
+    let mut to_reset = Vec::new();
+
+    if extract_size(create).as_deref() != existing.size.as_deref()
+        && let Some(option) = find_cluster_option(create, ClusterOptionName::Size)
+    {
+        to_set.push(option.clone());
+    }
+    if extract_replication_factor(create).map(i64::from) != existing.replication_factor
+        && let Some(option) = find_cluster_option(create, ClusterOptionName::ReplicationFactor)
+    {
+        to_set.push(option.clone());
+    }
+
+    if supports_auto_scaling {
+        let desired = extract_auto_scaling_strategy(create)?;
+        if desired != existing.auto_scaling_strategy {
+            match desired {
+                Some(strategy) => to_set.push(strategy_to_cluster_option(&strategy)),
+                None => to_reset.push(ClusterOptionName::AutoScalingStrategy),
+            }
+        }
+    }
+
+    Ok((to_set, to_reset))
+}
+
+/// Find a `CREATE CLUSTER` option by name.
+fn find_cluster_option(
+    create: &CreateClusterStatement<Raw>,
+    name: ClusterOptionName,
+) -> Option<&ClusterOption<Raw>> {
+    create.options.iter().find(|option| option.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mz_sql_parser::ast::Statement;
+    use mz_sql_parser::parser::parse_statements;
+
+    fn definition(sql: &str) -> ClusterDefinition {
+        let create_stmt = match parse_statements(sql).unwrap().pop().unwrap().ast {
+            Statement::CreateCluster(stmt) => stmt,
+            other => panic!("expected CREATE CLUSTER, got {:?}", other),
+        };
+        ClusterDefinition {
+            name: create_stmt.name.to_string(),
+            create_stmt,
+            grants: vec![],
+            comments: vec![],
+        }
+    }
+
+    fn cluster(size: &str, replication_factor: i64) -> Cluster {
+        Cluster {
+            id: "u1".to_string(),
+            name: "scaled".to_string(),
+            size: Some(size.to_string()),
+            replication_factor: Some(replication_factor),
+            auto_scaling_strategy: None,
+        }
+    }
+
+    /// Render a diff as `(SET statement parts, RESET names)` for concise asserts.
+    fn diff(def: &ClusterDefinition, existing: &Cluster) -> (Vec<String>, Vec<String>) {
+        let (to_set, to_reset) = diff_cluster_options(def, existing, true).unwrap();
+        (
+            to_set
+                .iter()
+                .map(AstDisplay::to_ast_string_simple)
+                .collect(),
+            to_reset
+                .iter()
+                .map(AstDisplay::to_ast_string_simple)
+                .collect(),
+        )
+    }
+
+    #[mz_ore::test]
+    fn test_diff_up_to_date() {
+        let def = definition(
+            "CREATE CLUSTER scaled (SIZE = '25cc', REPLICATION FACTOR = 2, \
+             AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '100cc')))",
+        );
+        let mut existing = cluster("25cc", 2);
+        existing.auto_scaling_strategy = extract_auto_scaling_strategy(&def.create_stmt).unwrap();
+        assert_eq!(diff(&def, &existing), (vec![], Vec::<String>::new()));
+    }
+
+    #[mz_ore::test]
+    fn test_diff_size_only() {
+        let def = definition("CREATE CLUSTER scaled (SIZE = '50cc', REPLICATION FACTOR = 2)");
+        assert_eq!(
+            diff(&def, &cluster("25cc", 2)),
+            (vec!["SIZE = '50cc'".to_string()], Vec::<String>::new())
+        );
+    }
+
+    #[mz_ore::test]
+    fn test_diff_strategy_set() {
+        let def = definition(
+            "CREATE CLUSTER scaled (SIZE = '25cc', REPLICATION FACTOR = 2, \
+             AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '100cc')))",
+        );
+        assert_eq!(
+            diff(&def, &cluster("25cc", 2)),
+            (
+                vec![
+                    "AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '100cc'))".to_string()
+                ],
+                Vec::<String>::new()
+            )
+        );
+    }
+
+    #[mz_ore::test]
+    fn test_diff_strategy_reset() {
+        let def = definition("CREATE CLUSTER scaled (SIZE = '25cc', REPLICATION FACTOR = 2)");
+        let mut existing = cluster("25cc", 2);
+        existing.auto_scaling_strategy = extract_auto_scaling_strategy(
+            &definition(
+                "CREATE CLUSTER scaled (SIZE = '25cc', AUTO SCALING STRATEGY = \
+                 (ON HYDRATION (HYDRATION SIZE = '100cc')))",
+            )
+            .create_stmt,
+        )
+        .unwrap();
+        assert_eq!(
+            diff(&def, &existing),
+            (vec![], vec!["AUTO SCALING STRATEGY".to_string()])
+        );
+    }
+
+    #[mz_ore::test]
+    fn test_diff_unsupported_region_skips_strategy() {
+        // With autoscaling unsupported, a live policy is never diffed even
+        // though the file drops it.
+        let def = definition("CREATE CLUSTER scaled (SIZE = '25cc', REPLICATION FACTOR = 2)");
+        let existing = cluster("25cc", 2);
+        let (to_set, to_reset) = diff_cluster_options(&def, &existing, false).unwrap();
+        assert!(to_set.is_empty() && to_reset.is_empty());
+    }
 }

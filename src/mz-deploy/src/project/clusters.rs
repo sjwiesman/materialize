@@ -328,7 +328,7 @@ fn validate_auto_scaling_options(create_stmt: &CreateClusterStatement<Raw>) -> V
         Err(reason) => return vec![reason],
     };
     let Some(strategy) = strategy else {
-        // An empty block disables autoscaling; nothing left to check.
+        // An empty block disables autoscaling, so there is nothing to check.
         return vec![];
     };
 

@@ -54,9 +54,6 @@ use tokio_postgres::{Client as PgClient, NoTls, Row, SimpleQueryMessage, Transac
 pub struct Client {
     client: PgClient,
     profile: Profile,
-    /// Whether the region exposes `mz_internal.mz_cluster_auto_scaling_strategies`,
-    /// probed on first use. Older regions predate the view, and every
-    /// autoscaling-aware query path degrades to "no policy" when it is absent.
     auto_scaling_support: std::sync::OnceLock<bool>,
 }
 
@@ -201,9 +198,6 @@ impl Client {
     }
 
     /// Whether the region exposes the autoscaling-strategy introspection view.
-    ///
-    /// The result is cached for the lifetime of the connection. A concurrent
-    /// first call may probe twice; both probes return the same answer.
     pub(crate) async fn supports_auto_scaling_strategies(&self) -> Result<bool, ConnectionError> {
         if let Some(supported) = self.auto_scaling_support.get() {
             return Ok(*supported);

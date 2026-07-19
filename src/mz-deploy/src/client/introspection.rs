@@ -74,10 +74,9 @@ pub(super) async fn cluster_exists(client: &Client, name: &str) -> Result<bool, 
     Ok(row.get("exists"))
 }
 
-/// Parse the `auto_scaling_strategy` column selected by the cluster queries
-/// below: the `strategy` jsonb of `mz_internal.mz_cluster_auto_scaling_strategies`
-/// fetched as text, `NULL` when the cluster has no row (or the region predates
-/// the view and the query selected a literal `NULL`).
+/// The cluster's configured autoscaling policy, read from the
+/// `auto_scaling_strategy` column of a cluster query row. A `NULL` column means
+/// "no policy": the cluster has none, or the region predates the feature.
 fn parse_auto_scaling_strategy(
     row: &tokio_postgres::Row,
     cluster_name: &str,
@@ -94,9 +93,9 @@ fn parse_auto_scaling_strategy(
     }
 }
 
-/// The `auto_scaling_strategy` select expression and join for cluster queries.
-/// When the region predates the introspection view, the join is skipped and
-/// the column degrades to `NULL` (no policy).
+/// SQL fragments (a select expression and a join) that add the configured
+/// autoscaling policy to a cluster query. On regions that predate the feature,
+/// they yield a `NULL` policy column instead.
 async fn auto_scaling_query_parts(
     client: &Client,
 ) -> Result<(&'static str, &'static str), ConnectionError> {
