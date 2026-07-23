@@ -722,9 +722,13 @@ impl ComputeController {
 
         // Capture dictionary compression once, at replica creation, and hold it fixed for the
         // replica's lifetime (see `InstanceConfig::arrangement_dictionary_compression`). This is
-        // why a later flip of the flag only affects replicas created afterwards.
-        let arrangement_dictionary_compression =
-            ENABLE_ARRANGEMENT_DICTIONARY_COMPRESSION_ALPHA.get(&self.dyncfg);
+        // why a later flip of the flag only affects replicas created afterwards. The feature flag
+        // only gates the feature: a replica honors its per-cluster/replica configured value only
+        // while the flag is enabled, so turning the flag off disables compression on new or
+        // restarted replicas regardless of their configuration.
+        let arrangement_dictionary_compression = ENABLE_ARRANGEMENT_DICTIONARY_COMPRESSION_ALPHA
+            .get(&self.dyncfg)
+            && config.arrangement_compression;
 
         let replica_config = ReplicaConfig {
             location,
@@ -781,7 +785,7 @@ impl ComputeController {
     pub fn create_dataflow(
         &mut self,
         instance_id: ComputeInstanceId,
-        mut dataflow: DataflowDescription<mz_compute_types::plan::Plan, ()>,
+        mut dataflow: DataflowDescription<mz_compute_types::plan::LirRelationExpr, ()>,
         target_replica: Option<ReplicaId>,
     ) -> Result<(), DataflowCreationError> {
         use DataflowCreationError::*;
@@ -1013,7 +1017,7 @@ impl ComputeController {
     fn determine_time_dependence(
         &self,
         instance_id: ComputeInstanceId,
-        dataflow: &DataflowDescription<mz_compute_types::plan::Plan, ()>,
+        dataflow: &DataflowDescription<mz_compute_types::plan::LirRelationExpr, ()>,
     ) -> Result<Option<TimeDependence>, TimeDependenceError> {
         let instance = self
             .instance(instance_id)

@@ -13,6 +13,7 @@ processes). See cluster tests for separate clusterds, see platform-checks for
 further restart scenarios.
 """
 
+import copy
 import json
 import time
 from textwrap import dedent
@@ -24,6 +25,7 @@ from psycopg.errors import (
 )
 
 from materialize import MZ_ROOT, buildkite
+from materialize.mzcompose import cluster_replica_size_map
 from materialize.mzcompose.composition import Composition, Service
 from materialize.mzcompose.services.kafka import Kafka
 from materialize.mzcompose.services.materialized import Materialized
@@ -64,7 +66,7 @@ SERVICES = [
 
 def workflow_retain_history(c: Composition) -> None:
     def check_retain_history(name: str):
-        start = time.time()
+        start = time.monotonic()
         while True:
             ts = c.sql_query(
                 f"EXPLAIN TIMESTAMP AS JSON FOR SELECT * FROM retain_{name}"
@@ -74,13 +76,16 @@ def workflow_retain_history(c: Composition) -> None:
             source = ts["sources"][0]
             since = source["read_frontier"][0]
             upper = source["write_frontier"][0]
-            if upper - since > 2000:
+            # The write frontier is exclusive, so an exact 2,000 ms gap retains
+            # the requested two seconds of history.
+            if upper - since >= 2000:
                 break
-            end = time.time()
-            # seconds since start
-            elapsed = end - start
+            elapsed = time.monotonic() - start
             if elapsed > 10:
-                raise UIError("timeout hit while waiting for retain history")
+                raise UIError(
+                    f"timeout hit while waiting for retain history for retain_{name}: "
+                    f"read frontier {since}, write frontier {upper}"
+                )
             time.sleep(0.5)
 
     def check_retain_history_for(names: list[str]):
@@ -356,6 +361,56 @@ def workflow_allowed_cluster_replica_sizes(c: Composition) -> None:
             ALTER SYSTEM RESET allowed_cluster_replica_sizes
             """),
     )
+
+
+def workflow_disabled_cluster_replica_size_survives_restart(c: Composition) -> None:
+    # SQL-306: disabling a size in `cluster_replica_sizes` that an existing
+    # replica still uses must not crash the environment at startup. Disabling
+    # is how you retire a size while leaving existing replicas running, so
+    # those replicas keep working and only new replicas of that size are
+    # refused.
+    c.down(destroy_volumes=True)
+
+    sizes = cluster_replica_size_map()
+    size = "scale=2,workers=4"
+    assert (
+        size in sizes and not sizes[size]["disabled"]
+    ), f"test assumes {size} exists and is enabled in the default size map"
+
+    # Boot with the size enabled and create a replica that uses it.
+    with c.override(Materialized(cluster_replica_size=sizes)):
+        c.up("materialized", Service("testdrive_no_reset", idle=True))
+        c.testdrive(
+            service="testdrive_no_reset",
+            input=dedent(f"""
+                > CREATE CLUSTER test REPLICAS (r1 (SIZE '{size}'))
+
+                > SHOW CLUSTER REPLICAS WHERE cluster = 'test'
+                test r1 {size} true ""
+                """),
+        )
+        c.kill("materialized")
+
+    # Restart with that size disabled. Startup rebuilds each replica from its
+    # durable size in apply_cluster_replica_update, so a disabled size must not
+    # stop the environment from booting and the existing replica must survive.
+    # A new replica of the disabled size is still refused.
+    disabled = copy.deepcopy(sizes)
+    disabled[size]["disabled"] = True
+    with c.override(Materialized(cluster_replica_size=disabled)):
+        c.up("materialized", Service("testdrive_no_reset", idle=True))
+        c.testdrive(
+            service="testdrive_no_reset",
+            input=dedent(f"""
+                # Existing replica of the now-disabled size survives the restart.
+                > SHOW CLUSTER REPLICAS WHERE cluster = 'test'
+                test r1 {size} true ""
+
+                # Creating a new replica of the disabled size is rejected.
+                ! CREATE CLUSTER REPLICA test.r2 SIZE '{size}'
+                contains:unknown cluster replica size {size}
+                """),
+        )
 
 
 def workflow_allow_user_sessions(c: Composition) -> None:
@@ -634,9 +689,17 @@ def workflow_drop_materialize_database(c: Composition) -> None:
     # Verify that materialize hasn't blown up
     c.sql("SELECT 1")
 
-    # Restore for next tests
+    # Restore for next tests. The recreated database is owned by mz_system, so
+    # the materialize role must be re-granted the database-level privileges
+    # (notably CREATE, needed to create schemas) and the public schema
+    # privileges it holds by default.
     c.sql(
         "CREATE DATABASE materialize",
+        port=6877,
+        user="mz_system",
+    )
+    c.sql(
+        "GRANT ALL PRIVILEGES ON DATABASE materialize TO materialize",
         port=6877,
         user="mz_system",
     )
@@ -983,6 +1046,198 @@ def workflow_user_id_no_reuse_after_restart(c: Composition) -> None:
     c.sql("DROP TABLE idreuse_t3")
     c.sql("DROP TABLE idreuse_t2")
     c.sql("DROP TABLE idreuse_t1")
+
+
+def workflow_rename_schema_types_functions(c: Composition) -> None:
+    """Verify that ALTER SCHEMA RENAME updates references to a renamed schema's types.
+
+    A type is only ever referenced by a schema-qualified name in "data type"
+    position: a cast, a table column type, or a nested element type. Every kind
+    of dependent object (view, materialized view, table, another type) reaches
+    the type the same way, so all of them must have their create_sql rewritten
+    on rename.
+
+    Regression test for three related bugs:
+
+    1. transact.rs RenameSchema only iterated schema.items, missing schema.types
+       (and schema.functions). The renamed schema's own types kept stale
+       create_sql, which fails to re-parse on restart (the original panic).
+
+    2. transform.rs CreateSqlRewriteSchema never descended into data types, so
+       references to a renamed schema's types inside dependents' create_sql
+       (casts, column types, element types) were left pointing at the old name.
+
+    3. consistency.rs check_items() only iterated schema.items, so a type with
+       invalid create_sql after a rename was never flagged by the checker.
+
+    The persisted create_sql is only re-parsed on boot, so the corruption is
+    invisible until a restart, after which the stale references fail to resolve.
+    """
+
+    c.up("materialized")
+
+    # Create a schema with a custom type, then exercise every object kind that
+    # can reference that type by a schema-qualified name.
+    c.sql("CREATE SCHEMA s1")
+    c.sql("CREATE TYPE s1.mytype AS LIST (ELEMENT TYPE = int4)")
+    # View: references the type in a cast.
+    c.sql("CREATE VIEW public.v_uses_type AS SELECT NULL::s1.mytype")
+    # Materialized view: same, but persisted as a separate object kind.
+    c.sql("CREATE MATERIALIZED VIEW public.mv_uses_type AS SELECT NULL::s1.mytype")
+    # Table: references the type as a column type.
+    c.sql("CREATE TABLE public.t_uses_type (a s1.mytype)")
+    # Type-in-type: an outer type in another schema whose element type is the
+    # renamed schema's type (nested data type position).
+    c.sql("CREATE TYPE public.outer_type AS LIST (ELEMENT TYPE = s1.mytype)")
+
+    # Sanity: everything works before rename.
+    assert c.sql_query("SELECT count(*) FROM public.v_uses_type")[0][0] == 1
+    assert c.sql_query("SELECT count(*) FROM public.mv_uses_type")[0][0] == 1
+    assert c.sql_query("SELECT count(*) FROM public.t_uses_type")[0][0] == 0
+
+    # Rename the schema.
+    c.sql("ALTER SCHEMA s1 RENAME TO s2")
+
+    # Restart Materialize. The persisted create_sql is re-parsed on boot, so any
+    # dependent whose create_sql still references the old schema name "s1" (which
+    # no longer exists) fails to resolve here.
+    c.kill("materialized")
+    c.up("materialized")
+
+    # After restart, every dependent must still be queryable.
+    assert c.sql_query("SELECT count(*) FROM public.v_uses_type")[0][0] == 1
+    assert c.sql_query("SELECT count(*) FROM public.mv_uses_type")[0][0] == 1
+    assert c.sql_query("SELECT count(*) FROM public.t_uses_type")[0][0] == 0
+
+    # Every object's create_sql must reference the new schema name, never the old
+    # one. This covers the type itself and each kind of dependent.
+    checks = [
+        ("mz_types", "mytype"),
+        ("mz_types", "outer_type"),
+        ("mz_views", "v_uses_type"),
+        ("mz_materialized_views", "mv_uses_type"),
+        ("mz_tables", "t_uses_type"),
+    ]
+    for catalog_table, name in checks:
+        result = c.sql_query(
+            f"SELECT create_sql FROM {catalog_table} WHERE name = '{name}'"
+        )
+        create_sql = result[0][0]
+        assert (
+            '"s2"' in create_sql and '"s1"' not in create_sql
+        ), f"{name} create_sql still references old schema after rename: {create_sql}"
+
+    # Cleanup.
+    c.sql("DROP TABLE public.t_uses_type")
+    c.sql("DROP MATERIALIZED VIEW public.mv_uses_type")
+    c.sql("DROP VIEW public.v_uses_type")
+    c.sql("DROP TYPE public.outer_type")
+    c.sql("DROP TYPE s2.mytype")
+    c.sql("DROP SCHEMA s2")
+
+
+def workflow_arrangement_sizes_stale_snapshot_after_restart(c: Composition) -> None:
+    """After a restart, mz_object_arrangement_size_history should not
+    record rows read from stale pre-restart shard contents (SQL-218).
+
+    The collections backing the history snapshots retain pre-restart rows
+    until the new introspection subscribes replace them. Each round drops
+    two indexes and kills environmentd immediately, before the drops'
+    retractions can reach the collections, so the retained shard contents
+    include rows for objects that no longer exist in the catalog. After
+    the restart nothing can legitimately report those objects, so any
+    post-restart history row for them must have been read from the stale
+    shard contents. Unlike asserting on sizes, this cannot
+    false-positive: a rehydrating index legitimately reports its
+    pre-restart size, but a dropped object cannot be reported at all.
+    """
+
+    num_replicas = 2
+    all_names = [f"sidx{i}" for i in range(1, 21)]
+
+    def name_filter(names: list[str]) -> str:
+        return "(" + ", ".join(f"'{n}'" for n in names) + ")"
+
+    c.down(destroy_volumes=True)
+    with c.override(
+        Materialized(
+            additional_system_parameter_defaults={
+                "arrangement_size_history_collection_interval": "500ms",
+            },
+            sanity_restart=False,
+        )
+    ):
+        c.up("materialized")
+        c.sql(dedent(f"""\
+                CREATE CLUSTER stale_test SIZE 'scale=1,workers=1', REPLICATION FACTOR {num_replicas};
+                CREATE TABLE stale_t (a int, b text);
+                INSERT INTO stale_t SELECT g, repeat('x', 1024) FROM generate_series(1, 30000) g;
+                CREATE VIEW stale_v AS SELECT a, b FROM stale_t;
+                {"".join(f"CREATE INDEX sidx{i} IN CLUSTER stale_test ON stale_v ((a + {i}));" for i in range(1, 21))}
+                """))
+
+        # Object IDs must be captured before dropping: history rows are keyed
+        # by object_id, and dropped objects no longer join against mz_objects.
+        object_ids = {name: obj_id for obj_id, name in c.sql_query(f"""
+                SELECT o.id, o.name FROM mz_objects o
+                WHERE o.name IN {name_filter(all_names)}""")}
+        assert len(object_ids) == len(all_names)
+
+        def wait_for_full_sample(names: list[str]) -> None:
+            expected_count = len(names) * num_replicas
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                if c.sql_query(f"""
+                    SELECT 1 FROM mz_internal.mz_object_arrangement_size_history h
+                    JOIN mz_objects o ON o.id = h.object_id
+                    WHERE o.name IN {name_filter(names)}
+                    GROUP BY h.collection_timestamp
+                    HAVING count(*) = {expected_count} LIMIT 1"""):
+                    return
+                time.sleep(0.5)
+            raise UIError("timed out waiting for a full sample")
+
+        remaining = all_names
+        wait_for_full_sample(remaining)
+
+        for round_num in range(5):
+            dropped, remaining = remaining[:2], remaining[2:]
+
+            # Kill right after the drops: their retractions cannot reach the
+            # storage collections before the process dies, so the retained
+            # shard contents keep rows for the now-nonexistent indexes.
+            c.sql(";".join(f"DROP INDEX {name}" for name in dropped))
+            c.kill("materialized")
+            c.up("materialized")
+
+            # With the freshness gate, recording cannot resume until well
+            # after this query runs, so `boundary` cleanly separates pre-kill
+            # rows from anything recorded after the restart.
+            boundary = c.sql_query("""
+                SELECT max(collection_timestamp)::text
+                FROM mz_internal.mz_object_arrangement_size_history""")[0][0]
+            assert boundary is not None, (
+                f"round {round_num}: history table is empty right after "
+                "restart; pre-restart contents must be retained"
+            )
+
+            # A full post-restart sample of the remaining indexes implies the
+            # subscribes have delivered, so the stale window has closed.
+            wait_for_full_sample(remaining)
+
+            dropped_ids = ", ".join(f"'{object_ids[name]}'" for name in dropped)
+            stale_rows = c.sql_query(f"""
+                SELECT h.collection_timestamp::text, h.replica_id, h.object_id, h.size
+                FROM mz_internal.mz_object_arrangement_size_history h
+                WHERE h.object_id IN ({dropped_ids})
+                  AND h.collection_timestamp > '{boundary}'::timestamptz
+                ORDER BY h.collection_timestamp""")
+
+            assert not stale_rows, (
+                f"round {round_num}: {len(stale_rows)} post-restart history "
+                f"rows recorded for indexes dropped just before the restart "
+                f"({dropped}); first 10: {stale_rows[:10]}"
+            )
 
 
 def workflow_default(c: Composition) -> None:

@@ -17,7 +17,7 @@ As a general guideline, we recommend:
 
 - ARM-based CPU.
 - A 1:8 ratio of vCPU to GiB memory.
-- An 8:1 ratio of GiB local instance storage to GiB memory when using swap.
+- At least a 2:1 ratio of GiB local instance storage to GiB memory when using swap.
 
 ### Recommended Azure VM Types with Local NVMe Disks
 
@@ -89,3 +89,7 @@ Certificate Authority (CA) rather than self-signed certificates.
 
 {{< include-md file="shared-content/self-managed/general-rules-for-upgrades.md"
 >}}
+
+## Node pool resizing
+
+{{% include-headless "/headless/self-managed-deployments/resize-node-pool" %}}

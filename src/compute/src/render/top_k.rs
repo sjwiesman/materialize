@@ -20,16 +20,17 @@ use differential_dataflow::hashable::Hashable;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::{Arranged, TraceAgent};
 use differential_dataflow::operators::iterate::Variable as SemigroupVariable;
-use differential_dataflow::trace::implementations::BatchContainer;
-use differential_dataflow::trace::{Builder, Trace};
+use differential_dataflow::trace::cursor::{BatchCursor, BatchValOwn};
+use differential_dataflow::trace::{Builder, Cursor, Navigable, Trace};
 use differential_dataflow::{Data, VecCollection};
 use mz_compute_types::dyncfgs::{ENABLE_COMPUTE_TEMPORAL_BUCKETING, TEMPORAL_BUCKETING_SUMMARY};
 use mz_compute_types::plan::ArrangementStrategy;
+use mz_compute_types::plan::scalar::LirScalarExpr;
 use mz_compute_types::plan::top_k::{
     BasicTopKPlan, MonotonicTop1Plan, MonotonicTopKPlan, TopKPlan,
 };
 use mz_expr::func::CastUint64ToInt64;
-use mz_expr::{BinaryFunc, Columns, Eval, EvalError, MirScalarExpr, UnaryFunc, func};
+use mz_expr::{BinaryFunc, Columns, Eval, EvalError, UnaryFunc, func, permutation_for_arrangement};
 use mz_ore::cast::CastFrom;
 use mz_ore::soft_assert_or_log;
 use mz_repr::fixed_length::ExtendDatums;
@@ -44,12 +45,13 @@ use timely::dataflow::operators::Operator;
 use crate::extensions::arrange::{ArrangementSize, KeyCollection, MzArrange};
 use crate::extensions::reduce::{ClearContainer, MzReduce};
 use crate::render::Pairer;
-use crate::render::context::{CollectionBundle, Context};
+use crate::render::context::{ArrangementFlavor, CollectionBundle, Context};
 use crate::render::errors::DataflowErrorSer;
 use crate::render::errors::MaybeValidatingRow;
-use crate::typedefs::{KeyBatcher, MzTimestamp, RowRowSpine, RowSpine};
+use crate::typedefs::{ErrBatcher, ErrBuilder, KeyBatcher, MzTimestamp, RowRowSpine, RowSpine};
 use mz_row_spine::{
-    DatumSeq, RowBatcher, RowBuilder, RowRowBatcher, RowRowBuilder, RowValBuilder, RowValSpine,
+    DatumContainer, DatumSeq, RowBatcher, RowBuilder, RowRowBatcher, RowRowBuilder, RowValBuilder,
+    RowValSpine,
 };
 
 // The implementation requires integer timestamps to be able to delay feedback for monotonic inputs.
@@ -66,7 +68,7 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
 
         // Bucket the per-row input stream when lowering chose `TemporalBucketing`.
         // `TopK` builds its own arrangement(s) inside the variants below, bypassing
-        // `ensure_collections`, so the strategy is plumbed through `PlanNode::TopK`
+        // `ensure_collections`, so the strategy is plumbed through `LirRelationNode::TopK`
         // rather than inferred at the arrangement site. `apply_bucketing_strategy`
         // is a no-op for `Direct`.
         //
@@ -113,7 +115,7 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
 
         // We create a new region to compartmentalize the topk logic.
         let outer_scope = ok_input.scope();
-        let (ok_result, err_collection) = outer_scope.clone().region_named("TopK", |inner| {
+        let bundle = outer_scope.clone().region_named("TopK", |inner| {
             let ok_input = ok_input.enter_region(inner);
             let mut err_collection = err_input.enter_region(inner);
 
@@ -151,20 +153,36 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
                 }
             }
 
-            let ok_result = match top_k_plan {
+            let bundle = match top_k_plan {
                 TopKPlan::MonotonicTop1(MonotonicTop1Plan {
                     group_key,
                     order_key,
+                    arity,
                     must_consolidate,
                 }) => {
-                    let (oks, errs) = self.render_top1_monotonic(
+                    let (arrangement, errs) = self.render_top1_monotonic(
                         ok_input,
-                        group_key,
+                        group_key.clone(),
                         order_key,
+                        arity,
                         must_consolidate,
                     );
                     err_collection = err_collection.concat(errs);
-                    oks
+
+                    // Lowering advertises this group-key arrangement (see the
+                    // `MirRelationExpr::TopK` arm in `lowering.rs`), so deliver it alone,
+                    // mirroring `render_reduce_plan`'s `ArrangementFlavor::Local`. A consumer
+                    // that needs the raw collection reconstructs it from the arrangement via
+                    // the advertised permutation, exactly as for an index arrangement.
+                    let errs: KeyCollection<_, _, _> = err_collection.clone().into();
+                    let err_arrangement = errs
+                        .mz_arrange::<ColumnationChunker<_>, ErrBatcher<_, _>, ErrBuilder<_, _>, _>(
+                            "Arrange bundle err",
+                        );
+                    CollectionBundle::from_columns(
+                        group_key.iter().copied(),
+                        ArrangementFlavor::Local(arrangement, err_arrangement),
+                    )
                 }
                 TopKPlan::MonotonicTopK(MonotonicTopKPlan {
                     order_key,
@@ -263,7 +281,10 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
                         "requested no validation, but received error collection"
                     );
 
-                    result.map(|(_key_hash, row)| row)
+                    CollectionBundle::from_collections(
+                        result.map(|(_key_hash, row)| row),
+                        err_collection,
+                    )
                 }
                 TopKPlan::Basic(BasicTopKPlan {
                     group_key,
@@ -286,18 +307,15 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
                         ok_input, group_key, order_key, offset, limit, arity, buckets,
                     );
                     err_collection = err_collection.concat(errs);
-                    oks
+                    CollectionBundle::from_collections(oks, err_collection)
                 }
             };
 
             // Extract the results from the region.
-            (
-                ok_result.leave_region(outer_scope),
-                err_collection.leave_region(outer_scope),
-            )
+            bundle.leave_region(outer_scope)
         });
 
-        CollectionBundle::from_collections(ok_result, err_collection)
+        bundle
     }
 
     /// Constructs a TopK dataflow subgraph.
@@ -307,7 +325,7 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
         group_key: Vec<usize>,
         order_key: Vec<mz_expr::ColumnOrder>,
         offset: usize,
-        limit: Option<mz_expr::MirScalarExpr>,
+        limit: Option<LirScalarExpr>,
         arity: usize,
         buckets: Vec<u64>,
     ) -> (
@@ -343,10 +361,10 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
 
                 if let Some(new_limit) = new_limit {
                     limit =
-                        MirScalarExpr::literal_ok(Datum::Int64(new_limit), ReprScalarType::Int64);
+                        LirScalarExpr::literal_ok(Datum::Int64(new_limit), ReprScalarType::Int64);
                 } else {
                     limit = limit.call_binary(
-                        MirScalarExpr::literal_ok(
+                        LirScalarExpr::literal_ok(
                             Datum::UInt64(u64::cast_from(offset)),
                             ReprScalarType::UInt64,
                         )
@@ -437,7 +455,7 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
         order_key: Vec<mz_expr::ColumnOrder>,
         modulus: u64,
         offset: usize,
-        limit: Option<mz_expr::MirScalarExpr>,
+        limit: Option<LirScalarExpr>,
         arity: usize,
         validating: bool,
     ) -> (
@@ -501,11 +519,24 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
         collection: VecCollection<'s, T, Row, Diff>,
         group_key: Vec<usize>,
         order_key: Vec<mz_expr::ColumnOrder>,
+        arity: usize,
         must_consolidate: bool,
     ) -> (
-        VecCollection<'s, T, Row, Diff>,
+        Arranged<'s, TraceAgent<RowRowSpine<T, Diff>>>,
         VecCollection<'s, T, DataflowErrorSer, Diff>,
     ) {
+        // The arrangement we build below is keyed by `group_key` and its value is the winning
+        // row thinned to `thinning`, following the layout `permutation_for_arrangement`
+        // dictates for `Reduce`-style group-key arrangements. A top-1 winner's group-key
+        // columns equal the key by construction, so dropping them from the value is lossless;
+        // consumers reconstruct the full row from key and value via the (unused here)
+        // permutation.
+        let key: Vec<LirScalarExpr> = group_key
+            .iter()
+            .map(|c| LirScalarExpr::column(*c))
+            .collect();
+        let (_permutation, thinning) = permutation_for_arrangement(&key, arity);
+
         // We can place our rows directly into the diff field, and only keep the relevant one
         // corresponding to evaluating our aggregate, instead of having to do a hierarchical
         // reduction. We start by mapping the group key along with the row and consolidating
@@ -557,15 +588,19 @@ impl<'scope, T: crate::render::RenderTimestamp + crate::render::MaybeBucketByTim
             >(
                 "Arranged MonotonicTop1 partial [val: empty]",
             )
-            .mz_reduce_abelian::<_, RowRowBuilder<_, _>, RowRowSpine<_, _>>(
+            .mz_reduce_abelian::<_, RowRowBuilder<_, _>, RowRowSpine<_, _>, _>(
                 "MonotonicTop1",
-                move |_key, input, output| {
-                    let accum: &monoids::Top1Monoid = &input[0].1;
-                    output.push((accum.row.clone(), Diff::ONE));
+                {
+                    let mut datum_vec = mz_repr::DatumVec::new();
+                    move |_key, input, output| {
+                        let accum: &monoids::Top1Monoid = &input[0].1;
+                        let datums = datum_vec.borrow_with(&accum.row);
+                        let value = SharedRow::pack(thinning.iter().map(|i| datums[*i]));
+                        output.push((value, Diff::ONE));
+                    }
                 },
             );
-        // TODO(database-issues#2288): Here we discard the arranged output.
-        (result.as_collection(|_k, v| v.to_row()), errs)
+        (result, errs)
     }
 }
 
@@ -580,7 +615,7 @@ fn build_topk_negated_stage<'s, T, Bu, Tr>(
     input: &VecCollection<'s, T, (Row, Row), Diff>,
     order_key: Vec<mz_expr::ColumnOrder>,
     offset: usize,
-    limit: Option<mz_expr::MirScalarExpr>,
+    limit: Option<LirScalarExpr>,
     arity: usize,
 ) -> (
     Arranged<'s, TraceAgent<RowRowSpine<T, Diff>>>,
@@ -590,16 +625,17 @@ where
     T: MzTimestamp,
     Bu: Builder<
             Time = T,
-            Input: Container + ClearContainer + PushInto<((Row, Tr::ValOwn), T, Diff)>,
+            Input: Container + ClearContainer + PushInto<((Row, BatchValOwn<Tr>), T, Diff)>,
             Output = Tr::Batch,
-        >,
-    Tr: for<'a> Trace<
+        > + 'static,
+    Tr: Trace<Batch: Navigable, Time = T> + 'static,
+    for<'a> BatchCursor<Tr>: Cursor<
             Key<'a> = DatumSeq<'a>,
-            KeyContainer: BatchContainer<Owned = Row>,
+            KeyContainer = DatumContainer,
             ValOwn: Data + MaybeValidatingRow<Row, Row>,
             Time = T,
             Diff = Diff,
-        > + 'static,
+        >,
     Arranged<'s, TraceAgent<Tr>>: ArrangementSize,
 {
     let mut datum_vec = mz_repr::DatumVec::new();
@@ -628,8 +664,8 @@ where
 
     let reduced = arranged
         .clone()
-        .mz_reduce_abelian::<_, Bu, Tr>("Reduced TopK input", {
-            move |hash_key, source, target: &mut Vec<(Tr::ValOwn, Diff)>| {
+        .mz_reduce_abelian::<_, Bu, Tr, _>("Reduced TopK input", {
+            move |hash_key, source, target: &mut Vec<(BatchValOwn<Tr>, Diff)>| {
                 // Unpack the limit, either into an integer literal or an expression to evaluate.
                 let limit = match &limit {
                     Some(Ok(lit)) => Some(*lit),
@@ -651,7 +687,7 @@ where
                     None => None,
                 };
 
-                if let Some(err) = Tr::ValOwn::into_error() {
+                if let Some(err) = BatchValOwn::<Tr>::into_error() {
                     for (datums, diff) in source.iter() {
                         if diff.is_positive() {
                             continue;
@@ -675,7 +711,7 @@ where
                 // dependencies on the user-provided (potentially unbounded) limit.
                 target.reserve(source.len());
                 for (datums, diff) in source.iter() {
-                    target.push((Tr::ValOwn::ok((*datums).to_row()), -diff));
+                    target.push((BatchValOwn::<Tr>::ok((*datums).to_row()), -diff));
                 }
                 // local copies that may count down to zero.
                 let mut offset = offset;
@@ -725,7 +761,7 @@ where
                     if diff.is_positive() {
                         // Emit retractions for the elements actually part of
                         // the set of TopK elements.
-                        target.push((Tr::ValOwn::ok(datums.to_row()), diff));
+                        target.push((BatchValOwn::<Tr>::ok(datums.to_row()), diff));
                     }
                 }
             }
@@ -736,7 +772,7 @@ where
 fn render_intra_ts_thinning<'s, T>(
     collection: VecCollection<'s, T, (Row, Row), Diff>,
     order_key: Vec<mz_expr::ColumnOrder>,
-    limit: mz_expr::MirScalarExpr,
+    limit: LirScalarExpr,
 ) -> VecCollection<'s, T, (Row, Row), Diff>
 where
     T: timely::progress::Timestamp + Lattice,

@@ -5,6 +5,30 @@ disable_list: true
 aliases:
   - /self-hosted/concepts/
   - /self-managed-deployments/appendix/legacy/appendix-legacy-terraform-releases/
+  - /self-managed/
+  - /self-managed/v25.2/
+  - /self-managed/v25.2/installation/
+  - /self-managed/v25.2/installation/configuration/
+  - /self-managed/v25.2/installation/install-on-aws/
+  - /self-managed/v25.2/installation/install-on-aws/upgrade-on-aws/
+  - /self-managed/v25.2/installation/install-on-aws/appendix-aws-configuration/
+  - /self-managed/v25.2/installation/install-on-awsappendix-deployment-guidelines/
+  - /self-managed/v25.2/installation/install-on-gcp/
+  - /self-managed/v25.2/installation/install-on-gcp/appendix-gcp-configuration/
+  - /self-managed/v25.2/installation/install-on-azure/
+  - /self-managed/v25.2/installation/install-on-azureappendix-deployment-guidelines/
+  - /self-managed/v25.2/installation/install-on-azureappendix-azure-configuration/
+  - /self-managed/v25.2/installation/install-on-azure/upgrade-on-azure/
+  - /self-managed/v25.2/installation/install-on-local-kind/
+  - /self-managed/v25.2/installation/install-on-local-minikube/
+  - /self-managed/v25.2/installation/install-on-local-minikubeupgrade-on-local-minikube/
+  - /self-managed/v25.2/installation/operational-guidelines/
+  - /self-managed/v25.2/installation/troubleshooting/
+  - /self-managed/v25.2/installation/appendix-terraforms/
+  - /self-managed/v25.2/installation/upgrading/
+  - /self-managed/v25.2/installation/troubleshooting/
+  - /self-managed/v25.2/installation/upgrade-to-swap/
+
 menu:
   main:
     identifier: "sm-deployments"
@@ -157,6 +181,11 @@ custom resource definitions(CRDs). For a full list of fields available for the
 Materialize CR, see [Materialize CRD Field
 Descriptions](/self-managed-deployments/materialize-crd-field-descriptions/).
 
+{{< tabs >}}
+{{< tab "v1alpha1" >}}
+
+{{< self-managed/crd-version-note "v1alpha1" >}}
+
 ```yaml
 apiVersion: materialize.cloud/v1alpha1
 kind: Materialize
@@ -168,10 +197,34 @@ spec:
 # ... additional fields omitted for brevity
 ```
 
+{{< /tab >}}
+{{< tab "v1" >}}
+
+{{< self-managed/crd-version-note "v1" >}}
+
+```yaml
+apiVersion: materialize.cloud/v1
+kind: Materialize
+metadata:
+  name: 12345678-1234-1234-1234-123456789012
+  namespace: materialize-environment
+spec:
+  environmentdImageRef: materialize/environmentd:{{< self-managed/versions/get-latest-version >}}
+# ... additional fields omitted for brevity
+```
+
+{{< /tab >}}
+{{< /tabs >}}
+
 When you first apply the Materialize custom resource, the operator automatically
 creates all required Kubernetes resources.
 
 #### Modifying the custom resource
+
+{{< tabs >}}
+{{< tab "v1alpha1" >}}
+
+{{< self-managed/crd-version-note "v1alpha1" >}}
 
 To modify a custom resource, update the CRD with your changes, including the
 `requestRollout` field with a new UUID value. When you apply the CRD, the
@@ -181,6 +234,17 @@ operator will roll out the changes.
 If you do not specify a new `requestRollout` UUID, the operator
 watches for updates but does not roll out the changes.
 {{< /note >}}
+
+{{< /tab >}}
+{{< tab "v1" >}}
+
+{{< self-managed/crd-version-note "v1" >}}
+
+To modify a custom resource, update the CRD with your changes.
+When you apply the CRD, the operator will roll out the changes.
+
+{{< /tab >}}
+{{< /tabs >}}
 
 For a full list of fields available for the Materialize CR, see [Materialize CRD
 Field

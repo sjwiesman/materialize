@@ -244,6 +244,22 @@ pub static SQL_SERVER_SOURCE_VALIDATE_RESTORE_HISTORY: Config<bool> = Config::ne
     "Whether to treat a restore history change as a definite error",
 );
 
+// AWS
+
+/// The AWS SDK's connect timeout on the AssumeRole prefetcher's STS calls.
+/// Raise it if credential fetches time out on slow connections.
+///
+/// The default matches the SDK's own 3.1 second default, so behavior only
+/// changes when an operator raises it.
+///
+/// Read once when a connection is set up. Running sinks are unaffected by
+/// changes until their dataflow restarts.
+pub const AWS_PREFETCH_STS_CONNECT_TIMEOUT: Config<Duration> = Config::new(
+    "aws_prefetch_sts_connect_timeout",
+    Duration::from_millis(3100),
+    "Connect timeout for the AWS AssumeRole credentials prefetcher's STS calls.",
+);
+
 // Networking
 
 /// Whether or not to enforce that external connection addresses are global
@@ -294,18 +310,20 @@ pub const STORAGE_UPSERT_MAX_SNAPSHOT_BATCH_BUFFERING: Config<Option<usize>> = C
     "Limit snapshot buffering in upsert.",
 );
 
-/// Allow the upsert-v2 source stash's paged columnar merge batcher to spill
-/// cold chains out of RSS via the column pager. The stash draws from the same
-/// shared budget pool (and backend / codec) as the compute column-paged
-/// batcher — there is one budget — but this flag gates the stash's
-/// participation independently of the compute-side
-/// `enable_column_paged_batcher_spill`.
+/// Allow the upsert-v2 source stash's chunk batcher to spill cold chains out
+/// of RSS via the process buffer pool. The stash draws from the same shared
+/// pool budget as the compute chunk batchers — there is one budget — but
+/// this flag gates the stash's participation independently of the
+/// compute-side `enable_column_paged_batcher_spill`.
 ///
 /// Off by default; the stash keeps every chunk resident until enabled.
+/// Enabling it also installs the process buffer pool (via compute's config
+/// handler, which reads this flag from the aggregate dyncfg set), so
+/// storage-only spilling needs no compute-side gate.
 pub const ENABLE_UPSERT_PAGED_SPILL: Config<bool> = Config::new(
     "enable_upsert_paged_spill",
     false,
-    "Allow the upsert-v2 source stash to spill chunks via the shared column pager, gated \
+    "Allow the upsert-v2 source stash to spill chunks to the shared buffer pool, gated \
      independently of the compute `enable_column_paged_batcher_spill`.",
 );
 
@@ -383,6 +401,7 @@ pub const STATISTICS_RETENTION_DURATION: Config<Duration> = Config::new(
 /// Adds the full set of all storage `Config`s.
 pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
     configs
+        .add(&AWS_PREFETCH_STS_CONNECT_TIMEOUT)
         .add(&CLUSTER_SHUTDOWN_GRACE_PERIOD)
         .add(&DELAY_SOURCES_PAST_REHYDRATION)
         .add(&ENFORCE_EXTERNAL_ADDRESSES)

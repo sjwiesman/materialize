@@ -71,6 +71,7 @@ def run_and_detect_rust_incremental_build_failure(
     base_env = env if env is not None else os.environ
     p = subprocess.Popen(
         cmd,
+        cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -124,6 +125,7 @@ def run_and_detect_rust_incremental_build_failure(
     stderr_contents = stderr_result.getvalue()
     stderr_result.close()
     if retcode:
+        # Keep these signatures in sync with bin/clear-corrupted-cargo-target-dir.
         incremental_build_failure_msgs = [
             "panicked at compiler/rustc_metadata/src/rmeta/def_path_hash_map.rs",
             "Found unstable fingerprints for",
@@ -688,6 +690,29 @@ class CargoBuild(CargoPreImage):
             else {}
         )
 
+        # clang/lld `-22` suffixes must match the LLVM version of the rustc in
+        # rust-version (root Cargo.toml) and the apt.llvm.org release in
+        # ci/builder/Dockerfile.
+        if (
+            rd.profile == Profile.RELEASE
+            and rd.sanitizer == Sanitizer.none
+            and not rd.coverage
+        ):
+            rustflags += [
+                "-Clinker-plugin-lto",
+            ]
+            extra_env = {
+                "CC": "clang-22",
+                "CXX": "clang++-22",
+                "AR": "llvm-ar-22",
+                "RANLIB": "llvm-ranlib-22",
+                "CFLAGS": "-flto=thin",
+                "CXXFLAGS": "-flto=thin",
+                "LDFLAGS": "--ld-path=/usr/bin/ld.lld-22 -static-libstdc++",
+                "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER": "/usr/local/bin/clang-lld-22",
+                "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER": "/usr/local/bin/clang-lld-22",
+            }
+
         cargo_build = rd.build(
             "build", channel=None, rustflags=rustflags, extra_env=extra_env
         )
@@ -1074,8 +1099,14 @@ class ResolvedImage:
                 str(self.image.path),
             ]
         else:
-            docker_tag = f"docker.io/{self.spec()}"
-            ghcr_tag = f"ghcr.io/materializeinc/{self.spec()}"
+            # `self.spec()` may already be ghcr-qualified (MZ_GHCR), so strip the
+            # prefix before re-deriving each tag. Otherwise they double-prefix and
+            # a dependent image's `FROM self.spec()` can't resolve the local build.
+            spec = self.spec()
+            if spec.startswith(GHCR_PREFIX):
+                spec = spec.removeprefix(GHCR_PREFIX)
+            docker_tag = f"docker.io/{spec}"
+            ghcr_tag = f"{GHCR_PREFIX}{spec}"
             cmd: Sequence[str] = [
                 "docker",
                 "buildx",

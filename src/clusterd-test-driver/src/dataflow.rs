@@ -28,10 +28,11 @@ use std::collections::BTreeMap;
 use mz_compute_types::dataflows::{
     BuildDesc, DataflowDescription, IndexDesc, IndexImport, SourceImport,
 };
-use mz_compute_types::plan::Plan;
+use mz_compute_types::plan::LirRelationExpr;
 use mz_compute_types::plan::render_plan::RenderPlan;
 use mz_compute_types::sinks::{
-    ComputeSinkConnection, ComputeSinkDesc, MaterializedViewSinkConnection, SubscribeSinkConnection,
+    ComputeSinkConnection, ComputeSinkDesc, MaterializedViewSinkConnection, MetricSinkConnection,
+    SubscribeSinkConnection,
 };
 use mz_compute_types::sources::SourceInstanceDesc;
 use mz_expr::{
@@ -162,10 +163,10 @@ impl Input {
 ///  1. Accumulate a MIR-level [`DataflowDescription<OptimizedMirRelationExpr, ()>`]
 ///     using the same [`import_source`] / [`insert_plan`] / [`export_index`] helpers
 ///     the optimizer uses.
-///  2. Lower it to LIR via [`Plan::finalize_dataflow`], yielding
-///     [`DataflowDescription<Plan, ()>`].
+///  2. Lower it to LIR via [`LirRelationExpr::finalize_dataflow`], yielding
+///     [`DataflowDescription<LirRelationExpr, ()>`].
 ///  3. Augment it into [`DataflowDescription<RenderPlan, CollectionMetadata>`] by
-///     converting each object's [`Plan`] via [`RenderPlan::try_from`] and attaching
+///     converting each object's [`LirRelationExpr`] via [`RenderPlan::try_from`] and attaching
 ///     the storage [`CollectionMetadata`] to each source import — the same step
 ///     performed in `compute-client`'s `Instance::create_dataflow`.
 ///
@@ -382,6 +383,33 @@ impl DataflowBuilder {
         self
     }
 
+    /// Export a metric sink `sink_id` publishing the collection `from_id` into the replica's
+    /// in-process Prometheus registry.
+    ///
+    /// Like a subscribe, a metric sink writes no shard, so it needs no storage metadata.
+    /// `from_desc` must be the shaped canonical row shape the operator reads: `metric_name`,
+    /// `metric_type`, `labels`, `value`, `help`, plus the planner-computed `metric_kind` and
+    /// `name_valid` columns (see `mz_adapter::optimize::metric_sink::shape_metric_sink_source`).
+    /// The sink has no upper bound, matching a maintained (non-`UP TO`) export.
+    pub fn export_metric_sink(
+        &mut self,
+        sink_id: GlobalId,
+        from_id: GlobalId,
+        from_desc: RelationDesc,
+    ) -> &mut Self {
+        let desc = ComputeSinkDesc {
+            from: from_id,
+            from_desc,
+            connection: ComputeSinkConnection::MetricSink(MetricSinkConnection {}),
+            with_snapshot: true,
+            up_to: Antichain::new(),
+            non_null_assertions: vec![],
+            refresh_schedule: None,
+        };
+        self.mir.export_sink(sink_id, desc);
+        self
+    }
+
     /// Set the dataflow's `as_of` (the read frontier hydration starts from).
     pub fn as_of(&mut self, t: Timestamp) -> &mut Self {
         self.mir.as_of = Some(Antichain::from_elem(t));
@@ -439,8 +467,8 @@ impl DataflowBuilder {
                 .map_err(|e| anyhow::anyhow!("optimizing dataflow failed: {e}"))?;
         }
         // Lower MIR -> LIR. Deterministic and self-contained.
-        let lowered: DataflowDescription<Plan, ()> =
-            Plan::finalize_dataflow(self.mir, &features)
+        let lowered: DataflowDescription<LirRelationExpr, ()> =
+            LirRelationExpr::finalize_dataflow(self.mir, &features, None)
                 .map_err(|e| anyhow::anyhow!("lowering dataflow failed: {e}"))?;
         augment(lowered, &self.sources, &self.sinks)
     }
@@ -528,13 +556,13 @@ pub fn count_over_index(
 /// Convert a lowered `DataflowDescription<Plan, ()>` into the
 /// `<RenderPlan, CollectionMetadata>` form expected by the compute protocol.
 ///
-/// Mirrors `compute-client`'s `Instance::create_dataflow`: each object's [`Plan`]
+/// Mirrors `compute-client`'s `Instance::create_dataflow`: each object's [`LirRelationExpr`]
 /// is flattened into a [`RenderPlan`], and every source import is augmented with the
 /// storage [`CollectionMetadata`] needed by the compute instance to read it. The
 /// per-id [`PersistSource`] supplies the metadata and the exclusive `upper` telling
 /// the compute instance up to which timestamp the shard's data is available.
 fn augment(
-    lowered: DataflowDescription<Plan, ()>,
+    lowered: DataflowDescription<LirRelationExpr, ()>,
     sources: &BTreeMap<GlobalId, PersistSource>,
     sinks: &BTreeMap<GlobalId, CollectionMetadata>,
 ) -> anyhow::Result<DataflowDescription<RenderPlan, CollectionMetadata>> {
@@ -600,6 +628,9 @@ fn augment(
                 })
             }
             ComputeSinkConnection::Subscribe(conn) => ComputeSinkConnection::Subscribe(conn),
+            // A metric sink writes into the process-local metrics registry, not persist, so it
+            // carries no storage metadata to splice.
+            ComputeSinkConnection::MetricSink(conn) => ComputeSinkConnection::MetricSink(conn),
             ComputeSinkConnection::CopyToS3Oneshot(_) => {
                 anyhow::bail!("copy-to-s3 sink {id} is not implemented")
             }
@@ -640,6 +671,7 @@ mod tests {
 
     use mz_compute_types::plan::GetPlan;
     use mz_compute_types::plan::render_plan::Expr;
+    use mz_compute_types::plan::scalar::LirScalarExpr;
     use mz_expr::Id;
 
     /// Assert the assembled dataflow matches the verified structure: a single
@@ -702,7 +734,7 @@ mod tests {
             panic!("expected root ArrangeBy, got {:?}", root_node.expr);
         };
         assert_eq!(forms.arranged.len(), 1);
-        assert_eq!(forms.arranged[0].0, vec![MirScalarExpr::column(0)]);
+        assert_eq!(forms.arranged[0].0, vec![LirScalarExpr::column(0)]);
         assert_eq!(
             *strategy,
             mz_compute_types::plan::ArrangementStrategy::Direct
@@ -874,6 +906,52 @@ mod tests {
         assert!(matches!(
             sink.connection,
             ComputeSinkConnection::MaterializedView(_)
+        ));
+    }
+
+    /// A metric sink assembles like any other export: a source import, a view binding built over
+    /// it, and one sink export whose connection is a payload-free `MetricSink`. Unlike a
+    /// materialized view, the augment step splices no storage metadata into it.
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)] // error: unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    fn metric_sink_dataflow_structure() {
+        let desc = crate::data::sample_desc();
+        let loc = PersistLocation {
+            blob_uri: "mem://".parse().unwrap(),
+            consensus_uri: "mem://".parse().unwrap(),
+        };
+        let (source_id, view_id, sink_id) = (
+            GlobalId::User(1000),
+            GlobalId::User(1001),
+            GlobalId::User(1002),
+        );
+
+        let mut builder = DataflowBuilder::new("headless-metric-sink");
+        let src = builder.import_persist(
+            source_id,
+            PersistSource {
+                shard: ShardId::new(),
+                location: loc,
+                desc: desc.clone(),
+                upper: Timestamp::from(1),
+            },
+        );
+        builder.build(
+            view_id,
+            src.get().filter(vec![MirScalarExpr::literal_true()]),
+        );
+        builder.as_of(Timestamp::from(0));
+        builder.export_metric_sink(sink_id, view_id, desc);
+        let df = builder.finish().unwrap();
+
+        assert_eq!(df.sink_exports.len(), 1);
+        let (sid, sink) = df.sink_exports.iter().next().unwrap();
+        assert_eq!(*sid, sink_id);
+        assert_eq!(sink.from, view_id);
+        // The metric sink carries a payload-free connection and no storage metadata.
+        assert!(matches!(
+            sink.connection,
+            ComputeSinkConnection::MetricSink(MetricSinkConnection {})
         ));
     }
 

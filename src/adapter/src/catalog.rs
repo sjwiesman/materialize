@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use futures::future::BoxFuture;
 use futures::{Future, FutureExt};
@@ -106,6 +107,7 @@ pub(crate) mod consistency;
 mod migrate;
 
 mod apply;
+pub(crate) mod cluster_state;
 mod open;
 mod state;
 mod timeline;
@@ -139,6 +141,35 @@ pub struct Catalog {
     expr_cache_handle: Option<ExpressionCacheHandle>,
     storage: Arc<tokio::sync::Mutex<Box<dyn mz_catalog::durable::DurableCatalogState>>>,
     transient_revision: u64,
+    /// The latest `transient_revision`, shared by all clones of this catalog.
+    /// While `transient_revision` is this clone's own revision, frozen when
+    /// the snapshot was taken, this field always tracks the latest revision
+    /// across all clones. Comparing the two lets a snapshot holder detect
+    /// from off-thread whether its snapshot is still current, via
+    /// [`Catalog::transient_revision_is_current`], without a Coordinator
+    /// round-trip (see `PeekClient::catalog_snapshot`).
+    ///
+    /// The store happens in `transact`, before the transaction's effects can
+    /// be observed anywhere (responses, notices, builtin table writes), so a
+    /// session that has observed any evidence of a catalog change is
+    /// guaranteed to see the corresponding bump.
+    shared_transient_revision: Arc<AtomicU64>,
+}
+
+/// A handle for advancing the durable catalog upper off the coordinator loop.
+#[derive(Debug, Clone)]
+pub struct CatalogUpperHandle {
+    storage: Arc<tokio::sync::Mutex<Box<dyn mz_catalog::durable::DurableCatalogState>>>,
+}
+
+impl CatalogUpperHandle {
+    /// Advances the durable catalog upper to at least `new_upper`.
+    pub async fn advance_upper(
+        &self,
+        new_upper: mz_repr::Timestamp,
+    ) -> Result<(), mz_catalog::durable::CatalogError> {
+        self.storage.lock().await.advance_upper(new_upper).await
+    }
 }
 
 // Implement our own Clone because derive can't unless S is Clone, which it's
@@ -150,6 +181,7 @@ impl Clone for Catalog {
             expr_cache_handle: self.expr_cache_handle.clone(),
             storage: Arc::clone(&self.storage),
             transient_revision: self.transient_revision,
+            shared_transient_revision: Arc::clone(&self.shared_transient_revision),
         }
     }
 }
@@ -178,7 +210,7 @@ impl Catalog {
     pub fn set_physical_plan(
         &mut self,
         id: GlobalId,
-        plan: DataflowDescription<mz_compute_types::plan::Plan>,
+        plan: DataflowDescription<mz_compute_types::plan::LirRelationExpr>,
     ) {
         self.state.set_physical_plan(id, plan);
     }
@@ -198,7 +230,7 @@ impl Catalog {
     pub fn try_get_physical_plan(
         &self,
         id: &GlobalId,
-    ) -> Option<&DataflowDescription<mz_compute_types::plan::Plan>> {
+    ) -> Option<&DataflowDescription<mz_compute_types::plan::LirRelationExpr>> {
         let entry = self.state.try_get_entry_by_global_id(id)?;
         entry.item().physical_plan().map(AsRef::as_ref)
     }
@@ -309,6 +341,18 @@ impl Catalog {
         self.transient_revision
     }
 
+    /// Reports whether this catalog's transient revision is still the latest,
+    /// i.e., whether no catalog transaction has committed since this snapshot
+    /// was taken. Can be called on a snapshot from off-thread, without a
+    /// Coordinator round-trip. See the field documentation on
+    /// `shared_transient_revision`.
+    pub fn transient_revision_is_current(&self) -> bool {
+        self.transient_revision
+            == self
+                .shared_transient_revision
+                .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Creates a debug catalog from the current
     /// `METADATA_BACKEND_URL` with parameters set appropriately for debug contexts,
     /// like in tests.
@@ -360,8 +404,7 @@ impl Catalog {
         let mut storage = openable_storage
             .open(now().into(), &bootstrap_args)
             .await
-            .expect("can open durable catalog")
-            .0;
+            .expect("can open durable catalog");
         // Drain updates.
         let _ = storage
             .sync_to_current_updates()
@@ -387,7 +430,7 @@ impl Catalog {
             .with_default_deploy_generation()
             .build()
             .await?;
-        let storage = openable_storage.open(now().into(), bootstrap_args).await?.0;
+        let storage = openable_storage.open(now().into(), bootstrap_args).await?;
         let system_parameter_defaults = BTreeMap::default();
         Self::open_debug_catalog_inner(
             persist_client,
@@ -575,16 +618,18 @@ impl Catalog {
         self.storage().await.current_upper().await
     }
 
+    /// Allocates and returns both a user [`CatalogItemId`] and [`GlobalId`], delegating to
+    /// [`DurableCatalogState::allocate_user_id`].
     pub async fn allocate_user_id(
         &self,
         commit_ts: mz_repr::Timestamp,
     ) -> Result<(CatalogItemId, GlobalId), Error> {
-        self.storage()
+        Ok(self
+            .storage()
             .await
             .allocate_user_id(commit_ts)
             .await
-            .maybe_terminate("allocating user ids")
-            .err_into()
+            .maybe_terminate("allocating user ids")?)
     }
 
     /// Allocate `amount` many user IDs. See [`DurableCatalogState::allocate_user_ids`].
@@ -593,12 +638,12 @@ impl Catalog {
         amount: u64,
         commit_ts: mz_repr::Timestamp,
     ) -> Result<Vec<(CatalogItemId, GlobalId)>, Error> {
-        self.storage()
+        Ok(self
+            .storage()
             .await
             .allocate_user_ids(amount, commit_ts)
             .await
-            .maybe_terminate("allocating user ids")
-            .err_into()
+            .maybe_terminate("allocating user ids")?)
     }
 
     pub async fn allocate_user_id_for_test(&self) -> Result<(CatalogItemId, GlobalId), Error> {
@@ -665,16 +710,18 @@ impl Catalog {
             .err_into()
     }
 
+    /// Allocates and returns a user [`ClusterId`], delegating to
+    /// [`DurableCatalogState::allocate_user_cluster_id`].
     pub async fn allocate_user_cluster_id(
         &self,
         commit_ts: mz_repr::Timestamp,
     ) -> Result<ClusterId, Error> {
-        self.storage()
+        Ok(self
+            .storage()
             .await
             .allocate_user_cluster_id(commit_ts)
             .await
-            .maybe_terminate("allocating user cluster ids")
-            .err_into()
+            .maybe_terminate("allocating user cluster ids")?)
     }
 
     /// Allocate `amount` many user replica IDs. See
@@ -684,12 +731,12 @@ impl Catalog {
         amount: u64,
         commit_ts: mz_repr::Timestamp,
     ) -> Result<Vec<ReplicaId>, Error> {
-        self.storage()
+        Ok(self
+            .storage()
             .await
             .allocate_user_replica_ids(amount, commit_ts)
             .await
-            .maybe_terminate("allocating user replica ids")
-            .err_into()
+            .maybe_terminate("allocating user replica ids")?)
     }
 
     /// Allocate `amount` many system replica IDs. See
@@ -699,12 +746,12 @@ impl Catalog {
         amount: u64,
         commit_ts: mz_repr::Timestamp,
     ) -> Result<Vec<ReplicaId>, Error> {
-        self.storage()
+        Ok(self
+            .storage()
             .await
             .allocate_system_replica_ids(amount, commit_ts)
             .await
-            .maybe_terminate("allocating system replica ids")
-            .err_into()
+            .maybe_terminate("allocating system replica ids")?)
     }
 
     /// Allocate `amount` many replica IDs for `cluster_id`, picking user or
@@ -1121,9 +1168,21 @@ impl Catalog {
         }
     }
 
+    /// Advances the catalog upper to at least `new_upper`.
+    ///
+    /// Empty progress can overtake `new_upper`. A durable upper mismatch with content returns
+    /// `CatalogOutOfSync`. See [`mz_catalog::durable::DurableCatalogState::advance_upper`] for
+    /// fencing semantics.
     #[mz_ore::instrument(level = "debug")]
     pub async fn advance_upper(&self, new_upper: mz_repr::Timestamp) -> Result<(), AdapterError> {
         Ok(self.storage().await.advance_upper(new_upper).await?)
+    }
+
+    /// Returns a durable-upper handle that shares the catalog storage mutex.
+    pub fn upper_handle(&self) -> CatalogUpperHandle {
+        CatalogUpperHandle {
+            storage: Arc::clone(&self.storage),
+        }
     }
 
     /// Return the ids of all log sources the given object depends on.
@@ -1401,7 +1460,7 @@ impl Catalog {
         id: GlobalId,
         local_mir: Option<OptimizedMirRelationExpr>,
         mut global_mir: DataflowDescription<OptimizedMirRelationExpr>,
-        mut physical_plan: DataflowDescription<mz_compute_types::plan::Plan>,
+        mut physical_plan: DataflowDescription<mz_compute_types::plan::LirRelationExpr>,
         dataflow_metainfos: DataflowMetainfo<Arc<OptimizerNotice>>,
         optimizer_features: OptimizerFeatures,
     ) -> BoxFuture<'static, ()> {
@@ -1482,8 +1541,27 @@ pub fn is_reserved_name(name: &str) -> bool {
         .any(|prefix| name.starts_with(prefix))
 }
 
+/// Role names that PostgreSQL reserves for role specifications in statements
+/// like `GRANT ... TO CURRENT_USER` and `SET ROLE NONE`. A role with such a
+/// name would be ambiguous there, so creating one is not allowed.
+///
+/// PostgreSQL rejects most of these at parse time, only when they appear as
+/// unquoted keywords. Our parser does not track whether an identifier was
+/// quoted, so we instead reject the names themselves. Only the lowercase
+/// spellings are reserved, which is what the unquoted forms normalize to, so
+/// quoted names like `"CURRENT_USER"` remain valid, as in PostgreSQL.
+const RESERVED_ROLE_SPECIFICATION_NAMES: [&str; 5] = [
+    "current_user",
+    "current_role",
+    "session_user",
+    "user",
+    "none",
+];
+
 pub fn is_reserved_role_name(name: &str) -> bool {
-    is_reserved_name(name) || is_public_role(name)
+    is_reserved_name(name)
+        || is_public_role(name)
+        || RESERVED_ROLE_SPECIFICATION_NAMES.contains(&name)
 }
 
 pub fn is_public_role(name: &str) -> bool {
@@ -2433,6 +2511,8 @@ mod tests {
             .await
             .expect("unable to open debug catalog");
             assert_eq!(catalog.transient_revision(), 1);
+            assert!(catalog.transient_revision_is_current());
+            let snapshot = catalog.clone();
             let commit_ts = catalog.current_upper().await;
             catalog
                 .transact(
@@ -2447,6 +2527,10 @@ mod tests {
                 .await
                 .expect("failed to transact");
             assert_eq!(catalog.transient_revision(), 2);
+            assert!(catalog.transient_revision_is_current());
+            // The pre-transaction snapshot detects its own staleness through
+            // the shared latest revision.
+            assert!(!snapshot.transient_revision_is_current());
             catalog.expire().await;
         }
         {

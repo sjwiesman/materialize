@@ -19,6 +19,7 @@ use mz_compute_client::controller::error as compute_error;
 use mz_compute_client::controller::error::InstanceMissing;
 
 use mz_compute_types::ComputeInstanceId;
+use mz_controller_types::ClusterId;
 use mz_expr::EvalError;
 use mz_ore::error::ErrorExt;
 use mz_ore::stack::RecursionLimitError;
@@ -108,6 +109,12 @@ pub enum AdapterError {
         object_name: String,
         /// Human-readable type of the object (e.g. "source", "source-export table").
         object_type: String,
+    },
+    /// A read-then-write statement's read set has more transitive dependencies
+    /// than validation is willing to walk.
+    ReadThenWriteDependencyLimitExceeded {
+        /// The configured maximum number of dependencies.
+        max_rw_dependencies: usize,
     },
     /// Expression violated a column's constraint
     ConstraintViolation(NotNullViolation),
@@ -226,6 +233,13 @@ pub enum AdapterError {
     DDLOnlyTransaction,
     /// Another session modified the Catalog while this transaction was open.
     DDLTransactionRace,
+    /// A conditional cluster-config write failed its precondition: the cluster's
+    /// managed config changed between when the write was conditioned and when it
+    /// was applied. Produced by `Op::CheckClusterState`, never by SQL DDL, so it
+    /// does not reach a SQL client.
+    ClusterStateChanged {
+        cluster_id: ClusterId,
+    },
     /// An error occurred in the storage layer
     Storage(mz_storage_types::controller::StorageError),
     /// An error occurred in the compute layer
@@ -263,6 +277,15 @@ pub enum AdapterError {
     ReadOnly,
     AlterClusterTimeout,
     AlterClusterWhilePendingReplicas,
+    /// Attempt to convert a cluster to unmanaged while a graceful
+    /// reconfiguration is in progress.
+    AlterClusterUnmanagedWhileReconfiguring,
+    /// Attempt to convert a cluster to unmanaged while a hydration burst is in
+    /// flight.
+    AlterClusterUnmanagedWhileBursting,
+    /// Attempt to change a cluster's replication factor while a graceful
+    /// reconfiguration is in progress.
+    AlterClusterReplicationFactorWhileReconfiguring,
     AuthenticationError(AuthenticationError),
     /// Schema of a replacement is incompatible with the target.
     ReplacementSchemaMismatch(RelationDescDiff),
@@ -526,6 +549,13 @@ impl AdapterError {
                      dependencies must not include sources or source-export tables",
                 object_name.quoted()
             )),
+            AdapterError::ReadThenWriteDependencyLimitExceeded {
+                max_rw_dependencies,
+            } => Some(format!(
+                "The read set transitively depends on more than {max_rw_dependencies} \
+                     objects. Reduce the number of dependencies, or raise the \
+                     read_then_write_max_dependencies system parameter."
+            )),
             AdapterError::SafeModeViolation(_) => Some(
                 "The Materialize server you are connected to is running in \
                  safe mode, which limits the features that are available."
@@ -699,6 +729,21 @@ impl AdapterError {
             ),
             AdapterError::Catalog(c) => c.hint(),
             AdapterError::Eval(e) => e.hint(),
+            AdapterError::AlterClusterUnmanagedWhileReconfiguring => Some(
+                "Cancel the reconfiguration by altering the cluster back to its current \
+                configuration, or wait for it to settle, then convert."
+                    .to_string(),
+            ),
+            AdapterError::AlterClusterUnmanagedWhileBursting => Some(
+                "Remove the strategy with ALTER CLUSTER ... RESET (AUTO SCALING STRATEGY), \
+                or wait for the burst to wind down, then convert."
+                    .to_string(),
+            ),
+            AdapterError::AlterClusterReplicationFactorWhileReconfiguring => Some(
+                "Cancel the reconfiguration by altering the cluster back to its current \
+                configuration, or wait for it to settle, then change the replication factor."
+                    .to_string(),
+            ),
             AdapterError::InvalidClusterReplicaAz { expected, az: _ } => {
                 Some(if expected.is_empty() {
                     "No availability zones configured; do not specify AVAILABILITY ZONE".into()
@@ -816,6 +861,9 @@ impl AdapterError {
             AdapterError::InvalidTableMutationSelection { .. } => {
                 SqlState::INVALID_TRANSACTION_STATE
             }
+            AdapterError::ReadThenWriteDependencyLimitExceeded { .. } => {
+                SqlState::PROGRAM_LIMIT_EXCEEDED
+            }
             AdapterError::ConstraintViolation(NotNullViolation(_)) => SqlState::NOT_NULL_VIOLATION,
             AdapterError::CopyFormatError(_) => SqlState::BAD_COPY_FILE_FORMAT,
             AdapterError::ConcurrentClusterDrop => SqlState::INVALID_TRANSACTION_STATE,
@@ -837,6 +885,12 @@ impl AdapterError {
             }
             AdapterError::PlanError(PlanError::ParameterNotAllowed(_)) => {
                 SqlState::UNDEFINED_PARAMETER
+            }
+            // `PlanError::Unsupported` is raised (via `bail_unsupported!`) only for
+            // genuinely unsupported features, so it maps to PostgreSQL's
+            // feature-not-supported code rather than internal-error. See SQL-326.
+            AdapterError::PlanError(PlanError::Unsupported { .. }) => {
+                SqlState::FEATURE_NOT_SUPPORTED
             }
             AdapterError::PlanError(_) => SqlState::INTERNAL_ERROR,
             AdapterError::PreparedStatementExists(_) => SqlState::DUPLICATE_PSTATEMENT,
@@ -867,6 +921,9 @@ impl AdapterError {
                 }
                 OptimizerError::PlanError(PlanError::ParameterNotAllowed(_)) => {
                     SqlState::UNDEFINED_PARAMETER
+                }
+                OptimizerError::PlanError(PlanError::Unsupported { .. }) => {
+                    SqlState::FEATURE_NOT_SUPPORTED
                 }
                 OptimizerError::PlanError(_) => SqlState::INTERNAL_ERROR,
                 OptimizerError::RecursionLimitError(_) => RECURSION_LIMIT_ERROR_CODE,
@@ -899,6 +956,7 @@ impl AdapterError {
             AdapterError::Unstructured(_) => SqlState::INTERNAL_ERROR,
             AdapterError::UntargetedLogRead { .. } => SqlState::FEATURE_NOT_SUPPORTED,
             AdapterError::DDLTransactionRace => SqlState::T_R_SERIALIZATION_FAILURE,
+            AdapterError::ClusterStateChanged { .. } => SqlState::T_R_SERIALIZATION_FAILURE,
             // It's not immediately clear which error code to use here because a
             // "write-only transaction", "single table write transaction", or "ddl only
             // transaction" are not things in Postgres. This error code is the generic "bad txn
@@ -924,6 +982,11 @@ impl AdapterError {
             AdapterError::ReadOnly => SqlState::READ_ONLY_SQL_TRANSACTION,
             AdapterError::AlterClusterTimeout => SqlState::QUERY_CANCELED,
             AdapterError::AlterClusterWhilePendingReplicas => SqlState::OBJECT_IN_USE,
+            AdapterError::AlterClusterUnmanagedWhileReconfiguring => SqlState::OBJECT_IN_USE,
+            AdapterError::AlterClusterUnmanagedWhileBursting => SqlState::OBJECT_IN_USE,
+            AdapterError::AlterClusterReplicationFactorWhileReconfiguring => {
+                SqlState::OBJECT_IN_USE
+            }
             AdapterError::ReplacementSchemaMismatch(_) => SqlState::FEATURE_NOT_SUPPORTED,
             AdapterError::AuthenticationError(AuthenticationError::InvalidCredentials) => {
                 SqlState::INVALID_PASSWORD
@@ -1148,6 +1211,14 @@ impl fmt::Display for AdapterError {
                     "invalid selection: operation may only (transitively) refer to non-source, non-system tables"
                 )
             }
+            AdapterError::ReadThenWriteDependencyLimitExceeded {
+                max_rw_dependencies,
+            } => {
+                write!(
+                    f,
+                    "selection has too many transitive dependencies to validate (limit {max_rw_dependencies})"
+                )
+            }
             AdapterError::ReplaceMaterializedViewSealed { name } => {
                 write!(
                     f,
@@ -1291,6 +1362,9 @@ impl fmt::Display for AdapterError {
             AdapterError::DDLTransactionRace => f.write_str(
                 "another session modified the catalog while this DDL transaction was open",
             ),
+            AdapterError::ClusterStateChanged { cluster_id } => {
+                write!(f, "cluster {cluster_id} was concurrently modified")
+            }
             AdapterError::Storage(e) => e.fmt(f),
             AdapterError::Compute(e) => e.fmt(f),
             AdapterError::Orchestrator(e) => e.fmt(f),
@@ -1357,6 +1431,24 @@ impl fmt::Display for AdapterError {
             }
             AdapterError::AlterClusterWhilePendingReplicas => {
                 write!(f, "cannot alter clusters with pending updates")
+            }
+            AdapterError::AlterClusterUnmanagedWhileReconfiguring => {
+                write!(
+                    f,
+                    "cannot convert cluster to unmanaged while a reconfiguration is in progress"
+                )
+            }
+            AdapterError::AlterClusterUnmanagedWhileBursting => {
+                write!(
+                    f,
+                    "cannot convert cluster to unmanaged while a hydration burst is in progress"
+                )
+            }
+            AdapterError::AlterClusterReplicationFactorWhileReconfiguring => {
+                write!(
+                    f,
+                    "cannot change replication factor while a reconfiguration is in progress"
+                )
             }
             AdapterError::ReplacementSchemaMismatch(_) => {
                 write!(f, "replacement schema differs from target schema")

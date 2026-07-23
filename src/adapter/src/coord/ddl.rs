@@ -52,7 +52,7 @@ use tracing::{Instrument, Level, event, info_span, warn};
 use crate::active_compute_sink::{ActiveComputeSink, ActiveComputeSinkRetireReason};
 use crate::catalog::{DropObjectInfo, Op, ReplicaCreateDropReason, TransactionResult};
 use crate::coord::Coordinator;
-use crate::coord::appends::BuiltinTableAppendNotify;
+use crate::coord::appends::{BuiltinTableAppendCompletion, BuiltinTableAppendNotify};
 use crate::coord::catalog_implications::parsed_state_updates::ParsedStateUpdate;
 use crate::session::{Session, Transaction, TransactionOps};
 use crate::telemetry::{EventDetails, SegmentClientExt};
@@ -335,6 +335,7 @@ impl Coordinator {
         let mut update_cluster_scheduling_config = false;
         let mut update_http_config = false;
         let mut update_advance_timelines_interval = false;
+        let mut update_optimizer_e2e_latency_warning_threshold = false;
 
         for op in &ops {
             match op {
@@ -389,6 +390,8 @@ impl Coordinator {
                     update_cluster_scheduling_config |= vars::is_cluster_scheduling_var(name);
                     update_http_config |= vars::is_http_config_var(name);
                     update_advance_timelines_interval |= name == DEFAULT_TIMESTAMP_INTERVAL.name();
+                    update_optimizer_e2e_latency_warning_threshold |=
+                        name == vars::OPTIMIZER_E2E_LATENCY_WARNING_THRESHOLD.name();
                 }
                 catalog::Op::ResetAllSystemConfiguration => {
                     // Assume they all need to be updated.
@@ -405,6 +408,7 @@ impl Coordinator {
                     update_metrics_config = true;
                     update_http_config = true;
                     update_advance_timelines_interval = true;
+                    update_optimizer_e2e_latency_warning_threshold = true;
                 }
                 catalog::Op::RenameItem { id, .. } => {
                     let item = self.catalog().get_entry(id);
@@ -463,7 +467,7 @@ impl Coordinator {
         // always going up, and believe we will always be close to the system
         // clock because it is well configured (chrony) and so may only rarely
         // regress or pause for 10s.
-        let oracle_write_ts = self.get_local_write_ts().await.timestamp;
+        let oracle_write_ts = self.get_catalog_write_ts().await;
 
         let Coordinator {
             catalog,
@@ -513,10 +517,7 @@ impl Coordinator {
 
         // Append our builtin table updates, then return the notify so we can run other tasks in
         // parallel.
-        let (builtin_update_notify, _) = self
-            .builtin_table_update()
-            .execute(builtin_table_updates)
-            .await;
+        let builtin_update_notify = self.builtin_table_update().execute(builtin_table_updates);
 
         // No error returns are allowed after this point. Enforce this at compile time
         // by using this odd structure so we don't accidentally add a stray `?`.
@@ -560,6 +561,14 @@ impl Coordinator {
                 if new_interval != self.advance_timelines_interval.period() {
                     self.advance_timelines_interval = tokio::time::interval(new_interval);
                 }
+            }
+            if update_optimizer_e2e_latency_warning_threshold {
+                let threshold = self
+                    .catalog()
+                    .system_config()
+                    .optimizer_e2e_latency_warning_threshold();
+                self.optimizer_metrics
+                    .set_e2e_optimization_time_log_threshold(threshold);
             }
         }
         .instrument(info_span!("coord::catalog_transact_with::finalize"))
@@ -613,16 +622,27 @@ impl Coordinator {
     }
 
     /// A convenience method for dropping tables.
-    pub(crate) fn drop_tables(&mut self, tables: Vec<(CatalogItemId, GlobalId)>, ts: Timestamp) {
+    pub(crate) async fn drop_tables(&mut self, tables: Vec<(CatalogItemId, GlobalId)>) {
         for (item_id, _gid) in &tables {
             self.active_webhooks.remove(item_id);
         }
 
+        let table_gids: Vec<_> = tables.into_iter().map(|(_id, gid)| gid).collect();
+
+        // FIFO ordering places the forget after every staged append.
+        let forget_ids = self
+            .controller
+            .storage
+            .txns_table_ids(table_gids.clone())
+            .unwrap_or_terminate("cannot fail to look up txns-registered tables");
+        if !forget_ids.is_empty() {
+            self.forget_tables_via_committer(forget_ids).await;
+        }
+
         let storage_metadata = self.catalog.state().storage_metadata();
-        let table_gids = tables.into_iter().map(|(_id, gid)| gid).collect();
         self.controller
             .storage
-            .drop_tables(storage_metadata, table_gids, ts)
+            .drop_tables(storage_metadata, table_gids)
             .unwrap_or_terminate("cannot fail to drop tables");
     }
 
@@ -638,7 +658,10 @@ impl Coordinator {
     /// sink was known to the controller. It is the caller's responsibility to
     /// retire the returned sink. Consider using `retire_compute_sinks` instead.
     #[must_use]
-    pub async fn drop_compute_sink(&mut self, sink_id: GlobalId) -> Option<ActiveComputeSink> {
+    pub async fn drop_compute_sink(
+        &mut self,
+        sink_id: GlobalId,
+    ) -> Option<(ActiveComputeSink, BuiltinTableAppendNotify)> {
         self.drop_compute_sinks([sink_id]).await.remove(&sink_id)
     }
 
@@ -647,18 +670,20 @@ impl Coordinator {
     /// For each sink that exists, the coordinator and controller's state
     /// associated with the sink is removed.
     ///
-    /// Returns a map containing the controller's state for each sink that was
-    /// removed. It is the caller's responsibility to retire the returned sinks.
-    /// Consider using `retire_compute_sinks` instead.
+    /// Returns a map from sink id to the controller's state for the sink and a notify that
+    /// resolves once the sink's `mz_subscriptions` retraction is durable (see
+    /// `remove_active_compute_sink`). It is the caller's responsibility to await the notify
+    /// off the coordinator loop and then retire the returned sinks. Consider using
+    /// `retire_compute_sinks` instead.
     #[must_use]
     pub async fn drop_compute_sinks(
         &mut self,
         sink_ids: impl IntoIterator<Item = GlobalId>,
-    ) -> BTreeMap<GlobalId, ActiveComputeSink> {
+    ) -> BTreeMap<GlobalId, (ActiveComputeSink, BuiltinTableAppendNotify)> {
         let mut by_id = BTreeMap::new();
         let mut by_cluster: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for sink_id in sink_ids {
-            let sink = match self.remove_active_compute_sink(sink_id).await {
+            let (sink, write_notify) = match self.remove_active_compute_sink(sink_id).await {
                 None => {
                     // This can happen due to a race condition: an internal
                     // subscribe may be cleaned up via its own message while
@@ -667,14 +692,14 @@ impl Coordinator {
                     tracing::debug!(%sink_id, "drop_compute_sinks: sink already removed");
                     continue;
                 }
-                Some(sink) => sink,
+                Some(entry) => entry,
             };
 
             by_cluster
                 .entry(sink.cluster_id())
                 .or_default()
                 .push(sink_id);
-            by_id.insert(sink_id, sink);
+            by_id.insert(sink_id, (sink, write_notify));
         }
         for (cluster_id, ids) in by_cluster {
             let compute = &mut self.controller.compute;
@@ -691,18 +716,41 @@ impl Coordinator {
     /// Retires a batch of sinks with disparate reasons for retirement.
     ///
     /// Each sink identified in `reasons` is dropped (see `drop_compute_sinks`),
-    /// then retired with its corresponding reason.
+    /// then retired with its corresponding reason. Returns a notify that resolves
+    /// once all `mz_subscriptions` retractions are durable and the sinks are retired.
     pub async fn retire_compute_sinks(
         &mut self,
         mut reasons: BTreeMap<GlobalId, ActiveComputeSinkRetireReason>,
-    ) {
+    ) -> BuiltinTableAppendCompletion {
         let sink_ids = reasons.keys().cloned();
-        for (id, sink) in self.drop_compute_sinks(sink_ids).await {
-            let reason = reasons
-                .remove(&id)
-                .expect("all returned IDs are in `reasons`");
-            sink.retire(reason);
-        }
+        let to_retire: Vec<_> = self
+            .drop_compute_sinks(sink_ids)
+            .await
+            .into_iter()
+            .map(|(id, (sink, write_notify))| {
+                let reason = reasons
+                    .remove(&id)
+                    .expect("all returned IDs are in `reasons`");
+                (sink, write_notify, reason)
+            })
+            .collect();
+
+        // Retire off the coordinator loop. We wait for each `mz_subscriptions` retraction
+        // before telling the subscribing client that the sink is gone. The returned notify
+        // lets statements that caused the retirement also wait before sending their response.
+        // The wait must not happen on the coordinator loop, since that would block every
+        // other session on the group-commit oracle round trip.
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        task::spawn(|| "retire_compute_sinks", async move {
+            for (sink, write_notify, reason) in to_retire {
+                write_notify.await;
+                sink.retire(reason);
+            }
+            let _ = done_tx.send(());
+        });
+        BuiltinTableAppendCompletion::new(Box::pin(async move {
+            let _ = done_rx.await;
+        }))
     }
 
     /// Drops all pending replicas for a set of clusters
@@ -744,7 +792,10 @@ impl Coordinator {
 
     /// Cancels all active compute sinks for the identified connection.
     #[mz_ore::instrument(level = "debug")]
-    pub(crate) async fn cancel_compute_sinks_for_conn(&mut self, conn_id: &ConnectionId) {
+    pub(crate) async fn cancel_compute_sinks_for_conn(
+        &mut self,
+        conn_id: &ConnectionId,
+    ) -> BuiltinTableAppendCompletion {
         self.retire_compute_sinks_for_conn(conn_id, ActiveComputeSinkRetireReason::Canceled)
             .await
     }
@@ -765,7 +816,7 @@ impl Coordinator {
         &mut self,
         conn_id: &ConnectionId,
         reason: ActiveComputeSinkRetireReason,
-    ) {
+    ) -> BuiltinTableAppendCompletion {
         let drop_sinks = self
             .active_conns
             .get_mut(conn_id)
@@ -774,7 +825,7 @@ impl Coordinator {
             .iter()
             .map(|sink_id| (*sink_id, reason.clone()))
             .collect();
-        self.retire_compute_sinks(drop_sinks).await;
+        self.retire_compute_sinks(drop_sinks).await
     }
 
     /// Cleans pending cluster reconfiguraiotns for the identified connection
@@ -1294,6 +1345,7 @@ impl Coordinator {
                 | Op::ResetAllSystemConfiguration { .. }
                 | Op::UpdateScopedSystemParameters { .. }
                 | Op::Comment { .. }
+                | Op::CheckClusterState { .. }
                 | Op::InjectAuditEvents { .. } => {}
             }
         }
@@ -1423,7 +1475,7 @@ impl Coordinator {
             )?;
         }
         self.validate_resource_limit_numeric(
-            self.current_credit_consumption_rate(),
+            self.current_credit_consumption_rate(None),
             new_credit_consumption_rate,
             |system_vars| {
                 self.license_key

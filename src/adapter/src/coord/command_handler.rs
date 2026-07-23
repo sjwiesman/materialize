@@ -35,8 +35,8 @@ use mz_ore::{instrument, soft_panic_or_log};
 use mz_repr::role_id::RoleId;
 use mz_repr::{Diff, GlobalId, SqlScalarType, Timestamp};
 use mz_sql::ast::{
-    AlterConnectionAction, AlterConnectionStatement, AlterSinkAction, AlterSourceAction, AstInfo,
-    ConstantVisitor, CopyRelation, CopyStatement, CreateSourceOptionName, Raw, Statement,
+    AlterConnectionAction, AlterConnectionStatement, AlterSourceAction, AstInfo, ConstantVisitor,
+    CopyRelation, CopyStatement, CreateSourceOptionName, Raw, Statement, StatementKind,
     SubscribeStatement,
 };
 use mz_sql::catalog::RoleAttributesRaw;
@@ -80,7 +80,7 @@ use crate::coord::{
 use crate::error::{AdapterError, AuthenticationError};
 use crate::notice::AdapterNotice;
 use crate::session::{Session, TransactionOps, TransactionStatus};
-use crate::statement_logging::WatchSetCreation;
+use crate::statement_logging::{StatementEndedExecutionReason, WatchSetCreation};
 use crate::util::{ClientTransmitter, ResultExt};
 use crate::webhook::{
     AppendWebhookResponse, AppendWebhookValidator, WebhookAppender, WebhookAppenderInvalidator,
@@ -345,7 +345,10 @@ impl Coordinator {
                         .await;
                     // Part of the Command::Commit contract is that the Coordinator guarantees that
                     // it has cleared its transaction state for the connection.
-                    self.clear_connection(&conn_id).await;
+                    let retire_notify = self.clear_connection(&conn_id).await;
+                    // `sequence_plan` has already handled the client response.
+                    // This call only satisfies the internal cleanup contract.
+                    drop(retire_notify);
                 }
 
                 Command::CatalogSnapshot { tx } => {
@@ -471,7 +474,7 @@ impl Coordinator {
                         statement_logging_id,
                         self.internal_cmd_tx.clone(),
                     );
-                    let result = self
+                    match self
                         .implement_subscribe(
                             &mut ctx_extra,
                             df_desc,
@@ -483,8 +486,27 @@ impl Coordinator {
                             read_holds,
                             plan,
                         )
-                        .await;
-                    let _ = tx.send(result);
+                        .await
+                    {
+                        Ok((resp, write_notify)) => {
+                            // Wait for the `mz_subscriptions` bookkeeping write off the
+                            // coordinator loop before returning the `SUBSCRIBE` response to
+                            // the subscribing session.
+                            task::spawn(|| "execute_subscribe::await_bookkeeping", async move {
+                                write_notify.await;
+                                let _ = tx.send(Ok(resp));
+                            });
+                        }
+                        Err(e) => {
+                            // On success the guard's contents moved into the
+                            // `Subscribing` response. On error the frontend
+                            // logs the error end, so we defuse rather than
+                            // let the guard's `Drop` emit a spurious
+                            // `Aborted`.
+                            let _ = ctx_extra.defuse();
+                            let _ = tx.send(Err(e));
+                        }
+                    }
                 }
 
                 Command::CopyToPreflight {
@@ -537,16 +559,18 @@ impl Coordinator {
                     .await;
                 }
 
-                Command::ExecuteSideEffectingFunc {
-                    plan,
-                    conn_id,
-                    current_role,
-                    tx,
-                } => {
-                    let result = self
-                        .execute_side_effecting_func(plan, conn_id, current_role)
-                        .await;
+                Command::ExecuteSideEffectingFunc { plan, conn_id, tx } => {
+                    let result = self.execute_side_effecting_func(plan, conn_id).await;
                     let _ = tx.send(result);
+                }
+                Command::LookupConnection { connection_id, tx } => {
+                    let conn =
+                        self.active_conns
+                            .get_key_value(&connection_id)
+                            .map(|(id_handle, meta)| {
+                                (id_handle.clone(), *meta.authenticated_role_id())
+                            });
+                    let _ = tx.send(conn);
                 }
                 Command::RegisterFrontendPeek {
                     uuid,
@@ -567,8 +591,8 @@ impl Coordinator {
                         tx,
                     );
                 }
-                Command::UnregisterFrontendPeek { uuid, tx } => {
-                    self.handle_unregister_frontend_peek(uuid, tx);
+                Command::UnregisterFrontendPeek { uuid, reason, tx } => {
+                    self.handle_unregister_frontend_peek(uuid, reason, tx);
                 }
                 Command::ExplainTimestamp {
                     conn_id,
@@ -1072,6 +1096,19 @@ impl Coordinator {
         // outer execute should be considered finished once the inner one is.
         outer_context: Option<ExecuteContextGuard>,
     ) {
+        // A new statement is starting, so discard any cancellation that was signaled while no
+        // statement was running. Such a cancellation targeted an earlier statement and must not
+        // cancel the new one. (Like in PostgreSQL, a cancel request that arrives when nothing is
+        // running has no effect.) The watch would otherwise retain a stale `true` within an
+        // explicit transaction, because it is removed only when the transaction is cleared, not
+        // at statement end.
+        //
+        // Don't do this for nested executes (e.g., FETCH executing its cursor's statement): the
+        // outer statement is still running and a pending cancellation may target it.
+        if outer_context.is_none() {
+            self.connection_cancel_watches.remove(session.conn_id());
+        }
+
         if session.vars().emit_trace_id_notice() {
             let span_context = tracing::Span::current()
                 .context()
@@ -1382,9 +1419,17 @@ impl Coordinator {
                             }
                         }
 
-                        return ctx.retire(Err(AdapterError::OperationProhibitsTransaction(
-                            stmt.to_string(),
-                        )));
+                        // For statements that can carry sensitive material, redact
+                        // literals so they don't leak into the error message, which
+                        // is persisted in `mz_statement_execution_history` (matching
+                        // how their SQL text is redacted). Other statements keep
+                        // their literals for a clearer error.
+                        let op = if StatementKind::from(&*stmt).is_sensitive() {
+                            stmt.to_ast_string_redacted()
+                        } else {
+                            stmt.to_string()
+                        };
+                        return ctx.retire(Err(AdapterError::OperationProhibitsTransaction(op)));
                     }
                 }
             }
@@ -1671,17 +1716,13 @@ impl Coordinator {
             // users.
             Statement::AlterCluster(_) => false,
 
-            // `ALTER SINK SET FROM` waits for the old relation to make enough progress for a clean
-            // cutover. If the old collection is stalled, it may block forever. Checks in
+            // `ALTER SINK` waits for the sink to make enough progress for a clean cutover to the
+            // new configuration. If the sink is stalled, it may block forever. Checks in
             // sequencing ensure that the operation fails if any one of these happens concurrently:
             //   * the sink is dropped
-            //   * the new source relation is dropped
+            //   * the source relation is dropped
             //   * another `ALTER SINK` for the same sink is applied first
-            Statement::AlterSink(stmt)
-                if matches!(stmt.action, AlterSinkAction::ChangeRelation(_)) =>
-            {
-                false
-            }
+            Statement::AlterSink(_) => false,
 
             // `ALTER MATERIALIZED VIEW ... APPLY REPLACEMENT` waits for the target MV to make
             // enough progress for a clean cutover. If the target MV is stalled, it may block
@@ -1909,7 +1950,10 @@ impl Coordinator {
 
         self.cancel_pending_peeks(&conn_id);
         self.cancel_pending_watchsets(&conn_id);
-        self.cancel_compute_sinks_for_conn(&conn_id).await;
+        let retire_notify = self.cancel_compute_sinks_for_conn(&conn_id).await;
+        // SQL cancellation has no success response to delay. Each subscribe
+        // still waits for its own retraction before it observes retirement.
+        drop(retire_notify);
         self.cancel_cluster_reconfigurations_for_conn(&conn_id)
             .await;
         self.cancel_pending_copy(&conn_id);
@@ -1934,7 +1978,10 @@ impl Coordinator {
 
         // We do not need to call clear_transaction here because there are no side effects to run
         // based on any session transaction state.
-        self.clear_connection(&conn_id).await;
+        let retire_notify = self.clear_connection(&conn_id).await;
+        // Termination has no statement response to delay. Each subscribe still
+        // waits for its own retraction before it observes retirement.
+        drop(retire_notify);
 
         self.drop_temp_items(&conn_id).await;
         // Only call catalog_mut() if a temporary schema actually exists for this connection.
@@ -2142,13 +2189,18 @@ impl Coordinator {
         let _ = tx.send(Ok(()));
     }
 
-    /// Handle unregistration of a frontend peek that was registered but failed to issue.
-    /// This is used for cleanup when `client.peek()` fails after `RegisterFrontendPeek` succeeds.
-    fn handle_unregister_frontend_peek(&mut self, uuid: Uuid, tx: oneshot::Sender<()>) {
-        // Remove from pending_peeks (this also removes from client_pending_peeks)
+    /// Handles [`Command::UnregisterFrontendPeek`]; see its documentation for
+    /// the end-of-execution ownership contract.
+    fn handle_unregister_frontend_peek(
+        &mut self,
+        uuid: Uuid,
+        reason: StatementEndedExecutionReason,
+        tx: oneshot::Sender<()>,
+    ) {
+        // A peek missing from `pending_peeks` was already retired, and its end
+        // logged, by a concurrent teardown.
         if let Some(pending_peek) = self.remove_pending_peek(&uuid) {
-            // Retire `ExecuteContextExtra`, because the frontend will log the peek's error result.
-            let _ = pending_peek.ctx_extra.defuse();
+            self.retire_execution(reason, pending_peek.ctx_extra.defuse());
         }
         let _ = tx.send(());
     }

@@ -56,6 +56,7 @@ pub mod copy_to;
 pub mod dataflows;
 pub mod index;
 pub mod materialized_view;
+mod metric_sink;
 pub mod peek;
 pub mod subscribe;
 pub mod view;
@@ -68,7 +69,7 @@ use mz_catalog::memory::objects::{CatalogCollectionEntry, CatalogEntry, Index};
 use mz_compute_types::ComputeInstanceId;
 use mz_compute_types::dataflows::DataflowDescription;
 use mz_compute_types::dyncfgs::SUBSCRIBE_SNAPSHOT_OPTIMIZATION;
-use mz_compute_types::plan::Plan;
+use mz_compute_types::plan::LirRelationExpr;
 use mz_controller_types::ClusterId;
 use mz_expr::{EvalError, MirRelationExpr, OptimizedMirRelationExpr, UnmaterializableFunc};
 use mz_ore::stack::RecursionLimitError;
@@ -91,7 +92,7 @@ use crate::TimestampContext;
 type MirDataflowDescription = DataflowDescription<OptimizedMirRelationExpr>;
 /// A type for a [`DataflowDescription`] backed by `Lir~` plans. Used internally
 /// by the optimizer implementations.
-type LirDataflowDescription = DataflowDescription<Plan>;
+type LirDataflowDescription = DataflowDescription<LirRelationExpr>;
 
 // Core API
 // --------
@@ -347,6 +348,12 @@ impl From<&OptimizerConfig> for mz_sql::plan::HirToMirConfig {
             enable_simplify_quantified_comparisons: config
                 .features
                 .enable_simplify_quantified_comparisons,
+            enable_fixed_correlated_cte_lowering: config
+                .features
+                .enable_fixed_correlated_cte_lowering,
+            enable_simplify_from_less_existence: config
+                .features
+                .enable_simplify_from_less_existence,
         }
     }
 }

@@ -51,9 +51,9 @@ use mz_repr::{
     SqlColumnType, SqlRelationType, SqlScalarType, Timestamp, VersionedRelationDesc,
 };
 use mz_sql_parser::ast::{
-    AlterSourceAddSubsourceOption, ClusterAlterOptionValue, ConnectionOptionName, QualifiedReplica,
-    RawDataType, SelectStatement, TransactionIsolationLevel, TransactionMode, UnresolvedItemName,
-    Value, WithOptionValue,
+    AlterSourceAddSubsourceOption, ClusterAlterOptionValue, ConnectionOptionName, CreateSinkOption,
+    CreateSinkOptionName, QualifiedReplica, RawDataType, SelectStatement,
+    TransactionIsolationLevel, TransactionMode, UnresolvedItemName, Value, WithOptionValue,
 };
 use mz_ssh_util::keys::SshKeyPair;
 use mz_storage_types::connections::aws::AwsConnection;
@@ -124,9 +124,9 @@ pub use statement::{
     StatementClassification, StatementContext, StatementDesc, describe, plan, plan_copy_from,
     resolve_cluster_for_materialized_view,
 };
+pub use with_options::TryFromValue;
 
 use self::statement::ddl::ClusterAlterOptionExtracted;
-use self::with_options::TryFromValue;
 
 /// Instructions for executing a SQL query.
 #[derive(Debug, EnumKind)]
@@ -587,6 +587,9 @@ pub struct CreateClusterManagedPlan {
     pub compute: ComputeReplicaConfig,
     pub optimizer_feature_overrides: OptimizerFeatureOverrides,
     pub schedule: ClusterSchedule,
+    /// The user-configured autoscaling policy, or `None` if autoscaling is
+    /// disabled for the cluster.
+    pub auto_scaling_strategy: Option<AutoScalingStrategy>,
 }
 
 #[derive(Debug)]
@@ -618,6 +621,10 @@ pub struct ComputeReplicaIntrospectionConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ComputeReplicaConfig {
     pub introspection: Option<ComputeReplicaIntrospectionConfig>,
+    /// Whether arrangements on this replica request dictionary compression. The
+    /// gating feature flag decides whether a replica honors this value at
+    /// creation time.
+    pub arrangement_compression: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1282,6 +1289,27 @@ pub struct AlterSinkPlan {
     pub sink: Sink,
     pub with_snapshot: bool,
     pub in_cluster: ClusterId,
+    /// The with-option edit requested by the `ALTER SINK`. Sequencing must
+    /// re-apply it to the catalog's `create_sql` (via
+    /// [`apply_sink_option_edits`]) because the `create_sql` may have changed
+    /// since planning, for example due to a schema swap.
+    pub set_options: Vec<CreateSinkOption<Aug>>,
+    pub reset_options: Vec<CreateSinkOptionName>,
+}
+
+/// Applies the option edits of an `ALTER SINK ... SET/RESET (...)` to the
+/// with-options of a `CREATE SINK` statement.
+pub fn apply_sink_option_edits<T: mz_sql_parser::ast::AstInfo>(
+    with_options: &mut Vec<CreateSinkOption<T>>,
+    set_options: &[CreateSinkOption<T>],
+    reset_options: &[CreateSinkOptionName],
+) where
+    CreateSinkOption<T>: Clone,
+{
+    with_options.retain(|o| {
+        set_options.iter().all(|s| s.name != o.name) && !reset_options.contains(&o.name)
+    });
+    with_options.extend(set_options.iter().cloned());
 }
 
 #[derive(Debug, Clone)]
@@ -2076,12 +2104,16 @@ pub struct PlanClusterOption {
     pub availability_zones: AlterOptionParameter<Vec<String>>,
     pub introspection_debugging: AlterOptionParameter<bool>,
     pub introspection_interval: AlterOptionParameter<OptionalDuration>,
+    pub arrangement_compression: AlterOptionParameter<bool>,
     pub managed: AlterOptionParameter<bool>,
     pub replicas: AlterOptionParameter<Vec<(String, ReplicaConfig)>>,
     pub replication_factor: AlterOptionParameter<u32>,
     pub size: AlterOptionParameter,
     pub schedule: AlterOptionParameter<ClusterSchedule>,
     pub workload_class: AlterOptionParameter<Option<String>>,
+    /// The autoscaling policy block. `Set(None)` disables autoscaling (an empty
+    /// `AUTO SCALING STRATEGY = ()` or `RESET (AUTO SCALING STRATEGY)`).
+    pub auto_scaling_strategy: AlterOptionParameter<Option<AutoScalingStrategy>>,
 }
 
 impl Default for PlanClusterOption {
@@ -2090,12 +2122,14 @@ impl Default for PlanClusterOption {
             availability_zones: AlterOptionParameter::Unchanged,
             introspection_debugging: AlterOptionParameter::Unchanged,
             introspection_interval: AlterOptionParameter::Unchanged,
+            arrangement_compression: AlterOptionParameter::Unchanged,
             managed: AlterOptionParameter::Unchanged,
             replicas: AlterOptionParameter::Unchanged,
             replication_factor: AlterOptionParameter::Unchanged,
             size: AlterOptionParameter::Unchanged,
             schedule: AlterOptionParameter::Unchanged,
             workload_class: AlterOptionParameter::Unchanged,
+            auto_scaling_strategy: AlterOptionParameter::Unchanged,
         }
     }
 }
@@ -2105,7 +2139,9 @@ pub enum AlterClusterPlanStrategy {
     None,
     For(Duration),
     UntilReady {
-        on_timeout: OnTimeoutAction,
+        /// `None` when the `ALTER` omits `ON TIMEOUT`. The executing path
+        /// supplies the implicit action.
+        on_timeout: Option<OnTimeoutAction>,
         timeout: Duration,
     },
 }
@@ -2126,12 +2162,6 @@ pub enum OnTimeoutAction {
     Commit,
     /// Drop the target replicas and keep the pre-reconfiguration set.
     Rollback,
-}
-
-impl Default for OnTimeoutAction {
-    fn default() -> Self {
-        Self::Commit
-    }
 }
 
 impl TryFrom<&str> for OnTimeoutAction {
@@ -2170,13 +2200,13 @@ impl TryFrom<ClusterAlterOptionExtracted> for AlterClusterPlanStrategy {
                         None => Err(PlanError::UntilReadyTimeoutRequired)?,
                     },
                     on_timeout: match extracted.on_timeout {
-                        Some(v) => OnTimeoutAction::try_from(v.as_str()).map_err(|e| {
+                        Some(v) => Some(OnTimeoutAction::try_from(v.as_str()).map_err(|e| {
                             PlanError::InvalidOptionValue {
                                 option_name: "ON TIMEOUT".into(),
                                 err: Box::new(e),
                             }
-                        })?,
-                        None => OnTimeoutAction::default(),
+                        })?),
+                        None => None,
                     },
                 }
             }

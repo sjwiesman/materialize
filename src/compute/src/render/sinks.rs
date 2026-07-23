@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use differential_dataflow::VecCollection;
+use mz_compute_types::plan::scalar::LirScalarExpr;
 use mz_compute_types::sinks::{ComputeSinkConnection, ComputeSinkDesc};
 use mz_expr::{EvalError, MapFilterProject, permutation_for_arrangement};
 use mz_ore::soft_assert_or_log;
@@ -66,8 +67,8 @@ impl<'g, T: RenderTimestamp> Context<'g, T> {
         let bundle = self
             .lookup_id(mz_expr::Id::Global(sink.from))
             .expect("Sink source collection not loaded");
-        let (ok_collection, mut err_collection) = if let Some(collection) = &bundle.collection {
-            collection.clone()
+        let (ok_collection, mut err_collection) = if let Some((oks, errs)) = &bundle.collection {
+            (oks.clone().into_vec(), errs.clone())
         } else {
             let (key, _arrangement) = bundle
                 .arranged
@@ -76,10 +77,11 @@ impl<'g, T: RenderTimestamp> Context<'g, T> {
                 .expect("Invariant violated: at least one collection must be present.");
             let unthinned_arity = sink.from_desc.arity();
             let (permutation, thinning) = permutation_for_arrangement(key, unthinned_arity);
-            let mut mfp = MapFilterProject::new(unthinned_arity);
+            let mut mfp = MapFilterProject::<LirScalarExpr>::new(unthinned_arity);
             mfp.permute_fn(|c| permutation[c], thinning.len() + key.len());
+            let mfp_plan = mfp.into_plan().expect("MFP planning failed");
             bundle.as_collection_core(
-                mfp,
+                mfp_plan,
                 Some((key.clone(), None)),
                 self.until.clone(),
                 &self.config_set,
@@ -136,6 +138,7 @@ impl<'g, T: RenderTimestamp> Context<'g, T> {
             ComputeSinkConnection::CopyToS3Oneshot(_) => {
                 format!("CopyToS3OneshotSink({:?})", sink_id)
             }
+            ComputeSinkConnection::MetricSink(_) => format!("MetricSink({:?})", sink_id),
         };
         outer_scope.clone().region_named(&region_name, |inner| {
             let sink_render = get_sink_render_for(&sink.connection);
@@ -183,5 +186,6 @@ fn get_sink_render_for<'scope>(
         ComputeSinkConnection::Subscribe(connection) => Box::new(connection.clone()),
         ComputeSinkConnection::MaterializedView(connection) => Box::new(connection.clone()),
         ComputeSinkConnection::CopyToS3Oneshot(connection) => Box::new(connection.clone()),
+        ComputeSinkConnection::MetricSink(connection) => Box::new(connection.clone()),
     }
 }

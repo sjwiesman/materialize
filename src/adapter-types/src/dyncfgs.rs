@@ -127,6 +127,18 @@ pub const ENABLE_PASSWORD_AUTH: Config<bool> = Config::new(
     "Enable password authentication.",
 );
 
+/// Upper bound on the number of transitive dependencies validated for a
+/// read-then-write statement (e.g. `DELETE ... WHERE ... IN (SELECT ...)`).
+/// Validation walks the read set's dependency graph, which is user controlled
+/// and can be arbitrarily large. The bound rejects pathological graphs with a
+/// clean error instead of consuming unbounded time and memory.
+pub const READ_THEN_WRITE_MAX_DEPENDENCIES: Config<usize> = Config::new(
+    "read_then_write_max_dependencies",
+    100_000,
+    "Maximum number of transitive dependencies validated for a read-then-write \
+     statement before it is rejected.",
+);
+
 /// OIDC issuer URL.
 pub const OIDC_ISSUER: Config<Option<&'static str>> =
     Config::new("oidc_issuer", None, "OIDC issuer URL.");
@@ -204,6 +216,15 @@ pub const ENABLE_MCP_AGENT_QUERY_TOOL: Config<bool> = Config::new(
     "Whether the MCP agent query tool is enabled. When false, the query tool is not advertised and calls to it are rejected. Agents can still discover and inspect data products.",
 );
 
+/// Whether the MCP agent read_data_product tool is enabled.
+/// When false, the `read_data_product` tool is hidden from tools/list and calls to it return an error.
+/// The `query` tool is the general-purpose alternative for reading data products.
+pub const ENABLE_MCP_AGENT_READ_DATA_PRODUCT_TOOL: Config<bool> = Config::new(
+    "enable_mcp_agent_read_data_product_tool",
+    true,
+    "Whether the MCP agent read_data_product tool is enabled. When false, the read_data_product tool is not advertised and calls to it are rejected. Agents can use the query tool to read data products.",
+);
+
 /// Whether the MCP developer endpoint is enabled.
 pub const ENABLE_MCP_DEVELOPER: Config<bool> = Config::new(
     "enable_mcp_developer",
@@ -236,6 +257,14 @@ pub const MCP_MAX_RESPONSE_SIZE: Config<usize> = Config::new(
     "Maximum size in bytes of MCP tool response content. Responses exceeding this limit are rejected with an error telling the agent to narrow its query.",
 );
 
+/// Maximum time an MCP request may run before it is aborted and a timeout
+/// error is returned to the client.
+pub const MCP_REQUEST_TIMEOUT: Config<Duration> = Config::new(
+    "mcp_request_timeout",
+    Duration::from_secs(60),
+    "Maximum time an MCP request may run before it is aborted with a timeout error.",
+);
+
 /// Maximum size (in bytes) of a webhook request body, measured after
 /// decompression. Requests whose body exceeds this limit are rejected with
 /// HTTP 413. Applies only to the webhook route; other HTTP routes use a
@@ -255,6 +284,15 @@ pub const USER_ID_POOL_BATCH_SIZE: Config<u32> = Config::new(
     "Number of user IDs to pre-allocate in a batch for DDL operations.",
 );
 
+/// Maximum number of txns-shard write attempts before rebuilding `environmentd`.
+///
+/// The effective minimum is one attempt.
+pub const GROUP_COMMIT_MAX_ATTEMPTS: Config<usize> = Config::new(
+    "group_commit_max_attempts",
+    100,
+    "Maximum number of txns-shard write attempts before rebuilding environmentd. Values below 1 are treated as 1.",
+);
+
 /// OIDC client ID for the web console.
 pub const CONSOLE_OIDC_CLIENT_ID: Config<&'static str> = Config::new(
     "console_oidc_client_id",
@@ -272,7 +310,8 @@ pub const CONSOLE_OIDC_SCOPES: Config<&'static str> = Config::new(
 /// Interval at which to collect per-object arrangement size snapshots for the history table.
 pub const ARRANGEMENT_SIZE_HISTORY_COLLECTION_INTERVAL: Config<Duration> = Config::new(
     "arrangement_size_history_collection_interval",
-    Duration::from_hours(1),
+    // Disabled by default until https://github.com/MaterializeInc/materialize/pull/37455 lands.
+    Duration::ZERO,
     "Interval at which to collect and snapshot per-object arrangement sizes \
      into mz_internal.mz_object_arrangement_size_history.",
 );
@@ -314,10 +353,85 @@ pub const ENABLE_SCOPED_SYSTEM_PARAMETERS: Config<bool> = Config::new(
     "Whether per-cluster and per-replica scoped system parameters are evaluated and applied.",
 );
 
+/// Top-level gate for the cluster controller. When on, the controller owns the
+/// managed-cluster replica set and the legacy paths (the graceful 3-stage
+/// machine and `cluster_scheduling.rs`) are bypassed. The replica set cannot
+/// have two writers, so this is a clean switch, not a per-strategy toggle.
+///
+/// Defaults on. This is the break-glass switch to fall back to the legacy
+/// paths if the controller misbehaves.
+pub const ENABLE_CLUSTER_CONTROLLER: Config<bool> = Config::new(
+    "enable_cluster_controller",
+    true,
+    "Whether the cluster controller owns the managed-cluster replica set. When false, the legacy scheduling and graceful-reconfiguration paths run instead.",
+);
+
+/// Cadence of the cluster controller's reconcile tick.
+///
+/// Replaces `cluster_check_scheduling_policies_interval` once the controller is
+/// the sole owner; while the controller is dark both intervals exist.
+pub const CLUSTER_CONTROLLER_TICK_INTERVAL: Config<Duration> = Config::new(
+    "cluster_controller_tick_interval",
+    Duration::from_secs(5),
+    "How often the cluster controller runs a reconcile tick.",
+);
+
+/// Whether a config-shape `ALTER CLUSTER` returns immediately, with the
+/// controller converging in the background, or blocks the session on a
+/// wait-shim until the reconfiguration completes or its deadline passes.
+///
+/// Only consulted while [`ENABLE_CLUSTER_CONTROLLER`] is on, when the
+/// controller owns the reconfiguration.
+///
+/// Defaults on. This is the break-glass switch back to the blocking wait-shim
+/// if returning immediately causes trouble.
+pub const ENABLE_BACKGROUND_ALTER_CLUSTER: Config<bool> = Config::new(
+    "enable_background_alter_cluster",
+    true,
+    "Whether a config-shape ALTER CLUSTER returns immediately (true) or the session blocks on a wait-shim over the durable reconfiguration record (false).",
+);
+
+/// The reconfiguration deadline written when a config-shape `ALTER CLUSTER`
+/// omits `WITH (WAIT ...)`. What happens when the deadline passes un-hydrated is
+/// the record's `on_timeout` action.
+pub const DEFAULT_CLUSTER_RECONFIGURATION_TIMEOUT: Config<Duration> = Config::new(
+    "default_cluster_reconfiguration_timeout",
+    Duration::from_secs(60 * 60 * 24),
+    "The reconfiguration deadline written when a config-shape ALTER CLUSTER omits WITH (WAIT ...).",
+);
+
+/// Break-glass for the hydration-burst strategy: when off the controller never
+/// runs a burst replica; graceful reconfiguration and `ON REFRESH` scheduling
+/// are unaffected.
+///
+/// Only consulted while [`ENABLE_CLUSTER_CONTROLLER`] is on. A cluster can only
+/// carry an `AUTO SCALING STRATEGY` while its SQL acceptance feature flag is
+/// on, so this is the second of the two gates burst sits behind.
+pub const ENABLE_HYDRATION_BURST: Config<bool> = Config::new(
+    "enable_hydration_burst",
+    true,
+    "Whether the cluster controller's hydration-burst strategy may run a burst replica (break-glass; leaves graceful reconfiguration and ON REFRESH untouched).",
+);
+
+/// The burst-replica linger duration written into a new `burst` record when the
+/// cluster's `AUTO SCALING STRATEGY` omits `LINGER DURATION`. The burst replica
+/// stays up this long after the steady-state replicas first hydrate.
+pub const DEFAULT_HYDRATION_BURST_LINGER: Config<Duration> = Config::new(
+    "default_hydration_burst_linger",
+    Duration::from_secs(0),
+    "The burst-replica linger duration written when an AUTO SCALING STRATEGY omits LINGER DURATION.",
+);
+
 /// Adds the full set of all adapter `Config`s.
 pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
     configs
         .add(&ALLOW_USER_SESSIONS)
+        .add(&ENABLE_CLUSTER_CONTROLLER)
+        .add(&CLUSTER_CONTROLLER_TICK_INTERVAL)
+        .add(&ENABLE_BACKGROUND_ALTER_CLUSTER)
+        .add(&DEFAULT_CLUSTER_RECONFIGURATION_TIMEOUT)
+        .add(&ENABLE_HYDRATION_BURST)
+        .add(&DEFAULT_HYDRATION_BURST_LINGER)
         .add(&WITH_0DT_DEPLOYMENT_MAX_WAIT)
         .add(&WITH_0DT_DEPLOYMENT_DDL_CHECK_INTERVAL)
         .add(&ENABLE_0DT_DEPLOYMENT_PANIC_AFTER_TIMEOUT)
@@ -333,6 +447,7 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&PLAN_INSIGHTS_NOTICE_FAST_PATH_CLUSTERS_OPTIMIZE_DURATION)
         .add(&ENABLE_EXPRESSION_CACHE)
         .add(&ENABLE_PASSWORD_AUTH)
+        .add(&READ_THEN_WRITE_MAX_DEPENDENCIES)
         .add(&OIDC_ISSUER)
         .add(&OIDC_AUDIENCE)
         .add(&OIDC_AUTHENTICATION_CLAIM)
@@ -343,12 +458,15 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&ENABLE_S3_TABLES_REGION_CHECK)
         .add(&ENABLE_MCP_AGENT)
         .add(&ENABLE_MCP_AGENT_QUERY_TOOL)
+        .add(&ENABLE_MCP_AGENT_READ_DATA_PRODUCT_TOOL)
         .add(&ENABLE_MCP_DEVELOPER)
         .add(&ENABLE_MCP_DEVELOPER_QUERY_TOOL)
         .add(&ENABLE_PUBLIC_METRICS_ENDPOINT)
         .add(&MCP_MAX_RESPONSE_SIZE)
+        .add(&MCP_REQUEST_TIMEOUT)
         .add(&WEBHOOK_MAX_REQUEST_SIZE_BYTES)
         .add(&USER_ID_POOL_BATCH_SIZE)
+        .add(&GROUP_COMMIT_MAX_ATTEMPTS)
         .add(&CONSOLE_OIDC_CLIENT_ID)
         .add(&CONSOLE_OIDC_SCOPES)
         .add(&ARRANGEMENT_SIZE_HISTORY_COLLECTION_INTERVAL)

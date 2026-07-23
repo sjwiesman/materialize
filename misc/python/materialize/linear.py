@@ -24,7 +24,8 @@ from materialize.github import (
     KnownGitHubIssue,
 )
 
-LINEAR_CLOSED_STATE_TYPES = {"completed", "canceled"}
+LINEAR_CLOSED_STATE_TYPES = {"completed", "canceled", "duplicate"}
+LINEAR_STALE_STATE_NAMES = {"stale"}
 
 
 def _search_issues_graphql(token: str) -> list[dict[str, Any]]:
@@ -68,6 +69,7 @@ def _search_issues_graphql(token: str) -> list[dict[str, Any]]:
                 "Content-Type": "application/json",
             },
             json={"query": query, "variables": variables},
+            timeout=60,
         )
 
         if response.status_code != 200:

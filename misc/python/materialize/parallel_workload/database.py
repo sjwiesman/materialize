@@ -58,24 +58,24 @@ from materialize.parallel_workload.executor import Executor
 from materialize.parallel_workload.expression import ExprKind, expression
 from materialize.parallel_workload.settings import Complexity, Scenario
 
-MAX_COLUMNS = 5
+MAX_COLUMNS = 50
 MAX_INCLUDE_HEADERS = 5
-MAX_ROWS = 50
+MAX_ROWS = 500
 MAX_CLUSTERS = 4
 MAX_CLUSTER_REPLICAS = 2
-MAX_DBS = 5
-MAX_SCHEMAS = 5
-MAX_TABLES = 5
-MAX_VIEWS = 15
-MAX_INDEXES = 15
-MAX_ROLES = 15
-MAX_WEBHOOK_SOURCES = 5
-MAX_KAFKA_SOURCES = 5
-MAX_MYSQL_SOURCES = 5
-MAX_SQL_SERVER_SOURCES = 5
-MAX_POSTGRES_SOURCES = 5
-MAX_KAFKA_SINKS = 5
-MAX_ICEBERG_SINKS = 5
+MAX_DBS = 50
+MAX_SCHEMAS = 50
+MAX_TABLES = 50
+MAX_VIEWS = 150
+MAX_INDEXES = 150
+MAX_ROLES = 150
+MAX_WEBHOOK_SOURCES = 50
+MAX_KAFKA_SOURCES = 50
+MAX_MYSQL_SOURCES = 50
+MAX_SQL_SERVER_SOURCES = 50
+MAX_POSTGRES_SOURCES = 50
+MAX_KAFKA_SINKS = 50
+MAX_ICEBERG_SINKS = 50
 
 MAX_INITIAL_DBS = 1
 MAX_INITIAL_SCHEMAS = 1
@@ -88,7 +88,6 @@ MAX_INITIAL_KAFKA_SOURCES = 1
 MAX_INITIAL_MYSQL_SOURCES = 1
 MAX_INITIAL_SQL_SERVER_SOURCES = 1
 MAX_INITIAL_POSTGRES_SOURCES = 1
-MAX_INITIAL_KAFKA_SINKS = 1
 
 
 class BodyFormat(Enum):
@@ -631,9 +630,7 @@ class KafkaSink(DBObject):
         if len(base_object.columns) == 1:
             formats.extend(single_column_formats)
         self.format = rng.choice(formats)
-        self.envelope = (
-            "UPSERT" if self.format == "JSON" else rng.choice(["DEBEZIUM", "UPSERT"])
-        )
+        self.envelope = rng.choice(["DEBEZIUM", "UPSERT"])
         if self.envelope == "UPSERT" or rng.choice([True, False]):
             key_cols = [
                 column
@@ -855,20 +852,29 @@ class SqlServerSource(DBObject):
 
 
 class S3Object(DBObject):
+    """A COPY TO dump of `table` that CopyFromS3Action can load back into it.
+
+    Only registered for verbatim (SELECT *) dumps of non-temp tables, so the
+    file's column names and types match the table's."""
+
     key: str
     bucket: str
     format: str
+    table: Table
 
     def __init__(
         self,
         key: str,
         bucket: str,
         format: str,
+        table: Table,
     ):
         super().__init__()
         self.key = key
         self.bucket = bucket
         self.format = format
+        self.table = table
+        self.columns = table.columns
 
     def name(self) -> str:
         return f"{self.bucket}/{self.key}"
@@ -876,26 +882,25 @@ class S3Object(DBObject):
     def __str__(self) -> str:
         return self.name()
 
-    def create(self, exe: Executor) -> None:
-        query = f"CREATE TABLE '{self.key}'("
-        query += ",\n    ".join(column.create() for column in self.columns)
-        query += ")"
-        exe.execute(query)
-
 
 class Index:
     _name: str
+    schema: Schema
     lock: threading.Lock
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, schema: Schema):
         self._name = name
+        # The index lives in the indexed object's schema. Referencing the
+        # schema object (instead of a rendered string) keeps the reference
+        # valid across schema renames.
+        self.schema = schema
         self.lock = threading.Lock()
 
     def name(self) -> str:
         return self._name
 
     def __str__(self) -> str:
-        return identifier(self.name())
+        return f"{self.schema}.{identifier(self.name())}"
 
 
 class Role:
@@ -1130,6 +1135,12 @@ class Database:
         | View
         | Table
     ]:
+        # Temp objects are intentionally included. Referencing one from a
+        # persistent object (sink, non-temp view) must be rejected by the
+        # server, not accepted, so keeping them here lets the workload stress
+        # that boundary and surface panics. The expected rejection ("non-
+        # temporary items cannot depend on temporary item") and cross-session
+        # "unknown catalog item" are ignored, see Action.errors_to_ignore.
         return (
             self.tables
             + self.views

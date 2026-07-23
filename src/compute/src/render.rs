@@ -115,7 +115,8 @@ use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::arrange::Arranged;
 use differential_dataflow::operators::arrange::ShutdownButton;
 use differential_dataflow::operators::iterate::Variable;
-use differential_dataflow::trace::{BatchReader, TraceReader};
+use differential_dataflow::trace::cursor::{BatchCursor, BatchDiff, BatchKey, BatchVal};
+use differential_dataflow::trace::{BatchReader, Cursor, Navigable, TraceReader};
 use differential_dataflow::{AsCollection, Data, VecCollection};
 use futures::FutureExt;
 use futures::channel::oneshot;
@@ -129,6 +130,7 @@ use mz_compute_types::dyncfgs::{
 use mz_compute_types::plan::render_plan::{
     self, BindStage, LetBind, LetFreePlan, RecBind, RenderPlan,
 };
+use mz_compute_types::plan::scalar::LirScalarExpr;
 use mz_compute_types::plan::{ArrangementStrategy, LirId};
 use mz_expr::{EvalError, Id, LocalId, permutation_for_arrangement};
 use mz_persist_client::operators::shard_source::{ErrorHandler, SnapshotMode};
@@ -162,11 +164,13 @@ use crate::extensions::temporal_bucket::TemporalBucketing;
 use crate::logging::compute::{
     ComputeEvent, DataflowGlobal, LirMapping, LirMetadata, LogDataflowErrors, OperatorHydration,
 };
+use crate::render::columnar::CollectionEdge;
 use crate::render::context::{ArrangementFlavor, Context};
 use crate::render::errors::DataflowErrorSer;
 use crate::typedefs::{ErrBatcher, ErrBuilder, ErrSpine, KeyBatcher, MzTimestamp};
 use mz_row_spine::{DatumSeq, RowRowBatcher, RowRowBuilder};
 
+pub(crate) mod columnar;
 pub mod context;
 pub(crate) mod errors;
 mod flat_map;
@@ -213,7 +217,7 @@ pub fn build_compute_dataflow(
     let indexes = dataflow
         .index_exports
         .iter()
-        .map(|(idx_id, (idx, _typ))| (*idx_id, dataflow.depends_on(idx.on_id), idx.clone()))
+        .map(|(idx_id, (idx, _typ))| (*idx_id, dataflow.depends_on(idx.on_id), idx.as_lir()))
         .collect::<Vec<_>>();
 
     // Determine sinks to export, and their dependencies.
@@ -391,7 +395,7 @@ pub fn build_compute_dataflow(
                         &mut tokens,
                         input_probe,
                         *idx_id,
-                        &idx.desc,
+                        &idx.desc.as_lir(),
                         &idx.typ,
                         snapshot_mode,
                         start_signal.clone(),
@@ -491,7 +495,7 @@ pub fn build_compute_dataflow(
                         &mut tokens,
                         input_probe,
                         *idx_id,
-                        &idx.desc,
+                        &idx.desc.as_lir(),
                         &idx.typ,
                         snapshot_mode,
                         start_signal.clone(),
@@ -563,18 +567,19 @@ where
     /// that we'll filter those out later if necessary.)
     fn import_filtered_index_collection<
         'outer,
-        Tr: TraceReader<Time = mz_repr::Timestamp> + Clone,
+        Tr: TraceReader<Time = mz_repr::Timestamp, Batch: Navigable> + Clone,
         V: Data,
     >(
         &self,
         arranged: Arranged<'outer, Tr>,
         start_signal: StartSignal,
-        mut logic: impl FnMut(Tr::Key<'_>, Tr::Val<'_>) -> V + 'static,
-    ) -> VecCollection<'g, T, V, Tr::Diff>
+        mut logic: impl FnMut(BatchKey<'_, Tr>, BatchVal<'_, Tr>) -> V + 'static,
+    ) -> VecCollection<'g, T, V, BatchDiff<Tr>>
     where
         // This is implied by the fact that the outer timestamp = mz_repr::Timestamp, but it's essential
         // for our batch-level filtering to be safe, so we document it here regardless.
         mz_repr::Timestamp: TotalOrder,
+        BatchCursor<Tr>: Cursor<Time = mz_repr::Timestamp>,
     {
         let oks = arranged.stream.with_start_signal(start_signal).filter({
             let as_of = self.as_of_frontier.clone();
@@ -590,7 +595,7 @@ where
         tokens: &mut BTreeMap<GlobalId, Rc<dyn std::any::Any>>,
         input_probe: probe::Handle<mz_repr::Timestamp>,
         idx_id: GlobalId,
-        idx: &IndexDesc,
+        idx: &IndexDesc<LirScalarExpr>,
         typ: &ReprRelationType,
         snapshot_mode: SnapshotMode,
         start_signal: StartSignal,
@@ -686,7 +691,7 @@ impl<'g> Context<'g, mz_repr::Timestamp> {
         tokens: &BTreeMap<GlobalId, Rc<dyn std::any::Any>>,
         dependency_ids: BTreeSet<GlobalId>,
         idx_id: GlobalId,
-        idx: &IndexDesc,
+        idx: &IndexDesc<LirScalarExpr>,
         output_probe: &MzProbeHandle<mz_repr::Timestamp>,
     ) {
         // put together tokens that belong to the export
@@ -703,7 +708,8 @@ impl<'g> Context<'g, mz_repr::Timestamp> {
             )
         });
 
-        match bundle.arrangement(&idx.key) {
+        let key = &idx.key;
+        match bundle.arrangement(key) {
             Some(ArrangementFlavor::Local(mut oks, mut errs)) => {
                 // Ensure that the frontier does not advance past the expiration time, if set.
                 // Otherwise, we might write down incorrect data.
@@ -745,7 +751,7 @@ impl<'g> Context<'g, mz_repr::Timestamp> {
                 panic!(
                     "Arrangement alarmingly absent! id: {:?}, keys: {:?}",
                     Id::Global(idx_id),
-                    &idx.key
+                    &key
                 );
             }
         };
@@ -765,7 +771,7 @@ where
         tokens: &BTreeMap<GlobalId, Rc<dyn std::any::Any>>,
         dependency_ids: BTreeSet<GlobalId>,
         idx_id: GlobalId,
-        idx: &IndexDesc,
+        idx: &IndexDesc<LirScalarExpr>,
         output_probe: &MzProbeHandle<mz_repr::Timestamp>,
     ) {
         // put together tokens that belong to the export
@@ -782,7 +788,8 @@ where
             )
         });
 
-        match bundle.arrangement(&idx.key) {
+        let key = &idx.key;
+        match bundle.arrangement(key) {
             Some(ArrangementFlavor::Local(oks, errs)) => {
                 // TODO: The following as_collection/leave/arrange sequence could be optimized.
                 //   * Combine as_collection and leave into a single function.
@@ -846,7 +853,7 @@ where
                 panic!(
                     "Arrangement alarmingly absent! id: {:?}, keys: {:?}",
                     Id::Global(idx_id),
-                    &idx.key
+                    &key,
                 );
             }
         };
@@ -931,6 +938,7 @@ impl<'scope> Context<'scope, Product<mz_repr::Timestamp, PointStamp<u64>>> {
                 // We need to ensure that the raw collection exists, but do not have enough information
                 // here to cause that to happen.
                 let (oks, mut err) = bundle.collection.clone().unwrap();
+                let oks = oks.into_vec();
                 self.insert_id(Id::Local(id), bundle);
                 let (oks_v, err_v) = variables.remove(&Id::Local(id)).unwrap();
 
@@ -972,10 +980,8 @@ impl<'scope> Context<'scope, Product<mz_repr::Timestamp, PointStamp<u64>>> {
                         ErrBatcher<_, _>,
                         ErrBuilder<_, _>,
                         ErrSpine<_, _>,
-                    >(
-                        "Arrange recursive err",
-                    )
-                    .mz_reduce_abelian::<_, ErrBuilder<_, _>, ErrSpine<_, _>>(
+                    >("Arrange recursive err")
+                    .mz_reduce_abelian::<_, ErrBuilder<_, _>, ErrSpine<_, _>, _>(
                         "Distinct recursive err",
                         move |_k, _s, t| t.push(((), Diff::ONE)),
                     )
@@ -988,6 +994,7 @@ impl<'scope> Context<'scope, Product<mz_repr::Timestamp, PointStamp<u64>>> {
             for id in rec_ids.into_iter() {
                 let bundle = self.remove_id(Id::Local(id)).unwrap();
                 let (oks, err) = bundle.collection.unwrap();
+                let oks = oks.into_vec();
                 self.insert_id(
                     Id::Local(id),
                     CollectionBundle::from_collections(
@@ -1313,8 +1320,11 @@ impl<'scope, T: RenderTimestamp + MaybeBucketByTime> Context<'scope, T> {
             }
             Negate { input } => {
                 let input = expect_input(input);
-                let (oks, errs) = input.as_specific_collection(None, &self.config_set);
-                CollectionBundle::from_collections(oks.negate(), errs)
+                let (oks, errs) = input
+                    .collection
+                    .clone()
+                    .expect("Negate input must be an unarranged collection");
+                CollectionBundle::from_edge(oks.negate(), errs)
             }
             Threshold {
                 input,
@@ -1331,8 +1341,10 @@ impl<'scope, T: RenderTimestamp + MaybeBucketByTime> Context<'scope, T> {
                 let mut oks = Vec::new();
                 let mut errs = Vec::new();
                 for (input, strategy) in inputs.into_iter().zip_eq(temporal_bucketing_strategies) {
-                    let (os, es) =
-                        expect_input(input).as_specific_collection(None, &self.config_set);
+                    let (os, es) = expect_input(input)
+                        .collection
+                        .clone()
+                        .expect("Union input must be an unarranged collection");
                     // Apply per-input temporal bucketing. No-op for `Direct`.
                     // Only consolidating Unions carry non-`Direct` strategies;
                     // see the `Union` arm of `lower_mir_expr_stack_safe`.
@@ -1343,26 +1355,26 @@ impl<'scope, T: RenderTimestamp + MaybeBucketByTime> Context<'scope, T> {
                             .get(&self.config_set)
                             .try_into()
                             .expect("must fit");
-                        T::maybe_apply_temporal_bucketing(
+                        let os = os.into_vec();
+                        CollectionEdge::Vec(T::maybe_apply_temporal_bucketing(
                             os.inner,
                             self.as_of_frontier.clone(),
                             summary,
-                        )
+                        ))
                     } else {
                         os
                     };
                     oks.push(os);
                     errs.push(es);
                 }
-                let mut oks = differential_dataflow::collection::concatenate(self.scope, oks);
-                if consolidate_output {
-                    oks = CollectionExt::consolidate_named::<KeyBatcher<_, _, _>>(
-                        oks,
-                        "UnionConsolidation",
-                    )
-                }
+                let oks = CollectionEdge::concat_many(self.scope, oks);
+                let oks = if consolidate_output {
+                    oks.consolidate_named("UnionConsolidation")
+                } else {
+                    oks
+                };
                 let errs = differential_dataflow::collection::concatenate(self.scope, errs);
-                CollectionBundle::from_collections(oks, errs)
+                CollectionBundle::from_edge(oks, errs)
             }
             ArrangeBy {
                 input_key,
@@ -1438,8 +1450,16 @@ impl<'scope, T: RenderTimestamp + MaybeBucketByTime> Context<'scope, T> {
                     .collection
                     .as_mut()
                     .expect("CollectionBundle invariant");
-                let stream = self.log_operator_hydration_inner(oks.inner.clone(), lir_id);
-                *oks = stream.as_collection();
+                match oks {
+                    CollectionEdge::Vec(c) => {
+                        let stream = self.log_operator_hydration_inner(c.inner.clone(), lir_id);
+                        *c = stream.as_collection();
+                    }
+                    CollectionEdge::Columnar(c) => {
+                        let stream = self.log_operator_hydration_inner(c.inner.clone(), lir_id);
+                        *c = stream.as_collection();
+                    }
+                }
             }
         }
     }

@@ -20,7 +20,7 @@ use futures::{Future, StreamExt, future};
 use itertools::Itertools;
 use mz_adapter_types::compaction::CompactionWindow;
 use mz_adapter_types::connection::ConnectionId;
-use mz_adapter_types::dyncfgs::ENABLE_PASSWORD_AUTH;
+use mz_adapter_types::dyncfgs::{ENABLE_PASSWORD_AUTH, READ_THEN_WRITE_MAX_DEPENDENCIES};
 use mz_catalog::memory::error::ErrorKind;
 use mz_catalog::memory::objects::{
     CatalogItem, Connection, DataSourceDesc, Sink, Source, Table, TableDataSource, Type,
@@ -65,6 +65,7 @@ use mz_sql::plan::{
 };
 use mz_sql::pure::{PurifiedSourceExport, generate_subsource_statements};
 use mz_storage_types::sinks::StorageSinkDesc;
+use mz_timestamp_oracle::TimestampOracle;
 // Import `plan` module, but only import select elements to avoid merge conflicts on use statements.
 use mz_sql::plan::{
     AlterConnectionAction, AlterConnectionPlan, CreateSourcePlanBundle, ExplainSinkSchemaPlan,
@@ -146,6 +147,30 @@ macro_rules! return_if_err {
 }
 
 pub(super) use return_if_err;
+
+fn spawn_linearized_read_ts<S>(
+    oracle: Option<Arc<dyn TimestampOracle<Timestamp> + Send + Sync>>,
+    name: &'static str,
+    build_stage: impl FnOnce(Option<Timestamp>) -> S + Send + 'static,
+) -> StageResult<Box<S>>
+where
+    S: Send + 'static,
+{
+    match oracle {
+        Some(oracle) => {
+            let span = Span::current();
+            StageResult::Handle(mz_ore::task::spawn(
+                move || name,
+                async move {
+                    let oracle_read_ts = oracle.read_ts().await;
+                    Ok(Box::new(build_stage(Some(oracle_read_ts))))
+                }
+                .instrument(span),
+            ))
+        }
+        None => StageResult::Immediate(Box::new(build_stage(None))),
+    }
+}
 
 struct DropOps {
     ops: Vec<catalog::Op>,
@@ -1516,13 +1541,23 @@ impl Coordinator {
             }
         }
 
-        let privilege_revoke_ops = privilege_revokes.into_iter().map(|(object_id, privilege)| {
-            catalog::Op::UpdatePrivilege {
-                target_id: object_id,
-                privilege,
-                variant: UpdatePrivilegeVariant::Revoke,
-            }
-        });
+        // Group revokes by target so each object is rewritten once, not once per privilege.
+        let mut privilege_revokes_by_target: BTreeMap<SystemObjectId, Vec<MzAclItem>> =
+            BTreeMap::new();
+        for (object_id, privilege) in privilege_revokes {
+            privilege_revokes_by_target
+                .entry(object_id)
+                .or_default()
+                .push(privilege);
+        }
+        let privilege_revoke_ops =
+            privilege_revokes_by_target
+                .into_iter()
+                .map(|(target_id, privileges)| catalog::Op::UpdatePrivilege {
+                    target_id,
+                    privileges,
+                    variant: UpdatePrivilegeVariant::Revoke,
+                });
         let default_privilege_revoke_ops = plan.default_privilege_revokes.into_iter().map(
             |(privilege_object, privilege_acl_item)| catalog::Op::UpdateDefaultPrivilege {
                 privilege_object,
@@ -2181,7 +2216,8 @@ impl Coordinator {
         ctx: &mut ExecuteContext,
         action: EndTransactionAction,
     ) -> Result<(Option<TransactionOps>, Option<WriteLocks>), AdapterError> {
-        let txn = self.clear_transaction(ctx.session_mut()).await;
+        let (txn, retire_notify) = self.clear_transaction(ctx.session_mut()).await;
+        ctx.delay_response_until(retire_notify);
 
         if let EndTransactionAction::Commit = action {
             if let (Some(mut ops), write_lock_guards) = txn.into_ops_and_lock_guard() {
@@ -2274,10 +2310,12 @@ impl Coordinator {
     }
 
     /// Execute a side-effecting function from the frontend peek path.
-    /// This is separate from `sequence_side_effecting_func` because
-    /// - It doesn't have an ExecuteContext.
-    /// - It needs to do its own RBAC check, because the `rbac::check_plan` call in the frontend
-    ///   peek sequencing can't look at `active_conns`.
+    /// This is separate from `sequence_side_effecting_func` because it doesn't have an
+    /// ExecuteContext. RBAC is checked by the caller via `rbac::check_plan` before
+    /// sending `Command::ExecuteSideEffectingFunc`. The caller must hold the target
+    /// connection's `ConnectionId` handle from its RBAC check until this command
+    /// completes, so that the connection found in `active_conns` here (if any) is
+    /// the same one the check was performed against.
     ///
     /// TODO(peek-seq): Delete `sequence_side_effecting_func` after we delete the old peek
     /// sequencing.
@@ -2285,7 +2323,6 @@ impl Coordinator {
         &mut self,
         plan: SideEffectingFunc,
         conn_id: ConnectionId,
-        current_role: RoleId,
     ) -> Result<ExecuteResponse, AdapterError> {
         match plan {
             SideEffectingFunc::PgCancelBackend { connection_id } => {
@@ -2302,36 +2339,14 @@ impl Coordinator {
                     return Err(AdapterError::Canceled);
                 }
 
-                // Perform RBAC check: the current user must be a member of the role
-                // that owns the connection being cancelled.
-                if let Some((_id_handle, conn_meta)) =
+                // The caller verified role membership via rbac::check_plan and
+                // still holds the target's `ConnectionId` handle, so this entry
+                // (if present) is the same connection the check was performed
+                // against.
+                if let Some((id_handle, _conn_meta)) =
                     self.active_conns.get_key_value(&connection_id)
                 {
-                    let target_role = *conn_meta.authenticated_role_id();
-                    let role_membership = self
-                        .catalog()
-                        .state()
-                        .collect_role_membership(&current_role);
-                    if !role_membership.contains(&target_role) {
-                        let target_role_name = self
-                            .catalog()
-                            .try_get_role(&target_role)
-                            .map(|role| role.name().to_string())
-                            .unwrap_or_else(|| target_role.to_string());
-                        return Err(AdapterError::Unauthorized(
-                            rbac::UnauthorizedError::RoleMembership {
-                                role_names: vec![target_role_name],
-                            },
-                        ));
-                    }
-
-                    // RBAC check passed, proceed with cancellation.
-                    let id_handle = self
-                        .active_conns
-                        .get_key_value(&connection_id)
-                        .map(|(id, _)| id.clone())
-                        .expect("checked above");
-                    self.handle_privileged_cancel(id_handle).await;
+                    self.handle_privileged_cancel(id_handle.clone()).await;
                     Ok(Self::send_immediate_rows(Row::pack_slice(&[Datum::True])))
                 } else {
                     // Connection not found, return false.
@@ -2788,17 +2803,24 @@ impl Coordinator {
         }
 
         // Ensure all objects `selection` depends on are valid for `ReadThenWrite` operations.
-        for gid in selection.depends_on() {
-            let item_id = self.catalog().resolve_item_id(&gid);
-            if let Err(err) = validate_read_then_write_dependencies(self.catalog(), &item_id) {
-                ctx.retire(Err(err));
-                return;
-            }
+        let dependency_ids = selection
+            .depends_on()
+            .into_iter()
+            .map(|gid| self.catalog().resolve_item_id(&gid));
+        let max_rw_dependencies =
+            READ_THEN_WRITE_MAX_DEPENDENCIES.get(self.catalog().system_config().dyncfgs());
+        if let Err(err) = validate_read_then_write_dependencies(
+            self.catalog(),
+            dependency_ids,
+            max_rw_dependencies,
+        ) {
+            ctx.retire(Err(err));
+            return;
         }
 
         let (peek_tx, peek_rx) = oneshot::channel();
         let peek_client_tx = ClientTransmitter::new(peek_tx, self.internal_cmd_tx.clone());
-        let (tx, _, session, extra) = ctx.into_parts();
+        let (tx, _, session, extra, response_barriers) = ctx.into_parts();
         // We construct a new execute context for the peek, with a trivial (`Default::default()`)
         // execution context, because this peek does not directly correspond to an execute,
         // and so we don't need to take any action on its retirement.
@@ -2851,8 +2873,13 @@ impl Coordinator {
                     session,
                     otel_ctx,
                 }) => {
-                    let ctx =
-                        ExecuteContext::from_parts(tx, internal_cmd_tx.clone(), session, extra);
+                    let ctx = ExecuteContext::from_parts_with_response_barriers(
+                        tx,
+                        internal_cmd_tx.clone(),
+                        session,
+                        extra,
+                        response_barriers,
+                    );
                     otel_ctx.attach_as_parent();
                     ctx.retire(Err(e));
                     return;
@@ -2860,7 +2887,13 @@ impl Coordinator {
                 // It is not an error for these results to be ready after `peek_client_tx` has been dropped.
                 Err(e) => return warn!("internal_cmd_rx dropped before we could send: {:?}", e),
             };
-            let mut ctx = ExecuteContext::from_parts(tx, internal_cmd_tx.clone(), session, extra);
+            let mut ctx = ExecuteContext::from_parts_with_response_barriers(
+                tx,
+                internal_cmd_tx.clone(),
+                session,
+                extra,
+                response_barriers,
+            );
             let mut timeout_dur = *ctx.session().vars().statement_timeout();
 
             // Timeout of 0 is equivalent to "off", meaning we will wait "forever."
@@ -3409,9 +3442,11 @@ impl Coordinator {
             sink: sink_plan,
             with_snapshot,
             in_cluster,
+            set_options,
+            reset_options,
         } = ctx.plan.clone();
 
-        // We avoid taking the DDL lock for `ALTER SINK SET FROM` commands, see
+        // We avoid taking the DDL lock for `ALTER SINK` commands, see
         // `Coordinator::must_serialize_ddl`. We therefore must assume that the world has
         // arbitrarily changed since we performed planning, and we must re-assert that it still
         // matches our requirements.
@@ -3475,18 +3510,23 @@ impl Coordinator {
         };
 
         // Update the sink version.
-        stmt.with_options
-            .retain(|o| o.name != CreateSinkOptionName::Version);
-        stmt.with_options.push(CreateSinkOption {
-            name: CreateSinkOptionName::Version,
-            value: Some(WithOptionValue::Value(mz_sql::ast::Value::Number(
-                sink_plan.version.to_string(),
-            ))),
-        });
+        plan::apply_sink_option_edits(
+            &mut stmt.with_options,
+            &[CreateSinkOption {
+                name: CreateSinkOptionName::Version,
+                value: Some(WithOptionValue::Value(mz_sql::ast::Value::Number(
+                    sink_plan.version.to_string(),
+                ))),
+            }],
+            &[],
+        );
 
         let conn_catalog = self.catalog().for_system_session();
         let (mut stmt, resolved_ids) =
             mz_sql::names::resolve(&conn_catalog, stmt).expect("resolvable create_sql");
+
+        // Re-apply the option edits requested by the `ALTER SINK`.
+        plan::apply_sink_option_edits(&mut stmt.with_options, &set_options, &reset_options);
 
         // Update the `from` relation.
         let from_entry = self.catalog().get_entry_by_global_id(&sink_plan.from);
@@ -3499,6 +3539,16 @@ impl Coordinator {
             version: from_entry.version,
         };
 
+        // `resolved_ids` was derived from the old `create_sql`, so it still
+        // references the old input. `create_sql` and `from` above already
+        // point at the new input, so sync the dependency set to match.
+        // Otherwise the in-memory catalog disagrees with `create_sql` until
+        // the next reload, and the temporary-dependency check in
+        // `Op::UpdateItem` (which reads `uses()`) would not see the new input.
+        let mut resolved_ids = resolved_ids;
+        resolved_ids.remove_item(&self.catalog().resolve_item_id(&old_sink.from));
+        resolved_ids.add_item(from_entry.id());
+
         let new_sink = Sink {
             create_sql: stmt.to_ast_string_stable(),
             global_id,
@@ -3507,7 +3557,7 @@ impl Coordinator {
             envelope: sink_plan.envelope,
             version: sink_plan.version,
             with_snapshot,
-            resolved_ids: resolved_ids.clone(),
+            resolved_ids,
             cluster_id: in_cluster,
             commit_interval: sink_plan.commit_interval,
         };
@@ -4345,7 +4395,7 @@ impl Coordinator {
         grantees: Vec<RoleId>,
         variant: UpdatePrivilegeVariant,
     ) -> Result<ExecuteResponse, AdapterError> {
-        let mut ops = Vec::with_capacity(update_privileges.len() * grantees.len());
+        let mut ops = Vec::with_capacity(update_privileges.len());
         let mut warnings = Vec::new();
         let catalog = self.catalog().for_session(session);
 
@@ -4389,6 +4439,9 @@ impl Coordinator {
                     "GRANTs/REVOKEs on an object type with no privileges",
                 ))?;
 
+            // Collect every grantee's change to this target into one op, so a bulk grant/revoke
+            // touching one object is a single durable write rather than one per grantee.
+            let mut target_privileges = Vec::with_capacity(grantees.len());
             for grantee in &grantees {
                 self.catalog().ensure_not_system_role(grantee)?;
                 self.catalog().ensure_not_predefined_role(grantee)?;
@@ -4397,39 +4450,30 @@ impl Coordinator {
                     .map(Cow::Borrowed)
                     .unwrap_or_else(|| Cow::Owned(MzAclItem::empty(*grantee, grantor)));
 
-                match variant {
-                    UpdatePrivilegeVariant::Grant
-                        if !existing_privilege.acl_mode.contains(acl_mode) =>
-                    {
-                        ops.push(catalog::Op::UpdatePrivilege {
-                            target_id: target_id.clone(),
-                            privilege: MzAclItem {
-                                grantee: *grantee,
-                                grantor,
-                                acl_mode,
-                            },
-                            variant,
-                        });
+                // Skip grantees for which the grant/revoke would be a no-op.
+                let changes = match variant {
+                    UpdatePrivilegeVariant::Grant => {
+                        !existing_privilege.acl_mode.contains(acl_mode)
                     }
-                    UpdatePrivilegeVariant::Revoke
-                        if !existing_privilege
-                            .acl_mode
-                            .intersection(acl_mode)
-                            .is_empty() =>
-                    {
-                        ops.push(catalog::Op::UpdatePrivilege {
-                            target_id: target_id.clone(),
-                            privilege: MzAclItem {
-                                grantee: *grantee,
-                                grantor,
-                                acl_mode,
-                            },
-                            variant,
-                        });
-                    }
-                    // no-op
-                    _ => {}
+                    UpdatePrivilegeVariant::Revoke => !existing_privilege
+                        .acl_mode
+                        .intersection(acl_mode)
+                        .is_empty(),
+                };
+                if changes {
+                    target_privileges.push(MzAclItem {
+                        grantee: *grantee,
+                        grantor,
+                        acl_mode,
+                    });
                 }
+            }
+            if !target_privileges.is_empty() {
+                ops.push(catalog::Op::UpdatePrivilege {
+                    target_id: target_id.clone(),
+                    privileges: target_privileges,
+                    variant,
+                });
             }
         }
 
@@ -4909,7 +4953,7 @@ impl Coordinator {
     ///   `set_dataflow_metainfo`,
     /// - and returns a future that resolves once the builtin-table append
     ///   has been observed, or `None` if nothing was appended.
-    async fn persist_dataflow_metainfo(
+    fn persist_dataflow_metainfo(
         &mut self,
         df_meta: DataflowMetainfo<Arc<OptimizerNotice>>,
         export_id: GlobalId,
@@ -4929,12 +4973,7 @@ impl Coordinator {
             // Save the metainfo.
             self.catalog_mut().set_dataflow_metainfo(export_id, df_meta);
 
-            Some(
-                self.builtin_table_update()
-                    .execute(builtin_table_updates)
-                    .await
-                    .0,
-            )
+            Some(self.builtin_table_update().execute(builtin_table_updates))
         } else {
             // Save the metainfo.
             self.catalog_mut().set_dataflow_metainfo(export_id, df_meta);

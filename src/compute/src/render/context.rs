@@ -15,17 +15,19 @@ use std::rc::Rc;
 
 use differential_dataflow::consolidation::ConsolidatingContainerBuilder;
 use differential_dataflow::operators::arrange::Arranged;
+use differential_dataflow::trace::cursor::{BatchCursor, BatchKey, BatchVal};
 use differential_dataflow::trace::implementations::BatchContainer;
-use differential_dataflow::trace::{BatchReader, Cursor, TraceReader};
+use differential_dataflow::trace::{Cursor, Navigable, TraceReader};
 use differential_dataflow::{AsCollection, Data, VecCollection};
 use mz_compute_types::dataflows::DataflowDescription;
 use mz_compute_types::dyncfgs::{
     ENABLE_COLUMN_PAGED_BATCHER, ENABLE_COMPUTE_RENDER_FUELED_AS_SPECIFIC_COLLECTION,
     ENABLE_COMPUTE_TEMPORAL_BUCKETING, TEMPORAL_BUCKETING_SUMMARY,
 };
+use mz_compute_types::plan::scalar::{LirScalarExpr, mfp_mir_to_lir_plan, mfp_plan_lir_to_mir};
 use mz_compute_types::plan::{ArrangementStrategy, AvailableCollections};
 use mz_dyncfg::ConfigSet;
-use mz_expr::{Eval, Id, MapFilterProject, MirScalarExpr};
+use mz_expr::{Eval, Id, MfpPlan};
 use mz_ore::soft_assert_or_log;
 use mz_repr::fixed_length::ExtendDatums;
 use mz_repr::{DatumVec, DatumVecBorrow, Diff, GlobalId, Row, RowArena, SharedRow};
@@ -46,6 +48,7 @@ use timely::progress::{Antichain, Timestamp};
 
 use crate::compute_state::ComputeState;
 use crate::extensions::arrange::{KeyCollection, MzArrange, MzArrangeCore};
+use crate::render::columnar::CollectionEdge;
 use crate::render::errors::{DataflowErrorSer, ErrorLogger};
 use crate::render::{LinearJoinSpec, MaybeBucketByTime, RenderTimestamp};
 use crate::typedefs::{
@@ -440,16 +443,24 @@ impl<'scope, T: RenderTimestamp> ArrangementFlavor<'scope, T> {
 #[derive(Clone)]
 pub struct CollectionBundle<'scope, T: RenderTimestamp> {
     pub collection: Option<(
-        VecCollection<'scope, T, Row, Diff>,
+        CollectionEdge<'scope, T>,
         VecCollection<'scope, T, DataflowErrorSer, Diff>,
     )>,
-    pub arranged: BTreeMap<Vec<MirScalarExpr>, ArrangementFlavor<'scope, T>>,
+    pub arranged: BTreeMap<Vec<LirScalarExpr>, ArrangementFlavor<'scope, T>>,
 }
 
 impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     /// Construct a new collection bundle from update streams.
     pub fn from_collections(
         oks: VecCollection<'scope, T, Row, Diff>,
+        errs: VecCollection<'scope, T, DataflowErrorSer, Diff>,
+    ) -> Self {
+        Self::from_edge(CollectionEdge::Vec(oks), errs)
+    }
+
+    /// Construct a new collection bundle from a [`CollectionEdge`] and an error stream.
+    pub fn from_edge(
+        oks: CollectionEdge<'scope, T>,
         errs: VecCollection<'scope, T, DataflowErrorSer, Diff>,
     ) -> Self {
         Self {
@@ -460,7 +471,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
 
     /// Inserts arrangements by the expressions on which they are keyed.
     pub fn from_expressions(
-        exprs: Vec<MirScalarExpr>,
+        exprs: Vec<LirScalarExpr>,
         arrangements: ArrangementFlavor<'scope, T>,
     ) -> Self {
         let mut arranged = BTreeMap::new();
@@ -478,7 +489,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     ) -> Self {
         let mut keys = Vec::new();
         for column in columns {
-            keys.push(MirScalarExpr::column(column));
+            keys.push(LirScalarExpr::column(column));
         }
         Self::from_expressions(keys, arrangements)
     }
@@ -486,7 +497,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     /// The scope containing the collection bundle.
     pub fn scope(&self) -> Scope<'scope, T> {
         if let Some((oks, _errs)) = &self.collection {
-            oks.inner.scope()
+            oks.scope()
         } else {
             self.arranged
                 .values()
@@ -548,7 +559,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     /// [`ENABLE_COMPUTE_RENDER_FUELED_AS_SPECIFIC_COLLECTION`].
     pub fn as_specific_collection(
         &self,
-        key: Option<&[MirScalarExpr]>,
+        key: Option<&[LirScalarExpr]>,
         config_set: &ConfigSet,
     ) -> (
         VecCollection<'scope, T, Row, Diff>,
@@ -560,10 +571,13 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
         //
         // If it doesn't, we panic.
         match key {
-            None => self
-                .collection
-                .clone()
-                .expect("The unarranged collection doesn't exist."),
+            None => {
+                let (oks, errs) = self
+                    .collection
+                    .clone()
+                    .expect("The unarranged collection doesn't exist.");
+                (oks.into_vec(), errs)
+            }
             Some(key) => {
                 let arranged = self.arranged.get(key).unwrap_or_else(|| {
                     panic!("The collection arranged by {:?} doesn't exist.", key)
@@ -607,9 +621,9 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     /// decode all columns.
     pub fn flat_map<D, DCB, L>(
         &self,
-        key_val: Option<(Vec<MirScalarExpr>, Option<Row>)>,
+        key_val: Option<(Vec<LirScalarExpr>, Option<Row>)>,
         max_demand: usize,
-        mut logic: L,
+        logic: L,
     ) -> (
         Stream<'scope, T, DCB::Container>,
         VecCollection<'scope, T, DataflowErrorSer, Diff>,
@@ -638,37 +652,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                 .collection
                 .clone()
                 .expect("Invariant violated: CollectionBundle contains no collection.");
-            let scope = oks.inner.scope();
-            let mut builder = OperatorBuilder::new("CollectionFlatMap".to_string(), scope);
-            let (ok_output, ok_stream) = builder.new_output();
-            let mut ok_output = OutputBuilder::<_, DCB>::from(ok_output);
-            let (err_output, err_stream) = builder.new_output();
-            let mut err_output = OutputBuilder::<_, ECB<T>>::from(err_output);
-            let mut input = builder.new_input(oks.inner, Pipeline);
-            builder.build(move |_capabilities| {
-                let mut datums = DatumVec::new();
-                move |_frontiers| {
-                    let mut ok_output = ok_output.activate();
-                    let mut err_output = err_output.activate();
-                    input.for_each(|time, data| {
-                        // Retain the input capability to derive a `Capability` for each output;
-                        // the `Session` type alias is fixed to `Capability<T>`.
-                        let ok_cap = time.retain(0);
-                        let err_cap = time.retain(1);
-                        let mut ok_session = ok_output.session_with_builder(&ok_cap);
-                        let mut err_session = err_output.session_with_builder(&err_cap);
-                        for (v, t, d) in data.drain(..) {
-                            logic(
-                                &mut datums.borrow_with_limit(&v, max_demand),
-                                t,
-                                d,
-                                &mut ok_session,
-                                &mut err_session,
-                            );
-                        }
-                    });
-                }
-            });
+            let (ok_stream, err_stream) = oks.flat_map_datums::<DCB, _>(max_demand, logic);
             let errs = errs.concat(err_stream.as_collection());
             (ok_stream, errs)
         }
@@ -686,7 +670,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     /// rationale.
     fn flat_map_core_fallible<Tr, D, DCB, L>(
         trace: Arranged<'scope, Tr>,
-        key: Option<&<Tr::KeyContainer as BatchContainer>::Owned>,
+        key: Option<&<<BatchCursor<Tr> as Cursor>::KeyContainer as BatchContainer>::Owned>,
         max_demand: usize,
         mut logic: L,
         refuel: usize,
@@ -695,14 +679,10 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
         Stream<'scope, T, Vec<(DataflowErrorSer, T, Diff)>>,
     )
     where
-        Tr: for<'a> TraceReader<
-                Key<'a>: ExtendDatums,
-                Val<'a>: ExtendDatums,
-                Time = T,
-                Diff = mz_repr::Diff,
-            > + Clone
-            + 'static,
-        <Tr::KeyContainer as BatchContainer>::Owned: PartialEq,
+        Tr: TraceReader<Batch: Navigable, Time = T> + Clone + 'static,
+        for<'a> BatchCursor<Tr>:
+            Cursor<Key<'a>: ExtendDatums, Val<'a>: ExtendDatums, Time = T, Diff = mz_repr::Diff>,
+        <<BatchCursor<Tr> as Cursor>::KeyContainer as BatchContainer>::Owned: PartialEq,
         D: Data,
         DCB: ContainerBuilder + PushInto<(D, T, Diff)>,
         // `logic` receives the key and value already decoded into a `DatumVecBorrow`. The decode
@@ -719,7 +699,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     {
         let scope = trace.stream.scope();
 
-        let mut key_con = Tr::KeyContainer::with_capacity(1);
+        let mut key_con = <BatchCursor<Tr> as Cursor>::KeyContainer::with_capacity(1);
         if let Some(key) = &key {
             key_con.push_own(key);
         }
@@ -767,8 +747,8 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                 let mut temp_storage = RowArena::new();
                 let mut datums = DatumVec::new();
                 let mut decode_logic =
-                    |k: Tr::Key<'_>,
-                     v: Tr::Val<'_>,
+                    |k: BatchKey<'_, Tr>,
+                     v: BatchVal<'_, Tr>,
                      t: T,
                      d: mz_repr::Diff,
                      ok_session: &mut Session<T, DCB>,
@@ -812,20 +792,16 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     /// and the empty err stream that would follow it.
     fn flat_map_core_ok<Tr, D, DCB, L>(
         trace: Arranged<'scope, Tr>,
-        key: Option<&<Tr::KeyContainer as BatchContainer>::Owned>,
+        key: Option<&<<BatchCursor<Tr> as Cursor>::KeyContainer as BatchContainer>::Owned>,
         max_demand: usize,
         mut logic: L,
         refuel: usize,
     ) -> Stream<'scope, T, DCB::Container>
     where
-        Tr: for<'a> TraceReader<
-                Key<'a>: ExtendDatums,
-                Val<'a>: ExtendDatums,
-                Time = T,
-                Diff = mz_repr::Diff,
-            > + Clone
-            + 'static,
-        <Tr::KeyContainer as BatchContainer>::Owned: PartialEq,
+        Tr: TraceReader<Batch: Navigable, Time = T> + Clone + 'static,
+        for<'a> BatchCursor<Tr>:
+            Cursor<Key<'a>: ExtendDatums, Val<'a>: ExtendDatums, Time = T, Diff = mz_repr::Diff>,
+        <<BatchCursor<Tr> as Cursor>::KeyContainer as BatchContainer>::Owned: PartialEq,
         D: Data,
         DCB: ContainerBuilder + PushInto<(D, T, Diff)>,
         // See `flat_map_core_fallible`: `logic` takes already-decoded datums; the decode lives in
@@ -840,7 +816,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     {
         let scope = trace.stream.scope();
 
-        let mut key_con = Tr::KeyContainer::with_capacity(1);
+        let mut key_con = <BatchCursor<Tr> as Cursor>::KeyContainer::with_capacity(1);
         if let Some(key) = &key {
             key_con.push_own(key);
         }
@@ -875,8 +851,8 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                 let mut temp_storage = RowArena::new();
                 let mut datums = DatumVec::new();
                 let mut decode_logic =
-                    |k: Tr::Key<'_>,
-                     v: Tr::Val<'_>,
+                    |k: BatchKey<'_, Tr>,
+                     v: BatchVal<'_, Tr>,
                      t: T,
                      d: mz_repr::Diff,
                      ok_session: &mut Session<T, DCB>| {
@@ -913,7 +889,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     ///
     /// The result may be `None` if no such arrangement exists, or it may be one of many
     /// "arrangement flavors" that represent the types of arranged data we might have.
-    pub fn arrangement(&self, key: &[MirScalarExpr]) -> Option<ArrangementFlavor<'scope, T>> {
+    pub fn arrangement(&self, key: &[LirScalarExpr]) -> Option<ArrangementFlavor<'scope, T>> {
         self.arranged.get(key).map(|x| x.clone())
     }
 }
@@ -929,17 +905,14 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     /// that we can seek to the supplied row.
     pub fn as_collection_core(
         &self,
-        mut mfp: MapFilterProject,
-        key_val: Option<(Vec<MirScalarExpr>, Option<Row>)>,
+        mfp_plan: MfpPlan<LirScalarExpr>,
+        key_val: Option<(Vec<LirScalarExpr>, Option<Row>)>,
         until: Antichain<mz_repr::Timestamp>,
         config_set: &ConfigSet,
     ) -> (
         VecCollection<'scope, T, mz_repr::Row, Diff>,
         VecCollection<'scope, T, DataflowErrorSer, Diff>,
     ) {
-        mfp.optimize();
-        let mfp_plan = mfp.clone().into_plan().unwrap();
-
         // If the MFP is trivial, we can just call `as_collection`.
         // In the case that we weren't going to apply the `key_val` optimization,
         // this path results in a slightly smaller and faster
@@ -956,10 +929,18 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
             return self.as_specific_collection(key.as_deref(), config_set);
         }
 
-        let max_demand = mfp.demand().last().map(|x| *x + 1).unwrap_or(0);
-        mfp.permute_fn(|c| c, max_demand);
-        mfp.optimize();
-        let mfp_plan = mfp.into_plan().unwrap();
+        // Apply demand-based column pruning. We round-trip through MIR
+        // so temporal bounds are folded back as mz_now() predicates —
+        // this way demand() sees all column references (including those
+        // in temporal bounds), and permute_fn applies uniformly.
+        let (mfp_plan, max_demand) = {
+            let mut mir_mfp = mfp_plan_lir_to_mir(mfp_plan).into_map_filter_project();
+            let max_demand = mir_mfp.demand().last().map(|x| *x + 1).unwrap_or(0);
+            mir_mfp.permute_fn(|c| c, max_demand);
+            mir_mfp.optimize();
+            let plan = mfp_mir_to_lir_plan(mir_mfp);
+            (plan, max_demand)
+        };
 
         let mut datum_vec = DatumVec::new();
         // Wrap in an `Rc` so that lifetimes work out.
@@ -1011,8 +992,8 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     pub fn ensure_collections(
         mut self,
         collections: AvailableCollections,
-        input_key: Option<Vec<MirScalarExpr>>,
-        input_mfp: MapFilterProject,
+        input_key: Option<Vec<LirScalarExpr>>,
+        input_mfp: MfpPlan<LirScalarExpr>,
         as_of: Antichain<mz_repr::Timestamp>,
         until: Antichain<mz_repr::Timestamp>,
         config_set: &ConfigSet,
@@ -1076,7 +1057,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
             } else {
                 oks
             };
-            self.collection = Some((oks, errs));
+            self.collection = Some((CollectionEdge::Vec(oks), errs));
         }
         for (key, _, thinning) in collections.arranged {
             if !self.arranged.contains_key(&key) {
@@ -1087,6 +1068,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                     .collection
                     .take()
                     .expect("Collection constructed above");
+                let oks = oks.into_vec();
                 // Apply temporal bucketing if the collection already existed on
                 // the bundle (e.g., from an upstream temporal Mfp or Get) and we
                 // haven't bucketed yet. This is the common path for temporal-MFP
@@ -1117,7 +1099,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                     use_paged_path,
                 );
                 let errs_concat: KeyCollection<_, _, _> = errs.clone().concat(errs_keyed).into();
-                self.collection = Some((passthrough, errs));
+                self.collection = Some((CollectionEdge::Vec(passthrough), errs));
                 let errs =
                     errs_concat.mz_arrange::<
                         ColumnationChunker<_>,
@@ -1147,7 +1129,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     fn arrange_collection(
         name: &String,
         oks: VecCollection<'scope, T, Row, Diff>,
-        key: Vec<MirScalarExpr>,
+        key: Vec<LirScalarExpr>,
         thinning: Vec<usize>,
         use_paged_path: bool,
     ) -> (
@@ -1233,14 +1215,14 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
 /// Type alias for a timely output `Session` whose capability is a `Capability<T>`. The container
 /// builder `CB` is left to the caller; sessions can therefore drive consolidating, capacity, or
 /// (in the future) columnar output builders without changing call sites.
-type Session<'a, 'b, T, CB> =
+pub(crate) type Session<'a, 'b, T, CB> =
     timely::dataflow::operators::generic::Session<'a, 'b, T, CB, Capability<T>>;
 
 /// Container builder used for the err output of every flat_map variant. Pre-refactor the
 /// merged Ok/Err stream flowed through a [`ConsolidatingContainerBuilder`] before the
 /// `map_fallible` demux split it; we preserve that consolidation here so errors with the
 /// same `(error, time)` cancel within a batch rather than propagating to downstream.
-type ECB<T> = ConsolidatingContainerBuilder<Vec<(DataflowErrorSer, T, Diff)>>;
+pub(crate) type ECB<T> = ConsolidatingContainerBuilder<Vec<(DataflowErrorSer, T, Diff)>>;
 
 /// Number of output records the arrangement flat_map operators may produce before yielding.
 /// See [`ArrangementFlavor::flat_map`] for the fuel rationale; the constant is a pragmatic
