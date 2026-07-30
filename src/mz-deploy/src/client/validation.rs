@@ -37,6 +37,7 @@
 use crate::client::connection::{Client, ValidationClient};
 use crate::client::errors::DatabaseValidationError;
 use crate::client::sql_placeholders;
+use crate::client::sql_row_placeholders;
 use crate::project::SchemaQualifier;
 use crate::project::ast::Statement;
 use crate::project::ir::graph;
@@ -218,41 +219,50 @@ async fn query_existing_object_ids(
         return Ok(existing);
     }
 
-    let fqn_to_object: BTreeMap<String, ObjectId> = object_ids
+    let rows_to_match: Vec<(&str, &str, &str)> = object_ids
         .iter()
-        .map(|obj| (obj.to_string(), obj.clone()))
+        .filter_map(ObjectId::catalog_row)
         .collect();
-    let fqns: Vec<String> = fqn_to_object.keys().cloned().collect();
+    if rows_to_match.is_empty() {
+        return Ok(existing);
+    }
+
     let table_name = lookup.table_name();
 
-    for chunk in fqns.chunks(LOOKUP_BATCH_SIZE) {
-        let placeholders = sql_placeholders(chunk.len());
+    for chunk in rows_to_match.chunks(LOOKUP_BATCH_SIZE) {
+        let placeholders = sql_row_placeholders(chunk.len(), 3);
         let query = format!(
             r#"
-            SELECT d.name || '.' || s.name || '.' || t.name AS fqn
+            SELECT d.name AS database, s.name AS schema, t.name AS object
             FROM {table_name} t
             JOIN mz_schemas s ON t.schema_id = s.id
             JOIN mz_databases d ON s.database_id = d.id
-            WHERE d.name || '.' || s.name || '.' || t.name IN ({placeholders})
+            WHERE (d.name, s.name, t.name) IN ({placeholders})
             "#,
             table_name = table_name,
             placeholders = placeholders
         );
 
-        #[allow(clippy::as_conversions)]
-        let params: Vec<&(dyn ToSql + Sync)> =
-            chunk.iter().map(|fqn| fqn as &(dyn ToSql + Sync)).collect();
+        let mut params: Vec<&(dyn ToSql + Sync)> = Vec::new();
+        for (database, schema, object) in chunk {
+            params.push(database);
+            params.push(schema);
+            params.push(object);
+        }
 
         let rows = client
             .query(&query, &params)
             .await
             .map_err(DatabaseValidationError::QueryError)?;
-        for row in rows {
-            let fqn: String = row.get("fqn");
-            if let Some(obj) = fqn_to_object.get(&fqn) {
-                existing.insert(obj.clone());
-            }
-        }
+        existing.extend(ObjectId::intersect_catalog_rows(
+            object_ids,
+            rows.iter().map(|row| {
+                let database: String = row.get("database");
+                let schema: String = row.get("schema");
+                let object: String = row.get("object");
+                (database, schema, object)
+            }),
+        ));
     }
 
     Ok(existing)

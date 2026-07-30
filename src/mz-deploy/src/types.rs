@@ -620,6 +620,36 @@ columns = []
     }
 
     #[mz_ore::test]
+    fn test_versioned_object_round_trip() {
+        let object_id = ObjectId::new(
+            "app".to_string(),
+            "ingest".to_string(),
+            "orders@1".to_string(),
+        );
+        let mut tables = BTreeMap::new();
+        tables.insert(object_id.clone(), BTreeMap::new());
+        let mut kinds = BTreeMap::new();
+        kinds.insert(object_id, ObjectKind::Table);
+        let types = Types {
+            version: 1,
+            tables,
+            kinds,
+            comments: BTreeMap::new(),
+        };
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        types
+            .write_types_lock(dir.path())
+            .expect("failed to write types.lock");
+
+        let contents =
+            fs::read_to_string(dir.path().join("types.lock")).expect("failed to read types.lock");
+        assert!(contents.contains(r#"name = "app.ingest.\"orders@1\"""#));
+        let loaded = load_types_lock(dir.path()).expect("failed to load types.lock");
+        assert_eq!(loaded, types);
+    }
+
+    #[mz_ore::test]
     fn test_round_trip_with_kind() {
         let mut tables = BTreeMap::new();
         let mut cols = BTreeMap::new();

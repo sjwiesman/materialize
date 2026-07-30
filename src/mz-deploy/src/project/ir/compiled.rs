@@ -45,6 +45,8 @@ pub struct FullyQualifiedName {
     id: ObjectId,
     pub path: PathBuf,
     item_name: UnresolvedItemName,
+    base_name: Ident,
+    version: Option<u32>,
 }
 
 impl FullyQualifiedName {
@@ -77,6 +79,17 @@ impl FullyQualifiedName {
     /// Get the UnresolvedItemName for updating statement names.
     pub fn to_item_name(&self) -> UnresolvedItemName {
         self.item_name.clone()
+    }
+
+    /// The object's declared name, without a version suffix.
+    #[inline]
+    pub fn base_name(&self) -> &str {
+        self.base_name.as_str()
+    }
+
+    #[inline]
+    pub fn version(&self) -> Option<u32> {
+        self.version
     }
 
     /// Create a FullyQualifiedName with explicit database and schema names.
@@ -121,6 +134,19 @@ impl FullyQualifiedName {
             )
         })?;
 
+        // `object_name` may itself carry a `@version` suffix, so the split happens
+        // here and every other constructor delegates.
+        let (base_str, version) = crate::project::ir::version::parse_physical_name(object_name);
+        let base_name = Ident::new(base_str).map_err(|e| {
+            ValidationError::with_file(
+                ValidationErrorKind::InvalidIdentifier {
+                    name: base_str.to_string(),
+                    reason: e.to_string(),
+                },
+                path.to_path_buf(),
+            )
+        })?;
+
         let item_name = UnresolvedItemName(vec![database_ident, schema_ident, object_ident]);
 
         let id = ObjectId::new(
@@ -133,7 +159,27 @@ impl FullyQualifiedName {
             id,
             path: path.to_path_buf(),
             item_name,
+            base_name,
+            version,
         })
+    }
+
+    /// Build a fully qualified name for a versioned object. `object()`
+    /// returns the deployed name (`orders@2`), while `base_name()` returns
+    /// what the user wrote.
+    pub fn with_versioned_name(
+        path: &std::path::Path,
+        base_name: &str,
+        version: u32,
+        database: &str,
+        schema: &str,
+    ) -> Result<Self, ValidationError> {
+        Self::with_names(
+            path,
+            &crate::project::ir::version::physical_name(base_name, version),
+            database,
+            schema,
+        )
     }
 }
 
@@ -149,10 +195,14 @@ impl TryFrom<UnresolvedItemName> for FullyQualifiedName {
             value.0[1].to_string(),
             value.0[2].to_string(),
         );
+        let (base_str, version) = crate::project::ir::version::parse_physical_name(id.object());
+        let base_name = Ident::new_unchecked(base_str);
         Ok(Self {
             id,
             path: PathBuf::new(),
             item_name: value,
+            base_name,
+            version,
         })
     }
 }
@@ -192,75 +242,32 @@ impl TryFrom<(&std::path::Path, &str)> for FullyQualifiedName {
                 )
             })?;
 
-        // Create Ident instances for each component
-        let database_ident = Ident::new(database).map_err(|e| {
-            ValidationError::with_file(
-                ValidationErrorKind::InvalidIdentifier {
-                    name: database.to_string(),
-                    reason: e.to_string(),
-                },
-                path.to_path_buf(),
-            )
-        })?;
-
-        let schema_ident = Ident::new(schema).map_err(|e| {
-            ValidationError::with_file(
-                ValidationErrorKind::InvalidIdentifier {
-                    name: schema.to_string(),
-                    reason: e.to_string(),
-                },
-                path.to_path_buf(),
-            )
-        })?;
-
-        let object_ident = Ident::new(object_name).map_err(|e| {
-            ValidationError::with_file(
-                ValidationErrorKind::InvalidIdentifier {
-                    name: object_name.to_string(),
-                    reason: e.to_string(),
-                },
-                path.to_path_buf(),
-            )
-        })?;
-
-        // Create the UnresolvedItemName
-        let item_name = UnresolvedItemName(vec![database_ident, schema_ident, object_ident]);
-
-        // Create ObjectId
-        let id = ObjectId::new(
-            database.to_string(),
-            schema.to_string(),
-            object_name.to_string(),
-        );
-
-        Ok(FullyQualifiedName {
-            id,
-            path: path.to_path_buf(),
-            item_name,
-        })
+        Self::with_names(path, object_name, database, schema)
     }
 }
 
 impl From<ObjectId> for FullyQualifiedName {
     fn from(id: ObjectId) -> Self {
-        let item_name = UnresolvedItemName(vec![
-            Ident::new(id.expect_database()).expect("validated database identifier"),
-            Ident::new(id.schema()).expect("validated schema identifier"),
-            Ident::new(id.object()).expect("validated object identifier"),
-        ]);
-        Self {
-            id,
-            path: PathBuf::new(),
-            item_name,
-        }
+        Self::with_names(
+            &PathBuf::new(),
+            id.object(),
+            id.expect_database(),
+            id.schema(),
+        )
+        .expect("ObjectId components are already validated identifiers")
     }
 }
 
 /// The primary CREATE statement for a database object.
 impl Statement {
-    /// Normalizes the statement name to be fully qualified.
-    pub fn normalize_stmt(self, fqn: &FullyQualifiedName) -> Self {
-        let mut visitor = NormalizingVisitor::fully_qualifying(fqn);
+    /// Normalizes the statement name to be fully qualified, resolving bare
+    /// references to versioned objects to their newest version.
+    pub(crate) fn normalize_stmt(
+        self,
+        fqn: &FullyQualifiedName,
+        version_map: Option<&super::version::VersionMap>,
+    ) -> Self {
+        let mut visitor = NormalizingVisitor::fully_qualifying_with_versions(fqn, version_map);
         self.normalize_name_with(&visitor, &fqn.to_item_name())
             .normalize_dependencies_with(&mut visitor)
     }
@@ -656,5 +663,41 @@ fn rewrite_in_cluster(
         if let Some(suffixed) = cluster_map.get(&name) {
             *ident = Ident::new(suffixed).expect("valid cluster identifier");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `From<ObjectId>` receives already-deployed names, so a versioned id has to
+    /// split into the same pair `with_versioned_name` would produce.
+    #[mz_ore::test]
+    fn test_from_object_id_splits_versioned_object_name() {
+        let id = ObjectId::new(
+            "mydb".to_string(),
+            "public".to_string(),
+            "orders@1".to_string(),
+        );
+        let fqn = FullyQualifiedName::from(id);
+
+        assert_eq!(fqn.object(), "orders@1");
+        assert_eq!(fqn.base_name(), "orders");
+        assert_eq!(fqn.version(), Some(1));
+    }
+
+    /// An unversioned id keeps base and deployed name identical.
+    #[mz_ore::test]
+    fn test_from_object_id_unversioned_object_has_no_version() {
+        let id = ObjectId::new(
+            "mydb".to_string(),
+            "public".to_string(),
+            "orders".to_string(),
+        );
+        let fqn = FullyQualifiedName::from(id);
+
+        assert_eq!(fqn.object(), "orders");
+        assert_eq!(fqn.base_name(), "orders");
+        assert_eq!(fqn.version(), None);
     }
 }

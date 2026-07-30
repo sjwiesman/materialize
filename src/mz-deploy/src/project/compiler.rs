@@ -46,12 +46,17 @@
 //! - the full path of every file variant
 //! - the cached content hash of those variants
 //! - the compile-time variable map
+//! - a fingerprint of every version declared anywhere in the project (see
+//!   [`version_map_fingerprint`])
 //!
 //! As a result:
 //!
 //! - editing any variant for an object invalidates that object's cache entry
 //! - changing variables invalidates every object whose fingerprint includes
 //!   those variables
+//! - adding, removing, or renumbering a versioned file's version invalidates
+//!   every object's cache entry, since a bare reference anywhere in the
+//!   project could now resolve differently
 //! - changing the active profile or suffix moves compilation to a different
 //!   namespace, isolating caches across profiles
 //! - moving the same checkout to a different directory invalidates the cache
@@ -86,6 +91,7 @@ mod object_validation;
 pub(crate) mod typecheck;
 
 use super::error::{LoadError, ProjectError, ValidationError, ValidationErrors};
+use crate::project::ir::object_id::ObjectId;
 use crate::project::ir::{compiled, graph};
 use crate::project::syntax::input;
 use crate::project::syntax::parser::parse_statements_with_context;
@@ -154,6 +160,7 @@ struct ObjectDescriptor {
     original_db_name: String,
     schema_name: String,
     object_name: String,
+    version: Option<u32>,
     variants: Vec<VariantDescriptor>,
 }
 
@@ -281,6 +288,30 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
         BuildArtifact::open(root, profile, profile_suffix, variables).map_err(LoadError::from)?;
     let discovery = discover_project(fs, root, profile_suffix, variables, profile_set, &mut db)?;
 
+    // Built from every descriptor, so resolution sees versions declared in any
+    // schema. A descriptor contributes only when it resolves under the active
+    // profile, since a bare reference must not resolve to a version that profile
+    // does not have.
+    let mut version_map = crate::project::ir::version::VersionMap::default();
+    for descriptor in &discovery.object_descriptors {
+        let Some(version) = descriptor.version else {
+            continue;
+        };
+        let resolves_under_profile = descriptor.variants.iter().any(|variant| {
+            variant.profile.is_none() || variant.profile.as_deref() == Some(profile)
+        });
+        if !resolves_under_profile {
+            continue;
+        }
+        version_map.insert(
+            &descriptor.original_db_name,
+            &descriptor.schema_name,
+            &descriptor.object_name,
+            version,
+        );
+    }
+    let version_fingerprint = version_map_fingerprint(&version_map);
+
     let variant_paths: BTreeSet<PathBuf> = discovery
         .object_descriptors
         .iter()
@@ -302,7 +333,15 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
         .object_descriptors
         .clone()
         .into_par_iter()
-        .map(|descriptor| stage_object(descriptor, &existing_fingerprints, &file_hashes, variables))
+        .map(|descriptor| {
+            stage_object(
+                descriptor,
+                &existing_fingerprints,
+                &file_hashes,
+                variables,
+                &version_fingerprint,
+            )
+        })
         .collect();
 
     // Phase 2: load full artifacts only for fingerprint-level hits — selective.
@@ -386,6 +425,7 @@ fn compile_sync_with_stats<P: AsRef<Path>>(
                     variables,
                     profile_set,
                     &miss_file_entries,
+                    &version_map,
                 )
             })
             .collect();
@@ -627,6 +667,7 @@ fn discover_project(
                     original_db_name: original_db_name.clone(),
                     schema_name: schema_name.clone(),
                     object_name: object_files.name,
+                    version: object_files.version,
                     variants,
                 });
             }
@@ -723,16 +764,14 @@ fn stage_object(
     existing_fingerprints: &BTreeMap<String, String>,
     file_hashes: &BTreeMap<PathBuf, String>,
     variables: &BTreeMap<String, String>,
+    version_fingerprint: &str,
 ) -> ObjectPlanStage {
-    let object_key = object_key(
-        &descriptor.db_name,
-        &descriptor.schema_name,
-        &descriptor.object_name,
-    );
-    let fingerprint = match object_fingerprint(&descriptor, file_hashes, variables) {
-        Ok(fingerprint) => fingerprint,
-        Err(err) => return ObjectPlanStage::ProjectErr(err),
-    };
+    let object_key = object_key(&descriptor);
+    let fingerprint =
+        match object_fingerprint(&descriptor, file_hashes, variables, version_fingerprint) {
+            Ok(fingerprint) => fingerprint,
+            Err(err) => return ObjectPlanStage::ProjectErr(err),
+        };
 
     if existing_fingerprints.get(&object_key) == Some(&fingerprint) {
         ObjectPlanStage::Hit {
@@ -836,6 +875,7 @@ fn compile_object_uncached(
     variables: &BTreeMap<String, String>,
     profile_set: bool,
     file_entries: &BTreeMap<PathBuf, String>,
+    version_map: &crate::project::ir::version::VersionMap,
 ) -> Result<Option<CachedTypedObject>, ObjectCompileFailure> {
     let mut variants = Vec::new();
     for variant in descriptor.variants {
@@ -866,10 +906,11 @@ fn compile_object_uncached(
         name: descriptor.object_name,
         database: descriptor.original_db_name.clone(),
         schema: descriptor.schema_name.clone(),
+        version: descriptor.version,
         variants,
     };
 
-    match compiled::DatabaseObject::validate(raw_object, profile) {
+    match compiled::DatabaseObject::validate(raw_object, profile, Some(version_map)) {
         Ok(Some(typed_object)) => Ok(Some(CachedTypedObject {
             db_name: descriptor.db_name,
             schema_name: descriptor.schema_name,
@@ -894,15 +935,22 @@ fn compile_object(
     variables: &BTreeMap<String, String>,
     profile_set: bool,
     file_entries: &BTreeMap<PathBuf, String>,
+    version_map: &crate::project::ir::version::VersionMap,
 ) -> ObjectCompileResult {
-    let compiled =
-        match compile_object_uncached(descriptor, profile, variables, profile_set, file_entries) {
-            Ok(compiled) => compiled,
-            Err(ObjectCompileFailure::Validation(errs)) => {
-                return ObjectCompileResult::ValidationErr(errs);
-            }
-            Err(ObjectCompileFailure::Project(err)) => return ObjectCompileResult::ProjectErr(err),
-        };
+    let compiled = match compile_object_uncached(
+        descriptor,
+        profile,
+        variables,
+        profile_set,
+        file_entries,
+        version_map,
+    ) {
+        Ok(compiled) => compiled,
+        Err(ObjectCompileFailure::Validation(errs)) => {
+            return ObjectCompileResult::ValidationErr(errs);
+        }
+        Err(ObjectCompileFailure::Project(err)) => return ObjectCompileResult::ProjectErr(err),
+    };
 
     let artifact = match &compiled {
         Some(object) => CompiledObjectArtifact::Object(compiled_object_to_artifact_data(object)),
@@ -930,15 +978,22 @@ fn compile_object(
 /// - the object's logical key (`db_name`, `schema_name`, `object_name`)
 /// - every compile-time variable binding (name and value)
 /// - every file variant's path, profile tag, and content hash
+/// - a fingerprint of the project's entire declared version set (see
+///   [`version_map_fingerprint`])
 ///
 /// Two invocations produce the same fingerprint if and only if the object's
-/// identity, variables, file paths, and file contents are all identical.
-/// This is the cache key: a matching fingerprint means the cached artifact
-/// is safe to reuse without recompilation.
+/// identity, variables, file paths, file contents, and the project's version
+/// set are all identical. This is the cache key: a matching fingerprint
+/// means the cached artifact is safe to reuse without recompilation.
+///
+/// The version set is included in full rather than per-object, since which object
+/// a `.sql` file resolves a bare name to cannot be known without parsing it, the
+/// work the cache exists to skip.
 fn object_fingerprint(
     descriptor: &ObjectDescriptor,
     file_hashes: &BTreeMap<PathBuf, String>,
     variables: &BTreeMap<String, String>,
+    version_fingerprint: &str,
 ) -> Result<String, ProjectError> {
     let mut hasher = Sha256::new();
     hasher.update(descriptor.db_name.as_bytes());
@@ -946,6 +1001,8 @@ fn object_fingerprint(
     hasher.update(descriptor.schema_name.as_bytes());
     hasher.update([0]);
     hasher.update(descriptor.object_name.as_bytes());
+    hasher.update([0]);
+    hasher.update(version_fingerprint.as_bytes());
     hasher.update([0]);
     for (name, value) in variables {
         hasher.update(name.as_bytes());
@@ -970,9 +1027,42 @@ fn object_fingerprint(
     Ok(hex_digest(hasher.finalize()))
 }
 
-/// Build the canonical cache key for a logical object: `"db.schema.object"`.
-fn object_key(db_name: &str, schema_name: &str, object_name: &str) -> String {
-    format!("{db_name}.{schema_name}.{object_name}")
+/// Compute a hex-encoded SHA-256 fingerprint of every declared version in
+/// `version_map`, for folding into [`object_fingerprint`]. `entries` iterates in
+/// sorted order, so the result does not depend on discovery order.
+fn version_map_fingerprint(version_map: &crate::project::ir::version::VersionMap) -> String {
+    let mut hasher = Sha256::new();
+    for (database, schema, base, version) in version_map.entries() {
+        hasher.update(database.as_bytes());
+        hasher.update([0]);
+        hasher.update(schema.as_bytes());
+        hasher.update([0]);
+        hasher.update(base.as_bytes());
+        hasher.update([0]);
+        hasher.update(version.to_le_bytes());
+        hasher.update([0xfd]);
+    }
+    hex_digest(hasher.finalize())
+}
+
+/// Build the canonical cache key for an object: its deployed identity, version
+/// suffix included, as [`ObjectId`] renders it.
+///
+/// NOTE: Must be byte-identical to `ObjectId::to_string()`, since
+/// [`crate::project::ir::graph::Project::compile_dirty`] parses these keys back out.
+fn object_key(descriptor: &ObjectDescriptor) -> String {
+    let object = match descriptor.version {
+        Some(version) => {
+            crate::project::ir::version::physical_name(&descriptor.object_name, version)
+        }
+        None => descriptor.object_name.clone(),
+    };
+    ObjectId::new(
+        descriptor.db_name.clone(),
+        descriptor.schema_name.clone(),
+        object,
+    )
+    .to_string()
 }
 
 /// Compute the cache namespace for a profile configuration.

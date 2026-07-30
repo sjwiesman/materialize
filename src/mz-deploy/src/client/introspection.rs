@@ -19,6 +19,7 @@ use crate::client::errors::ConnectionError;
 use crate::client::models::{Cluster, ClusterConfig, ClusterOptions, ClusterReplica, ObjectGrant};
 use crate::client::quote_identifier;
 use crate::client::sql_placeholders;
+use crate::client::sql_row_placeholders;
 use crate::client::staging_suffix_like_pattern;
 use crate::project::SchemaQualifier;
 use crate::project::ir::object_id::ObjectId;
@@ -458,38 +459,44 @@ pub(super) async fn check_objects_exist(
         return Ok(BTreeSet::new());
     }
 
-    let fqn_map: BTreeMap<String, &ObjectId> = objects.iter().map(|o| (o.to_string(), o)).collect();
-    let fqns: Vec<&String> = fqn_map.keys().collect();
+    let rows_to_match: Vec<(&str, &str, &str)> =
+        objects.iter().filter_map(ObjectId::catalog_row).collect();
+    if rows_to_match.is_empty() {
+        return Ok(BTreeSet::new());
+    }
 
-    let placeholders_str = sql_placeholders(fqns.len());
+    let placeholders_str = sql_row_placeholders(rows_to_match.len(), 3);
 
     let query = format!(
         r#"
-        SELECT d.name || '.' || s.name || '.' || mo.name as fqn
+        SELECT d.name AS database, s.name AS schema, mo.name AS object
         FROM mz_objects mo
         JOIN mz_schemas s ON mo.schema_id = s.id
         JOIN mz_databases d ON s.database_id = d.id
-        WHERE d.name || '.' || s.name || '.' || mo.name IN ({})
+        WHERE (d.name, s.name, mo.name) IN ({})
         AND mo.type IN ('table', 'view', 'materialized-view', 'source', 'sink')
-        ORDER BY fqn
     "#,
         placeholders_str
     );
 
     let mut params: Vec<&(dyn ToSql + Sync)> = Vec::new();
-    for fqn in &fqns {
-        params.push(fqn);
+    for (database, schema, object) in &rows_to_match {
+        params.push(database);
+        params.push(schema);
+        params.push(object);
     }
 
     let rows = client.query(&query, &params).await?;
 
-    Ok(rows
-        .iter()
-        .filter_map(|row| {
-            let fqn: String = row.get("fqn");
-            fqn_map.get(&fqn).map(|id| (*id).clone())
-        })
-        .collect())
+    Ok(ObjectId::intersect_catalog_rows(
+        objects,
+        rows.iter().map(|row| {
+            let database: String = row.get("database");
+            let schema: String = row.get("schema");
+            let object: String = row.get("object");
+            (database, schema, object)
+        }),
+    ))
 }
 
 /// Check which objects from the given set exist in a specific catalog table.
@@ -504,40 +511,43 @@ async fn check_catalog_objects_exist(
         return Ok(BTreeSet::new());
     }
 
-    // Build a lookup map from FQN string -> ObjectId for O(1) matching
-    let fqn_map: BTreeMap<String, &ObjectId> = objects.iter().map(|o| (o.to_string(), o)).collect();
-    let fqns: Vec<&String> = fqn_map.keys().collect();
+    let rows_to_match: Vec<(&str, &str, &str)> =
+        objects.iter().filter_map(ObjectId::catalog_row).collect();
+    if rows_to_match.is_empty() {
+        return Ok(BTreeSet::new());
+    }
 
-    let placeholders_str = sql_placeholders(fqns.len());
+    let placeholders_str = sql_row_placeholders(rows_to_match.len(), 3);
 
     let query = format!(
         r#"
-        SELECT d.name || '.' || s.name || '.' || t.name as fqn
+        SELECT d.name AS database, s.name AS schema, t.name AS object
         FROM {} t
         JOIN mz_schemas s ON t.schema_id = s.id
         JOIN mz_databases d ON s.database_id = d.id
-        WHERE d.name || '.' || s.name || '.' || t.name IN ({})
-        ORDER BY fqn
+        WHERE (d.name, s.name, t.name) IN ({})
     "#,
         catalog_table, placeholders_str
     );
 
     let mut params: Vec<&(dyn ToSql + Sync)> = Vec::new();
-    for fqn in &fqns {
-        params.push(*fqn);
+    for (database, schema, object) in &rows_to_match {
+        params.push(database);
+        params.push(schema);
+        params.push(object);
     }
 
     let rows = client.query(&query, &params).await?;
 
-    let mut existing = BTreeSet::new();
-    for row in rows {
-        let fqn: String = row.get("fqn");
-        if let Some(obj_id) = fqn_map.get(&fqn) {
-            existing.insert((*obj_id).clone());
-        }
-    }
-
-    Ok(existing)
+    Ok(ObjectId::intersect_catalog_rows(
+        objects,
+        rows.iter().map(|row| {
+            let database: String = row.get("database");
+            let schema: String = row.get("schema");
+            let object: String = row.get("object");
+            (database, schema, object)
+        }),
+    ))
 }
 
 /// Check which tables from the given set exist in the database.
@@ -827,7 +837,13 @@ pub(super) async fn drop_objects(
         return Ok(dropped);
     }
 
-    let placeholders_str = sql_placeholders(objects.len());
+    let rows_to_match: Vec<(&str, &str, &str)> =
+        objects.iter().filter_map(ObjectId::catalog_row).collect();
+    if rows_to_match.is_empty() {
+        return Ok(dropped);
+    }
+
+    let placeholders_str = sql_row_placeholders(rows_to_match.len(), 3);
 
     let query = format!(
         r#"
@@ -835,7 +851,7 @@ pub(super) async fn drop_objects(
         FROM mz_objects mo
         JOIN mz_schemas s ON mo.schema_id = s.id
         JOIN mz_databases d ON s.database_id = d.id
-        WHERE d.name || '.' || s.name || '.' || mo.name IN ({})
+        WHERE (d.name, s.name, mo.name) IN ({})
         AND mo.type IN ('table', 'view', 'materialized-view', 'source', 'sink')
         ORDER BY mo.id DESC
     "#,
@@ -843,9 +859,10 @@ pub(super) async fn drop_objects(
     );
 
     let mut params: Vec<&(dyn ToSql + Sync)> = Vec::new();
-    let fqns: Vec<_> = objects.iter().map(|object| object.to_string()).collect();
-    for fqn in &fqns {
-        params.push(fqn);
+    for (database, schema, object) in &rows_to_match {
+        params.push(database);
+        params.push(schema);
+        params.push(object);
     }
 
     let rows = client.query(&query, &params).await?;
