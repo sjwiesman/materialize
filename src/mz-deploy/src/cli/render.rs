@@ -219,7 +219,7 @@ fn typecheck_to_positional(error: &TypeCheckError) -> Vec<PositionalDiagnostic> 
         TypeCheckError::Multiple(es) => es.iter().collect(),
         TypeCheckError::DatabaseSetupError(_)
         | TypeCheckError::SortError(_)
-        | TypeCheckError::TypesCacheWriteFailed(_) => return Vec::new(),
+        | TypeCheckError::Types(_) => return Vec::new(),
     };
 
     errors

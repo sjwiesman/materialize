@@ -133,7 +133,7 @@ pub async fn run(
     let target_cluster = validate_target(planned_obj, &target)?;
 
     // Load column schemas for stub tables
-    let (types_lock, types_cache) = load_types_and_cache(settings);
+    let (types_lock, types_cache) = load_types_and_cache(settings)?;
 
     let get_columns = |id: &ObjectId| -> Option<BTreeMap<String, ColumnType>> {
         types_cache
@@ -296,8 +296,8 @@ fn validate_target(
 }
 
 /// Load types.lock and open ProjectCache for stub table column schemas.
-fn load_types_and_cache(settings: &Settings) -> (Types, Option<ProjectCache>) {
-    let types_lock = crate::types::load_types_lock(&settings.directory).unwrap_or_default();
+fn load_types_and_cache(settings: &Settings) -> Result<(Types, Option<ProjectCache>), CliError> {
+    let types_lock = crate::types::load_types_lock(&settings.directory)?;
     let types_cache = ProjectCache::open(
         &settings.directory,
         settings.profile_name().unwrap_or(""),
@@ -309,7 +309,7 @@ fn load_types_and_cache(settings: &Settings) -> (Types, Option<ProjectCache>) {
     if types_cache.is_none() {
         verbose!("No types cache found; stub tables will use types.lock and AST only");
     }
-    (types_lock, types_cache)
+    Ok((types_lock, types_cache))
 }
 
 /// Build the staging actions for all transitive dependencies of the target.
