@@ -1390,6 +1390,214 @@ def workflow_index_on_storage(c: Composition, parser: WorkflowArgumentParser) ->
     ), f"expected hint to suggest indexing a view, got:\n{combined}"
 
 
+def object_depends_on(
+    c: Composition, dependent: str, dependency: str, schema: str = "ingest"
+) -> bool:
+    """Whether ``dependent`` reads ``dependency`` according to the catalog.
+
+    Resolves both names through ``mz_object_dependencies`` so the assertion
+    reflects what Materialize actually recorded, not what the project SQL
+    said. ``dependent`` is looked up in ``core``, ``dependency`` in
+    ``schema``."""
+    rows = c.sql_query(
+        "SELECT count(*) FROM mz_internal.mz_object_dependencies d "
+        "JOIN mz_objects up ON d.referenced_object_id = up.id "
+        "JOIN mz_schemas up_s ON up.schema_id = up_s.id "
+        "JOIN mz_objects down ON d.object_id = down.id "
+        "JOIN mz_schemas down_s ON down.schema_id = down_s.id "
+        f"WHERE up.name = '{dependency}' AND up_s.name = '{schema}' "
+        f"AND down.name = '{dependent}' AND down_s.name = 'core'",
+        database="app",
+    )
+    return rows[0][0] > 0
+
+
+def workflow_source_versions(c: Composition, parser: WorkflowArgumentParser) -> None:
+    """Versioned source tables deploy, resolve, and repoint against a real
+    Materialize.
+
+    An ``orders@1.sql`` file deploys as the quoted object ``"orders@1"``. A
+    bare reference tracks the newest version and a quoted one stays pinned,
+    so adding ``orders@2.sql`` repoints the tracking view and leaves the
+    pinned view alone. The Rust tests cover the compile-time half of this.
+    What only a live catalog can show is that the quoted identifier survives
+    apply, stage, promote, and dependency recording intact."""
+    setup_base(c)
+
+    with c.test_case("apply-v1"):
+        run_mz_deploy(c, "versions/v1", "apply")
+
+        # The deployed name carries the suffix. The base name is not a second
+        # identity and must not exist.
+        rows = c.sql_query(
+            "SELECT t.name FROM mz_tables t "
+            "JOIN mz_schemas s ON t.schema_id = s.id "
+            "WHERE s.name = 'ingest' ORDER BY t.name",
+            database="app",
+        )
+        names = [r[0] for r in rows]
+        assert names == ["orders@1"], f"expected only orders@1, got {names}"
+
+        # The comment declared in the versioned file targets the versioned
+        # object rather than the base name.
+        rows = c.sql_query(
+            "SELECT cm.comment FROM mz_internal.mz_comments cm "
+            "JOIN mz_objects o ON cm.id = o.id "
+            "JOIN mz_schemas s ON o.schema_id = s.id "
+            "WHERE o.name = 'orders@1' AND s.name = 'ingest'",
+            database="app",
+        )
+        assert (
+            rows and rows[0][0] == "Orders without status."
+        ), f"comment should attach to the versioned object, got {rows}"
+
+        # So does the grant, which names the object by its qualified base name
+        # rather than bare, so the two companion statements in this file cover
+        # both spellings of a self-reference. A privilege landing on the base
+        # name would land on no object at all and produce no row here.
+        rows = c.sql_query(
+            "SELECT grantee.name, priv.privilege_type FROM ("
+            "  SELECT mz_internal.mz_aclexplode(t.privileges).* "
+            "  FROM mz_tables t "
+            "  JOIN mz_schemas s ON t.schema_id = s.id "
+            "  WHERE t.name = 'orders@1' AND s.name = 'ingest'"
+            ") priv "
+            "JOIN mz_roles grantee ON priv.grantee = grantee.id "
+            "WHERE grantee.name = 'materialize' AND priv.privilege_type = 'SELECT'",
+            database="app",
+        )
+        assert (
+            len(rows) == 1
+        ), f"SELECT grant should attach to the versioned object, got {rows}"
+
+    with c.test_case("deploy-v1-compute"):
+        # `apply` covers storage objects only. The views live in `core` and
+        # reach the catalog through stage and promote.
+        run_mz_deploy(c, "versions/v1", "stage", "--deploy-id", "v1", "--allow-dirty")
+        run_mz_deploy(c, "versions/v1", "promote", "v1", "--no-ready-check")
+
+    with c.test_case("v1-resolution"):
+        # Both views resolve to version 1, the bare one because it is newest
+        # and the quoted one because it names it.
+        assert object_depends_on(
+            c, "order_ids", "orders@1"
+        ), "bare reference should resolve to the only version"
+        assert object_depends_on(
+            c, "order_ids_pinned", "orders@1"
+        ), "pinned reference should resolve to version 1"
+
+        # Deployed objects are owned by the deploying role, so this workflow
+        # asserts against mz_catalog rather than selecting from them, the same
+        # way the other workflows in this composition do.
+
+    with c.test_case("stage-before-apply-is-refused"):
+        # A bare reference already resolves to version 2 at compile time, but
+        # the table does not exist yet, so `stage` must refuse rather than
+        # deploy a view over a missing dependency. The error names the
+        # versioned dependency, which is also how this proves the quoted name
+        # survives dependency checking.
+        result = run_mz_deploy(
+            c,
+            "versions/v2",
+            "stage",
+            "--dry-run",
+            "--output",
+            "json",
+            "--allow-dirty",
+            check=False,
+        )
+        assert result.returncode != 0, "stage should refuse a missing dependency"
+        combined = result.stdout + result.stderr
+        assert (
+            'app.ingest.\\"orders@2\\"' in combined
+            or 'app.ingest."orders@2"' in combined
+        ), f"error should name the versioned dependency, got:\n{combined}"
+
+    with c.test_case("apply-v2"):
+        # `versions/v2` still declares orders@1 unchanged, so this also covers
+        # apply treating an existing versioned table as up to date rather than
+        # trying to recreate it.
+        run_mz_deploy(c, "versions/v2", "apply")
+
+    with c.test_case("stage-v2-marks-tracking-dirty"):
+        # Adding a version changes the compiled SQL of every latest-tracking
+        # model, so the tracking view enters the changeset.
+        result = run_mz_deploy(
+            c, "versions/v2", "stage", "--dry-run", "--output", "json", "--allow-dirty"
+        )
+        plan = parse_dry_run_json(result)
+        staged_objects = {o["object"] for o in plan["objects"]}
+        assert "order_ids" in staged_objects, f"tracking view should be dirty:\n{plan}"
+
+        # The pinned view is staged too, and that is correct rather than a
+        # defect. Dirtiness propagates at schema granularity, so every object
+        # in a dirty schema is redeployed and the whole schema is swapped.
+        # Pinning preserves which version a consumer reads, not whether its
+        # dataflow is rebuilt. A consumer that must avoid rebuilds needs to
+        # live in a schema of its own.
+        assert (
+            "order_ids_pinned" in staged_objects
+        ), f"schema-granular dirtiness should carry the pinned view:\n{plan}"
+        staged_schemas = {s["schema"] for s in plan["schemas"]}
+        assert staged_schemas == {
+            "core"
+        }, f"only the compute schema should stage:\n{plan}"
+
+    with c.test_case("promote-v2"):
+        run_mz_deploy(c, "versions/v2", "stage", "--deploy-id", "v2", "--allow-dirty")
+        run_mz_deploy(c, "versions/v2", "promote", "v2", "--no-ready-check")
+
+        rows = c.sql_query(
+            "SELECT t.name FROM mz_tables t "
+            "JOIN mz_schemas s ON t.schema_id = s.id "
+            "WHERE s.name = 'ingest' ORDER BY t.name",
+            database="app",
+        )
+        names = [r[0] for r in rows]
+        assert names == [
+            "orders@1",
+            "orders@2",
+        ], f"both versions should be live, got {names}"
+
+    with c.test_case("tracking-repointed-pinned-untouched"):
+        # This is the whole feature in two assertions.
+        assert object_depends_on(
+            c, "order_ids", "orders@2"
+        ), "bare reference should have repointed to the newest version"
+        assert not object_depends_on(
+            c, "order_ids", "orders@1"
+        ), "bare reference should no longer read version 1"
+        assert object_depends_on(
+            c, "order_ids_pinned", "orders@1"
+        ), "pinned reference must still read version 1"
+
+        # The two versions really do have different locked schemas, which is
+        # why a consumer would need to pin in the first place.
+        rows = c.sql_query(
+            "SELECT c.name FROM mz_columns c "
+            "JOIN mz_objects o ON c.id = o.id "
+            "JOIN mz_schemas s ON o.schema_id = s.id "
+            "WHERE s.name = 'ingest' AND o.name = 'orders@2' AND c.name = 'status'",
+            database="app",
+        )
+        assert rows, "version 2 should carry the column version 1 excludes"
+
+    with c.test_case("reject-unpinned-versioned-source"):
+        # A table may not track its source's newest version, because that
+        # would silently re-snapshot it.
+        result = run_mz_deploy(c, "versions/unpinned-source", "compile", check=False)
+        assert (
+            result.returncode != 0
+        ), f"compile should reject an unpinned versioned source: {result.stdout}"
+        combined = result.stdout + result.stderr
+        assert (
+            "without naming a version" in combined
+        ), f"expected a pinning error, got:\n{combined}"
+        assert (
+            "silently repoint the table" in combined
+        ), f"expected the hint to explain why, got:\n{combined}"
+
+
 def workflow_promote_resume(c: Composition, parser: WorkflowArgumentParser) -> None:
     """`promote` is crash-safe and resumable.
 
