@@ -6419,6 +6419,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mz-bm25"
+version = "0.0.0"
+dependencies = [
+ "differential-dataflow",
+ "mz-ore",
+ "mz-repr",
+ "timely",
+]
+
+[[package]]
 name = "mz-build-info"
 version = "0.0.0"
 dependencies = [

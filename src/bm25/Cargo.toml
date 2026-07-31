@@ -1,0 +1,19 @@
+[package]
+name = "mz-bm25"
+description = "BM25 full text search containers for differential dataflow (POC)."
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+differential-dataflow.workspace = true
+mz-ore = { path = "../ore" }
+mz-repr = { path = "../repr" }
+timely.workspace = true
+
+[features]
+default = ["mz-ore/default"]
