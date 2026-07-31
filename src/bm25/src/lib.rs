@@ -24,4 +24,8 @@ pub mod spine;
 
 pub use index::Bm25Index;
 pub use query::evaluate;
+pub use spine::{
+    Bm25Agent, Bm25Batch, Bm25Batcher, Bm25Builder, Bm25Chunker, Bm25Input, Bm25KeyContainer,
+    Bm25Layout, Bm25Spine,
+};
 pub use tokenize::tokenize;
