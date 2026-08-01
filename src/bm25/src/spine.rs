@@ -180,7 +180,7 @@ mod tests {
     use timely::progress::Antichain;
 
     use super::*;
-    use crate::evaluate;
+    use crate::{evaluate, parse_query};
 
     fn row(vals: &[&str]) -> Row {
         let mut row = Row::default();
@@ -223,7 +223,10 @@ mod tests {
             vec!["blue walking shoes", "green hat", "red running shoes"]
         );
 
-        let scores = evaluate(keys.bm25_index(), "shoes");
+        let scores = evaluate(
+            keys.bm25_index(),
+            &parse_query("shoes").expect("valid query"),
+        );
         // Keys are sorted: doc 0 = blue walking shoes, doc 2 = red running shoes.
         assert_eq!(scores.keys().copied().collect::<Vec<_>>(), vec![0, 2]);
 
@@ -307,7 +310,8 @@ mod tests {
                 arranged.stream.inspect(move |batch| {
                     let index = batch.storage.keys.bm25_index();
                     assert!(index.is_built());
-                    for doc_id in evaluate(index, "shoes").keys() {
+                    let query = parse_query("shoes").expect("valid query");
+                    for doc_id in evaluate(index, &query).keys() {
                         let text = batch.storage.keys.index(usize::cast_from(*doc_id));
                         collected.lock().expect("not poisoned").push(text.clone());
                     }

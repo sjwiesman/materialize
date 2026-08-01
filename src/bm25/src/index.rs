@@ -29,10 +29,6 @@ pub struct Posting {
 /// Maximum number of dictionary terms a prefix or fuzzy node expands to.
 /// Expansion keeps the rarest terms (lowest document frequency) and silently
 /// truncates the rest, so a one letter prefix cannot blow up evaluation.
-// TODO: Drop the `dead_code` allowances on the dictionary expansion surface
-// (this constant, `terms_with_prefix`, `terms_within_distance`, `cap_rarest`,
-// and `within_distance`) once query evaluation expands prefix and fuzzy nodes.
-#[allow(dead_code)]
 pub(crate) const EXPANSION_CAP: usize = 64;
 
 /// BM25 inverted index over the documents of one batch.
@@ -115,7 +111,6 @@ impl Bm25Index {
 
     /// Dictionary terms starting with `prefix`, rarest first, capped at
     /// [`EXPANSION_CAP`].
-    #[allow(dead_code)]
     pub(crate) fn terms_with_prefix(&self, prefix: &str) -> Vec<&str> {
         let candidates = self
             .postings
@@ -128,7 +123,6 @@ impl Bm25Index {
     /// Dictionary terms within `max_distance` Levenshtein edits of `term`,
     /// rarest first, capped at [`EXPANSION_CAP`]. Exact matches are included
     /// (distance 0).
-    #[allow(dead_code)]
     pub(crate) fn terms_within_distance(&self, term: &str, max_distance: u32) -> Vec<&str> {
         let candidates = self
             .postings
@@ -141,7 +135,6 @@ impl Bm25Index {
 
 /// Keeps the [`EXPANSION_CAP`] rarest of `candidates`, each paired with its
 /// document frequency. Ties break alphabetically so expansion is deterministic.
-#[allow(dead_code)]
 fn cap_rarest<'a>(candidates: impl Iterator<Item = (&'a str, usize)>) -> Vec<&'a str> {
     let mut candidates: Vec<_> = candidates.collect();
     candidates.sort_by_key(|(term, doc_freq)| (*doc_freq, *term));
@@ -152,7 +145,6 @@ fn cap_rarest<'a>(candidates: impl Iterator<Item = (&'a str, usize)>) -> Vec<&'a
 /// Banded Levenshtein check: true when the edit distance between `a` and `b` is
 /// at most `max`. Rejects on length difference first, and abandons a row as
 /// soon as its minimum exceeds `max`.
-#[allow(dead_code)]
 fn within_distance(a: &str, b: &str, max: u32) -> bool {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
