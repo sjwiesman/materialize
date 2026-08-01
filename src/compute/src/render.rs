@@ -742,15 +742,22 @@ impl<'g> Context<'g, mz_repr::Timestamp> {
                 }
             }
             Some(ArrangementFlavor::Trace(gid, _, _)) => {
-                // Reusing an imported arrangement hands back a handle to a standard `TraceBundle`,
-                // which has no BM25 counterpart to hand back with it. Rejecting here fails index
-                // creation loudly rather than leaving peeks to discover a missing trace.
-                assert!(!idx.bm25, "BM25 index cannot reuse an imported arrangement");
-
                 // Duplicate of existing arrangement with id `gid`, so
                 // just create another handle to that arrangement.
                 let trace = compute_state.traces.get(&gid).unwrap().clone();
                 compute_state.traces.set(idx_id, trace);
+                if idx.bm25 {
+                    // A BM25 index reusing another BM25 index's arrangement
+                    // shares the search trace the same way. A plain index's
+                    // arrangement has no search trace to share, and planning
+                    // rejects that pairing, so absence here is a bug.
+                    let bm25 = compute_state
+                        .traces
+                        .get_bm25(&gid)
+                        .expect("BM25 index cannot reuse a plain index's arrangement")
+                        .clone();
+                    compute_state.traces.set_bm25(idx_id, bm25);
+                }
             }
             None => {
                 println!("collection available: {:?}", bundle.collection.is_none());
