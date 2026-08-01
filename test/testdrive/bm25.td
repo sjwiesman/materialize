@@ -368,6 +368,53 @@ Target cluster: quickstart
 2 "Postgres sources faster"
 3 "New dashboard templates"
 
+# A second BM25 index on a different key of the same view. Its dataflow imports
+# the first index's arrangement and builds its own on top of it, and each index
+# then serves searches of its own column.
+> CREATE INDEX story_headline_search ON story_docs (headline) WITH (BM25)
+
+> SELECT id FROM story_docs WHERE headline @@@ 'postgres'
+2
+
+> SELECT id FROM story_docs WHERE doc @@@ 'replicat* AND postgres'
+2
+
+# A join over the view reads a BM25 index's standard arrangement the way it
+# would any other index's.
+> CREATE TABLE story_notes (story_id int, note text)
+
+> INSERT INTO story_notes VALUES (1, 'ships next release'), (2, 'backported')
+
+> SELECT s.id, o.note FROM story_docs s JOIN story_notes o ON s.id = o.story_id ORDER BY s.id
+1 "ships next release"
+2 backported
+
+? EXPLAIN OPTIMIZED PLAN WITH(no notices) AS VERBOSE TEXT FOR SELECT s.id, o.note FROM story_docs s JOIN story_notes o ON s.id = o.story_id
+Explained Query:
+  Project (#0, #2)
+    Join on=(#0{id} = #1{story_id}) type=differential
+      ArrangeBy keys=[[#0{id}]]
+        Project (#0)
+          Filter (#0{id}) IS NOT NULL
+            ReadIndex on=story_docs story_search=[*** full scan ***]
+      ArrangeBy keys=[[#0{story_id}]]
+        Filter (#0{story_id}) IS NOT NULL
+          ReadStorage materialize.public.story_notes
+
+Source materialize.public.story_notes
+  filter=((#0{story_id}) IS NOT NULL)
+
+Used Indexes:
+  - materialize.public.story_search (*** full scan ***)
+
+Target cluster: quickstart
+
+# The search arrangement is peek only, so `@@@` under a join has nothing to run
+# against and the join is rejected. Only the standard arrangement crosses into
+# a dataflow.
+! SELECT s.id, o.note FROM story_docs s JOIN story_notes o ON s.id = o.story_id WHERE s.doc @@@ 'postgres'
+contains:full-text search without a matching BM25 index
+
 # A second BM25 index on the same key and cluster shares arrangements with the
 # first instead of colliding with it.
 > CREATE INDEX story_search_dup ON story_docs (doc) WITH (BM25)
@@ -383,7 +430,13 @@ Target cluster: quickstart
 > SELECT id FROM story_docs WHERE doc @@@ 'streaming'
 1
 
+# Non-search reads survive the drop as well, through a surviving index's
+# standard arrangement.
+> SELECT count(*) FROM story_docs
+3
+
 # Updates to the table still flow through the view into the index.
 > DELETE FROM stories WHERE id = 1
 
+# No document mentions streaming once the story that did is gone.
 > SELECT id FROM story_docs WHERE doc @@@ 'streaming'
