@@ -314,3 +314,76 @@ contains:invalid search query
 # Edit distances above 2 are rejected rather than scanning the dictionary.
 ! SELECT id FROM docs2 WHERE body @@@ 'database~9'
 contains:invalid search query
+
+# BM25 indexes on plain views. The view has no arrangement of its own, so the
+# index is the only thing that keeps its `Get` alive through import and serves
+# both search and non-search reads of it.
+
+> CREATE TABLE stories (id int, headline text, summary text)
+
+> INSERT INTO stories VALUES
+  (1, 'Streaming joins land', 'incremental joins over streaming inputs are now supported'),
+  (2, 'Postgres sources faster', 'logical replication snapshots complete in half the time'),
+  (3, 'New dashboard templates', 'prebuilt dashboards for common monitoring needs')
+
+> CREATE VIEW story_docs AS
+  SELECT id, headline, headline || '. ' || summary AS doc FROM stories
+
+> CREATE INDEX story_search ON story_docs (doc) WITH (BM25)
+
+> SELECT id FROM story_docs WHERE doc @@@ 'streaming'
+1
+
+> SELECT id FROM story_docs WHERE doc @@@ 'replicat* AND postgres'
+2
+
+> SELECT id, mz_score() > 0 FROM story_docs WHERE doc @@@ '"logical replication"'
+2 true
+
+# The search plans as a BM25 peek against the view's index.
+? EXPLAIN OPTIMIZED PLAN WITH(no notices) AS VERBOSE TEXT FOR SELECT id FROM story_docs WHERE doc @@@ 'streaming'
+Explained Query (fast path):
+  Project (#0)
+    Bm25Peek materialize.public.story_docs (using materialize.public.story_search) query="streaming"
+
+Used Indexes:
+  - materialize.public.story_search (*** full scan ***)
+
+Target cluster: quickstart
+
+# A non-search read of the view is served by the same index's standard
+# arrangement rather than a transient dataflow.
+? EXPLAIN OPTIMIZED PLAN WITH(no notices) AS VERBOSE TEXT FOR SELECT id, headline FROM story_docs
+Explained Query (fast path):
+  Project (#1, #2)
+    ReadIndex on=materialize.public.story_docs story_search=[*** full scan ***]
+
+Used Indexes:
+  - materialize.public.story_search (*** full scan ***)
+
+Target cluster: quickstart
+
+> SELECT id, headline FROM story_docs ORDER BY id
+1 "Streaming joins land"
+2 "Postgres sources faster"
+3 "New dashboard templates"
+
+# A second BM25 index on the same key and cluster shares arrangements with the
+# first instead of colliding with it.
+> CREATE INDEX story_search_dup ON story_docs (doc) WITH (BM25)
+
+> SELECT id FROM story_docs WHERE doc @@@ 'streaming'
+1
+
+# Dropping the first leaves search working through the second. Because the
+# second reuses the first's arrangement, the drop only removes the first from
+# the catalog. Its arrangement stays maintained until the duplicate goes too.
+> DROP INDEX story_search
+
+> SELECT id FROM story_docs WHERE doc @@@ 'streaming'
+1
+
+# Updates to the table still flow through the view into the index.
+> DELETE FROM stories WHERE id = 1
+
+> SELECT id FROM story_docs WHERE doc @@@ 'streaming'
