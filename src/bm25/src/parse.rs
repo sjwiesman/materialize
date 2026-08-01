@@ -30,6 +30,12 @@ use std::fmt;
 
 use crate::tokenize::tokenize;
 
+/// Maximum nesting depth for parenthesized groups and `NOT` chains, the two
+/// forms whose parsing recurses. Query text is user controlled, so without a
+/// bound a literal made of a few thousand `(` exhausts the stack and aborts the
+/// process. Mirrors the SQL parser's `RECURSION_LIMIT`.
+const RECURSION_LIMIT: usize = 128;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
     /// One normalized term, optionally fuzzy. `terms` holds the tokens the
@@ -132,11 +138,33 @@ fn lex(input: &str) -> Result<Vec<Token>, QueryParseError> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Nesting depth of the recursive descent, see [`RECURSION_LIMIT`].
+    depth: usize,
 }
 
 impl Parser {
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
+    }
+
+    /// Runs `f` one nesting level deeper, erroring past [`RECURSION_LIMIT`].
+    ///
+    /// The depth must come back down once `f` returns, otherwise a wide but
+    /// shallow query such as `(a) (b) (c) ...` would accumulate depth across
+    /// sibling groups and be rejected.
+    fn nested<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, QueryParseError>,
+    ) -> Result<T, QueryParseError> {
+        self.depth += 1;
+        if self.depth > RECURSION_LIMIT {
+            return err(format!(
+                "query nesting exceeds the maximum depth of {RECURSION_LIMIT}"
+            ));
+        }
+        let result = f(self);
+        self.depth -= 1;
+        result
     }
 
     fn advance(&mut self) -> Option<Token> {
@@ -177,7 +205,7 @@ impl Parser {
     fn parse_unary(&mut self) -> Result<Query, QueryParseError> {
         if matches!(self.peek(), Some(Token::Not)) {
             self.advance();
-            let inner = self.parse_unary()?;
+            let inner = self.nested(|p| p.parse_unary())?;
             return Ok(Query::Bool {
                 must: Vec::new(),
                 should: Vec::new(),
@@ -190,7 +218,7 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Query, QueryParseError> {
         match self.advance() {
             Some(Token::LParen) => {
-                let inner = self.parse_or()?;
+                let inner = self.nested(|p| p.parse_or())?;
                 match self.advance() {
                     Some(Token::RParen) => Ok(inner),
                     _ => err("expected closing parenthesis"),
@@ -303,7 +331,11 @@ pub fn parse_query(input: &str) -> Result<Query, QueryParseError> {
             edit_distance: 0,
         });
     }
-    let mut parser = Parser { tokens, pos: 0 };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        depth: 0,
+    };
     let query = parser.parse_or()?;
     if parser.pos != parser.tokens.len() {
         return err("unexpected trailing input");
@@ -446,6 +478,24 @@ mod tests {
         assert!(parse_query("(foo").is_err());
         assert!(parse_query("\"unterminated").is_err());
         assert!(parse_query("AND foo").is_err());
+    }
+
+    #[mz_ore::test]
+    fn recursion_is_bounded() {
+        let nested_parens = format!("{}foo{}", "(".repeat(200), ")".repeat(200));
+        let err = parse_query(&nested_parens).unwrap_err();
+        assert!(err.message.contains("nesting"), "{err}");
+
+        let nested_nots = format!("{}foo", "NOT ".repeat(200));
+        let err = parse_query(&nested_nots).unwrap_err();
+        assert!(err.message.contains("nesting"), "{err}");
+
+        let shallow = format!("{}foo{}", "(".repeat(10), ")".repeat(10));
+        assert_eq!(parse_query(&shallow).unwrap(), terms(&["foo"]));
+
+        // Sibling groups are wide, not deep, so no bound applies to them.
+        let siblings = "(foo) ".repeat(200);
+        assert!(parse_query(&siblings).is_ok());
     }
 
     #[mz_ore::test]
