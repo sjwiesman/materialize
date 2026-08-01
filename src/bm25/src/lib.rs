@@ -17,12 +17,14 @@
 //! [`Bm25Index::build`] when [`Bm25Index::is_built`] is false.
 
 mod index;
+mod parse;
 mod query;
 mod tokenize;
 
 pub mod spine;
 
 pub use index::Bm25Index;
+pub use parse::{Query, QueryParseError, parse_query};
 pub use query::evaluate;
 pub use spine::{
     Bm25Agent, Bm25Batch, Bm25Batcher, Bm25Builder, Bm25Chunker, Bm25Input, Bm25KeyContainer,
