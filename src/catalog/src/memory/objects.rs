@@ -762,6 +762,10 @@ impl mz_sql::catalog::CatalogItem for CatalogCollectionEntry {
         self.entry.index_details()
     }
 
+    fn is_bm25_index(&self) -> bool {
+        self.entry.is_bm25_index()
+    }
+
     fn writable_table_details(&self) -> Option<&[Expr<Aug>]> {
         self.entry.writable_table_details()
     }
@@ -4040,6 +4044,10 @@ impl mz_sql::catalog::CatalogItem for CatalogEntry {
         } else {
             None
         }
+    }
+
+    fn is_bm25_index(&self) -> bool {
+        matches!(self.item(), CatalogItem::Index(Index { bm25: true, .. }))
     }
 
     fn writable_table_details(&self) -> Option<&[Expr<Aug>]> {

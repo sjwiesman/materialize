@@ -426,6 +426,10 @@ impl CatalogItem for LocalItem {
         None
     }
 
+    fn is_bm25_index(&self) -> bool {
+        false
+    }
+
     fn writable_table_details(&self) -> Option<&[Expr<Aug>]> {
         None
     }

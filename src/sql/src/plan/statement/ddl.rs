@@ -4365,11 +4365,20 @@ pub fn plan_create_index(
         print_name: None,
     });
 
-    if bm25 {
-        // Rendering reuses an existing arrangement whenever the new index imports a key the
-        // dataflow already has arranged, and reuse hands back a standard `TraceBundle` with no
-        // BM25 counterpart. The replica asserts against that, so an index accepted here would
-        // crash the replica on every render attempt. Reject before the catalog commits.
+    // A BM25 index's dataflow imports every plain index the cluster tracks, and rendering then
+    // reuses a matching arrangement rather than building its own. Reuse hands back a standard
+    // `TraceBundle`, which has no BM25 counterpart, so the replica asserts and crash-loops. A
+    // BM25 index and a plain index therefore cannot share a key on one cluster. Two indexes of
+    // the same kind are fine, because a BM25 index is never imported as an arrangement.
+    //
+    // The rule has to hold in both directions. An asymmetric rule would admit a catalog state
+    // that the rejected direction re-plans into an error, and rehydration re-plans every item.
+    //
+    // NOTE: The check is confined to interactive planning, which is what the plan context
+    // distinguishes: `CatalogState::deserialize_item` plans without one. Rehydration has to
+    // accept every state the catalog already holds, so re-planning stays idempotent no matter
+    // what a past version of this rule admitted.
+    if scx.pcx().is_ok() {
         let conflict = on.used_by().iter().find(|dependent_id| {
             let dependent = scx.catalog.get_item(dependent_id);
             let Some((index_keys, index_on)) = dependent.index_details() else {
@@ -4378,11 +4387,12 @@ pub fn plan_create_index(
             index_on == on.global_id()
                 && dependent.cluster_id() == Some(cluster_id)
                 && index_keys == keys.as_slice()
+                && dependent.is_bm25_index() != bm25
         });
         if let Some(conflict) = conflict {
             let conflict = scx.catalog.get_item(conflict);
             sql_bail!(
-                "a BM25 index cannot share its key with index {} on the same cluster",
+                "a BM25 index cannot share its key with a plain index on the same cluster, and {} already indexes this key",
                 scx.catalog.resolve_full_name(conflict.name())
             );
         }

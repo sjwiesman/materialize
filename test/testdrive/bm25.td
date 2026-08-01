@@ -107,16 +107,22 @@ contains:full-text search without a matching BM25 index not yet supported
 ! SELECT mz_score() FROM items
 contains:cannot call mz_score
 
-# An index sharing its key with an existing index on the same cluster is
-# rejected at planning time. Rendering would reuse the existing arrangement,
-# which has no BM25 counterpart.
-! CREATE INDEX items_search_dup ON items (description) WITH (BM25)
-contains:a BM25 index cannot share its key with index materialize.public.items_search
+# A BM25 index and a plain index cannot share a key on one cluster. Rendering
+# would hand the BM25 index the plain index's arrangement, which has no BM25
+# counterpart.
+> CREATE INDEX plain_body ON plain (body)
 
-# The same key on a different cluster is fine, which `items_rank` above already
-# relies on. Reusing that cluster is what makes it a conflict.
-! CREATE INDEX items_rank_dup IN CLUSTER bm25_rank ON items (description) WITH (BM25)
-contains:a BM25 index cannot share its key with index materialize.public.items_rank
+! CREATE INDEX plain_body_search ON plain (body) WITH (BM25)
+contains:a BM25 index cannot share its key with a plain index on the same cluster
+
+# The rejection is symmetric. Allowing this order would let a catalog state
+# exist that re-planning the BM25 index rejects, which is unbootable.
+! CREATE INDEX items_description ON items (description)
+contains:a BM25 index cannot share its key with a plain index on the same cluster
+
+# Only the cluster the index lands on matters, so the same pair on separate
+# clusters is fine.
+> CREATE INDEX plain_body_search IN CLUSTER bm25_rank ON plain (body) WITH (BM25)
 
 # A recursive target is rejected before the catalog commits. Index export in an
 # iterative scope has no BM25 counterpart.

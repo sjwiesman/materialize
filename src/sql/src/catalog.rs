@@ -887,6 +887,10 @@ pub trait CatalogItem {
     /// catalog item is an index.
     fn index_details(&self) -> Option<(&[MirScalarExpr], GlobalId)>;
 
+    /// Reports whether this catalog item is a BM25 index. False for every item
+    /// that is not an index.
+    fn is_bm25_index(&self) -> bool;
+
     /// Returns the column defaults associated with the catalog item, if the
     /// catalog item is a table that accepts writes.
     fn writable_table_details(&self) -> Option<&[Expr<Aug>]>;

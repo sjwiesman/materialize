@@ -72,6 +72,7 @@ def get_minimal_system_parameters(
         ),
         "enable_alter_swap": "true",
         "enable_arrangement_dictionary_compression_alpha": "false",
+        "enable_bm25_index": "true",
         "enable_case_literal_transform": "true",
         "enable_cast_elimination": "true",
         "enable_coalesce_case_transform": "true",
