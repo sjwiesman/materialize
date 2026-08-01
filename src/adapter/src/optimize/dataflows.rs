@@ -329,7 +329,10 @@ impl<'a> DataflowBuilder<'a> {
             // pipeline, and removes unneeded index imports based on the optimized plan.
             //
             // BM25 indexes are excluded: they arrange an inverted index rather than the
-            // collection itself, so they can never serve as an import of `id`.
+            // collection itself, so they can never serve as an import of `id`. An object
+            // whose only index is a BM25 index therefore lands in the `else` branch and is
+            // imported from storage, while `sufficient_collections` reports the BM25 index
+            // for it. See the note on that branch condition for why the two may diverge.
             let mut valid_indexes = self.indexes_on(*id).filter(|(_, idx)| !idx.bm25).peekable();
             if valid_indexes.peek().is_some() {
                 for (index_id, idx) in valid_indexes {
