@@ -232,3 +232,72 @@ contains:CREATE INDEX ... WITH (BM25) is not available
 
 $ postgres-execute connection=mz_system
 ALTER SYSTEM SET enable_bm25_index = true;
+
+# The Lucene style query language. Every assertion below is on the matched set,
+# not on scores, so it holds no matter how the rows hash across workers.
+
+> CREATE TABLE docs2 (id int, body text)
+
+> INSERT INTO docs2 VALUES
+  (1, 'streaming database for real time applications'),
+  (2, 'batch data warehouse'),
+  (3, 'real slow time series database'),
+  (4, 'incremental view maintenance')
+
+> CREATE INDEX docs2_search ON docs2 (body) WITH (BM25)
+
+# AND narrows, OR widens, NOT excludes.
+> SELECT id FROM docs2 WHERE body @@@ 'database AND streaming'
+1
+
+> SELECT id FROM docs2 WHERE body @@@ 'warehouse OR maintenance' ORDER BY id
+2
+4
+
+> SELECT id FROM docs2 WHERE body @@@ 'database NOT streaming'
+3
+
+# A phrase requires the terms adjacent and in order. The AND control shows both
+# rows contain both words, only row 1 has them adjacent.
+> SELECT id FROM docs2 WHERE body @@@ 'real AND time' ORDER BY id
+1
+3
+
+> SELECT id FROM docs2 WHERE body @@@ '"real time"'
+1
+
+> SELECT id FROM docs2 WHERE body @@@ '"time real"'
+
+# Fuzzy matching reaches a misspelling one edit away. The same word searched
+# exactly matches nothing, which is what makes the fuzzy result meaningful.
+> SELECT id FROM docs2 WHERE body @@@ 'databse~1' ORDER BY id
+1
+3
+
+> SELECT id FROM docs2 WHERE body @@@ 'databse'
+
+# Prefix expansion.
+> SELECT id FROM docs2 WHERE body @@@ 'incremen*'
+4
+
+# Grouping composes the operators.
+> SELECT id FROM docs2 WHERE body @@@ 'database AND (streaming OR "real time")'
+1
+
+# Stage one bag-of-words semantics are unchanged: bare adjacency is OR.
+> SELECT id FROM docs2 WHERE body @@@ 'warehouse streaming' ORDER BY id
+1
+2
+
+# Invalid queries are rejected at planning time.
+
+# A query with no positive clause would exclude from nothing.
+! SELECT id FROM docs2 WHERE body @@@ 'NOT database'
+contains:invalid search query
+
+! SELECT id FROM docs2 WHERE body @@@ '(database'
+contains:invalid search query
+
+# Edit distances above 2 are rejected rather than scanning the dictionary.
+! SELECT id FROM docs2 WHERE body @@@ 'database~9'
+contains:invalid search query
