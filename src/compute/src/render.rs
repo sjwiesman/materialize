@@ -742,6 +742,11 @@ impl<'g> Context<'g, mz_repr::Timestamp> {
                 }
             }
             Some(ArrangementFlavor::Trace(gid, _, _)) => {
+                // Reusing an imported arrangement hands back a handle to a standard `TraceBundle`,
+                // which has no BM25 counterpart to hand back with it. Rejecting here fails index
+                // creation loudly rather than leaving peeks to discover a missing trace.
+                assert!(!idx.bm25, "BM25 index cannot reuse an imported arrangement");
+
                 // Duplicate of existing arrangement with id `gid`, so
                 // just create another handle to that arrangement.
                 let trace = compute_state.traces.get(&gid).unwrap().clone();
@@ -829,6 +834,10 @@ impl<'g> Context<'g, mz_repr::Timestamp> {
             &format!("Bm25Index({idx_id})"),
         );
 
+        // NOTE: this arrangement is an independent operator chain behind its own exchange, and no
+        // probe holds it to the standard arrangement's pace. Its upper can therefore trail the
+        // standard bundle's oks upper. A peek must judge readiness by reading this trace's own
+        // upper. The standard bundle's frontier can lead it and says nothing about this one.
         compute_state.traces.set_bm25(idx_id, arranged.trace);
     }
 }
