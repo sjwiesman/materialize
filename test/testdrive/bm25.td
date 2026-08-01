@@ -238,11 +238,16 @@ ALTER SYSTEM SET enable_bm25_index = true;
 
 > CREATE TABLE docs2 (id int, body text)
 
+# Row 5 is what makes the grouping assertion below bite. It has the phrase
+# "real time" and no "database", so it matches `streaming OR "real time"` while
+# failing the `database` conjunct. Grouped and unparenthesized readings of that
+# query therefore return different rows.
 > INSERT INTO docs2 VALUES
   (1, 'streaming database for real time applications'),
   (2, 'batch data warehouse'),
   (3, 'real slow time series database'),
-  (4, 'incremental view maintenance')
+  (4, 'incremental view maintenance'),
+  (5, 'real time weather feed')
 
 > CREATE INDEX docs2_search ON docs2 (body) WITH (BM25)
 
@@ -257,14 +262,16 @@ ALTER SYSTEM SET enable_bm25_index = true;
 > SELECT id FROM docs2 WHERE body @@@ 'database NOT streaming'
 3
 
-# A phrase requires the terms adjacent and in order. The AND control shows both
-# rows contain both words, only row 1 has them adjacent.
+# A phrase requires the terms adjacent and in order. The AND control shows row 3
+# contains both words too, and only rows 1 and 5 have them adjacent.
 > SELECT id FROM docs2 WHERE body @@@ 'real AND time' ORDER BY id
 1
 3
+5
 
-> SELECT id FROM docs2 WHERE body @@@ '"real time"'
+> SELECT id FROM docs2 WHERE body @@@ '"real time"' ORDER BY id
 1
+5
 
 > SELECT id FROM docs2 WHERE body @@@ '"time real"'
 
@@ -280,9 +287,15 @@ ALTER SYSTEM SET enable_bm25_index = true;
 > SELECT id FROM docs2 WHERE body @@@ 'incremen*'
 4
 
-# Grouping composes the operators.
+# Grouping composes the operators. Parentheses make the disjunction a conjunct
+# of `database`, so row 5 is out. Dropping them lets AND bind tighter, leaving
+# `(database AND streaming) OR "real time"`, which row 5 satisfies.
 > SELECT id FROM docs2 WHERE body @@@ 'database AND (streaming OR "real time")'
 1
+
+> SELECT id FROM docs2 WHERE body @@@ 'database AND streaming OR "real time"' ORDER BY id
+1
+5
 
 # Stage one bag-of-words semantics are unchanged: bare adjacency is OR.
 > SELECT id FROM docs2 WHERE body @@@ 'warehouse streaming' ORDER BY id
