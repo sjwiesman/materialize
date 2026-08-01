@@ -328,12 +328,11 @@ impl<'a> DataflowBuilder<'a> {
             // `prune_and_annotate_dataflow_index_imports` runs at the end of the MIR
             // pipeline, and removes unneeded index imports based on the optimized plan.
             //
-            // BM25 indexes are excluded: they arrange an inverted index rather than the
-            // collection itself, so they can never serve as an import of `id`. An object
-            // whose only index is a BM25 index therefore lands in the `else` branch and is
-            // imported from storage, while `sufficient_collections` reports the BM25 index
-            // for it. See the note on that branch condition for why the two may diverge.
-            let mut valid_indexes = self.indexes_on(*id).filter(|(_, idx)| !idx.bm25).peekable();
+            // BM25 indexes import like any other index. Their standard arrangement is a
+            // complete arrangement of the collection keyed by the index keys, so it serves
+            // reads and joins, and keeping the `Get` alive is what lets the BM25 peek
+            // rewrite find the index on views.
+            let mut valid_indexes = self.indexes_on(*id).peekable();
             if valid_indexes.peek().is_some() {
                 for (index_id, idx) in valid_indexes {
                     let index_desc = IndexDesc {

@@ -42,13 +42,10 @@ impl DataflowBuilder<'_> {
             // Extract available indexes as those that are enabled, and installed on the cluster.
             let mut available_indexes = self.indexes_on(id).map(|(id, _)| id).peekable();
 
-            // NOTE: BM25 indexes count as available here but not in
-            // `import_into_dataflow`, so for an object whose only index is a BM25 index the
-            // two disagree on which branch to take. This bundle then names the BM25 index's
-            // compute id while the dataflow imports the object from storage. That is safe
-            // because a read hold on the BM25 index transitively pins its storage inputs at
-            // or below the index's since, so the object stays readable at any timestamp
-            // chosen for the bundle.
+            // The bundle names every index on the object, BM25 indexes included, since each
+            // one arranges the collection itself. `import_into_dataflow` considers the same
+            // set, so the two always agree on whether the object is served by an index or
+            // read from its inputs.
             if available_indexes.peek().is_some() {
                 id_bundle
                     .compute_ids
@@ -91,11 +88,11 @@ impl DataflowBuilder<'_> {
         id_bundle
     }
 
-    // NOTE: BM25 indexes are filtered where this is used for plan/import decisions (the
-    // IndexOracle impl, import_into_dataflow) and matched on rather than filtered where an
-    // index is compared against the one being created (the IndexAlreadyExists notice in
-    // optimize::index), but not here, so that sufficient_collections still takes read holds
-    // on them.
+    // BM25 indexes are yielded alongside plain ones. Each carries a standard arrangement of
+    // the collection next to its search arrangement, so plan and import decisions may use it
+    // like any other index. The `IndexAlreadyExists` notice in `optimize::index` compares
+    // these against the index being created, and matches on the `bm25` flag so that same key
+    // indexes of different kinds are not mistaken for each other.
     pub fn indexes_on(&self, id: GlobalId) -> impl Iterator<Item = (GlobalId, &Index)> {
         self.catalog
             .get_indexes_on(id, self.compute.instance_id())
@@ -111,7 +108,6 @@ impl IndexOracle for DataflowBuilder<'_> {
     ) -> Box<dyn Iterator<Item = (GlobalId, &[MirScalarExpr])> + '_> {
         Box::new(
             self.indexes_on(id)
-                .filter(|(_, idx)| !idx.bm25)
                 .map(|(idx_id, idx)| (idx_id, idx.keys.as_ref())),
         )
     }
