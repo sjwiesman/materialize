@@ -4277,7 +4277,21 @@ pub fn plan_create_index(
                 .collect()
         }
     };
+    let (options, bm25) = plan_index_options(scx, with_options.clone())?;
+
     let keys = query::plan_index_exprs(scx, &on_desc, filled_key_parts.clone())?;
+
+    if bm25 {
+        let [key] = keys.as_slice() else {
+            sql_bail!("a BM25 index requires exactly one key expression");
+        };
+        let mz_expr::MirScalarExpr::Column(col, _) = key else {
+            sql_bail!("a BM25 index key must be a column reference");
+        };
+        if on_desc.typ().column_types[*col].scalar_type != SqlScalarType::String {
+            sql_bail!("a BM25 index key must have type text");
+        }
+    }
 
     let index_name = if let Some(name) = name {
         QualifiedItemName {
@@ -4341,7 +4355,6 @@ pub fn plan_create_index(
         });
     }
 
-    let options = plan_index_options(scx, with_options.clone())?;
     let cluster_id = match in_cluster {
         None => scx.resolve_cluster(None)?.id(),
         Some(in_cluster) => in_cluster.id,
@@ -4375,6 +4388,7 @@ pub fn plan_create_index(
             keys,
             cluster_id,
             compaction_window,
+            bm25,
         },
         if_not_exists,
     }))
@@ -6338,24 +6352,34 @@ fn plan_retain_history(
     }
 }
 
-generate_extracted_config!(IndexOption, (RetainHistory, OptionalDuration));
+generate_extracted_config!(
+    IndexOption,
+    (RetainHistory, OptionalDuration),
+    (Bm25, bool, Default(false))
+);
 
+/// Plans an index's `WITH` options, returning the durable options alongside the
+/// BM25 flag, which is carried on the index itself rather than as an option.
 fn plan_index_options(
     scx: &StatementContext,
     with_opts: Vec<IndexOption<Aug>>,
-) -> Result<Vec<crate::plan::IndexOption>, PlanError> {
-    if !with_opts.is_empty() {
+) -> Result<(Vec<crate::plan::IndexOption>, bool), PlanError> {
+    let IndexOptionExtracted {
+        retain_history,
+        bm25,
+        ..
+    }: IndexOptionExtracted = with_opts.try_into()?;
+
+    if retain_history.is_some() {
         // Index options are not durable.
         scx.require_feature_flag(&vars::ENABLE_INDEX_OPTIONS)?;
     }
-
-    let IndexOptionExtracted { retain_history, .. }: IndexOptionExtracted = with_opts.try_into()?;
 
     let mut out = Vec::with_capacity(1);
     if let Some(cw) = plan_retain_history_option(scx, retain_history)? {
         out.push(crate::plan::IndexOption::RetainHistory(cw));
     }
-    Ok(out)
+    Ok((out, bm25))
 }
 
 generate_extracted_config!(
@@ -6419,6 +6443,7 @@ pub fn plan_alter_index_options(
                             None,
                         );
                     }
+                    IndexOptionName::Bm25 => sql_bail!("BM25 cannot be altered"),
                 }
             }
             sql_bail!("expected option");
@@ -6439,6 +6464,7 @@ pub fn plan_alter_index_options(
                             opt.value,
                         );
                     }
+                    IndexOptionName::Bm25 => sql_bail!("BM25 cannot be altered"),
                 }
             }
             sql_bail!("expected option");

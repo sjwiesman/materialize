@@ -1975,6 +1975,8 @@ pub struct Index {
     pub keys: Vec<mz_expr::MirScalarExpr>,
     pub compaction_window: Option<CompactionWindow>,
     pub cluster_id: ClusterId,
+    /// Whether to build a BM25 full-text index over the single text key column.
+    pub bm25: bool,
 }
 
 #[derive(Clone, Debug)]
