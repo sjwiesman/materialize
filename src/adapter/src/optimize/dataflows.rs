@@ -218,12 +218,16 @@ impl ExprPrep for ExprPrepOneShot<'_> {
         // invocation with the result.
         expr.try_visit_mut_post(&mut |e| {
             if let MirScalarExpr::CallUnmaterializable(f) = e {
-                *e = eval_unmaterializable_func(
-                    self.catalog_state,
-                    f,
-                    self.logical_time,
-                    self.session,
-                )?;
+                // MzScore is left in place for the BM25 peek fast path, which
+                // rewrites it into a reference to the appended score column.
+                if !matches!(f, UnmaterializableFunc::MzScore) {
+                    *e = eval_unmaterializable_func(
+                        self.catalog_state,
+                        f,
+                        self.logical_time,
+                        self.session,
+                    )?;
+                }
             }
             Ok(())
         })
@@ -707,6 +711,13 @@ fn eval_unmaterializable_func(
                 f.output_type().scalar_type,
             ))
         }
+        // Only the BM25 peek fast path can supply a score, and it rewrites the
+        // call before evaluation. Reaching here means the call sits somewhere
+        // that has no score to offer.
+        UnmaterializableFunc::MzScore => Err(OptimizerError::UncallableFunction {
+            func: UnmaterializableFunc::MzScore,
+            context: "this context",
+        }),
         UnmaterializableFunc::MzSessionId => pack(Datum::from(state.config().session_id)),
         UnmaterializableFunc::MzSessionRoleMemberships => {
             let role_id = session.current_role_id();

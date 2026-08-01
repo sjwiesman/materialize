@@ -45,6 +45,7 @@ pub enum UnmaterializableFunc {
     MzIsSuperuser,
     MzNow,
     MzRoleOidMemberships,
+    MzScore,
     MzSessionId,
     MzSessionRoleMemberships,
     MzUptime,
@@ -87,6 +88,7 @@ impl UnmaterializableFunc {
                 custom_id: None,
             }
             .nullable(false),
+            UnmaterializableFunc::MzScore => SqlScalarType::Float64.nullable(false),
             UnmaterializableFunc::MzSessionId => SqlScalarType::Uuid.nullable(false),
             UnmaterializableFunc::MzSessionRoleMemberships => {
                 SqlScalarType::Array(Box::new(SqlScalarType::String)).nullable(false)
@@ -141,6 +143,9 @@ impl UnmaterializableFunc {
             | Self::MzSessionRoleMemberships => true,
             // Session config inspection
             Self::IsRbacEnabled | Self::ViewableVariables => true,
+            // Relevance score of a full text search match, a property of the
+            // user data being queried rather than of the system.
+            Self::MzScore => true,
             // Internal system information: not relevant to data product queries
             Self::MzIsSuperuser
             | Self::MzRoleOidMemberships
@@ -169,6 +174,7 @@ impl fmt::Display for UnmaterializableFunc {
             UnmaterializableFunc::MzIsSuperuser => f.write_str("mz_is_superuser"),
             UnmaterializableFunc::MzNow => f.write_str("mz_now"),
             UnmaterializableFunc::MzRoleOidMemberships => f.write_str("mz_role_oid_memberships"),
+            UnmaterializableFunc::MzScore => f.write_str("mz_score"),
             UnmaterializableFunc::MzSessionId => f.write_str("mz_session_id"),
             UnmaterializableFunc::MzSessionRoleMemberships => {
                 f.write_str("mz_session_role_memberships")

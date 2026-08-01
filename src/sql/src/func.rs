@@ -4721,6 +4721,9 @@ pub static MZ_CATALOG_BUILTINS: LazyLock<BTreeMap<&'static str, Func>> = LazyLoc
         "mz_now" => Scalar {
             params!() => UnmaterializableFunc::MzNow => MzTimestamp, oid::FUNC_MZ_NOW_OID;
         },
+        "mz_score" => Scalar {
+            params!() => UnmaterializableFunc::MzScore => Float64, oid::FUNC_MZ_SCORE_OID;
+        },
         "mz_uptime" => Scalar {
             params!() => UnmaterializableFunc::MzUptime => Interval, oid::FUNC_MZ_UPTIME_OID;
         },
