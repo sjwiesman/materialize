@@ -6115,6 +6115,7 @@ dependencies = [
  "mz-adapter-types",
  "mz-audit-log",
  "mz-auth",
+ "mz-bm25",
  "mz-build-info",
  "mz-catalog",
  "mz-cloud-provider",

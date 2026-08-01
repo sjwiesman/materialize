@@ -37,6 +37,7 @@ maplit.workspace = true
 mz-adapter-types = { path = "../adapter-types" }
 mz-audit-log = { path = "../audit-log" }
 mz-auth = { path = "../auth" }
+mz-bm25 = { path = "../bm25" }
 mz-build-info = { path = "../build-info" }
 mz-catalog = { path = "../catalog" }
 mz-cloud-provider = { path = "../cloud-provider", default-features = false }

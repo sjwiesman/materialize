@@ -631,6 +631,12 @@ fn bm25_fast_path(
         return Ok(None);
     };
 
+    // Only once an index is going to answer this predicate is the query string ours to interpret,
+    // so reject bad syntax here rather than for every query that happens to hold a string literal.
+    if let Err(e) = mz_bm25::parse_query(&query) {
+        return Err(OptimizerError::InvalidBm25Query(e.to_string()));
+    }
+
     // Rebuild over `input ++ score`. The score sits at `input_arity`, so every reference at or
     // beyond that point, which is a reference to a map output, moves over by one.
     let rewrite = |expr: &MirScalarExpr| -> MirScalarExpr {
@@ -2092,5 +2098,25 @@ mod tests {
                 .expect("no error")
                 .is_none()
         );
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    fn test_bm25_fast_path_rejects_invalid_query() {
+        let coll_id = GlobalId::User(1);
+        let cluster_id = ClusterId::user(1).expect("valid cluster id");
+        let idx_id = GlobalId::User(2);
+        let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(1), cluster_id));
+        let instance = ComputeInstanceSnapshot::new_from_parts(cluster_id, [idx_id].into());
+
+        // A purely negative query and an unbalanced parenthesis.
+        for query in ["NOT foo", "(foo"] {
+            let mfp = MapFilterProject::new(3).filter([bm25_match(1, query)]);
+            let result = bm25_fast_path(&mfp, coll_id, &catalog, &instance);
+            assert!(
+                matches!(result, Err(OptimizerError::InvalidBm25Query(_))),
+                "expected {query:?} to be rejected, got {result:?}"
+            );
+        }
     }
 }

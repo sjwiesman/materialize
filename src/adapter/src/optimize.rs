@@ -402,6 +402,8 @@ pub enum OptimizerError {
     },
     #[error("access to function {0} is restricted")]
     RestrictedFunction(UnmaterializableFunc),
+    #[error("invalid search query: {0}")]
+    InvalidBm25Query(String),
     #[error("{0}")]
     UnsupportedTemporalExpression(String),
     /// This is a specific kind of internal error. It's distinct from `Internal`, because we want to
