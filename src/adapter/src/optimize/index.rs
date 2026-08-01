@@ -226,10 +226,10 @@ impl Optimize<Index> for Optimizer {
         }
 
         // Emit a notice for each available index identical to the one we are
-        // currently optimizing. The kind filter keeps the notice within a kind. The
-        // notice advises dropping one of the pair, and a plain index cannot stand in
-        // for a BM25 index's search arrangement, so the two are not interchangeable.
-        // A same key pair of different kinds is rejected at planning anyway.
+        // currently optimizing. The notice advises dropping one of the pair, and a
+        // plain index cannot stand in for a BM25 index's search arrangement, so the
+        // two are not interchangeable. A same key pair of different kinds is rejected
+        // at planning anyway.
         for (index_id, idx) in df_builder
             .indexes_on(index.on)
             .filter(|(_id, idx)| idx.bm25 == index.bm25)

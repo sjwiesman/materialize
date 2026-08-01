@@ -4369,7 +4369,9 @@ pub fn plan_create_index(
     // reuses a matching arrangement rather than building its own. Reuse hands back a standard
     // `TraceBundle`, which has no BM25 counterpart, so the replica asserts and crash-loops. A
     // BM25 index and a plain index therefore cannot share a key on one cluster. Two indexes of
-    // the same kind are fine, because a BM25 index is never imported as an arrangement.
+    // the same kind are fine. The second imports the first, and reuse there hands back a bundle
+    // whose kind matches, so a duplicate BM25 index picks up the search trace alongside the
+    // standard one.
     //
     // The rule has to hold in both directions. An asymmetric rule would admit a catalog state
     // that the rejected direction re-plans into an error, and rehydration re-plans every item.

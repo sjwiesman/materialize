@@ -45,11 +45,11 @@ Neither BM25 filter survives:
   see BM25 indexes like any other
 
 The inherent `DataflowBuilder::indexes_on` never filtered BM25 indexes, so
-read hold and timestamp behavior is unchanged. The NOTE comments beside the
-two loops state the contract that results: a BM25 index serves everything a
-plain index on the same key serves, through its standard arrangement, plus
-`@@@` peeks through its search arrangement, on tables, views, and materialized
-views alike.
+read hold and timestamp behavior is unchanged. The NOTE comments beside the two
+loops record why a BM25 index belongs in the set each one considers, which is
+the contract that results: a BM25 index serves everything a plain index on the
+same key serves, through its standard arrangement, plus `@@@` peeks through its
+search arrangement, on tables, views, and materialized views alike.
 
 Consequences beyond the bug fix, all desirable:
 
@@ -116,4 +116,6 @@ view's index. No rewrite, protocol, or mz-bm25 changes.
 The stage one and stage two design documents state the same contract. Stage
 one's catalog and planning bullets, peek routing section, and known
 limitations describe the first class index and what is left of the peek only
-restriction, which is that no dataflow can import the search arrangement.
+restriction, which is that no dataflow can import the search arrangement. Stage
+two states the contract once in its architecture section and scopes itself to
+the query string, which is all it changes.
