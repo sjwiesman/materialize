@@ -127,13 +127,13 @@ fn evaluate_phrase(index: &Bm25Index, terms: &[String]) -> BTreeMap<u32, f32> {
         });
         if occurs {
             let mut score = 0.0;
-            for (term, posting) in member_postings.iter().enumerate() {
+            for (term_idx, posting) in member_postings.iter().enumerate() {
                 let tf = calculate_tf(
                     posting.term_freq,
                     index.doc_length(doc_id),
                     index.avg_doc_length(),
                 );
-                score += idfs[term] * tf;
+                score += idfs[term_idx] * tf;
             }
             scores.insert(doc_id, score);
         }
@@ -167,6 +167,9 @@ fn evaluate_bool(
     let mut result = match result {
         Some(result) => {
             // Should clauses are optional score boosts when must clauses exist.
+            // NOTE: The grammar cannot reach this branch, because parsing
+            // populates must or should but never both. It exists so evaluation
+            // matches the documented must/should semantics.
             let mut result = result;
             for clause in should {
                 for (doc, score) in evaluate(index, clause) {
@@ -246,6 +249,15 @@ mod tests {
         let index = Bm25Index::build(["shoes shoes shoes", "shoes and more"].into_iter());
         let scores = evaluate(&index, &parse_query("shoes").unwrap());
         assert!(scores[&0] > scores[&1]);
+    }
+
+    #[mz_ore::test]
+    fn repeated_query_term_scores_once_per_operand() {
+        let index = Bm25Index::build(["red shoes", "green hat"].into_iter());
+        let once = evaluate(&index, &parse_query("shoes").unwrap());
+        let twice = evaluate(&index, &parse_query("shoes shoes").unwrap());
+        assert_eq!(twice.keys().copied().collect::<Vec<_>>(), vec![0]);
+        assert!((twice[&0] - 2.0 * once[&0]).abs() < 0.001);
     }
 
     #[mz_ore::test]

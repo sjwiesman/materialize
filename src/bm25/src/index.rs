@@ -236,12 +236,13 @@ mod tests {
 
     #[mz_ore::test]
     fn expansion_cap_keeps_rarest() {
-        let docs: Vec<String> = (0..100).map(|i| format!("term{i:03} termcommon")).collect();
+        let docs: Vec<String> = (0..100).map(|i| format!("termz{i:03} terma")).collect();
         let index = Bm25Index::build(docs.iter().map(|s| s.as_str()));
         let terms = index.terms_with_prefix("term");
         assert_eq!(terms.len(), EXPANSION_CAP);
-        // Every termNNN has doc frequency 1 while "termcommon" has 100, so the
-        // cap drops the common term even though the prefix matches it.
-        assert!(!terms.contains(&"termcommon"));
+        // Every termzNNN has doc frequency 1 while "terma" has 100, so the cap
+        // drops the common term even though the prefix matches it and it sorts
+        // ahead of every rare term alphabetically.
+        assert!(!terms.contains(&"terma"));
     }
 }
