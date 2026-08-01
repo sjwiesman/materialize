@@ -395,7 +395,7 @@ pub enum OptimizerError {
     EvalError(#[from] EvalError),
     #[error("cannot materialize call to {0}")]
     UnmaterializableFunction(UnmaterializableFunc),
-    #[error("cannot call {func} in {context} ")]
+    #[error("cannot call {func} in {context}")]
     UncallableFunction {
         func: UnmaterializableFunc,
         context: &'static str,

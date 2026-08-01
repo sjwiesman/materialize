@@ -59,6 +59,7 @@ use uuid::Uuid;
 
 use crate::active_compute_sink::{ActiveComputeSink, ActiveCopyTo};
 use crate::coord::timestamp_selection::TimestampDetermination;
+use crate::optimize::dataflows::ComputeInstanceSnapshot;
 use crate::optimize::{OptimizerCatalog, OptimizerError};
 use crate::statement_logging::WatchSetCreation;
 use crate::statement_logging::{StatementEndedExecutionReason, StatementExecutionStrategy};
@@ -584,7 +585,7 @@ fn permute_oneshot_mfp_around_index(
 }
 
 /// Matches an MFP over `Get(coll_id)` whose filters contain `#col @@@ 'literal'`, where a BM25
-/// index on `coll_id` keyed by `#col` exists on `instance_id`.
+/// index on `coll_id` keyed by `#col` is maintained by `compute_instance`.
 ///
 /// On a match the predicate is removed, as the index answers it, and the MFP is rebuilt over the
 /// index's output row, which is the collection's row with the BM25 score appended. Calls to
@@ -593,7 +594,7 @@ fn bm25_fast_path(
     mfp: &mz_expr::MapFilterProject,
     coll_id: GlobalId,
     catalog: &dyn OptimizerCatalog,
-    instance_id: ComputeInstanceId,
+    compute_instance: &ComputeInstanceSnapshot,
 ) -> Result<Option<FastPathPlan>, OptimizerError> {
     let input_arity = mfp.input_arity;
     let (maps, filters, project) = mfp.as_map_filter_project();
@@ -617,8 +618,14 @@ fn bm25_fast_path(
         return Ok(None);
     };
 
+    // The peek takes a read hold on the index it names, and `sufficient_collections` only offers
+    // holds on collections the instance tracks, so an index the snapshot does not know about must
+    // not be named here. `DataflowBuilder::indexes_on` additionally skips indexes at or after a
+    // replan id. That guard lives on the builder and is out of reach here, but it is only ever set
+    // by `EXPLAIN REPLAN`, which never executes the peek and so never needs the read hold.
     let Some((idx_id, _idx)) = catalog
-        .get_indexes_on(coll_id, instance_id)
+        .get_indexes_on(coll_id, compute_instance.instance_id())
+        .filter(|(idx_id, _)| compute_instance.contains_collection(idx_id))
         .find(|(_, idx)| idx.bm25 && idx.keys.len() == 1 && idx.keys[0].as_column() == Some(col))
     else {
         return Ok(None);
@@ -656,7 +663,7 @@ fn bm25_fast_path(
     if new_maps
         .iter()
         .chain(new_filters.iter())
-        .any(|e| bm25_calls(e).0)
+        .any(|e| bm25_calls(e).bm25_match)
     {
         return Ok(None);
     }
@@ -674,32 +681,41 @@ fn bm25_fast_path(
     }))
 }
 
-/// Whether `expr` calls `@@@`, and whether it calls `mz_score()`.
-fn bm25_calls(expr: &MirScalarExpr) -> (bool, bool) {
-    let (mut bm25_match, mut mz_score) = (false, false);
+/// The BM25 calls found in an expression. Only a BM25 peek can answer either of them.
+#[derive(Default)]
+struct Bm25Calls {
+    /// A call to the `@@@` operator.
+    bm25_match: bool,
+    /// A call to `mz_score()`.
+    mz_score: bool,
+}
+
+/// The BM25 calls in `expr`.
+fn bm25_calls(expr: &MirScalarExpr) -> Bm25Calls {
+    let mut calls = Bm25Calls::default();
     expr.visit_pre(|e| match e {
         MirScalarExpr::CallBinary {
             func: BinaryFunc::Bm25Match(_),
             ..
-        } => bm25_match = true,
-        MirScalarExpr::CallUnmaterializable(UnmaterializableFunc::MzScore) => mz_score = true,
+        } => calls.bm25_match = true,
+        MirScalarExpr::CallUnmaterializable(UnmaterializableFunc::MzScore) => calls.mz_score = true,
         _ => {}
     });
-    (bm25_match, mz_score)
+    calls
 }
 
-/// [`bm25_calls`] over an `mfp` and the expression it sits on.
-fn find_bm25_calls(mfp: &mz_expr::MapFilterProject, expr: &MirRelationExpr) -> (bool, bool) {
-    let (mut bm25_match, mut mz_score) = (false, false);
+/// The BM25 calls in `mfp` and in the expression it sits on.
+fn find_bm25_calls(mfp: &mz_expr::MapFilterProject, expr: &MirRelationExpr) -> Bm25Calls {
+    let mut found = Bm25Calls::default();
     let mut inspect = |scalar: &MirScalarExpr| {
         let calls = bm25_calls(scalar);
-        bm25_match |= calls.0;
-        mz_score |= calls.1;
+        found.bm25_match |= calls.bm25_match;
+        found.mz_score |= calls.mz_score;
     };
     mfp.expressions.iter().for_each(&mut inspect);
     mfp.predicates.iter().for_each(|(_, p)| inspect(p));
     expr.visit_scalars(&mut inspect);
-    (bm25_match, mz_score)
+    found
 }
 
 /// Determine if the dataflow plan can be implemented without an actual dataflow.
@@ -718,7 +734,7 @@ pub fn create_fast_path_plan(
     persist_fast_path_limit: usize,
     persist_fast_path_order: bool,
     catalog: &dyn OptimizerCatalog,
-    instance_id: ComputeInstanceId,
+    compute_instance: &ComputeInstanceSnapshot,
 ) -> Result<Option<FastPathPlan>, OptimizerError> {
     // At this point, `dataflow_plan` contains our best optimized dataflow.
     // We will check the plan to see if there is a fast path to escape full dataflow construction.
@@ -783,21 +799,21 @@ pub fn create_fast_path_plan(
                 ..
             } = mir
             {
-                if let Some(plan) = bm25_fast_path(&mfp, *get_id, catalog, instance_id)? {
+                if let Some(plan) = bm25_fast_path(&mfp, *get_id, catalog, compute_instance)? {
                     return Ok(Some(plan));
                 }
             }
             // A call the BM25 peek did not take can be evaluated nowhere, neither on another fast
             // path nor by a dataflow operator, so reject the query rather than build a plan that
             // fails once it runs.
-            let (bm25_match, mz_score) = find_bm25_calls(&mfp, mir);
-            if bm25_match {
+            let calls = find_bm25_calls(&mfp, mir);
+            if calls.bm25_match {
                 return Err(OptimizerError::PlanError(PlanError::Unsupported {
                     feature: "full-text search without a matching BM25 index".into(),
                     discussion_no: None,
                 }));
             }
-            if mz_score {
+            if calls.mz_score {
                 return Err(OptimizerError::UncallableFunction {
                     func: UnmaterializableFunc::MzScore,
                     context: "a query without a full-text search filter served by a BM25 index",
@@ -1981,7 +1997,9 @@ mod tests {
     fn test_bm25_fast_path() {
         let coll_id = GlobalId::User(1);
         let cluster_id = ClusterId::user(1).expect("valid cluster id");
+        let idx_id = GlobalId::User(2);
         let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(1), cluster_id));
+        let instance = ComputeInstanceSnapshot::new_from_parts(cluster_id, [idx_id].into());
 
         // `#1 @@@ 'red shoes'` filters, one map produces the score, a second map reads the first,
         // and a filter and the projection both read map outputs.
@@ -1994,7 +2012,7 @@ mod tests {
             .filter([MirScalarExpr::column(4)])
             .project([2, 3, 4]);
 
-        let plan = bm25_fast_path(&mfp, coll_id, &catalog, cluster_id)
+        let plan = bm25_fast_path(&mfp, coll_id, &catalog, &instance)
             .expect("no error")
             .expect("fast path applies");
 
@@ -2008,7 +2026,7 @@ mod tests {
             .project([2, 4, 5]);
         let FastPathPlan::PeekBm25 {
             coll_id: got_coll_id,
-            idx_id,
+            idx_id: got_idx_id,
             query,
             mfp: got_mfp,
         } = plan
@@ -2016,7 +2034,7 @@ mod tests {
             panic!("expected a BM25 fast path");
         };
         assert_eq!(got_coll_id, coll_id);
-        assert_eq!(idx_id, GlobalId::User(2));
+        assert_eq!(got_idx_id, idx_id);
         assert_eq!(query, "red shoes");
         assert_eq!(got_mfp, mfp_to_safe_plan(expected).expect("valid plan"));
     }
@@ -2027,6 +2045,8 @@ mod tests {
         let coll_id = GlobalId::User(1);
         let cluster_id = ClusterId::user(1).expect("valid cluster id");
         let other_cluster = ClusterId::user(2).expect("valid cluster id");
+        let idx_id = GlobalId::User(2);
+        let instance = ComputeInstanceSnapshot::new_from_parts(cluster_id, [idx_id].into());
         let mfp = MapFilterProject::new(3).filter([bm25_match(1, "red shoes")]);
 
         // No BM25 index at all.
@@ -2034,7 +2054,7 @@ mod tests {
         plain.bm25 = false;
         let catalog = OneIndexCatalog(plain);
         assert!(
-            bm25_fast_path(&mfp, coll_id, &catalog, cluster_id)
+            bm25_fast_path(&mfp, coll_id, &catalog, &instance)
                 .expect("no error")
                 .is_none()
         );
@@ -2042,7 +2062,7 @@ mod tests {
         // A BM25 index on a different column.
         let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(0), cluster_id));
         assert!(
-            bm25_fast_path(&mfp, coll_id, &catalog, cluster_id)
+            bm25_fast_path(&mfp, coll_id, &catalog, &instance)
                 .expect("no error")
                 .is_none()
         );
@@ -2050,16 +2070,25 @@ mod tests {
         // A BM25 index on a different cluster.
         let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(1), other_cluster));
         assert!(
-            bm25_fast_path(&mfp, coll_id, &catalog, cluster_id)
+            bm25_fast_path(&mfp, coll_id, &catalog, &instance)
+                .expect("no error")
+                .is_none()
+        );
+
+        // A BM25 index the target instance does not maintain. Naming it would leave the peek
+        // without a read hold on its target.
+        let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(1), cluster_id));
+        let untracked = ComputeInstanceSnapshot::new_from_parts(cluster_id, BTreeSet::new());
+        assert!(
+            bm25_fast_path(&mfp, coll_id, &catalog, &untracked)
                 .expect("no error")
                 .is_none()
         );
 
         // A second `@@@` call that the one index cannot answer.
-        let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(1), cluster_id));
         let two_filters = mfp.filter([bm25_match(2, "blue hats")]);
         assert!(
-            bm25_fast_path(&two_filters, coll_id, &catalog, cluster_id)
+            bm25_fast_path(&two_filters, coll_id, &catalog, &instance)
                 .expect("no error")
                 .is_none()
         );
