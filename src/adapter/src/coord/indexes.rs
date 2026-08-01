@@ -88,11 +88,13 @@ impl DataflowBuilder<'_> {
         id_bundle
     }
 
-    // BM25 indexes are yielded alongside plain ones. Each carries a standard arrangement of
-    // the collection next to its search arrangement, so plan and import decisions may use it
-    // like any other index. The `IndexAlreadyExists` notice in `optimize::index` compares
-    // these against the index being created, and matches on the `bm25` flag so that same key
-    // indexes of different kinds are not mistaken for each other.
+    /// Yields every index on `id` that this instance tracks, of either kind.
+    ///
+    /// BM25 indexes come back alongside plain ones. Each carries a standard arrangement of the
+    /// collection next to its search arrangement, so a caller making a plan or import decision may
+    /// use it like any other index. A caller that distinguishes the kinds has to read the `bm25`
+    /// flag itself, as the `IndexAlreadyExists` notice in `optimize::index` does so that same key
+    /// indexes of different kinds are not mistaken for each other.
     pub fn indexes_on(&self, id: GlobalId) -> impl Iterator<Item = (GlobalId, &Index)> {
         self.catalog
             .get_indexes_on(id, self.compute.instance_id())

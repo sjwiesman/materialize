@@ -90,6 +90,24 @@ search index.
 contains. Once view `Get`s survive import, the existing lookup finds the
 view's index. No rewrite, protocol, or mz-bm25 changes.
 
+## Known limitations
+
+* A BM25 index whose key the indexed object's plan already arranges by stops
+  the replica. `export_bm25_index` builds its search arrangement from the
+  bundle's raw collection, and `ensure_collections` forms that collection only
+  when it is explicitly demanded or when it is about to build a new
+  arrangement. A view such as `SELECT DISTINCT body FROM docs` indexed on
+  `body` hands index export the reduce's existing arrangement and no raw
+  collection beside it, so the assert at the head of `export_bm25_index` fires
+  and the replica panics while creating the index. The catalog commits the
+  index before the dataflow renders, so the restarted replica renders the same
+  dataflow and panics again. A plain index on that shape is fine, as is a BM25
+  index on a column the view's plan does not arrange by. Closing this means
+  unthinning the reused arrangement back into a raw collection rather than
+  asserting. Only inlined objects can present index export with a
+  pre-existing arrangement, so tables and materialized views, whose imports are
+  always raw, never reach it.
+
 ## Testing
 
 * testdrive additions: a plain view over a table with a derived text column,
@@ -97,13 +115,27 @@ view's index. No rewrite, protocol, or mz-bm25 changes.
   prefix), an `EXPLAIN` pinning the `Bm25Peek` fast path against the view,
   a non search `SELECT * FROM view` with an `EXPLAIN` pinning that it reads
   the BM25 index's standard arrangement, a same key same cluster duplicate
-  BM25 index (search works through either, drop the first, search still
-  works), and the existing mixed kind rejections re-asserted.
+  BM25 index (search works through either, drop the first, search and a non
+  search read still work), a second BM25 index on a different key of the same
+  view with a search through each, a join over the view with an `EXPLAIN`
+  pinning that it reads a BM25 index's standard arrangement, the same join with
+  `@@@` in its `WHERE` rejected, and the existing mixed kind rejections
+  re-asserted.
 * Dropping the first of the duplicate pair succeeds and searches keep working
   through the second. The catalog drop does not tear the shared arrangement
   down, and Materialize says so with a notice that the dropped index stays
   maintained until the duplicate reusing its arrangement is dropped as well.
-* Both `EXPLAIN` assertions use the
+  The compute controller is what makes that true. The second index's dataflow
+  imported the first, so it holds a read hold on the first's collection for as
+  long as it runs. `Instance::drop_collections` only marks the collection
+  dropped and releases the implied and warmup holds. The dependent's hold keeps
+  the collection's read capabilities non-empty, so its since never reaches the
+  empty frontier, and the empty-frontier `AllowCompaction` is the only thing
+  that tells a replica to tear a dataflow down. `cleanup_collections` waits on
+  the same emptiness before it forgets the collection. The dropped index's
+  arrangements, standard and search alike, therefore stay live on the replica
+  under the dropped id.
+* Every `EXPLAIN` assertion uses the
   `EXPLAIN OPTIMIZED PLAN WITH(no notices) AS VERBOSE TEXT` form the rest of
   the file uses. A bare `EXPLAIN` renders a physical plan and carries optimizer
   notices, which makes for a less stable golden.
