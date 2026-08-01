@@ -10,8 +10,11 @@
 # BM25 full-text search: `CREATE INDEX ... WITH (BM25)` plus the `@@@` match
 # operator and `mz_score()`, served by the BM25 peek fast path.
 #
-# Scores are computed per batch, so only relative orderings that hold within a
-# single batch are asserted, never absolute score values.
+# No absolute score is asserted. Scores are computed per batch and the BM25
+# arrangement is exchanged by key hash, so a document's score depends on which
+# other documents share its worker. The one ranking assertion therefore runs on
+# a single-worker cluster, where every document shares one corpus. Everywhere
+# else a score is only asserted to be positive.
 
 > CREATE TABLE items (id int, description text)
 
@@ -33,10 +36,25 @@
 1
 2
 
-# A doc matching two query terms outranks one matching a single term.
-> SELECT id FROM items WHERE description @@@ 'running shoes' ORDER BY mz_score() DESC
+# A doc matching two query terms outranks one matching a single term. This
+# needs every doc scored against one corpus, so it runs on a single-worker
+# cluster with its own BM25 index. `LIMIT 1` is what makes the assertion bite:
+# the limit is applied server-side after the ordering, so only the top-ranked
+# row crosses the wire. Without it testdrive would sort the result and accept
+# either order.
+> CREATE CLUSTER bm25_rank SIZE 'scale=1,workers=1'
+
+> CREATE INDEX items_rank IN CLUSTER bm25_rank ON items (description) WITH (BM25)
+
+> SET cluster = bm25_rank
+
+> SELECT id FROM items WHERE description @@@ 'running shoes' ORDER BY mz_score() DESC LIMIT 1
 1
+
+> SELECT id FROM items WHERE description @@@ 'running shoes' ORDER BY mz_score() ASC LIMIT 1
 2
+
+> SET cluster = quickstart
 
 # Scores are positive for every match.
 > SELECT id, mz_score() > 0 FROM items WHERE description @@@ 'hat'
