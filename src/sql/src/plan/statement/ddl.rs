@@ -6398,6 +6398,10 @@ fn plan_index_options(
         scx.require_feature_flag(&vars::ENABLE_INDEX_OPTIONS)?;
     }
 
+    if bm25 {
+        scx.require_feature_flag(&vars::ENABLE_BM25_INDEX)?;
+    }
+
     let mut out = Vec::with_capacity(1);
     if let Some(cw) = plan_retain_history_option(scx, retain_history)? {
         out.push(crate::plan::IndexOption::RetainHistory(cw));

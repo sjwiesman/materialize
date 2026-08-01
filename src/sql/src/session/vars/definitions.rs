@@ -1826,6 +1826,12 @@ feature_flags!(
     },
     // Actual feature flags
     {
+        name: enable_bm25_index,
+        desc: "CREATE INDEX ... WITH (BM25)",
+        default: false,
+        enable_for_item_parsing: true,
+    },
+    {
         name: enable_binary_date_bin,
         desc: "the binary version of date_bin function",
         default: false,

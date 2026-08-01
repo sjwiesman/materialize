@@ -239,6 +239,7 @@ KNOWN_MISSING_FROM_LD: set[str] = set("""
     enable_background_alter_cluster
     enable_statement_arrival_logging
     enable_binary_date_bin
+    enable_bm25_index
     enable_bounded_staleness_isolation
     enable_cluster_controller
     enable_coalesce_case_transform
