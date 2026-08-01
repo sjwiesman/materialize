@@ -144,20 +144,22 @@ impl PlanInsights {
                         Some(ctx.optimizer_config.features.persist_fast_path_limit);
                     continue;
                 }
-                let idx_name = if let FastPathPlan::PeekExisting(_, idx_id, _, _) = plan {
-                    let idx_entry = ctx.catalog.get_entry_by_global_id(&idx_id);
-                    Some(FastPathCluster {
-                        index: structured_name(humanizer, idx_id),
-                        on: structured_name(
-                            humanizer,
-                            idx_entry.index().expect("must be index").on,
-                        ),
-                    })
-                } else {
+                let idx_name = match plan {
+                    FastPathPlan::PeekExisting(_, idx_id, _, _)
+                    | FastPathPlan::PeekBm25 { idx_id, .. } => {
+                        let idx_entry = ctx.catalog.get_entry_by_global_id(&idx_id);
+                        Some(FastPathCluster {
+                            index: structured_name(humanizer, idx_id),
+                            on: structured_name(
+                                humanizer,
+                                idx_entry.index().expect("must be index").on,
+                            ),
+                        })
+                    }
                     // This shouldn't ever happen (changing the cluster should not affect whether a
                     // fast path of type constant or persist peek is created), but protect against
                     // it anyway.
-                    None
+                    FastPathPlan::Constant(..) | FastPathPlan::PeekPersist(..) => None,
                 };
                 self.fast_path_clusters.insert(name, idx_name);
             }

@@ -30,9 +30,10 @@ use mz_compute_types::dataflows::{DataflowDescription, IndexImport};
 use mz_controller_types::ClusterId;
 use mz_expr::explain::{HumanizedExplain, HumanizerMode, fmt_text_constant_rows};
 use mz_expr::row::RowCollection;
+use mz_expr::visit::Visit;
 use mz_expr::{
-    EvalError, Id, MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr, RowSetFinishing,
-    RowSetFinishingIncremental, permutation_for_arrangement,
+    BinaryFunc, Columns, EvalError, Id, MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr,
+    RowSetFinishing, RowSetFinishingIncremental, UnmaterializableFunc, permutation_for_arrangement,
 };
 use mz_ore::cast::CastFrom;
 use mz_ore::collections::CollectionExt;
@@ -48,6 +49,7 @@ use mz_repr::{
     Diff, GlobalId, IntoRowIterator, RelationDesc, Row, RowIterator, SqlRelationType,
     preserves_order,
 };
+use mz_sql::plan::PlanError;
 use mz_storage_types::sources::SourceData;
 use serde::{Deserialize, Serialize};
 use timely::progress::Antichain;
@@ -57,7 +59,7 @@ use uuid::Uuid;
 
 use crate::active_compute_sink::{ActiveComputeSink, ActiveCopyTo};
 use crate::coord::timestamp_selection::TimestampDetermination;
-use crate::optimize::OptimizerError;
+use crate::optimize::{OptimizerCatalog, OptimizerError};
 use crate::statement_logging::WatchSetCreation;
 use crate::statement_logging::{StatementEndedExecutionReason, StatementExecutionStrategy};
 use crate::{AdapterError, ExecuteContextGuard, ExecuteResponse};
@@ -581,17 +583,142 @@ fn permute_oneshot_mfp_around_index(
     Ok(safe_mfp)
 }
 
+/// Matches an MFP over `Get(coll_id)` whose filters contain `#col @@@ 'literal'`, where a BM25
+/// index on `coll_id` keyed by `#col` exists on `instance_id`.
+///
+/// On a match the predicate is removed, as the index answers it, and the MFP is rebuilt over the
+/// index's output row, which is the collection's row with the BM25 score appended. Calls to
+/// `mz_score()` become references to that appended column.
+fn bm25_fast_path(
+    mfp: &mz_expr::MapFilterProject,
+    coll_id: GlobalId,
+    catalog: &dyn OptimizerCatalog,
+    instance_id: ComputeInstanceId,
+) -> Result<Option<FastPathPlan>, OptimizerError> {
+    let input_arity = mfp.input_arity;
+    let (maps, filters, project) = mfp.as_map_filter_project();
+
+    // Only a predicate directly on an input column can be answered by an index on that column.
+    // Anything computed by the MFP's maps is not what the index was built over.
+    let matched = filters.iter().enumerate().find_map(|(i, filter)| {
+        let MirScalarExpr::CallBinary {
+            func: BinaryFunc::Bm25Match(_),
+            expr1,
+            expr2,
+        } = filter
+        else {
+            return None;
+        };
+        let col = expr1.as_column().filter(|col| *col < input_arity)?;
+        let query = expr2.as_literal_str()?;
+        Some((i, col, query.to_owned()))
+    });
+    let Some((filter_idx, col, query)) = matched else {
+        return Ok(None);
+    };
+
+    let Some((idx_id, _idx)) = catalog
+        .get_indexes_on(coll_id, instance_id)
+        .find(|(_, idx)| idx.bm25 && idx.keys.len() == 1 && idx.keys[0].as_column() == Some(col))
+    else {
+        return Ok(None);
+    };
+
+    // Rebuild over `input ++ score`. The score sits at `input_arity`, so every reference at or
+    // beyond that point, which is a reference to a map output, moves over by one.
+    let rewrite = |expr: &MirScalarExpr| -> MirScalarExpr {
+        let mut expr = expr.clone();
+        expr.visit_mut_post(&mut |e| match e {
+            MirScalarExpr::Column(c, _) if *c >= input_arity => *c += 1,
+            // The visit does not descend into what it substitutes here, so the score column this
+            // installs is not itself shifted by the arm above.
+            MirScalarExpr::CallUnmaterializable(UnmaterializableFunc::MzScore) => {
+                *e = MirScalarExpr::column(input_arity);
+            }
+            _ => {}
+        });
+        expr
+    };
+    let new_maps = maps.iter().map(rewrite).collect::<Vec<_>>();
+    let new_filters = filters
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != filter_idx)
+        .map(|(_, f)| rewrite(f))
+        .collect::<Vec<_>>();
+    let new_project = project
+        .iter()
+        .map(|c| if *c >= input_arity { *c + 1 } else { *c })
+        .collect::<Vec<_>>();
+
+    // One index answers one `@@@` call. Another call, in a second predicate or in a map, has
+    // nothing left to answer it, so decline and let the caller reject the query.
+    if new_maps
+        .iter()
+        .chain(new_filters.iter())
+        .any(|e| bm25_calls(e).0)
+    {
+        return Ok(None);
+    }
+
+    let new_mfp = mz_expr::MapFilterProject::new(input_arity + 1)
+        .map(new_maps)
+        .filter(new_filters)
+        .project(new_project);
+
+    Ok(Some(FastPathPlan::PeekBm25 {
+        coll_id,
+        idx_id,
+        query,
+        mfp: mfp_to_safe_plan(new_mfp)?,
+    }))
+}
+
+/// Whether `expr` calls `@@@`, and whether it calls `mz_score()`.
+fn bm25_calls(expr: &MirScalarExpr) -> (bool, bool) {
+    let (mut bm25_match, mut mz_score) = (false, false);
+    expr.visit_pre(|e| match e {
+        MirScalarExpr::CallBinary {
+            func: BinaryFunc::Bm25Match(_),
+            ..
+        } => bm25_match = true,
+        MirScalarExpr::CallUnmaterializable(UnmaterializableFunc::MzScore) => mz_score = true,
+        _ => {}
+    });
+    (bm25_match, mz_score)
+}
+
+/// [`bm25_calls`] over an `mfp` and the expression it sits on.
+fn find_bm25_calls(mfp: &mz_expr::MapFilterProject, expr: &MirRelationExpr) -> (bool, bool) {
+    let (mut bm25_match, mut mz_score) = (false, false);
+    let mut inspect = |scalar: &MirScalarExpr| {
+        let calls = bm25_calls(scalar);
+        bm25_match |= calls.0;
+        mz_score |= calls.1;
+    };
+    mfp.expressions.iter().for_each(&mut inspect);
+    mfp.predicates.iter().for_each(|(_, p)| inspect(p));
+    expr.visit_scalars(&mut inspect);
+    (bm25_match, mz_score)
+}
+
 /// Determine if the dataflow plan can be implemented without an actual dataflow.
 ///
 /// If the optimized plan is a `Constant` or a `Get` of a maintained arrangement,
 /// we can avoid building a dataflow (and either just return the results, or peek
 /// out of the arrangement, respectively).
+///
+/// Returns an error if the plan still calls `@@@` or `mz_score()` once the BM25 fast path has
+/// declined it. Only that fast path can answer those calls, and neither another fast path nor the
+/// dataflow we would otherwise fall back to can evaluate them.
 pub fn create_fast_path_plan(
     dataflow_plan: &mut DataflowDescription<OptimizedMirRelationExpr>,
     view_id: GlobalId,
     finishing: Option<&RowSetFinishing>,
     persist_fast_path_limit: usize,
     persist_fast_path_order: bool,
+    catalog: &dyn OptimizerCatalog,
+    instance_id: ComputeInstanceId,
 ) -> Result<Option<FastPathPlan>, OptimizerError> {
     // At this point, `dataflow_plan` contains our best optimized dataflow.
     // We will check the plan to see if there is a fast path to escape full dataflow construction.
@@ -648,6 +775,35 @@ pub fn create_fast_path_plan(
             // can skip creating a dataflow and instead pull all the rows in
             // index and apply the linear operator against them.
             let (mfp, mir) = mz_expr::MapFilterProject::extract_from_expression(mir);
+
+            // The BM25 peek is the only plan that can answer `@@@` or supply a score, so it gets
+            // first refusal on the plan.
+            if let MirRelationExpr::Get {
+                id: Id::Global(get_id),
+                ..
+            } = mir
+            {
+                if let Some(plan) = bm25_fast_path(&mfp, *get_id, catalog, instance_id)? {
+                    return Ok(Some(plan));
+                }
+            }
+            // A call the BM25 peek did not take can be evaluated nowhere, neither on another fast
+            // path nor by a dataflow operator, so reject the query rather than build a plan that
+            // fails once it runs.
+            let (bm25_match, mz_score) = find_bm25_calls(&mfp, mir);
+            if bm25_match {
+                return Err(OptimizerError::PlanError(PlanError::Unsupported {
+                    feature: "full-text search without a matching BM25 index".into(),
+                    discussion_no: None,
+                }));
+            }
+            if mz_score {
+                return Err(OptimizerError::UncallableFunction {
+                    func: UnmaterializableFunc::MzScore,
+                    context: "a query without a full-text search filter served by a BM25 index",
+                });
+            }
+
             match mir {
                 MirRelationExpr::Get {
                     id: Id::Global(get_id),
@@ -1649,12 +1805,14 @@ impl crate::coord::Coordinator {
 
 #[cfg(test)]
 mod tests {
-    use mz_expr::func::IsNull;
+    use mz_catalog::memory::objects::{CatalogCollectionEntry, CatalogEntry, Index};
+    use mz_expr::func::{Bm25Match, IsNull};
     use mz_expr::{MapFilterProject, UnaryFunc};
     use mz_ore::str::Indent;
     use mz_repr::explain::text::text_string_at;
     use mz_repr::explain::{DummyHumanizer, ExplainConfig, PlanRenderingContext};
-    use mz_repr::{Datum, SqlColumnType, SqlScalarType};
+    use mz_repr::{CatalogItemId, Datum, ReprScalarType, SqlColumnType, SqlScalarType};
+    use mz_sql::names::{FullItemName, QualifiedItemName, ResolvedIds};
 
     use super::*;
 
@@ -1691,6 +1849,17 @@ mod tests {
                 .into_nontemporal()
                 .expect("invalid nontemporal"),
         );
+        let bm25 = FastPathPlan::PeekBm25 {
+            coll_id: GlobalId::User(12),
+            idx_id: GlobalId::User(13),
+            query: "red shoes".into(),
+            mfp: MapFilterProject::new(3)
+                .project([1, 2])
+                .into_plan()
+                .expect("invalid plan")
+                .into_nontemporal()
+                .expect("invalid nontemporal"),
+        };
 
         let humanizer = DummyHumanizer;
         let config = ExplainConfig {
@@ -1714,10 +1883,12 @@ mod tests {
         let no_lookup_exp = "Project (#1, #4)\n  Map ((#0 OR #2))\n    ReadIndex on=u8 [DELETED INDEX]=[*** full scan ***]\n";
         let lookup_exp =
             "Filter (#0) IS NULL\n  ReadIndex on=u9 [DELETED INDEX]=[lookup value=(5)]\n";
+        let bm25_exp = "Project (#1, #2)\n  Bm25Peek u12 (using u13) query=\"red shoes\"\n";
 
         assert_eq!(text_string_at(&constant_err, ctx_gen), constant_err_exp);
         assert_eq!(text_string_at(&no_lookup, ctx_gen), no_lookup_exp);
         assert_eq!(text_string_at(&lookup, ctx_gen), lookup_exp);
+        assert_eq!(text_string_at(&bm25, ctx_gen), bm25_exp);
 
         let mut constant_rows = vec![
             (Row::pack(Some(Datum::String("hello"))), Diff::ONE),
@@ -1743,6 +1914,154 @@ mod tests {
         assert_eq!(
             text_string_at(&FastPathPlan::Constant(Ok(constant_rows), typ), ctx_gen),
             constant_exp2
+        );
+    }
+
+    /// A catalog holding a single index, for [`bm25_fast_path`].
+    #[derive(Debug)]
+    struct OneIndexCatalog(Index);
+
+    impl OptimizerCatalog for OneIndexCatalog {
+        fn get_entry(&self, _id: &GlobalId) -> CatalogCollectionEntry {
+            unimplemented!("not called by bm25_fast_path")
+        }
+
+        fn get_entry_by_item_id(&self, _id: &CatalogItemId) -> &CatalogEntry {
+            unimplemented!("not called by bm25_fast_path")
+        }
+
+        fn resolve_full_name(
+            &self,
+            _name: &QualifiedItemName,
+            _conn_id: Option<&ConnectionId>,
+        ) -> FullItemName {
+            unimplemented!("not called by bm25_fast_path")
+        }
+
+        fn get_indexes_on(
+            &self,
+            id: GlobalId,
+            cluster: ClusterId,
+        ) -> Box<dyn Iterator<Item = (GlobalId, &Index)> + '_> {
+            if self.0.on == id && self.0.cluster_id == cluster {
+                Box::new(std::iter::once((self.0.global_id, &self.0)))
+            } else {
+                Box::new(std::iter::empty())
+            }
+        }
+    }
+
+    fn bm25_index(on: GlobalId, key: MirScalarExpr, cluster_id: ClusterId) -> Index {
+        Index {
+            create_sql: String::new(),
+            global_id: GlobalId::User(2),
+            on,
+            keys: [key].into(),
+            bm25: true,
+            conn_id: None,
+            resolved_ids: ResolvedIds::empty(),
+            cluster_id,
+            custom_logical_compaction_window: None,
+            is_retained_metrics_object: false,
+            optimized_plan: None,
+            physical_plan: None,
+            dataflow_metainfo: None,
+        }
+    }
+
+    fn bm25_match(col: usize, query: &str) -> MirScalarExpr {
+        MirScalarExpr::column(col).call_binary(
+            MirScalarExpr::literal_ok(Datum::String(query), ReprScalarType::String),
+            Bm25Match,
+        )
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    fn test_bm25_fast_path() {
+        let coll_id = GlobalId::User(1);
+        let cluster_id = ClusterId::user(1).expect("valid cluster id");
+        let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(1), cluster_id));
+
+        // `#1 @@@ 'red shoes'` filters, one map produces the score, a second map reads the first,
+        // and a filter and the projection both read map outputs.
+        let mfp = MapFilterProject::new(3)
+            .filter([bm25_match(1, "red shoes")])
+            .map([
+                MirScalarExpr::CallUnmaterializable(UnmaterializableFunc::MzScore),
+                MirScalarExpr::column(3).call_unary(UnaryFunc::IsNull(IsNull)),
+            ])
+            .filter([MirScalarExpr::column(4)])
+            .project([2, 3, 4]);
+
+        let plan = bm25_fast_path(&mfp, coll_id, &catalog, cluster_id)
+            .expect("no error")
+            .expect("fast path applies");
+
+        // The score sits at column 3, so the two map outputs move from 3 and 4 to 4 and 5.
+        let expected = MapFilterProject::new(4)
+            .map([
+                MirScalarExpr::column(3),
+                MirScalarExpr::column(4).call_unary(UnaryFunc::IsNull(IsNull)),
+            ])
+            .filter([MirScalarExpr::column(5)])
+            .project([2, 4, 5]);
+        let FastPathPlan::PeekBm25 {
+            coll_id: got_coll_id,
+            idx_id,
+            query,
+            mfp: got_mfp,
+        } = plan
+        else {
+            panic!("expected a BM25 fast path");
+        };
+        assert_eq!(got_coll_id, coll_id);
+        assert_eq!(idx_id, GlobalId::User(2));
+        assert_eq!(query, "red shoes");
+        assert_eq!(got_mfp, mfp_to_safe_plan(expected).expect("valid plan"));
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    fn test_bm25_fast_path_requires_matching_index() {
+        let coll_id = GlobalId::User(1);
+        let cluster_id = ClusterId::user(1).expect("valid cluster id");
+        let other_cluster = ClusterId::user(2).expect("valid cluster id");
+        let mfp = MapFilterProject::new(3).filter([bm25_match(1, "red shoes")]);
+
+        // No BM25 index at all.
+        let mut plain = bm25_index(coll_id, MirScalarExpr::column(1), cluster_id);
+        plain.bm25 = false;
+        let catalog = OneIndexCatalog(plain);
+        assert!(
+            bm25_fast_path(&mfp, coll_id, &catalog, cluster_id)
+                .expect("no error")
+                .is_none()
+        );
+
+        // A BM25 index on a different column.
+        let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(0), cluster_id));
+        assert!(
+            bm25_fast_path(&mfp, coll_id, &catalog, cluster_id)
+                .expect("no error")
+                .is_none()
+        );
+
+        // A BM25 index on a different cluster.
+        let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(1), other_cluster));
+        assert!(
+            bm25_fast_path(&mfp, coll_id, &catalog, cluster_id)
+                .expect("no error")
+                .is_none()
+        );
+
+        // A second `@@@` call that the one index cannot answer.
+        let catalog = OneIndexCatalog(bm25_index(coll_id, MirScalarExpr::column(1), cluster_id));
+        let two_filters = mfp.filter([bm25_match(2, "blue hats")]);
+        assert!(
+            bm25_fast_path(&two_filters, coll_id, &catalog, cluster_id)
+                .expect("no error")
+                .is_none()
         );
     }
 }

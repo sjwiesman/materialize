@@ -21,7 +21,7 @@ use mz_ore::soft_assert_or_log;
 use mz_repr::explain::trace_plan;
 use mz_repr::{GlobalId, ReprRelationType, SqlRelationType, Timestamp};
 use mz_sql::optimizer_metrics::OptimizerMetrics;
-use mz_sql::plan::HirRelationExpr;
+use mz_sql::plan::{HirRelationExpr, PlanError};
 use mz_sql::session::metadata::SessionMetadata;
 use mz_transform::dataflow::DataflowMetainfo;
 use mz_transform::normalize_lets::normalize_lets;
@@ -343,11 +343,20 @@ impl<'s> Optimize<LocalMirPlan<Resolved<'s>>> for Optimizer {
             Some(&self.finishing),
             self.config.features.persist_fast_path_limit,
             self.config.persist_fast_path_order,
+            &*self.catalog,
+            self.compute_instance.instance_id(),
         ) {
             Ok(maybe_fast_path_plan) => maybe_fast_path_plan.is_some(),
             Err(OptimizerError::InternalUnsafeMfpPlan(_)) => {
                 // This is expected, in that `create_fast_path_plan` can choke on `mz_now`, which we
                 // haven't removed yet.
+                false
+            }
+            Err(OptimizerError::UncallableFunction { .. })
+            | Err(OptimizerError::PlanError(PlanError::Unsupported { .. })) => {
+                // A `@@@` or `mz_score()` call that the BM25 fast path did not consume. Global
+                // optimization may still shape the plan into one the fast path recognizes, so
+                // leave the verdict to the second `create_fast_path_plan` call below.
                 false
             }
             Err(e) => {
@@ -378,6 +387,8 @@ impl<'s> Optimize<LocalMirPlan<Resolved<'s>>> for Optimizer {
             Some(&self.finishing),
             self.config.features.persist_fast_path_limit,
             self.config.persist_fast_path_order,
+            &*self.catalog,
+            self.compute_instance.instance_id(),
         )? {
             Some(plan) if !self.config.no_fast_path => {
                 if self.config.mode == OptimizeMode::Explain {
