@@ -273,7 +273,7 @@ impl PeekClient {
     ///
     /// `logging_guard` owns end-of-execution logging for this statement. For a
     /// constant peek it stays armed and the caller logs the end from the
-    /// returned result. For a `PeekExisting`/`PeekPersist` peek, successful
+    /// returned result. For a `PeekExisting`/`PeekPersist`/`PeekBm25` peek, successful
     /// registration with the coordinator hands ownership of the end to the
     /// coordinator and the guard is defused here. That holds even when the
     /// subsequent `client.peek()` fails to issue.

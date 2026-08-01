@@ -61,12 +61,6 @@ impl PushInto<String> for Bm25KeyContainer {
     }
 }
 
-impl<'a> PushInto<&'a String> for Bm25KeyContainer {
-    fn push_into(&mut self, item: &'a String) {
-        self.inner.push(item.clone());
-    }
-}
-
 impl BatchContainer for Bm25KeyContainer {
     type Owned = String;
     type ReadItem<'a> = &'a String;

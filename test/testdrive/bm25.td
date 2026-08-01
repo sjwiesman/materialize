@@ -16,6 +16,11 @@
 # a single-worker cluster, where every document shares one corpus. Everywhere
 # else a score is only asserted to be positive.
 
+$ postgres-connect name=mz_system url=postgres://mz_system:materialize@${testdrive.materialize-internal-sql-addr}
+
+$ postgres-execute connection=mz_system
+ALTER SYSTEM SET enable_bm25_index = true;
+
 > CREATE TABLE items (id int, description text)
 
 > INSERT INTO items VALUES
@@ -101,3 +106,123 @@ contains:full-text search without a matching BM25 index not yet supported
 # `mz_score()` without a search filter is rejected at planning time.
 ! SELECT mz_score() FROM items
 contains:cannot call mz_score
+
+# An index sharing its key with an existing index on the same cluster is
+# rejected at planning time. Rendering would reuse the existing arrangement,
+# which has no BM25 counterpart.
+! CREATE INDEX items_search_dup ON items (description) WITH (BM25)
+contains:a BM25 index cannot share its key with index materialize.public.items_search
+
+# The same key on a different cluster is fine, which `items_rank` above already
+# relies on. Reusing that cluster is what makes it a conflict.
+! CREATE INDEX items_rank_dup IN CLUSTER bm25_rank ON items (description) WITH (BM25)
+contains:a BM25 index cannot share its key with index materialize.public.items_rank
+
+# A recursive target is rejected before the catalog commits. Index export in an
+# iterative scope has no BM25 counterpart.
+> CREATE VIEW recursive_docs AS
+  WITH MUTUALLY RECURSIVE
+    padded (body text) AS (
+      SELECT description FROM items WHERE description IS NOT NULL
+      UNION
+      SELECT body || ' more' FROM padded WHERE length(body) < 40
+    )
+  SELECT body FROM padded
+
+! CREATE INDEX recursive_docs_search ON recursive_docs (body) WITH (BM25)
+contains:a BM25 index on a recursive view not yet supported
+
+# Merged batches carry no embedded inverted index, so the peek rebuilds one
+# from the batch's texts. Each INSERT below commits at its own timestamp, which
+# gives the spine enough batches to merge before the searches run.
+> CREATE TABLE docs (id int, body text)
+
+> CREATE INDEX docs_search ON docs (body) WITH (BM25)
+
+> INSERT INTO docs VALUES (1, 'common alpha')
+
+> INSERT INTO docs VALUES (2, 'common bravo')
+
+> INSERT INTO docs VALUES (3, 'common charlie quokka')
+
+> INSERT INTO docs VALUES (4, 'common delta')
+
+> INSERT INTO docs VALUES (5, 'common echo')
+
+> INSERT INTO docs VALUES (6, 'common foxtrot')
+
+> INSERT INTO docs VALUES (7, 'common golf')
+
+> INSERT INTO docs VALUES (8, 'common hotel')
+
+> INSERT INTO docs VALUES (9, 'common india')
+
+> INSERT INTO docs VALUES (10, 'common juliett')
+
+> INSERT INTO docs VALUES (11, 'common kilo quokka')
+
+> INSERT INTO docs VALUES (12, 'common lima')
+
+> INSERT INTO docs VALUES (13, 'common mike')
+
+> INSERT INTO docs VALUES (14, 'common november')
+
+> INSERT INTO docs VALUES (15, 'common oscar')
+
+> INSERT INTO docs VALUES (16, 'common papa')
+
+> INSERT INTO docs VALUES (17, 'common quebec')
+
+> INSERT INTO docs VALUES (18, 'common romeo')
+
+> INSERT INTO docs VALUES (19, 'common sierra quokka')
+
+> INSERT INTO docs VALUES (20, 'common tango')
+
+> SELECT id FROM docs WHERE body @@@ 'quokka' ORDER BY id
+3
+11
+19
+
+> SELECT id, mz_score() > 0 FROM docs WHERE body @@@ 'kilo'
+11 true
+
+# Every document matches, so this reads across all of the spine's batches.
+> SELECT id FROM docs WHERE body @@@ 'common' ORDER BY id
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+
+# A retraction of a row indexed in an earlier batch is reflected after merges.
+> DELETE FROM docs WHERE id = 11
+
+> SELECT id FROM docs WHERE body @@@ 'quokka' ORDER BY id
+3
+19
+
+# The feature flag gates index creation.
+$ postgres-execute connection=mz_system
+ALTER SYSTEM SET enable_bm25_index = false;
+
+! CREATE INDEX docs_search_off ON docs (body) WITH (BM25)
+contains:CREATE INDEX ... WITH (BM25) is not available
+
+$ postgres-execute connection=mz_system
+ALTER SYSTEM SET enable_bm25_index = true;

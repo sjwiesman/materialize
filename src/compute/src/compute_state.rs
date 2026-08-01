@@ -1960,7 +1960,7 @@ impl Bm25Peek {
     /// Each batch carries an inverted index over its own keys, so scoring is per batch and the
     /// results are stitched back together here: diffs of a `(key, row)` pair are summed across
     /// batches for all times not beyond the peek timestamp, and the pair's score is taken from the
-    /// newest batch that scored it.
+    /// newest batch in which the pair has a nonzero net change.
     fn collect_ok_finished_data(&self, max_result_size: u64) -> PeekStatus {
         let max_result_size = usize::cast_from(max_result_size);
         let count_byte_size = size_of::<NonZeroUsize>();

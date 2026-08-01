@@ -12,10 +12,14 @@
 /// Maximum token length in bytes. Matches Tantivy's default. Longer tokens are dropped.
 const MAX_TOKEN_LENGTH: usize = 40;
 
-/// Splits text into lowercased alphanumeric tokens.
+/// Splits text into lowercased ASCII-alphanumeric tokens.
 ///
 /// Both documents (at index build time) and queries (at evaluation time) must
 /// be tokenized by this same function for terms to match.
+///
+/// NOTE: Only ASCII alphanumerics start or continue a token, so text made up
+/// entirely of other characters, CJK for example, yields no tokens at all and
+/// is therefore unsearchable.
 pub fn tokenize(text: &str) -> impl Iterator<Item = String> + '_ {
     AlphanumericTokens { text, pos: 0 }
         .filter(|t| t.len() <= MAX_TOKEN_LENGTH)

@@ -125,7 +125,12 @@ impl TraceManager {
         self.bm25_traces.get_mut(id)
     }
 
-    /// Removes the trace for `id`.
+    /// Removes both the standard [`TraceBundle`] and any BM25 trace for `id`, returning the
+    /// former.
+    ///
+    /// NOTE: There is no way to drop only one of the two. Code that removes a trace and then
+    /// reinstalls it must reinstall the BM25 trace as well, or peeks against a BM25 index will
+    /// find it missing.
     pub fn remove(&mut self, id: &GlobalId) -> Option<TraceBundle> {
         self.bm25_traces.remove(id);
         self.traces.remove(id)
