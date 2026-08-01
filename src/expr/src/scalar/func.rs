@@ -2384,10 +2384,18 @@ fn starts_with(a: &str, b: &str) -> bool {
 }
 
 /// Placeholder for the BM25 `@@@` operator. The peek fast path rewrites it out
-/// of the plan. It is never evaluated.
+/// of the plan.
+///
+/// Only peeks are rewritten, so a call that survives into a dataflow, from a
+/// materialized view, a `SUBSCRIBE`, or a `COPY TO`, reaches this body. It
+/// returns an error rather than panicking, so the failure lands as a row-level
+/// dataflow error instead of taking the replica down.
 #[sqlfunc(is_infix_op = true, sqlname = "@@@", propagates_nulls = true)]
-fn bm25_match(_haystack: &str, _query: &str) -> bool {
-    panic!("bm25_match must be eliminated during peek planning")
+fn bm25_match(_haystack: &str, _query: &str) -> Result<bool, EvalError> {
+    Err(EvalError::Unsupported {
+        feature: "@@@ outside a peek served by a BM25 index".into(),
+        discussion_no: None,
+    })
 }
 
 #[sqlfunc(

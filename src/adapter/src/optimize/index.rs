@@ -34,6 +34,7 @@ use mz_repr::explain::trace_plan;
 use mz_repr::{GlobalId, ReprRelationType};
 use mz_sql::names::QualifiedItemName;
 use mz_sql::optimizer_metrics::OptimizerMetrics;
+use mz_sql::plan::PlanError;
 use mz_transform::TransformCtx;
 use mz_transform::dataflow::DataflowMetainfo;
 use mz_transform::normalize_lets::normalize_lets;
@@ -202,6 +203,21 @@ impl Optimize<Index> for Optimizer {
         if self.config.mode == OptimizeMode::Explain {
             // Collect the list of indexes used by the dataflow at this point.
             trace_plan!(at: "global", &df_meta.used_indexes(&df_desc));
+        }
+
+        // A dataflow containing a `LetRec` renders in an iterative scope, where index export has
+        // no BM25 counterpart and the replica asserts. Rejecting here fails index creation before
+        // the catalog commits, rather than leaving the replica to crash on every render attempt.
+        if index.bm25
+            && df_desc
+                .objects_to_build
+                .iter()
+                .any(|build| build.plan.as_inner().is_recursive())
+        {
+            return Err(OptimizerError::PlanError(PlanError::Unsupported {
+                feature: "a BM25 index on a recursive view".into(),
+                discussion_no: None,
+            }));
         }
 
         // Emit a notice if we are trying to create an empty index.

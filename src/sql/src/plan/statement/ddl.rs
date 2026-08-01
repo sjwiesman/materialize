@@ -4365,6 +4365,29 @@ pub fn plan_create_index(
         print_name: None,
     });
 
+    if bm25 {
+        // Rendering reuses an existing arrangement whenever the new index imports a key the
+        // dataflow already has arranged, and reuse hands back a standard `TraceBundle` with no
+        // BM25 counterpart. The replica asserts against that, so an index accepted here would
+        // crash the replica on every render attempt. Reject before the catalog commits.
+        let conflict = on.used_by().iter().find(|dependent_id| {
+            let dependent = scx.catalog.get_item(dependent_id);
+            let Some((index_keys, index_on)) = dependent.index_details() else {
+                return false;
+            };
+            index_on == on.global_id()
+                && dependent.cluster_id() == Some(cluster_id)
+                && index_keys == keys.as_slice()
+        });
+        if let Some(conflict) = conflict {
+            let conflict = scx.catalog.get_item(conflict);
+            sql_bail!(
+                "a BM25 index cannot share its key with index {} on the same cluster",
+                scx.catalog.resolve_full_name(conflict.name())
+            );
+        }
+    }
+
     // Normalize `stmt`.
     *name = Some(Ident::new(index_name.item.clone())?);
     *key_parts = Some(filled_key_parts);
