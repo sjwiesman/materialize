@@ -1968,6 +1968,16 @@ impl Bm25Peek {
         let PeekTarget::Bm25Index { query, .. } = &self.peek.target else {
             unreachable!("Bm25Peek always has a Bm25Index target");
         };
+        let parsed = match mz_bm25::parse_query(query) {
+            Ok(parsed) => parsed,
+            // Planning validates the query, so a parse failure here means an
+            // adapter/replica version skew. Fail the peek, not the process.
+            Err(e) => {
+                return PeekStatus::Ready(PeekResponse::Error(format!(
+                    "invalid search query: {e}"
+                )));
+            }
+        };
         let peek_timestamp = self.peek.timestamp;
 
         // `(key, row)` to accumulated diff, score, and the lower bound of the batch the score came
@@ -1991,7 +2001,7 @@ impl Bm25Peek {
                 &rebuilt
             };
 
-            let scores = mz_bm25::evaluate(index, query);
+            let scores = mz_bm25::evaluate(index, &parsed);
             if scores.is_empty() {
                 return;
             }
