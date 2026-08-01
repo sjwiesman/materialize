@@ -121,8 +121,6 @@ impl TraceManager {
 
     /// Returns a mutable reference to the BM25 search arrangement for `id`,
     /// should it exist.
-    // TODO: drop the `allow` once the BM25 peek path reads this.
-    #[allow(dead_code)]
     pub fn get_bm25(&mut self, id: &GlobalId) -> Option<&mut Bm25Agent> {
         self.bm25_traces.get_mut(id)
     }

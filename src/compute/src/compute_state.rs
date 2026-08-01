@@ -16,10 +16,11 @@ use std::time::{Duration, Instant};
 
 use bytesize::ByteSize;
 use differential_dataflow::Hashable;
-use differential_dataflow::lattice::Lattice;
+use differential_dataflow::lattice::{Lattice, antichain_join};
 use differential_dataflow::trace::cursor::BatchCursor;
 use differential_dataflow::trace::implementations::BatchContainer;
-use differential_dataflow::trace::{Cursor, Navigable, TraceReader};
+use differential_dataflow::trace::{BatchReader, Cursor, Navigable, TraceReader};
+use mz_bm25::Bm25Agent;
 use mz_compute_client::logging::LoggingConfig;
 use mz_compute_client::protocol::command::{
     ComputeCommand, ComputeParameters, InstanceConfig, Peek, PeekTarget,
@@ -39,6 +40,7 @@ use mz_expr::row::RowCollection;
 use mz_expr::{RowComparator, SafeMfpPlan};
 use mz_ore::cast::{CastFrom, CastLossy};
 use mz_ore::collections::CollectionExt;
+use mz_ore::error::ErrorExt;
 use mz_ore::metrics::{MetricsRegistry, UIntGauge};
 use mz_ore::now::EpochMillis;
 use mz_ore::soft_panic_or_log;
@@ -51,7 +53,7 @@ use mz_persist_client::read::ReadHandle;
 use mz_persist_types::PersistLocation;
 use mz_persist_types::codec_impls::UnitSchema;
 use mz_repr::fixed_length::ExtendDatums;
-use mz_repr::{DatumVec, Diff, GlobalId, Row, RowArena, Timestamp};
+use mz_repr::{Datum, DatumVec, Diff, GlobalId, Row, RowArena, Timestamp};
 use mz_storage_operators::stats::StatsCursor;
 use mz_storage_types::StorageDiff;
 use mz_storage_types::controller::CollectionMetadata;
@@ -758,7 +760,17 @@ impl<'a> ActiveComputeState<'a> {
                     self.timely_worker,
                 )
             }
-            PeekTarget::Bm25Index { .. } => todo!("bm25 peek execution"),
+            PeekTarget::Bm25Index { id, .. } => {
+                let oks = self
+                    .compute_state
+                    .traces
+                    .get_bm25(id)
+                    .unwrap_or_else(|| panic!("BM25 arrangement missing for peek target {id}"))
+                    .clone();
+                // The standard bundle for the same index carries the error collection.
+                let errs_bundle = self.compute_state.traces.get(id).unwrap().clone();
+                PendingPeek::bm25(peek, oks, errs_bundle)
+            }
         };
 
         // Log the receipt of the peek.
@@ -1091,6 +1103,15 @@ impl<'a> ActiveComputeState<'a> {
                     }
                 }
             }
+            PendingPeek::Bm25(peek) => {
+                match peek.seek_fulfillment(upper, self.compute_state.max_result_size) {
+                    PeekStatus::Ready(result) => Some(result),
+                    PeekStatus::NotReady => None,
+                    PeekStatus::UsePeekStash => {
+                        unreachable!("BM25 peeks do not use the peek stash")
+                    }
+                }
+            }
             PendingPeek::Persist(peek) => peek.result.try_recv().ok().map(|(result, duration)| {
                 self.compute_state
                     .metrics
@@ -1274,6 +1295,8 @@ impl<'a> ActiveComputeState<'a> {
 pub enum PendingPeek {
     /// A peek against an index. (Possibly a temporary index created for the purpose.)
     Index(IndexPeek),
+    /// A search against a BM25 index.
+    Bm25(Bm25Peek),
     /// A peek against a Persist-backed collection.
     Persist(PersistPeek),
     /// A peek against an index that is being stashed in the peek stash by an
@@ -1319,6 +1342,26 @@ impl PendingPeek {
         PendingPeek::Index(IndexPeek {
             peek,
             trace_bundle,
+            span: tracing::Span::current(),
+        })
+    }
+
+    fn bm25(peek: Peek, mut oks: Bm25Agent, mut errs_bundle: TraceBundle) -> Self {
+        let empty_frontier = Antichain::new();
+        let timestamp_frontier = Antichain::from_elem(peek.timestamp);
+        oks.set_logical_compaction(timestamp_frontier.borrow());
+        errs_bundle
+            .errs_mut()
+            .set_logical_compaction(timestamp_frontier.borrow());
+        oks.set_physical_compaction(empty_frontier.borrow());
+        errs_bundle
+            .errs_mut()
+            .set_physical_compaction(empty_frontier.borrow());
+
+        PendingPeek::Bm25(Bm25Peek {
+            peek,
+            oks,
+            errs_bundle,
             span: tracing::Span::current(),
         })
     }
@@ -1399,6 +1442,7 @@ impl PendingPeek {
     fn span(&self) -> &tracing::Span {
         match self {
             PendingPeek::Index(p) => &p.span,
+            PendingPeek::Bm25(p) => &p.span,
             PendingPeek::Persist(p) => &p.span,
             PendingPeek::Stash(p) => &p.span,
         }
@@ -1407,6 +1451,7 @@ impl PendingPeek {
     pub(crate) fn peek(&self) -> &Peek {
         match self {
             PendingPeek::Index(p) => &p.peek,
+            PendingPeek::Bm25(p) => &p.peek,
             PendingPeek::Persist(p) => &p.peek,
             PendingPeek::Stash(p) => &p.peek,
         }
@@ -1826,6 +1871,228 @@ impl IndexPeek {
         metrics
             .row_collection_seconds
             .observe(row_collection_start.elapsed().as_secs_f64());
+        PeekStatus::Ready(PeekResponse::Rows(vec![collection]))
+    }
+}
+
+/// An in-progress search against a BM25 index, and data to eventually fulfill it.
+pub struct Bm25Peek {
+    peek: Peek,
+    /// The BM25 search arrangement, which holds the indexed text as key and the full row as value.
+    oks: Bm25Agent,
+    /// The standard bundle for the same index, read for its error collection.
+    errs_bundle: TraceBundle,
+    /// The `tracing::Span` tracking this peek's operation
+    span: tracing::Span,
+}
+
+impl Bm25Peek {
+    /// Attempts to fulfill the peek and reports success.
+    ///
+    /// Readiness is judged by the BM25 arrangement's own upper. That arrangement is an independent
+    /// operator chain behind its own exchange, so its upper can trail the standard bundle's and the
+    /// standard bundle's frontiers say nothing about whether this trace is settled.
+    fn seek_fulfillment(
+        &mut self,
+        upper: &mut Antichain<Timestamp>,
+        max_result_size: u64,
+    ) -> PeekStatus {
+        self.oks.read_upper(upper);
+        if upper.less_equal(&self.peek.timestamp) {
+            return PeekStatus::NotReady;
+        }
+        self.errs_bundle.errs_mut().read_upper(upper);
+        if upper.less_equal(&self.peek.timestamp) {
+            return PeekStatus::NotReady;
+        }
+
+        let read_frontier = antichain_join(
+            &self.oks.get_logical_compaction(),
+            &self.errs_bundle.errs_mut().get_logical_compaction(),
+        );
+        if !read_frontier.less_equal(&self.peek.timestamp) {
+            let error = format!(
+                "Arrangement compaction frontier ({:?}) is beyond the time of the attempted read ({})",
+                read_frontier.elements(),
+                self.peek.timestamp,
+            );
+            return PeekStatus::Ready(PeekResponse::Error(error));
+        }
+
+        self.collect_finished_data(max_result_size)
+    }
+
+    /// Collects data for a known-complete peek, errors first.
+    fn collect_finished_data(&mut self, max_result_size: u64) -> PeekStatus {
+        // Check if there exist any errors and, if so, return whatever one we
+        // find first.
+        let (mut cursor, storage) = self.errs_bundle.errs_mut().cursor();
+        while cursor.key_valid(&storage) {
+            let mut copies = Diff::ZERO;
+            cursor.map_times(&storage, |time, diff| {
+                if time.less_equal(&self.peek.timestamp) {
+                    copies += diff;
+                }
+            });
+            if copies.is_negative() {
+                let error = cursor.key(&storage);
+                error!(
+                    target = %self.peek.target.id(), diff = %copies, %error,
+                    "bm25 peek encountered negative multiplicities in error trace",
+                );
+                return PeekStatus::Ready(PeekResponse::Error(format!(
+                    "Invalid data in source errors, \
+                    saw retractions ({}) for row that does not exist: {}",
+                    -copies, error,
+                )));
+            }
+            if copies.is_positive() {
+                return PeekStatus::Ready(PeekResponse::Error(cursor.key(&storage).to_string()));
+            }
+            cursor.step_key(&storage);
+        }
+
+        self.collect_ok_finished_data(max_result_size)
+    }
+
+    /// Searches every batch of the BM25 arrangement and assembles the response.
+    ///
+    /// Each batch carries an inverted index over its own keys, so scoring is per batch and the
+    /// results are stitched back together here: diffs of a `(key, row)` pair are summed across
+    /// batches for all times not beyond the peek timestamp, and the pair's score is taken from the
+    /// newest batch that scored it.
+    fn collect_ok_finished_data(&self, max_result_size: u64) -> PeekStatus {
+        let max_result_size = usize::cast_from(max_result_size);
+        let count_byte_size = size_of::<NonZeroUsize>();
+
+        let PeekTarget::Bm25Index { query, .. } = &self.peek.target else {
+            unreachable!("Bm25Peek always has a Bm25Index target");
+        };
+        let peek_timestamp = self.peek.timestamp;
+
+        // `(key, row)` to accumulated diff, score, and the lower bound of the batch the score came
+        // from. Batch lower bounds order the batches, so a score from a batch that is not before
+        // the recorded one wins.
+        let mut accumulated: BTreeMap<(String, Row), (Diff, f64, Antichain<Timestamp>)> =
+            BTreeMap::new();
+
+        self.oks.map_batches(|batch| {
+            if batch.is_empty() {
+                return;
+            }
+
+            // Merging does not rebuild the inverted index, so merged batches arrive unbuilt.
+            let rebuilt;
+            let keys = &batch.storage.keys;
+            let index = if keys.bm25_index().is_built() {
+                keys.bm25_index()
+            } else {
+                rebuilt = mz_bm25::Bm25Index::build(keys.texts());
+                &rebuilt
+            };
+
+            let scores = mz_bm25::evaluate(index, query);
+            if scores.is_empty() {
+                return;
+            }
+
+            let batch_lower = batch.description().lower().clone();
+            let mut cursor = batch.cursor();
+            // Document ids are positions in the batch's key container, and the cursor walks keys
+            // in that same order, so stepping the cursor forward to each scored id maps the id
+            // back to its key and vals. Scores are ordered by document id.
+            let mut current_doc: u32 = 0;
+            for (doc_id, score) in scores {
+                while current_doc < doc_id && cursor.key_valid(batch) {
+                    cursor.step_key(batch);
+                    current_doc += 1;
+                }
+                if !cursor.key_valid(batch) {
+                    break;
+                }
+
+                let key: String = cursor.key(batch).clone();
+                while cursor.val_valid(batch) {
+                    let val: Row = cursor.val(batch).clone();
+                    let mut copies = Diff::ZERO;
+                    cursor.map_times(batch, |time, diff| {
+                        if time.less_equal(&peek_timestamp) {
+                            copies += diff;
+                        }
+                    });
+                    if copies != Diff::ZERO {
+                        let score = f64::from(score);
+                        let entry = accumulated
+                            .entry((key.clone(), val))
+                            .or_insert_with(|| (Diff::ZERO, score, batch_lower.clone()));
+                        entry.0 += copies;
+                        if PartialOrder::less_equal(&entry.2, &batch_lower) {
+                            entry.1 = score;
+                            entry.2 = batch_lower.clone();
+                        }
+                    }
+                    cursor.step_val(batch);
+                }
+            }
+        });
+
+        // Evaluate the MFP over `(row ++ score)` and assemble the response.
+        let mut datum_vec = DatumVec::new();
+        let mut row_builder = Row::default();
+        let mut results = Vec::new();
+        let mut total_size: usize = 0;
+
+        for ((_key, val), (copies, score, _batch_lower)) in accumulated {
+            if copies.is_negative() {
+                error!(
+                    target = %self.peek.target.id(), diff = %copies, row = ?val,
+                    "bm25 peek encountered negative multiplicities in ok trace",
+                );
+                return PeekStatus::Ready(PeekResponse::Error(format!(
+                    "Invalid data in source, \
+                    saw retractions ({}) for row that does not exist: {:?}",
+                    -copies, val,
+                )));
+            }
+            let copies = usize::try_from(copies.into_inner()).expect("checked non-negative");
+            let Some(copies) = NonZeroUsize::new(copies) else {
+                continue;
+            };
+
+            // A fresh arena per row keeps the memory held by the MFP's temporaries bounded by one
+            // row, at the cost of an allocation per result.
+            let arena = RowArena::new();
+            let mut datums = datum_vec.borrow_with(&val);
+            datums.push(Datum::from(score));
+            let result = self
+                .peek
+                .map_filter_project
+                .evaluate_into(&mut datums, &arena, &mut row_builder)
+                .map(|row| row.cloned());
+            drop(datums);
+
+            let row = match result {
+                Ok(Some(row)) => row,
+                Ok(None) => continue,
+                Err(err) => {
+                    return PeekStatus::Ready(PeekResponse::Error(err.to_string_with_causes()));
+                }
+            };
+
+            total_size = total_size
+                .saturating_add(row.byte_len())
+                .saturating_add(count_byte_size);
+            if total_size > max_result_size {
+                return PeekStatus::Ready(PeekResponse::Error(format!(
+                    "result exceeds max size of {}",
+                    ByteSize::b(u64::cast_from(max_result_size))
+                )));
+            }
+
+            results.push((row, copies));
+        }
+
+        let collection = RowCollection::new(results, &self.peek.finishing.order_by);
         PeekStatus::Ready(PeekResponse::Rows(vec![collection]))
     }
 }
