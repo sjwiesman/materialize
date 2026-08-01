@@ -426,6 +426,7 @@ mod derive {
         PrettySql(PrettySql),
         RegexpReplace(RegexpReplace),
         StartsWith(StartsWith),
+        Bm25Match(Bm25Match),
     }
 }
 

@@ -5860,6 +5860,9 @@ pub static OP_IMPLS: LazyLock<BTreeMap<&'static str, Func>> = LazyLock::new(|| {
             params!(Jsonb, SqlScalarType::Array(Box::new(SqlScalarType::String)))
                 => BF::from(func::JsonbGetPathStringify) => String, 3206;
         },
+        "@@@" => Scalar {
+            params!(String, String) => BF::from(func::Bm25Match) => Bool, oid::OP_BM25_MATCH_OID;
+        },
         "@>" => Scalar {
             params!(Jsonb, Jsonb) => BF::from(func::JsonbContainsJsonb) => Bool, 3246;
             params!(Jsonb, String) => Operation::binary(|_ecx, lhs, rhs| {

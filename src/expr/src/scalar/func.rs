@@ -2383,6 +2383,13 @@ fn starts_with(a: &str, b: &str) -> bool {
     a.starts_with(b)
 }
 
+/// Placeholder for the BM25 `@@@` operator. The peek fast path rewrites it out
+/// of the plan. It is never evaluated.
+#[sqlfunc(is_infix_op = true, sqlname = "@@@", propagates_nulls = true)]
+fn bm25_match(_haystack: &str, _query: &str) -> bool {
+    panic!("bm25_match must be eliminated during peek planning")
+}
+
 #[sqlfunc(
     sqlname = "||",
     is_infix_op = true,
