@@ -583,6 +583,8 @@ pub struct IndexDesc<E> {
     pub on_id: GlobalId,
     /// Expressions to be arranged, in order of decreasing primacy.
     pub key: Vec<E>,
+    /// Whether this is a BM25 full-text-search index rather than a regular arrangement.
+    pub bm25: bool,
 }
 
 impl IndexDesc<MirScalarExpr> {
@@ -591,7 +593,11 @@ impl IndexDesc<MirScalarExpr> {
         let on_id = self.on_id.clone();
         let key = lses_from_mses(&self.key);
 
-        IndexDesc { on_id, key }
+        IndexDesc {
+            on_id,
+            key,
+            bm25: self.bm25,
+        }
     }
 }
 

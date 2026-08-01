@@ -327,12 +327,16 @@ impl<'a> DataflowBuilder<'a> {
             // Here, we import all indexes that belong to all imported collections. Later,
             // `prune_and_annotate_dataflow_index_imports` runs at the end of the MIR
             // pipeline, and removes unneeded index imports based on the optimized plan.
-            let mut valid_indexes = self.indexes_on(*id).peekable();
+            //
+            // BM25 indexes are excluded: they arrange an inverted index rather than the
+            // collection itself, so they can never serve as an import of `id`.
+            let mut valid_indexes = self.indexes_on(*id).filter(|(_, idx)| !idx.bm25).peekable();
             if valid_indexes.peek().is_some() {
                 for (index_id, idx) in valid_indexes {
                     let index_desc = IndexDesc {
                         on_id: *id,
                         key: idx.keys.to_vec(),
+                        bm25: idx.bm25,
                     };
                     let entry = self.catalog.get_entry(id);
                     let desc = entry

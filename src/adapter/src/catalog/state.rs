@@ -1493,6 +1493,7 @@ impl CatalogState {
                 global_id,
                 on: index.on,
                 keys: index.keys.into(),
+                bm25: index.bm25,
                 conn_id: None,
                 resolved_ids,
                 cluster_id: index.cluster_id,

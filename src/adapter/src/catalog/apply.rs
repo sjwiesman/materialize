@@ -2205,6 +2205,7 @@ impl CatalogState {
                 .into_iter()
                 .map(MirScalarExpr::column)
                 .collect(),
+            bm25: false,
             create_sql: index_sql(
                 index_item_name,
                 cluster_id,

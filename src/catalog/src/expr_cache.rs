@@ -805,6 +805,7 @@ mod tests {
                 desc: IndexDesc {
                     on_id: GlobalId::User(1),
                     key: Default::default(),
+                    bm25: false,
                 },
                 typ: ReprRelationType::empty(),
                 monotonic: false,

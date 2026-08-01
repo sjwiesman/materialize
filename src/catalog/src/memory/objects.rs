@@ -1572,6 +1572,8 @@ pub struct Index {
     pub on: GlobalId,
     /// Keys of the index.
     pub keys: Arc<[MirScalarExpr]>,
+    /// Whether this is a BM25 full-text-search index rather than a regular arrangement.
+    pub bm25: bool,
     /// If created in the `TEMPORARY` schema, the [`ConnectionId`] for that session.
     pub conn_id: Option<ConnectionId>,
     /// Other catalog objects referenced by this index, e.g. the object we're indexing.

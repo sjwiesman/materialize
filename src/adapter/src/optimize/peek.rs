@@ -279,6 +279,7 @@ impl<'s> Optimize<LocalMirPlan<Resolved<'s>>> for Optimizer {
                 IndexDesc {
                     on_id: self.select_id,
                     key,
+                    bm25: false,
                 },
                 ReprRelationType::from(&typ),
             );

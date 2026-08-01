@@ -84,6 +84,9 @@ impl DataflowBuilder<'_> {
         id_bundle
     }
 
+    // NOTE: BM25 indexes are filtered where this is used for plan/import
+    // decisions (the IndexOracle impl, import_into_dataflow), but not here,
+    // so that sufficient_collections still takes read holds on them.
     pub fn indexes_on(&self, id: GlobalId) -> impl Iterator<Item = (GlobalId, &Index)> {
         self.catalog
             .get_indexes_on(id, self.compute.instance_id())
@@ -99,6 +102,7 @@ impl IndexOracle for DataflowBuilder<'_> {
     ) -> Box<dyn Iterator<Item = (GlobalId, &[MirScalarExpr])> + '_> {
         Box::new(
             self.indexes_on(id)
+                .filter(|(_, idx)| !idx.bm25)
                 .map(|(idx_id, idx)| (idx_id, idx.keys.as_ref())),
         )
     }

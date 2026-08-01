@@ -90,12 +90,23 @@ pub struct Index {
     name: QualifiedItemName,
     on: GlobalId,
     keys: Vec<mz_expr::MirScalarExpr>,
+    bm25: bool,
 }
 
 impl Index {
     /// Construct a new [`Index`]. Arguments are recorded as-is.
-    pub fn new(name: QualifiedItemName, on: GlobalId, keys: Vec<mz_expr::MirScalarExpr>) -> Self {
-        Self { name, on, keys }
+    pub fn new(
+        name: QualifiedItemName,
+        on: GlobalId,
+        keys: Vec<mz_expr::MirScalarExpr>,
+        bm25: bool,
+    ) -> Self {
+        Self {
+            name,
+            on,
+            keys,
+            bm25,
+        }
     }
 }
 
@@ -160,6 +171,7 @@ impl Optimize<Index> for Optimizer {
         let index_desc = IndexDesc {
             on_id: index.on,
             key: index.keys.clone(),
+            bm25: index.bm25,
         };
         df_desc.export_index(
             self.exported_index_id,
@@ -198,9 +210,11 @@ impl Optimize<Index> for Optimizer {
         }
 
         // Emit a notice for each available index identical to the one we are
-        // currently optimizing.
+        // currently optimizing. A BM25 index arranges different data than a
+        // regular index on the same keys, so the two never duplicate each other.
         for (index_id, idx) in df_builder
             .indexes_on(index.on)
+            .filter(|(_id, idx)| idx.bm25 == index.bm25)
             .filter(|(_id, idx)| idx.keys.as_ref() == &index.keys)
         {
             df_meta.push_optimizer_notice_dedup(IndexAlreadyExists {

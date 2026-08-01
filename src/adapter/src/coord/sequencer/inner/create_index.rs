@@ -359,6 +359,7 @@ impl Coordinator {
                         plan.name.clone(),
                         plan.index.on,
                         plan.index.keys.clone(),
+                        plan.index.bm25,
                     );
 
                     // MIR ⇒ MIR optimization (global)
@@ -442,6 +443,7 @@ impl Coordinator {
                             create_sql,
                             on,
                             keys,
+                            bm25,
                             cluster_id,
                             compaction_window,
                         },
@@ -465,6 +467,7 @@ impl Coordinator {
                 create_sql,
                 global_id,
                 keys: keys.into(),
+                bm25,
                 on,
                 conn_id: None,
                 resolved_ids,

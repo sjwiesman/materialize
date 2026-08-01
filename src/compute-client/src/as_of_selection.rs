@@ -1093,6 +1093,7 @@ mod tests {
                     desc: IndexDesc {
                         on_id: GlobalId::Transient(0),
                         key: Default::default(),
+                        bm25: false,
                     },
                     typ: ReprRelationType::empty(),
                     monotonic: Default::default(),
@@ -1108,6 +1109,7 @@ mod tests {
                 let desc = IndexDesc {
                     on_id: GlobalId::Transient(0),
                     key: Default::default(),
+                    bm25: false,
                 };
                 let typ = ReprRelationType::empty();
                 (id, (desc, typ))

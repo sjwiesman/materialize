@@ -249,7 +249,11 @@ impl DataflowBuilder {
         let key: Vec<MirScalarExpr> = key_cols.into_iter().map(MirScalarExpr::column).collect();
         self.mir.import_index(
             index_id,
-            IndexDesc { on_id, key },
+            IndexDesc {
+                on_id,
+                key,
+                bm25: false,
+            },
             on_type.clone(),
             monotonic,
         );
@@ -303,8 +307,15 @@ impl DataflowBuilder {
             .unwrap_or_else(|| panic!("export_index on unknown id {on_id}"))
             .clone();
         let key: Vec<MirScalarExpr> = key_cols.into_iter().map(MirScalarExpr::column).collect();
-        self.mir
-            .export_index(index_id, IndexDesc { on_id, key }, on_type);
+        self.mir.export_index(
+            index_id,
+            IndexDesc {
+                on_id,
+                key,
+                bm25: false,
+            },
+            on_type,
+        );
         self
     }
 
