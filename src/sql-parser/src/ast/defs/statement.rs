@@ -1916,6 +1916,8 @@ impl_display_t!(CreateIndexStatement);
 pub enum IndexOptionName {
     // The `RETAIN HISTORY` option
     RetainHistory,
+    // The `BM25` option
+    Bm25,
 }
 
 impl AstDisplay for IndexOptionName {
@@ -1923,6 +1925,9 @@ impl AstDisplay for IndexOptionName {
         match self {
             IndexOptionName::RetainHistory => {
                 f.write_str("RETAIN HISTORY");
+            }
+            IndexOptionName::Bm25 => {
+                f.write_str("BM25");
             }
         }
     }
@@ -1937,6 +1942,7 @@ impl WithOptionName for IndexOptionName {
     fn redact_value(&self) -> bool {
         match self {
             IndexOptionName::RetainHistory => false,
+            IndexOptionName::Bm25 => false,
         }
     }
 }

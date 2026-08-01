@@ -1125,6 +1125,27 @@ CREATE INDEX foo ON myschema.bar (a, b) WITH (RETAIN HISTORY = FOR '1000 hours')
 CreateIndex(CreateIndexStatement { name: Some(Ident("foo")), in_cluster: None, on_name: Name(UnresolvedItemName([Ident("myschema"), Ident("bar")])), key_parts: Some([Identifier([Ident("a")]), Identifier([Ident("b")])]), with_options: [IndexOption { name: RetainHistory, value: Some(RetainHistoryFor(String("1000 hours"))) }], if_not_exists: false })
 
 parse-statement
+CREATE INDEX fts ON t (a) WITH (BM25)
+----
+CREATE INDEX fts ON t (a) WITH (BM25)
+=>
+CreateIndex(CreateIndexStatement { name: Some(Ident("fts")), in_cluster: None, on_name: Name(UnresolvedItemName([Ident("t")])), key_parts: Some([Identifier([Ident("a")])]), with_options: [IndexOption { name: Bm25, value: None }], if_not_exists: false })
+
+parse-statement
+CREATE INDEX fts ON t (a) WITH (BM25 = true)
+----
+CREATE INDEX fts ON t (a) WITH (BM25 = true)
+=>
+CreateIndex(CreateIndexStatement { name: Some(Ident("fts")), in_cluster: None, on_name: Name(UnresolvedItemName([Ident("t")])), key_parts: Some([Identifier([Ident("a")])]), with_options: [IndexOption { name: Bm25, value: Some(Value(Boolean(true))) }], if_not_exists: false })
+
+parse-statement
+CREATE INDEX fts ON t (a) WITH (RETAIN HISTORY = FOR '1s', BM25)
+----
+CREATE INDEX fts ON t (a) WITH (RETAIN HISTORY = FOR '1s', BM25)
+=>
+CreateIndex(CreateIndexStatement { name: Some(Ident("fts")), in_cluster: None, on_name: Name(UnresolvedItemName([Ident("t")])), key_parts: Some([Identifier([Ident("a")])]), with_options: [IndexOption { name: RetainHistory, value: Some(RetainHistoryFor(String("1s"))) }, IndexOption { name: Bm25, value: None }], if_not_exists: false })
+
+parse-statement
 CREATE INDEX fizz ON baz (ascii(x), a IS NOT NULL, (EXISTS (SELECT y FROM boop WHERE boop.z = z)), delta)
 ----
 CREATE INDEX fizz ON baz (ascii(x), a IS NOT NULL, (EXISTS (SELECT y FROM boop WHERE boop.z = z)), delta)
@@ -1634,49 +1655,49 @@ CREATE TABLE foo FROM SOURCE mz_source (REFERENCE = x)
 parse-statement
 ALTER INDEX name SET (property = true)
 ----
-error: Expected RETAIN, found identifier "property"
+error: Expected one of RETAIN or BM25, found identifier "property"
 ALTER INDEX name SET (property = true)
                       ^
 
 parse-statement
 ALTER INDEX name RESET (property)
 ----
-error: Expected RETAIN, found identifier "property"
+error: Expected one of RETAIN or BM25, found identifier "property"
 ALTER INDEX name RESET (property)
                         ^
 
 parse-statement
 ALTER INDEX IF EXISTS name SET (property = true)
 ----
-error: Expected RETAIN, found identifier "property"
+error: Expected one of RETAIN or BM25, found identifier "property"
 ALTER INDEX IF EXISTS name SET (property = true)
                                 ^
 
 parse-statement
 ALTER INDEX name SET ()
 ----
-error: Expected RETAIN, found right parenthesis
+error: Expected one of RETAIN or BM25, found right parenthesis
 ALTER INDEX name SET ()
                       ^
 
 parse-statement
 ALTER INDEX name RESET ()
 ----
-error: Expected RETAIN, found right parenthesis
+error: Expected one of RETAIN or BM25, found right parenthesis
 ALTER INDEX name RESET ()
                         ^
 
 parse-statement
 ALTER INDEX name SET (property)
 ----
-error: Expected RETAIN, found identifier "property"
+error: Expected one of RETAIN or BM25, found identifier "property"
 ALTER INDEX name SET (property)
                       ^
 
 parse-statement
 ALTER INDEX name RESET (property = true)
 ----
-error: Expected RETAIN, found identifier "property"
+error: Expected one of RETAIN or BM25, found identifier "property"
 ALTER INDEX name RESET (property = true)
                         ^
 

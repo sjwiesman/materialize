@@ -65,6 +65,7 @@ Begin
 Between
 Bigint
 Billed
+Bm25
 Body
 Boolean
 Both

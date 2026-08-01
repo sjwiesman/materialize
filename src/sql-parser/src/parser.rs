@@ -4380,14 +4380,22 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_index_option_name(&mut self) -> Result<IndexOptionName, ParserError> {
-        self.expect_keywords(&[RETAIN, HISTORY])?;
-        Ok(IndexOptionName::RetainHistory)
+        let name = match self.expect_one_of_keywords(&[RETAIN, BM25])? {
+            RETAIN => {
+                self.expect_keyword(HISTORY)?;
+                IndexOptionName::RetainHistory
+            }
+            BM25 => IndexOptionName::Bm25,
+            _ => unreachable!(),
+        };
+        Ok(name)
     }
 
     fn parse_index_option(&mut self) -> Result<IndexOption<Raw>, ParserError> {
         let name = self.parse_index_option_name()?;
         let value = match name {
             IndexOptionName::RetainHistory => self.parse_option_retain_history(),
+            IndexOptionName::Bm25 => self.parse_optional_option_value(),
         }?;
         Ok(IndexOption { name, value })
     }
