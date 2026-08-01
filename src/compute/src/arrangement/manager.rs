@@ -18,6 +18,7 @@ use differential_dataflow::lattice::antichain_join;
 use differential_dataflow::operators::arrange::{Arranged, ShutdownButton, TraceAgent};
 use differential_dataflow::trace::TraceReader;
 use differential_dataflow::trace::wrappers::frontier::TraceFrontier;
+use mz_bm25::Bm25Agent;
 use mz_repr::{Diff, GlobalId, Timestamp};
 use timely::PartialOrder;
 use timely::dataflow::Scope;
@@ -32,6 +33,10 @@ use crate::typedefs::{ErrAgent, RowRowAgent};
 /// representation of that collection.
 pub struct TraceManager {
     pub(crate) traces: BTreeMap<GlobalId, TraceBundle>,
+    /// BM25 search arrangements, keyed like `traces`. A BM25 index has an entry
+    /// in both maps: the standard bundle serves frontier reporting and errors,
+    /// this map serves `PeekTarget::Bm25Index`.
+    pub(crate) bm25_traces: BTreeMap<GlobalId, Bm25Agent>,
     metrics: WorkerMetrics,
 }
 
@@ -40,6 +45,7 @@ impl TraceManager {
     pub fn new(metrics: WorkerMetrics) -> Self {
         TraceManager {
             traces: BTreeMap::new(),
+            bm25_traces: BTreeMap::new(),
             metrics,
         }
     }
@@ -62,6 +68,10 @@ impl TraceManager {
             bundle.errs.read_upper(&mut antichain);
             bundle.errs.set_physical_compaction(antichain.borrow());
         }
+        for trace in self.bm25_traces.values_mut() {
+            trace.read_upper(&mut antichain);
+            trace.set_physical_compaction(antichain.borrow());
+        }
 
         let duration = start.elapsed().as_secs_f64();
         self.metrics
@@ -81,6 +91,9 @@ impl TraceManager {
             bundle.oks.set_logical_compaction(frontier);
             bundle.errs.set_logical_compaction(frontier);
         }
+        if let Some(trace) = self.bm25_traces.get_mut(&id) {
+            trace.set_logical_compaction(frontier);
+        }
     }
 
     /// Returns a reference to the trace for `id`, should it exist.
@@ -99,8 +112,24 @@ impl TraceManager {
         self.traces.insert(id, trace);
     }
 
+    /// Binds the BM25 search arrangement for `id` to `trace`.
+    ///
+    /// The caller is expected to also `set` a standard [`TraceBundle`] for `id`.
+    pub fn set_bm25(&mut self, id: GlobalId, trace: Bm25Agent) {
+        self.bm25_traces.insert(id, trace);
+    }
+
+    /// Returns a mutable reference to the BM25 search arrangement for `id`,
+    /// should it exist.
+    // TODO: drop the `allow` once the BM25 peek path reads this.
+    #[allow(dead_code)]
+    pub fn get_bm25(&mut self, id: &GlobalId) -> Option<&mut Bm25Agent> {
+        self.bm25_traces.get_mut(id)
+    }
+
     /// Removes the trace for `id`.
     pub fn remove(&mut self, id: &GlobalId) -> Option<TraceBundle> {
+        self.bm25_traces.remove(id);
         self.traces.remove(id)
     }
 }

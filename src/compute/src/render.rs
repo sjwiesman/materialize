@@ -117,10 +117,11 @@ use differential_dataflow::operators::arrange::ShutdownButton;
 use differential_dataflow::operators::iterate::Variable;
 use differential_dataflow::trace::cursor::{BatchCursor, BatchDiff, BatchKey, BatchVal};
 use differential_dataflow::trace::{BatchReader, Cursor, Navigable, TraceReader};
-use differential_dataflow::{AsCollection, Data, VecCollection};
+use differential_dataflow::{AsCollection, Data, Hashable, VecCollection};
 use futures::FutureExt;
 use futures::channel::oneshot;
 use itertools::Itertools;
+use mz_bm25::{Bm25Batcher, Bm25Builder, Bm25Chunker, Bm25Spine};
 use mz_compute_types::dataflows::{DataflowDescription, IndexDesc};
 use mz_compute_types::dyncfgs::{
     COMPUTE_APPLY_COLUMN_DEMANDS, COMPUTE_LOGICAL_BACKPRESSURE_INFLIGHT_SLACK,
@@ -132,7 +133,7 @@ use mz_compute_types::plan::render_plan::{
 };
 use mz_compute_types::plan::scalar::LirScalarExpr;
 use mz_compute_types::plan::{ArrangementStrategy, LirId};
-use mz_expr::{EvalError, Id, LocalId, permutation_for_arrangement};
+use mz_expr::{Eval, EvalError, Id, LocalId, permutation_for_arrangement};
 use mz_persist_client::operators::shard_source::{ErrorHandler, SnapshotMode};
 use mz_repr::explain::DummyHumanizer;
 use mz_repr::fixed_length::ExtendDatums;
@@ -145,7 +146,7 @@ use mz_timely_util::probe::{Handle as MzProbeHandle, ProbeNotify};
 use mz_timely_util::scope_label::ScopeExt;
 use timely::PartialOrder;
 use timely::container::CapacityContainerBuilder;
-use timely::dataflow::channels::pact::Pipeline;
+use timely::dataflow::channels::pact::{ExchangeCore, Pipeline};
 use timely::dataflow::operators::vec::ToStream;
 use timely::dataflow::operators::vec::{BranchWhen, Filter};
 use timely::dataflow::operators::{Capability, Operator, Probe, probe};
@@ -735,6 +736,10 @@ impl<'g> Context<'g, mz_repr::Timestamp> {
                     idx_id,
                     TraceBundle::new(oks.trace, errs.trace).with_drop(needed_tokens),
                 );
+
+                if idx.bm25 {
+                    self.export_bm25_index(compute_state, idx_id, idx, &bundle);
+                }
             }
             Some(ArrangementFlavor::Trace(gid, _, _)) => {
                 // Duplicate of existing arrangement with id `gid`, so
@@ -756,6 +761,76 @@ impl<'g> Context<'g, mz_repr::Timestamp> {
             }
         };
     }
+
+    /// Builds the BM25 arrangement for a `WITH (BM25)` index and registers it under `idx_id`
+    /// alongside the standard arrangement.
+    ///
+    /// The key expression is evaluated per row: NULL keys are skipped and never indexed, non-text
+    /// keys panic because plan-time validation rules them out. The arrangement's value is the full
+    /// original row, not the thinned value the standard arrangement stores, because the peek path
+    /// appends the BM25 score to it and then applies an MFP written against the object's column
+    /// order.
+    fn export_bm25_index(
+        &self,
+        compute_state: &mut ComputeState,
+        idx_id: GlobalId,
+        idx: &IndexDesc<LirScalarExpr>,
+        bundle: &CollectionBundle<'g, mz_repr::Timestamp>,
+    ) {
+        // The unarranged collection is the only form that carries the original rows, so the BM25
+        // arrangement reads it rather than unthinning the standard arrangement. `ensure_collections`
+        // leaves it on the bundle whenever it builds an arrangement, which covers every index whose
+        // key is not already served by an upstream reduce or top-k arrangement.
+        //
+        // NOTE: this is a second reader of the raw collection, so it tees when the collection is
+        // also consumed elsewhere in the dataflow.
+        assert!(
+            bundle.collection.is_some(),
+            "BM25 index {idx_id} exports an arrangement built without a raw collection"
+        );
+        let (oks, _errs) = bundle.as_specific_collection(None, &self.config_set);
+
+        let key_expr = idx.key[0].clone();
+        let mut datum_vec = DatumVec::new();
+        let keyed = oks.flat_map(move |row| {
+            let temp_storage = RowArena::new();
+            let datums = datum_vec.borrow_with(&row);
+            let key = match key_expr
+                .eval(&datums, &temp_storage)
+                .expect("BM25 key expression must not error")
+            {
+                Datum::Null => None,
+                Datum::String(text) => Some(text.to_owned()),
+                other => panic!("BM25 key must be of type text, got {other:?}"),
+            };
+            // `DatumVecBorrow` implements `Drop`, so its borrow of `row` runs to the end of the
+            // scope unless it is dropped explicitly, and `row` cannot move out until then.
+            drop(datums);
+            key.map(|key| (key, row))
+        });
+
+        // `MzArrange` cannot host `Bm25Spine`, as `ArrangementSize` is only implemented for the
+        // built-in agent types. That costs us the arrangement size logging, not correctness.
+        #[allow(clippy::disallowed_methods)]
+        let arranged = differential_dataflow::operators::arrange::arrangement::arrange_core::<
+            _,
+            _,
+            Bm25Chunker,
+            Bm25Batcher,
+            Bm25Builder,
+            Bm25Spine,
+        >(
+            keyed.inner,
+            ExchangeCore::new(
+                |((key, _row), _time, _diff): &((String, Row), mz_repr::Timestamp, Diff)| {
+                    key.hashed()
+                },
+            ),
+            &format!("Bm25Index({idx_id})"),
+        );
+
+        compute_state.traces.set_bm25(idx_id, arranged.trace);
+    }
 }
 
 // This implementation block requires the scopes have the same timestamp as the trace manager.
@@ -774,6 +849,11 @@ where
         idx: &IndexDesc<LirScalarExpr>,
         output_probe: &MzProbeHandle<mz_repr::Timestamp>,
     ) {
+        assert!(
+            !idx.bm25,
+            "BM25 indexes on recursive dataflows are not supported"
+        );
+
         // put together tokens that belong to the export
         let mut needed_tokens = Vec::new();
         for dep_id in dependency_ids {
