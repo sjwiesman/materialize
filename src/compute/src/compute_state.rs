@@ -758,6 +758,7 @@ impl<'a> ActiveComputeState<'a> {
                     self.timely_worker,
                 )
             }
+            PeekTarget::Bm25Index { .. } => todo!("bm25 peek execution"),
         };
 
         // Log the receipt of the peek.
@@ -1287,6 +1288,7 @@ impl PendingPeek {
         let (id, peek_type) = match &peek.target {
             PeekTarget::Index { id } => (*id, logging::compute::PeekType::Index),
             PeekTarget::Persist { id, .. } => (*id, logging::compute::PeekType::Persist),
+            PeekTarget::Bm25Index { id, .. } => (*id, logging::compute::PeekType::Index),
         };
         let uuid = peek.uuid.into_bytes();
         ComputeEvent::Peek(PeekEvent {

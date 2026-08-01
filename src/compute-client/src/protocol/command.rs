@@ -422,6 +422,13 @@ pub enum PeekTarget {
         /// The identifying metadata of the Persist shard.
         metadata: CollectionMetadata,
     },
+    /// This peek is against a BM25 search index, carrying the search query.
+    Bm25Index {
+        /// The id of the index.
+        id: GlobalId,
+        /// The bag-of-words search query.
+        query: String,
+    },
 }
 
 impl PeekTarget {
@@ -430,6 +437,7 @@ impl PeekTarget {
         match self {
             Self::Index { id } => *id,
             Self::Persist { id, .. } => *id,
+            Self::Bm25Index { id, .. } => *id,
         }
     }
 }

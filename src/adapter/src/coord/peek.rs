@@ -179,6 +179,17 @@ pub enum FastPathPlan {
     PeekExisting(GlobalId, GlobalId, Option<Vec<Row>>, mz_expr::SafeMfpPlan),
     /// The view can be read directly out of Persist.
     PeekPersist(GlobalId, Option<Row>, mz_expr::SafeMfpPlan),
+    /// The view can be answered by searching a BM25 index.
+    PeekBm25 {
+        /// The collection the index is on.
+        coll_id: GlobalId,
+        /// The BM25 index to search.
+        idx_id: GlobalId,
+        /// The bag-of-words search query.
+        query: String,
+        /// The map/filter/project to apply to the search results.
+        mfp: mz_expr::SafeMfpPlan,
+    },
 }
 
 impl<'a, T: 'a> DisplayText<PlanRenderingContext<'a, T>> for FastPathPlan {
@@ -246,6 +257,44 @@ impl FastPathPlan {
                 } else {
                     writeln!(f, "{}→Indexed {coll} (using {idx})", ctx.indent)?;
                 }
+
+                ctx.indent.reset();
+            }
+            FastPathPlan::PeekBm25 {
+                coll_id,
+                idx_id,
+                query,
+                mfp,
+            } => {
+                let coll = ctx
+                    .humanizer
+                    .humanize_id(*coll_id)
+                    .unwrap_or_else(|| coll_id.to_string());
+                let idx = ctx
+                    .humanizer
+                    .humanize_id(*idx_id)
+                    .unwrap_or_else(|| idx_id.to_string());
+                writeln!(f, "{}→Map/Filter/Project", ctx.indent)?;
+                ctx.indent.set();
+
+                ctx.indent += 1;
+
+                mode.expr(mfp.deref(), None).fmt_default_text(f, ctx)?;
+                let printed = !mfp.expressions.is_empty() || !mfp.predicates.is_empty();
+
+                if printed {
+                    ctx.indent += 1;
+                }
+                let query = if mode.redacted() {
+                    "█".to_string()
+                } else {
+                    format!("{query:?}")
+                };
+                writeln!(
+                    f,
+                    "{}→Bm25Peek on {coll} (using {idx}) query={query}",
+                    ctx.indent
+                )?;
 
                 ctx.indent.reset();
             }
@@ -363,6 +412,68 @@ impl FastPathPlan {
                     None,
                 )?;
                 writeln!(f)?;
+                ctx.as_mut().reset();
+                Ok(())
+            }
+            FastPathPlan::PeekBm25 {
+                coll_id,
+                idx_id,
+                query,
+                mfp,
+            } => {
+                ctx.as_mut().set();
+                let (map, filter, project) = mfp.as_map_filter_project();
+
+                let cols = if !ctx.config.humanized_exprs {
+                    None
+                } else if let Some(cols) = ctx.humanizer.column_names_for_id(*idx_id) {
+                    let cols = itertools::chain(
+                        cols.iter().cloned(),
+                        std::iter::repeat(String::new()).take(map.len()),
+                    )
+                    .collect::<Vec<_>>();
+                    Some(cols)
+                } else {
+                    None
+                };
+
+                if project.len() != mfp.input_arity + map.len()
+                    || !project.iter().enumerate().all(|(i, o)| i == *o)
+                {
+                    let outputs = mode.seq(&project, cols.as_ref());
+                    let outputs = CompactScalars(outputs);
+                    writeln!(f, "{}Project ({})", ctx.as_mut(), outputs)?;
+                    *ctx.as_mut() += 1;
+                }
+                if !filter.is_empty() {
+                    let predicates = separated(" AND ", mode.seq(&filter, cols.as_ref()));
+                    writeln!(f, "{}Filter {}", ctx.as_mut(), predicates)?;
+                    *ctx.as_mut() += 1;
+                }
+                if !map.is_empty() {
+                    let scalars = mode.seq(&map, cols.as_ref());
+                    let scalars = CompactScalars(scalars);
+                    writeln!(f, "{}Map ({})", ctx.as_mut(), scalars)?;
+                    *ctx.as_mut() += 1;
+                }
+                let coll = ctx
+                    .humanizer
+                    .humanize_id(*coll_id)
+                    .unwrap_or_else(|| coll_id.to_string());
+                let idx = ctx
+                    .humanizer
+                    .humanize_id(*idx_id)
+                    .unwrap_or_else(|| idx_id.to_string());
+                let query = if redacted {
+                    "█".to_string()
+                } else {
+                    format!("{query:?}")
+                };
+                writeln!(
+                    f,
+                    "{}Bm25Peek {coll} (using {idx}) query={query}",
+                    ctx.as_mut()
+                )?;
                 ctx.as_mut().reset();
                 Ok(())
             }
@@ -688,6 +799,9 @@ impl FastPathPlan {
                 }
             }
             FastPathPlan::PeekPersist(..) => UsedIndexes::default(),
+            FastPathPlan::PeekBm25 { idx_id, .. } => {
+                UsedIndexes::new([(*idx_id, vec![IndexUsageType::FullScan])].into())
+            }
         }
     }
 }
@@ -818,6 +932,25 @@ impl crate::coord::Coordinator {
                         read_hold,
                     )
                 }
+                PeekPlan::FastPath(FastPathPlan::PeekBm25 {
+                    idx_id, query, mfp, ..
+                }) => {
+                    let read_hold = self
+                        .controller
+                        .compute
+                        .acquire_read_hold(compute_instance, idx_id)
+                        .map_err(
+                            AdapterError::concurrent_dependency_drop_from_collection_update_error,
+                        )?;
+                    (
+                        (None, timestamp, mfp),
+                        None,
+                        true,
+                        PeekTarget::Bm25Index { id: idx_id, query },
+                        StatementExecutionStrategy::FastPath,
+                        read_hold,
+                    )
+                }
                 PeekPlan::FastPath(FastPathPlan::PeekPersist(
                     coll_id,
                     literal_constraint,
@@ -924,8 +1057,8 @@ impl crate::coord::Coordinator {
                         read_hold,
                     )
                 }
-                PeekPlan::FastPath(_) => {
-                    unreachable!()
+                PeekPlan::FastPath(FastPathPlan::Constant(..)) => {
+                    unreachable!("constant peeks return above")
                 }
             };
 

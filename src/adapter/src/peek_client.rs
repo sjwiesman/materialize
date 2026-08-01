@@ -367,6 +367,18 @@ impl PeekClient {
                     strategy,
                 )
             }
+            FastPathPlan::PeekBm25 {
+                idx_id, query, mfp, ..
+            } => {
+                let peek_target = PeekTarget::Bm25Index { id: idx_id, query };
+                let target_read_hold = input_read_holds
+                    .compute_holds
+                    .get(&(compute_instance, idx_id))
+                    .expect("missing compute read hold on PeekBm25 peek target")
+                    .clone();
+                let strategy = statement_logging::StatementExecutionStrategy::FastPath;
+                (peek_target, target_read_hold, None, mfp, strategy)
+            }
             FastPathPlan::PeekPersist(coll_id, literal_constraint, mfp) => {
                 let literal_constraints = literal_constraint.map(|r| vec![r]);
                 let metadata = self

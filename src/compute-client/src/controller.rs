@@ -891,7 +891,8 @@ impl ComputeController {
     /// Initiate a peek request for the contents of the given collection at `timestamp`.
     ///
     /// The caller supplies a `read_hold` for the peek target — via
-    /// [`ComputeController::acquire_read_hold`] for `PeekTarget::Index`, or via the storage
+    /// [`ComputeController::acquire_read_hold`] for `PeekTarget::Index` and
+    /// `PeekTarget::Bm25Index`, or via the storage
     /// collections for `PeekTarget::Persist`. The hold keeps the collection's `since` at
     /// `<= timestamp` until the peek completes.
     pub fn peek(

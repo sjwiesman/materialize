@@ -1679,6 +1679,7 @@ impl PeekClient {
                         FastPathPlan::Constant(..) => (vec![], vec![]),
                         FastPathPlan::PeekExisting(_coll_id, idx_id, ..) => (vec![], vec![*idx_id]),
                         FastPathPlan::PeekPersist(global_id, ..) => (vec![*global_id], vec![]),
+                        FastPathPlan::PeekBm25 { idx_id, .. } => (vec![], vec![*idx_id]),
                     };
                     (
                         sources,
