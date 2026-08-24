@@ -10,248 +10,115 @@
 //! Shared helpers for grant reconciliation across apply commands.
 
 use crate::cli::CliError;
+use crate::cli::commands::reconcile::ReconcileTarget;
 use crate::cli::executor::DeploymentExecutor;
-use crate::client::{Client, ObjectGrant};
+use crate::client::ObjectGrant;
 use crate::info;
-use crate::project::ir::object_id::ObjectId;
 use mz_sql_parser::ast::{
-    GrantPrivilegesStatement, GrantTargetSpecification, GrantTargetSpecificationInner, Ident,
-    ObjectType, Privilege, PrivilegeSpecification, Raw, RevokePrivilegesStatement,
-    UnresolvedItemName, UnresolvedObjectName,
+    GrantPrivilegesStatement, GrantTargetSpecification, Ident, Privilege, PrivilegeSpecification,
+    Raw, RevokePrivilegesStatement,
 };
 use owo_colors::{OwoColorize, Stream, Style};
-use std::collections::BTreeSet;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-/// The kind of database object for grant reconciliation.
-///
-/// Groups the catalog table name, SQL keyword, privilege set, and display label
-/// that vary per object type so callers don't have to pass four loose strings.
-#[derive(Clone, Copy)]
-pub enum GrantObjectKind {
-    Table,
-    Source,
-    Secret,
-    Connection,
-}
-
-impl GrantObjectKind {
-    pub fn catalog_table(&self) -> &'static str {
-        match self {
-            Self::Table => "mz_tables",
-            Self::Source => "mz_sources",
-            Self::Secret => "mz_secrets",
-            Self::Connection => "mz_connections",
-        }
-    }
-
-    pub fn grant_target(&self, obj_id: &ObjectId) -> GrantTargetSpecification<Raw> {
-        let object_type = match self {
-            Self::Table | Self::Source => ObjectType::Table,
-            Self::Secret => ObjectType::Secret,
-            Self::Connection => ObjectType::Connection,
-        };
-        let item_name = UnresolvedItemName::qualified(&[
-            Ident::new_unchecked(obj_id.expect_database()),
-            Ident::new_unchecked(obj_id.schema()),
-            Ident::new_unchecked(obj_id.object()),
-        ]);
-        build_grant_target(object_type, UnresolvedObjectName::Item(item_name))
-    }
-
-    pub fn all_privileges(&self) -> &'static [&'static str] {
-        match self {
-            Self::Table => &["SELECT", "INSERT", "UPDATE", "DELETE"],
-            Self::Source => &["SELECT"],
-            Self::Secret | Self::Connection => &["USAGE"],
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Table => "table",
-            Self::Source => "source",
-            Self::Secret => "secret",
-            Self::Connection => "connection",
-        }
-    }
-
-    /// The `object_type` string used in `mz_default_privileges`.
-    pub fn object_type_str(&self) -> &'static str {
-        match self {
-            Self::Table | Self::Source => "table",
-            Self::Secret => "secret",
-            Self::Connection => "connection",
-        }
-    }
-}
-
-/// Build a [`GrantTargetSpecification`] for a single named object.
-fn build_grant_target(
-    object_type: ObjectType,
-    name: UnresolvedObjectName,
-) -> GrantTargetSpecification<Raw> {
-    GrantTargetSpecification::Object {
-        object_type,
-        object_spec_inner: GrantTargetSpecificationInner::Objects { names: vec![name] },
-    }
-}
-
-/// The kind of named infrastructure object for grant reconciliation.
-///
-/// Named objects (clusters, network policies) use simpler catalog lookups
-/// than schema-qualified database objects.
-pub enum GrantNamedObjectKind {
-    Cluster,
-    NetworkPolicy,
-}
-
-impl GrantNamedObjectKind {
-    fn grant_target(&self, name: &str) -> GrantTargetSpecification<Raw> {
-        let (object_type, object_name) = match self {
-            Self::Cluster => (
-                ObjectType::Cluster,
-                UnresolvedObjectName::Cluster(Ident::new_unchecked(name)),
-            ),
-            Self::NetworkPolicy => (
-                ObjectType::NetworkPolicy,
-                UnresolvedObjectName::NetworkPolicy(Ident::new_unchecked(name)),
-            ),
-        };
-        build_grant_target(object_type, object_name)
-    }
-
-    fn all_privileges(&self) -> &'static [&'static str] {
-        match self {
-            Self::Cluster => &["USAGE", "CREATE"],
-            Self::NetworkPolicy => &["USAGE"],
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Cluster => "cluster",
-            Self::NetworkPolicy => "network policy",
-        }
-    }
-}
-
-/// Reconcile grants for a named infrastructure object (cluster or network policy).
-///
-/// Three-step algorithm:
-/// 1. Apply all desired GRANTs idempotently (GRANT is a no-op if already present).
-/// 2. Query the live grant state and default-privilege grants from the catalog.
-/// 3. Compute the set difference (current - desired - protected) and REVOKE stale grants.
-pub async fn reconcile_named_object(
-    client: &Client,
-    executor: &DeploymentExecutor<'_>,
-    name: &str,
-    grants: &[GrantPrivilegesStatement<Raw>],
-    kind: &GrantNamedObjectKind,
-) -> Result<(), CliError> {
-    for grant in grants {
-        executor.execute_sql(grant).await?;
-    }
-    let introspection = client.introspection();
-    let (current, default_privs) = match kind {
-        GrantNamedObjectKind::Cluster => (
-            introspection
-                .get_cluster_grants(name)
-                .await
-                .map_err(CliError::Connection)?,
-            introspection
-                .get_default_privilege_grants_for_cluster(name)
-                .await
-                .map_err(CliError::Connection)?,
-        ),
-        GrantNamedObjectKind::NetworkPolicy => (
-            introspection
-                .get_network_policy_grants(name)
-                .await
-                .map_err(CliError::Connection)?,
-            introspection
-                .get_default_privilege_grants_for_network_policy(name)
-                .await
-                .map_err(CliError::Connection)?,
-        ),
-    };
-    let protected: BTreeSet<_> = default_privs
-        .iter()
-        .map(|g| (g.grantee.to_lowercase(), g.privilege_type.to_uppercase()))
-        .collect();
-    let desired = desired_grants(grants, kind.all_privileges());
-    let target = kind.grant_target(name);
-    let revocations = stale_grant_revocations(&current, &desired, &protected, &target);
-    execute_revocations(executor, &revocations, kind.label(), &name).await
-}
-
-/// Reconcile grants for a single object: apply desired grants, revoke stale ones.
-///
-/// Three-step algorithm:
-/// 1. Apply all desired GRANTs idempotently (GRANT is a no-op if already present).
-/// 2. Query the live grant state and default-privilege grants from the catalog.
-/// 3. Compute the set difference (current - desired - protected) and REVOKE stale grants.
+/// Reconcile grants on one object from a catalog state already read by the
+/// orchestration layer.
 pub async fn reconcile(
-    client: &Client,
     executor: &DeploymentExecutor<'_>,
-    obj_id: &ObjectId,
+    target: &ReconcileTarget<'_>,
     grants: &[GrantPrivilegesStatement<Raw>],
-    kind: &GrantObjectKind,
+    current: &[ObjectGrant],
+    default_privileges: &[ObjectGrant],
 ) -> Result<(), CliError> {
-    for grant in grants {
-        executor.execute_sql(grant).await?;
-    }
-    let current = client
-        .introspection()
-        .get_database_object_grants(
-            kind.catalog_table(),
-            obj_id.expect_database(),
-            obj_id.schema(),
-            obj_id.object(),
-        )
-        .await
-        .map_err(CliError::Connection)?;
-    let default_privs = client
-        .introspection()
-        .get_default_privilege_grants_for_database_object(
-            kind.catalog_table(),
-            obj_id.expect_database(),
-            obj_id.schema(),
-            obj_id.object(),
-            kind.object_type_str(),
-        )
-        .await
-        .map_err(CliError::Connection)?;
-    let protected: BTreeSet<_> = default_privs
+    let protected: BTreeSet<_> = default_privileges
         .iter()
-        .map(|g| (g.grantee.to_lowercase(), g.privilege_type.to_uppercase()))
+        .filter_map(GrantKey::from_catalog)
         .collect();
-    let desired = desired_grants(grants, kind.all_privileges());
-    let target = kind.grant_target(obj_id);
-    let revocations = stale_grant_revocations(&current, &desired, &protected, &target);
-    execute_revocations(executor, &revocations, kind.label(), obj_id).await
+    let desired = desired_grants(grants, target.kind().all_privileges());
+    let grant_target = target
+        .grant_target()
+        .expect("grant reconciliation requires a grant-bearing target");
+    execute_grants(
+        executor,
+        &missing_grant_statements(&desired, current, &grant_target),
+    )
+    .await?;
+    let revocations = stale_grant_revocations(current, &desired, &protected, &grant_target);
+    execute_revocations(
+        executor,
+        &revocations,
+        target.kind().label(),
+        &target.display_name(),
+    )
+    .await
 }
 
-/// Extract `(grantee, privilege_type)` pairs from parsed GRANT statements.
+/// One concrete privilege granted to one role.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantKey {
+    pub grantee: String,
+    pub privilege: Privilege,
+}
+
+/// Ordered by grantee, then by the privilege's canonical keyword.
+///
+/// `Privilege` is not itself ordered, and these keys live in `BTreeSet`s whose
+/// iteration order reaches emitted SQL, so the ordering has to come from
+/// somewhere stable. The keyword is that anchor: it is the spelling the catalog
+/// and the grammar both use, so the order does not shift when the parser's
+/// variants are reordered.
+impl Ord for GrantKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.grantee.as_str(), privilege_keyword(&self.privilege))
+            .cmp(&(other.grantee.as_str(), privilege_keyword(&other.privilege)))
+    }
+}
+
+impl PartialOrd for GrantKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl GrantKey {
+    fn from_catalog(grant: &ObjectGrant) -> Option<Self> {
+        Some(Self {
+            grantee: grant.grantee.clone(),
+            privilege: parse_privilege(&grant.privilege_type)?,
+        })
+    }
+}
+
+/// Extract typed grant keys from parsed GRANT statements.
 ///
 /// Expands `ALL` privileges based on `all_privileges` (the set of privileges
 /// that `ALL` maps to for the object type).
+///
+/// Grantee names are kept exactly as authored. Role names are identifiers and
+/// identifiers are case-sensitive in Materialize: a role created as `"Reader"`
+/// cannot be reached as `reader`. The parser has already folded unquoted names
+/// to the casing the catalog stores, so the authored name and the catalog name
+/// agree without normalization, and folding here would instead conflate two
+/// roles that differ only by case. Privilege types are uppercased because they
+/// are keywords, not identifiers.
 pub fn desired_grants(
     grants: &[GrantPrivilegesStatement<Raw>],
-    all_privileges: &[&str],
-) -> BTreeSet<(String, String)> {
+    all_privileges: &[Privilege],
+) -> BTreeSet<GrantKey> {
     let mut result = BTreeSet::new();
     for grant in grants {
-        let privs: Vec<String> = match &grant.privileges {
-            PrivilegeSpecification::All => all_privileges.iter().map(|p| p.to_string()).collect(),
-            PrivilegeSpecification::Privileges(privs) => {
-                privs.iter().map(|p| p.to_string()).collect()
-            }
+        let privileges: &[Privilege] = match &grant.privileges {
+            PrivilegeSpecification::All => all_privileges,
+            PrivilegeSpecification::Privileges(privileges) => privileges,
         };
         for role in &grant.roles {
-            let role_name = role.as_str().to_lowercase();
-            for priv_name in &privs {
-                result.insert((role_name.clone(), priv_name.clone()));
+            for privilege in privileges {
+                result.insert(GrantKey {
+                    grantee: role.as_str().to_string(),
+                    privilege: privilege.clone(),
+                });
             }
         }
     }
@@ -264,7 +131,7 @@ pub fn desired_grants(
 /// happen if a future Materialize release introduces a new privilege type.
 /// Callers should skip unknown privileges rather than fail outright so the
 /// CLI keeps working against newer servers.
-fn parse_privilege(s: &str) -> Option<Privilege> {
+pub(crate) fn parse_privilege(s: &str) -> Option<Privilege> {
     let p = if s.eq_ignore_ascii_case("SELECT") {
         Privilege::SELECT
     } else if s.eq_ignore_ascii_case("INSERT") {
@@ -291,29 +158,81 @@ fn parse_privilege(s: &str) -> Option<Privilege> {
     Some(p)
 }
 
+/// The canonical SQL keyword for a privilege, the inverse of [`parse_privilege`].
+///
+/// Kept in step with `parse_privilege`: every keyword it accepts must be the one
+/// returned here, or a grant read back from the catalog will not match the same
+/// grant declared in a project file.
+pub(crate) fn privilege_keyword(privilege: &Privilege) -> &'static str {
+    match privilege {
+        Privilege::SELECT => "SELECT",
+        Privilege::INSERT => "INSERT",
+        Privilege::UPDATE => "UPDATE",
+        Privilege::DELETE => "DELETE",
+        Privilege::USAGE => "USAGE",
+        Privilege::CREATE => "CREATE",
+        Privilege::CREATEROLE => "CREATEROLE",
+        Privilege::CREATEDB => "CREATEDB",
+        Privilege::CREATECLUSTER => "CREATECLUSTER",
+        Privilege::CREATENETWORKPOLICY => "CREATENETWORKPOLICY",
+    }
+}
+
+/// Compute GRANT statements for desired grants that `current` does not already
+/// hold (2-way set difference).
+///
+/// Missing privileges are grouped by grantee so one statement carries every
+/// privilege that role is owed. `desired` has `ALL` already expanded to concrete
+/// privileges, so the emitted SQL names them explicitly rather than echoing an
+/// authored `GRANT ALL`.
+pub fn missing_grant_statements(
+    desired: &BTreeSet<GrantKey>,
+    current: &[ObjectGrant],
+    target: &GrantTargetSpecification<Raw>,
+) -> Vec<GrantPrivilegesStatement<Raw>> {
+    let present: BTreeSet<_> = current.iter().filter_map(GrantKey::from_catalog).collect();
+
+    let mut by_grantee: BTreeMap<&str, Vec<Privilege>> = BTreeMap::new();
+    for key in desired {
+        if present.contains(key) {
+            continue;
+        }
+        by_grantee
+            .entry(key.grantee.as_str())
+            .or_default()
+            .push(key.privilege.clone());
+    }
+
+    for privileges in by_grantee.values_mut() {
+        privileges.sort_by_key(privilege_keyword);
+    }
+
+    by_grantee
+        .into_iter()
+        .map(|(grantee, privileges)| GrantPrivilegesStatement {
+            privileges: PrivilegeSpecification::Privileges(privileges),
+            target: target.clone(),
+            roles: vec![Ident::new_unchecked(grantee)],
+        })
+        .collect()
+}
+
 /// Compute REVOKE statements for grants that exist in `current` but not in
 /// `desired` and not in `protected` (3-way set difference).
 ///
-/// Grantee names are lowercased and privilege types uppercased before comparison
-/// so that catalog casing differences don't cause spurious revocations.
+/// Grantee names are compared exactly and privilege types uppercased, matching
+/// [`desired_grants`].
 ///
 /// `protected` contains grants that should never be revoked (e.g., grants
 /// originating from `ALTER DEFAULT PRIVILEGES`).
 pub fn stale_grant_revocations(
     current: &[ObjectGrant],
-    desired: &BTreeSet<(String, String)>,
-    protected: &BTreeSet<(String, String)>,
+    desired: &BTreeSet<GrantKey>,
+    protected: &BTreeSet<GrantKey>,
     target: &GrantTargetSpecification<Raw>,
 ) -> Vec<RevokePrivilegesStatement<Raw>> {
     let mut revocations = Vec::new();
     for grant in current {
-        let key = (
-            grant.grantee.to_lowercase(),
-            grant.privilege_type.to_uppercase(),
-        );
-        if desired.contains(&key) || protected.contains(&key) {
-            continue;
-        }
         let Some(privilege) = parse_privilege(&grant.privilege_type) else {
             crate::verbose!(
                 "skipping revocation of unknown privilege '{}' on grantee '{}' (target: {:?})",
@@ -323,6 +242,13 @@ pub fn stale_grant_revocations(
             );
             continue;
         };
+        let key = GrantKey {
+            grantee: grant.grantee.clone(),
+            privilege: privilege.clone(),
+        };
+        if desired.contains(&key) || protected.contains(&key) {
+            continue;
+        }
         revocations.push(RevokePrivilegesStatement {
             privileges: PrivilegeSpecification::Privileges(vec![privilege]),
             target: target.clone(),
@@ -330,6 +256,17 @@ pub fn stale_grant_revocations(
         });
     }
     revocations
+}
+
+/// Execute GRANT statements for missing grants.
+pub async fn execute_grants(
+    executor: &DeploymentExecutor<'_>,
+    grants: &[GrantPrivilegesStatement<Raw>],
+) -> Result<(), CliError> {
+    for stmt in grants {
+        executor.execute_sql(stmt).await?;
+    }
+    Ok(())
 }
 
 /// Execute REVOKE statements for stale grants, printing status for each.
@@ -357,6 +294,8 @@ pub async fn execute_revocations(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::commands::reconcile::ObjectKind;
+    use crate::project::ir::object_id::ObjectId;
     use mz_sql_parser::ast::Statement;
     use mz_sql_parser::parser::parse_statements;
 
@@ -377,11 +316,15 @@ mod tests {
     }
 
     fn cluster_target(name: &str) -> GrantTargetSpecification<Raw> {
-        GrantNamedObjectKind::Cluster.grant_target(name)
+        ReconcileTarget::named(ObjectKind::Cluster, name)
+            .grant_target()
+            .unwrap()
     }
 
     fn network_policy_target(name: &str) -> GrantTargetSpecification<Raw> {
-        GrantNamedObjectKind::NetworkPolicy.grant_target(name)
+        ReconcileTarget::named(ObjectKind::NetworkPolicy, name)
+            .grant_target()
+            .unwrap()
     }
 
     fn obj_id(db: &str, schema: &str, name: &str) -> ObjectId {
@@ -389,19 +332,34 @@ mod tests {
     }
 
     fn table_target(db: &str, schema: &str, name: &str) -> GrantTargetSpecification<Raw> {
-        GrantObjectKind::Table.grant_target(&obj_id(db, schema, name))
+        ReconcileTarget::item(ObjectKind::Table, &obj_id(db, schema, name))
+            .grant_target()
+            .unwrap()
     }
 
     fn secret_target(db: &str, schema: &str, name: &str) -> GrantTargetSpecification<Raw> {
-        GrantObjectKind::Secret.grant_target(&obj_id(db, schema, name))
+        ReconcileTarget::item(ObjectKind::Secret, &obj_id(db, schema, name))
+            .grant_target()
+            .unwrap()
     }
 
     fn connection_target(db: &str, schema: &str, name: &str) -> GrantTargetSpecification<Raw> {
-        GrantObjectKind::Connection.grant_target(&obj_id(db, schema, name))
+        ReconcileTarget::item(ObjectKind::Connection, &obj_id(db, schema, name))
+            .grant_target()
+            .unwrap()
     }
 
     fn source_target(db: &str, schema: &str, name: &str) -> GrantTargetSpecification<Raw> {
-        GrantObjectKind::Source.grant_target(&obj_id(db, schema, name))
+        ReconcileTarget::item(ObjectKind::Source, &obj_id(db, schema, name))
+            .grant_target()
+            .unwrap()
+    }
+
+    fn key(grantee: &str, privilege: Privilege) -> GrantKey {
+        GrantKey {
+            grantee: grantee.to_string(),
+            privilege,
+        }
     }
 
     /// Convert revocations to strings for easier assertion.
@@ -409,100 +367,120 @@ mod tests {
         revocations.iter().map(|r| r.to_string()).collect()
     }
 
+    /// `privilege_keyword` and `parse_privilege` have to agree, or a grant read
+    /// back from the catalog will not match the same grant declared in a project
+    /// file and reconciliation will churn.
     #[mz_ore::test]
-    fn test_desired_grants_single_privilege_single_role() {
-        let grant = parse_grant("GRANT USAGE ON CLUSTER my_cluster TO reader");
-        let result = desired_grants(&[grant], &["USAGE", "CREATE"]);
-        assert_eq!(result.len(), 1);
-        assert!(result.contains(&("reader".to_string(), "USAGE".to_string())));
+    fn test_privilege_keyword_round_trips() {
+        for privilege in [
+            Privilege::SELECT,
+            Privilege::INSERT,
+            Privilege::UPDATE,
+            Privilege::DELETE,
+            Privilege::USAGE,
+            Privilege::CREATE,
+            Privilege::CREATEROLE,
+            Privilege::CREATEDB,
+            Privilege::CREATECLUSTER,
+            Privilege::CREATENETWORKPOLICY,
+        ] {
+            let keyword = privilege_keyword(&privilege);
+            assert_eq!(
+                parse_privilege(keyword),
+                Some(privilege.clone()),
+                "{keyword} does not round-trip"
+            );
+            assert_eq!(
+                keyword,
+                privilege.to_string(),
+                "{keyword} is not the keyword the grammar renders"
+            );
+        }
     }
 
     #[mz_ore::test]
-    fn test_desired_grants_multiple_privileges() {
-        let grant = parse_grant("GRANT USAGE, CREATE ON CLUSTER my_cluster TO writer");
-        let result = desired_grants(&[grant], &["USAGE", "CREATE"]);
-        assert_eq!(result.len(), 2);
-        assert!(result.contains(&("writer".to_string(), "USAGE".to_string())));
-        assert!(result.contains(&("writer".to_string(), "CREATE".to_string())));
-    }
+    fn test_desired_grants() {
+        let cases = [
+            (
+                "GRANT USAGE ON CLUSTER c TO reader",
+                ObjectKind::Cluster,
+                vec![key("reader", Privilege::USAGE)],
+            ),
+            (
+                "GRANT USAGE, CREATE ON CLUSTER c TO writer",
+                ObjectKind::Cluster,
+                vec![
+                    key("writer", Privilege::USAGE),
+                    key("writer", Privilege::CREATE),
+                ],
+            ),
+            (
+                "GRANT ALL ON CLUSTER c TO admin",
+                ObjectKind::Cluster,
+                vec![
+                    key("admin", Privilege::USAGE),
+                    key("admin", Privilege::CREATE),
+                ],
+            ),
+            (
+                "GRANT ALL ON SECRET db.public.s TO reader",
+                ObjectKind::Secret,
+                vec![key("reader", Privilege::USAGE)],
+            ),
+            (
+                "GRANT USAGE ON CLUSTER c TO reader, writer",
+                ObjectKind::Cluster,
+                vec![
+                    key("reader", Privilege::USAGE),
+                    key("writer", Privilege::USAGE),
+                ],
+            ),
+            (
+                "GRANT USAGE ON CLUSTER c TO \"MyRole\"",
+                ObjectKind::Cluster,
+                vec![key("MyRole", Privilege::USAGE)],
+            ),
+            (
+                "GRANT USAGE ON CLUSTER c TO MyRole",
+                ObjectKind::Cluster,
+                vec![key("myrole", Privilege::USAGE)],
+            ),
+            (
+                "GRANT ALL ON TABLE db.public.t TO admin",
+                ObjectKind::Table,
+                vec![
+                    key("admin", Privilege::SELECT),
+                    key("admin", Privilege::INSERT),
+                    key("admin", Privilege::UPDATE),
+                    key("admin", Privilege::DELETE),
+                ],
+            ),
+        ];
 
-    #[mz_ore::test]
-    fn test_desired_grants_all_expands_to_object_type_privileges() {
-        let grant = parse_grant("GRANT ALL ON CLUSTER my_cluster TO admin");
-        // For clusters, ALL = USAGE + CREATE
-        let result = desired_grants(&[grant], &["USAGE", "CREATE"]);
-        assert_eq!(result.len(), 2);
-        assert!(result.contains(&("admin".to_string(), "USAGE".to_string())));
-        assert!(result.contains(&("admin".to_string(), "CREATE".to_string())));
-    }
+        for (sql, kind, expected) in cases {
+            assert_eq!(
+                desired_grants(&[parse_grant(sql)], kind.all_privileges()),
+                expected.into_iter().collect(),
+                "{sql}"
+            );
+        }
 
-    #[mz_ore::test]
-    fn test_desired_grants_all_with_single_privilege_object_type() {
-        let grant = parse_grant("GRANT ALL ON SECRET \"db\".\"public\".\"my_secret\" TO reader");
-        // For secrets, ALL = USAGE only
-        let result = desired_grants(&[grant], &["USAGE"]);
-        assert_eq!(result.len(), 1);
-        assert!(result.contains(&("reader".to_string(), "USAGE".to_string())));
-    }
-
-    #[mz_ore::test]
-    fn test_desired_grants_multiple_roles() {
-        let grant = parse_grant("GRANT USAGE ON CLUSTER my_cluster TO reader, writer");
-        let result = desired_grants(&[grant], &["USAGE", "CREATE"]);
-        assert_eq!(result.len(), 2);
-        assert!(result.contains(&("reader".to_string(), "USAGE".to_string())));
-        assert!(result.contains(&("writer".to_string(), "USAGE".to_string())));
-    }
-
-    #[mz_ore::test]
-    fn test_desired_grants_multiple_grant_statements() {
-        let g1 = parse_grant("GRANT USAGE ON CLUSTER my_cluster TO reader");
-        let g2 = parse_grant("GRANT CREATE ON CLUSTER my_cluster TO writer");
-        let result = desired_grants(&[g1, g2], &["USAGE", "CREATE"]);
-        assert_eq!(result.len(), 2);
-        assert!(result.contains(&("reader".to_string(), "USAGE".to_string())));
-        assert!(result.contains(&("writer".to_string(), "CREATE".to_string())));
-    }
-
-    #[mz_ore::test]
-    fn test_desired_grants_deduplicates() {
-        // Two grant statements granting the same privilege to the same role
-        let g1 = parse_grant("GRANT USAGE ON CLUSTER my_cluster TO reader");
-        let g2 = parse_grant("GRANT USAGE ON CLUSTER my_cluster TO reader");
-        let result = desired_grants(&[g1, g2], &["USAGE", "CREATE"]);
-        assert_eq!(result.len(), 1);
-    }
-
-    #[mz_ore::test]
-    fn test_desired_grants_empty_input() {
-        let result = desired_grants(&[], &["USAGE", "CREATE"]);
-        assert!(result.is_empty());
-    }
-
-    #[mz_ore::test]
-    fn test_desired_grants_role_name_lowercased() {
-        let grant = parse_grant("GRANT USAGE ON CLUSTER my_cluster TO \"MyRole\"");
-        let result = desired_grants(&[grant], &["USAGE"]);
-        assert!(result.contains(&("myrole".to_string(), "USAGE".to_string())));
-    }
-
-    #[mz_ore::test]
-    fn test_desired_grants_table_all_privileges() {
-        let grant = parse_grant("GRANT ALL ON TABLE \"db\".\"public\".\"my_table\" TO admin");
-        // For tables, ALL = SELECT + INSERT + UPDATE + DELETE
-        let result = desired_grants(&[grant], &["SELECT", "INSERT", "UPDATE", "DELETE"]);
-        assert_eq!(result.len(), 4);
-        assert!(result.contains(&("admin".to_string(), "SELECT".to_string())));
-        assert!(result.contains(&("admin".to_string(), "INSERT".to_string())));
-        assert!(result.contains(&("admin".to_string(), "UPDATE".to_string())));
-        assert!(result.contains(&("admin".to_string(), "DELETE".to_string())));
+        let repeated = parse_grant("GRANT USAGE ON CLUSTER c TO reader");
+        assert_eq!(
+            desired_grants(
+                &[repeated.clone(), repeated],
+                ObjectKind::Cluster.all_privileges()
+            ),
+            BTreeSet::from([key("reader", Privilege::USAGE)])
+        );
+        assert!(desired_grants(&[], ObjectKind::Cluster.all_privileges()).is_empty());
     }
 
     #[mz_ore::test]
     fn test_stale_grant_revocations_no_stale() {
         let current = vec![make_object_grant("reader", "USAGE")];
         let mut desired = BTreeSet::new();
-        desired.insert(("reader".to_string(), "USAGE".to_string()));
+        desired.insert(key("reader", Privilege::USAGE));
 
         let target = cluster_target("my_cluster");
         let revocations = stale_grant_revocations(&current, &desired, &BTreeSet::new(), &target);
@@ -516,7 +494,7 @@ mod tests {
             make_object_grant("writer", "CREATE"),
         ];
         let mut desired = BTreeSet::new();
-        desired.insert(("reader".to_string(), "USAGE".to_string()));
+        desired.insert(key("reader", Privilege::USAGE));
 
         let target = cluster_target("my_cluster");
         let revocations = stale_grant_revocations(&current, &desired, &BTreeSet::new(), &target);
@@ -543,7 +521,7 @@ mod tests {
     #[mz_ore::test]
     fn test_stale_grant_revocations_empty_current() {
         let mut desired = BTreeSet::new();
-        desired.insert(("reader".to_string(), "USAGE".to_string()));
+        desired.insert(key("reader", Privilege::USAGE));
 
         let target = cluster_target("my_cluster");
         let revocations = stale_grant_revocations(&[], &desired, &BTreeSet::new(), &target);
@@ -557,16 +535,32 @@ mod tests {
         assert!(revocations.is_empty());
     }
 
+    /// Privilege types are keywords, so casing in the catalog does not matter.
     #[mz_ore::test]
-    fn test_stale_grant_revocations_case_insensitive_match() {
-        // Current has mixed case, desired has lowercase — should still match
-        let current = vec![make_object_grant("Reader", "usage")];
+    fn test_stale_grant_revocations_privilege_case_insensitive() {
+        let current = vec![make_object_grant("reader", "usage")];
         let mut desired = BTreeSet::new();
-        desired.insert(("reader".to_string(), "USAGE".to_string()));
+        desired.insert(key("reader", Privilege::USAGE));
 
         let target = cluster_target("my_cluster");
         let revocations = stale_grant_revocations(&current, &desired, &BTreeSet::new(), &target);
         assert!(revocations.is_empty());
+    }
+
+    /// Grantees are identifiers, so a grant held by `Reader` does not satisfy one
+    /// declared for `reader`; the stale one is revoked.
+    #[mz_ore::test]
+    fn test_stale_grant_revocations_distinguish_roles_by_case() {
+        let current = vec![make_object_grant("Reader", "usage")];
+        let mut desired = BTreeSet::new();
+        desired.insert(key("reader", Privilege::USAGE));
+
+        let target = cluster_target("my_cluster");
+        let revocations = stale_grant_revocations(&current, &desired, &BTreeSet::new(), &target);
+        assert_eq!(
+            to_strings(&revocations),
+            vec!["REVOKE USAGE ON CLUSTER my_cluster FROM \"Reader\""]
+        );
     }
 
     #[mz_ore::test]
@@ -584,63 +578,35 @@ mod tests {
     }
 
     #[mz_ore::test]
-    fn test_stale_grant_revocations_network_policy_keyword() {
-        let current = vec![make_object_grant("reader", "USAGE")];
-        let desired = BTreeSet::new();
+    fn test_stale_grant_revocations_render_target_kind() {
+        let cases = [
+            (
+                make_object_grant("reader", "USAGE"),
+                network_policy_target("my_policy"),
+                "REVOKE USAGE ON NETWORK POLICY my_policy FROM reader",
+            ),
+            (
+                make_object_grant("app", "USAGE"),
+                connection_target("db", "public", "my_conn"),
+                "REVOKE USAGE ON CONNECTION db.public.my_conn FROM app",
+            ),
+            (
+                make_object_grant("app", "USAGE"),
+                secret_target("db", "public", "my_secret"),
+                "REVOKE USAGE ON SECRET db.public.my_secret FROM app",
+            ),
+            (
+                make_object_grant("reader", "SELECT"),
+                source_target("db", "public", "my_source"),
+                "REVOKE SELECT ON TABLE db.public.my_source FROM reader",
+            ),
+        ];
 
-        let target = network_policy_target("my_policy");
-        let revocations = stale_grant_revocations(&current, &desired, &BTreeSet::new(), &target);
-        let strings = to_strings(&revocations);
-        assert_eq!(strings.len(), 1);
-        assert_eq!(
-            strings[0],
-            "REVOKE USAGE ON NETWORK POLICY my_policy FROM reader"
-        );
-    }
-
-    #[mz_ore::test]
-    fn test_stale_grant_revocations_connection_keyword() {
-        let current = vec![make_object_grant("app", "USAGE")];
-        let desired = BTreeSet::new();
-
-        let target = connection_target("db", "public", "my_conn");
-        let revocations = stale_grant_revocations(&current, &desired, &BTreeSet::new(), &target);
-        let strings = to_strings(&revocations);
-        assert_eq!(strings.len(), 1);
-        assert_eq!(
-            strings[0],
-            "REVOKE USAGE ON CONNECTION db.public.my_conn FROM app"
-        );
-    }
-
-    #[mz_ore::test]
-    fn test_stale_grant_revocations_secret_keyword() {
-        let current = vec![make_object_grant("app", "USAGE")];
-        let desired = BTreeSet::new();
-
-        let target = secret_target("db", "public", "my_secret");
-        let revocations = stale_grant_revocations(&current, &desired, &BTreeSet::new(), &target);
-        let strings = to_strings(&revocations);
-        assert_eq!(strings.len(), 1);
-        assert_eq!(
-            strings[0],
-            "REVOKE USAGE ON SECRET db.public.my_secret FROM app"
-        );
-    }
-
-    #[mz_ore::test]
-    fn test_stale_grant_revocations_source_keyword() {
-        let current = vec![make_object_grant("reader", "SELECT")];
-        let desired = BTreeSet::new();
-
-        let target = source_target("db", "public", "my_source");
-        let revocations = stale_grant_revocations(&current, &desired, &BTreeSet::new(), &target);
-        let strings = to_strings(&revocations);
-        assert_eq!(strings.len(), 1);
-        assert_eq!(
-            strings[0],
-            "REVOKE SELECT ON TABLE db.public.my_source FROM reader"
-        );
+        for (current, target, expected) in cases {
+            let revocations =
+                stale_grant_revocations(&[current], &BTreeSet::new(), &BTreeSet::new(), &target);
+            assert_eq!(to_strings(&revocations), vec![expected]);
+        }
     }
 
     #[mz_ore::test]
@@ -653,7 +619,7 @@ mod tests {
         ];
         let desired = BTreeSet::new();
         let mut protected = BTreeSet::new();
-        protected.insert(("reader".to_string(), "SELECT".to_string()));
+        protected.insert(key("reader", Privilege::SELECT));
 
         let target = table_target("db", "public", "t");
         let revocations = stale_grant_revocations(&current, &desired, &protected, &target);
@@ -666,7 +632,7 @@ mod tests {
     #[mz_ore::test]
     fn test_end_to_end_no_revocations_when_grants_match() {
         let grant = parse_grant("GRANT USAGE ON CLUSTER my_cluster TO reader");
-        let desired = desired_grants(&[grant], &["USAGE", "CREATE"]);
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
         let current = vec![make_object_grant("reader", "USAGE")];
 
         let target = cluster_target("my_cluster");
@@ -678,7 +644,7 @@ mod tests {
     fn test_end_to_end_revoke_removed_grant() {
         // Project only declares USAGE for reader, but cluster also has CREATE for writer
         let grant = parse_grant("GRANT USAGE ON CLUSTER my_cluster TO reader");
-        let desired = desired_grants(&[grant], &["USAGE", "CREATE"]);
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
         let current = vec![
             make_object_grant("reader", "USAGE"),
             make_object_grant("writer", "CREATE"),
@@ -695,7 +661,7 @@ mod tests {
     #[mz_ore::test]
     fn test_end_to_end_revoke_all_when_grants_removed() {
         // No grants declared in project, but cluster has grants
-        let desired = desired_grants(&[], &["USAGE", "CREATE"]);
+        let desired = desired_grants(&[], ObjectKind::Cluster.all_privileges());
         let current = vec![
             make_object_grant("reader", "USAGE"),
             make_object_grant("writer", "CREATE"),
@@ -709,7 +675,7 @@ mod tests {
     #[mz_ore::test]
     fn test_end_to_end_grant_all_covers_all_current() {
         let grant = parse_grant("GRANT ALL ON CLUSTER my_cluster TO admin");
-        let desired = desired_grants(&[grant], &["USAGE", "CREATE"]);
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
         // admin has both USAGE and CREATE — both covered by ALL
         let current = vec![
             make_object_grant("admin", "USAGE"),
@@ -724,7 +690,7 @@ mod tests {
     #[mz_ore::test]
     fn test_end_to_end_grant_all_still_revokes_other_roles() {
         let grant = parse_grant("GRANT ALL ON CLUSTER my_cluster TO admin");
-        let desired = desired_grants(&[grant], &["USAGE", "CREATE"]);
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
         // admin is covered, but reader is not in the project file
         let current = vec![
             make_object_grant("admin", "USAGE"),
@@ -743,7 +709,7 @@ mod tests {
     fn test_end_to_end_multiple_roles_multiple_privileges() {
         let g1 = parse_grant("GRANT USAGE ON CLUSTER c TO reader");
         let g2 = parse_grant("GRANT USAGE, CREATE ON CLUSTER c TO writer");
-        let desired = desired_grants(&[g1, g2], &["USAGE", "CREATE"]);
+        let desired = desired_grants(&[g1, g2], ObjectKind::Cluster.all_privileges());
 
         // Current has an extra admin grant
         let current = vec![
@@ -758,5 +724,165 @@ mod tests {
         let strings = to_strings(&revocations);
         assert_eq!(strings.len(), 1);
         assert!(strings[0].contains("admin"));
+    }
+
+    /// Convert missing grants to strings for easier assertion.
+    fn missing_to_strings(
+        desired: &BTreeSet<GrantKey>,
+        current: &[ObjectGrant],
+        target: &GrantTargetSpecification<Raw>,
+    ) -> Vec<String> {
+        missing_grant_statements(desired, current, target)
+            .iter()
+            .map(|g| g.to_string())
+            .collect()
+    }
+
+    #[mz_ore::test]
+    fn test_missing_grants_nothing_missing() {
+        let grant = parse_grant("GRANT USAGE ON CLUSTER c TO reader");
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
+        let current = vec![make_object_grant("reader", "USAGE")];
+        let strings = missing_to_strings(&desired, &current, &cluster_target("c"));
+        assert!(strings.is_empty(), "unexpected grants: {:?}", strings);
+    }
+
+    #[mz_ore::test]
+    fn test_missing_grants_all_missing() {
+        let grant = parse_grant("GRANT USAGE ON CLUSTER c TO reader");
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
+        let strings = missing_to_strings(&desired, &[], &cluster_target("c"));
+        assert_eq!(strings.len(), 1);
+        assert_eq!(strings[0], "GRANT USAGE ON CLUSTER c TO reader");
+    }
+
+    /// An authored `GRANT ALL` whose privileges are only partly held emits just
+    /// the gap, named explicitly rather than as `ALL`.
+    #[mz_ore::test]
+    fn test_missing_grants_partial_all() {
+        let grant = parse_grant("GRANT ALL ON TABLE \"db\".\"public\".\"t\" TO analyst");
+        let desired = desired_grants(&[grant], ObjectKind::Table.all_privileges());
+        let current = vec![
+            make_object_grant("analyst", "SELECT"),
+            make_object_grant("analyst", "INSERT"),
+        ];
+        let strings = missing_to_strings(&desired, &current, &table_target("db", "public", "t"));
+        assert_eq!(strings.len(), 1);
+        assert_eq!(
+            strings[0],
+            "GRANT DELETE, UPDATE ON TABLE db.public.t TO analyst"
+        );
+    }
+
+    #[mz_ore::test]
+    fn test_missing_grants_grouped_per_grantee() {
+        let g1 = parse_grant("GRANT USAGE, CREATE ON CLUSTER c TO writer");
+        let g2 = parse_grant("GRANT USAGE ON CLUSTER c TO reader");
+        let desired = desired_grants(&[g1, g2], ObjectKind::Cluster.all_privileges());
+        let current = vec![make_object_grant("writer", "USAGE")];
+        let strings = missing_to_strings(&desired, &current, &cluster_target("c"));
+        assert_eq!(
+            strings,
+            vec![
+                "GRANT USAGE ON CLUSTER c TO reader",
+                "GRANT CREATE ON CLUSTER c TO writer",
+            ]
+        );
+    }
+
+    /// Privilege casing in the catalog must not resurface a grant that is
+    /// already held.
+    #[mz_ore::test]
+    fn test_missing_grants_privilege_case_insensitive() {
+        let grant = parse_grant("GRANT USAGE ON CLUSTER c TO reader");
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
+        let current = vec![make_object_grant("reader", "usage")];
+        let strings = missing_to_strings(&desired, &current, &cluster_target("c"));
+        assert!(strings.is_empty(), "unexpected grants: {:?}", strings);
+    }
+
+    /// A privilege already supplied by ALTER DEFAULT PRIVILEGES shows up in
+    /// `current`, so it is neither re-granted nor revoked.
+    #[mz_ore::test]
+    fn test_missing_grants_satisfied_by_default_privilege() {
+        let grant = parse_grant("GRANT SELECT ON TABLE \"db\".\"public\".\"t\" TO analyst");
+        let desired = desired_grants(&[grant], ObjectKind::Table.all_privileges());
+        let current = vec![make_object_grant("analyst", "SELECT")];
+        let target = table_target("db", "public", "t");
+        assert!(missing_to_strings(&desired, &current, &target).is_empty());
+
+        let protected = BTreeSet::from([key("analyst", Privilege::SELECT)]);
+        let revocations = stale_grant_revocations(&current, &desired, &protected, &target);
+        assert!(revocations.is_empty());
+    }
+
+    /// Role names are identifiers, so a grant authored for `"Reader"` must not be
+    /// emitted for `reader`: they are different roles, and the second may not
+    /// exist at all.
+    #[mz_ore::test]
+    fn test_missing_grants_preserve_exact_role_casing() {
+        let grant = parse_grant("GRANT USAGE ON CLUSTER c TO \"Reader\"");
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
+        let strings = missing_to_strings(&desired, &[], &cluster_target("c"));
+        assert_eq!(strings, vec!["GRANT USAGE ON CLUSTER c TO \"Reader\""]);
+    }
+
+    /// Two roles differing only by case are distinct, so a grant held by one does
+    /// not satisfy a grant declared for the other.
+    #[mz_ore::test]
+    fn test_missing_grants_do_not_conflate_roles_by_case() {
+        let grant = parse_grant("GRANT USAGE ON CLUSTER c TO \"Reader\"");
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
+        let current = vec![make_object_grant("reader", "USAGE")];
+        let target = cluster_target("c");
+
+        assert_eq!(
+            missing_to_strings(&desired, &current, &target),
+            vec!["GRANT USAGE ON CLUSTER c TO \"Reader\""]
+        );
+        assert_eq!(
+            to_strings(&stale_grant_revocations(
+                &current,
+                &desired,
+                &BTreeSet::new(),
+                &target
+            )),
+            vec!["REVOKE USAGE ON CLUSTER c FROM reader"]
+        );
+    }
+
+    /// `PUBLIC` reaches the diff as the `public` pseudo-role name, so a grant the
+    /// catalog already holds for it is not re-emitted.
+    #[mz_ore::test]
+    fn test_public_grantee_round_trips() {
+        let grant = parse_grant("GRANT USAGE ON CLUSTER c TO PUBLIC");
+        let desired = desired_grants(&[grant], ObjectKind::Cluster.all_privileges());
+        let target = cluster_target("c");
+
+        assert_eq!(
+            missing_to_strings(&desired, &[], &target),
+            vec!["GRANT USAGE ON CLUSTER c TO public"]
+        );
+
+        let current = vec![make_object_grant("public", "USAGE")];
+        assert!(missing_to_strings(&desired, &current, &target).is_empty());
+        assert!(stale_grant_revocations(&current, &desired, &BTreeSet::new(), &target).is_empty());
+    }
+
+    /// A stale grant to `PUBLIC` is revocable, which it is not when the grantee
+    /// is dropped by an inner join to `mz_roles`.
+    #[mz_ore::test]
+    fn test_stale_public_grant_is_revoked() {
+        let current = vec![make_object_grant("public", "USAGE")];
+        let revocations = stale_grant_revocations(
+            &current,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &cluster_target("c"),
+        );
+        assert_eq!(
+            to_strings(&revocations),
+            vec!["REVOKE USAGE ON CLUSTER c FROM public"]
+        );
     }
 }

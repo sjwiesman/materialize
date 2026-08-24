@@ -10,8 +10,7 @@
 //! Apply tables command - create tables that don't exist in the database.
 
 use crate::cli::CliError;
-use crate::cli::commands::apply_objects;
-use crate::cli::commands::grants;
+use crate::cli::commands::reconcile::{self, ObjectKind};
 use crate::cli::executor::{
     ApplyPlan, ApplyResult, DeploymentExecutor, ObjectAction, ObjectResult,
     compile_apply_project_and_connect,
@@ -24,7 +23,7 @@ use crate::project::ir::graph::Project;
 use std::collections::BTreeSet;
 
 const PHASE_NAME: &str = "tables";
-const GRANT_KIND: grants::GrantObjectKind = grants::GrantObjectKind::Table;
+const OBJECT_KIND: ObjectKind = ObjectKind::Table;
 
 fn matches(stmt: &Statement) -> bool {
     matches!(
@@ -56,15 +55,29 @@ pub async fn plan(
     }
 
     let target_objects = planned_project.get_sorted_objects_filtered(&target_ids)?;
-    let existing = client
-        .introspection()
-        .check_catalog_objects_exist(&target_ids, GRANT_KIND.catalog_table())
-        .await
-        .map_err(CliError::Connection)?;
+    let (existing, reconcile_state) = futures::try_join!(
+        async {
+            client
+                .introspection()
+                .check_catalog_objects_exist(&target_ids, OBJECT_KIND.catalog_object_type())
+                .await
+                .map_err(CliError::Connection)
+        },
+        reconcile::ReconcileState::for_database_objects(client, OBJECT_KIND, &target_ids),
+    )?;
 
+    let to_create: BTreeSet<_> = target_ids.difference(&existing).cloned().collect();
+    client
+        .validation()
+        .validate_source_references(planned_project, &to_create)
+        .await?;
+
+    // Every schema this phase manages, not just the ones hosting a missing
+    // object. `prepare_schemas` creates only what is absent, and reconciles the
+    // database and schema configuration declared in mod files on every apply, so
+    // drift there is closed even when no object needs creating.
     let schemas: BTreeSet<_> = target_objects
         .iter()
-        .filter(|(obj_id, _)| !existing.contains(obj_id))
         .map(|(obj_id, _)| {
             project::SchemaQualifier::new(
                 obj_id.expect_database().to_string(),
@@ -82,18 +95,13 @@ pub async fn plan(
         executor.take_statements();
 
         if existing.contains(&obj_id) {
-            apply_objects::reconcile_grants_and_comments(
-                client,
-                executor,
-                &obj_id,
-                typed_obj,
-                &GRANT_KIND,
-            )
-            .await?;
+            reconcile::database_object(executor, &obj_id, typed_obj, OBJECT_KIND, &reconcile_state)
+                .await?;
+            let statements = executor.take_statements();
             results.push(ObjectResult {
                 object: obj_id.to_string(),
-                action: ObjectAction::UpToDate,
-                statements: executor.take_statements(),
+                action: ObjectAction::UpToDate.with_reconciled(!statements.is_empty()),
+                statements,
                 redacted_statements: vec![],
                 transaction_group: None,
                 post_statements: vec![],
@@ -107,14 +115,8 @@ pub async fn plan(
         for index in &typed_obj.indexes {
             executor.execute_sql(index).await?;
         }
-        apply_objects::reconcile_grants_and_comments(
-            client,
-            executor,
-            &obj_id,
-            typed_obj,
-            &GRANT_KIND,
-        )
-        .await?;
+        reconcile::database_object(executor, &obj_id, typed_obj, OBJECT_KIND, &reconcile_state)
+            .await?;
         let post_statements = executor.take_statements();
 
         let transaction_group = match &typed_obj.stmt {

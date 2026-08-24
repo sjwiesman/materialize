@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ from materialize.mzcompose.composition import (
 )
 from materialize.mzcompose.service import Service
 from materialize.mzcompose.services.materialized import Materialized
+from materialize.mzcompose.services.mysql import MySql
 from materialize.mzcompose.services.postgres import Postgres
 from materialize.mzcompose.services.redpanda import Redpanda
 
@@ -55,6 +57,9 @@ SERVICES = [
     # Kafka broker for the sinks workflow. Only started by workflows that
     # exercise sinks; the others never bring it up.
     Redpanda(),
+    # MySQL for the source-references-mysql workflow. Only started by workflows
+    # that exercise MySQL sources; the others never bring it up.
+    MySql(),
     # mz-deploy runs as a prebuilt mzbuild image (see src/mz-deploy/ci) rather
     # than a host `cargo build`, so CI doesn't recompile it on every run. The
     # projects directory is mounted at /projects; the binary reaches the
@@ -2687,3 +2692,427 @@ def workflow_apply_all_role_ordering(
     assert len(rows) == 1, f"expected role 'reader' to exist, got {rows}"
     rows = c.sql_query("SELECT name FROM mz_clusters WHERE name = 'reporting'")
     assert len(rows) == 1, f"expected cluster 'reporting' to exist, got {rows}"
+
+
+def workflow_source_references(c: Composition, parser: WorkflowArgumentParser) -> None:
+    """`apply tables` checks every `(REFERENCE ...)` against what its source can
+    read, and refreshes the source's references first so a table added upstream
+    after the source was created is still accepted."""
+    setup_base(c)
+
+    # v1 creates the source plus one table whose reference is valid.
+    result = run_mz_deploy(c, "source-references/v1", "apply")
+    assert result.returncode == 0, f"apply v1 failed: {result.stderr}"
+
+    with c.test_case("reject-unknown-reference"):
+        # v2 adds a table naming an upstream object that does not exist. Both
+        # the dry run and the real apply must refuse it.
+        for args in (["apply", "--dry-run"], ["apply"]):
+            result = run_mz_deploy(c, "source-references/v2", *args, check=False)
+            assert result.returncode != 0, f"{args} unexpectedly succeeded"
+            for expected in ("does not expose", "app.ingest.widgets", "public.widgets"):
+                assert (
+                    expected in result.stderr
+                ), f"{args} error missing {expected!r}:\n{result.stderr}"
+            # Nothing upstream is spelled anything like `widgets`, so the error
+            # must not reach for an unrelated name.
+            assert (
+                "did you mean" not in result.stderr
+            ), f"{args} suggested an unrelated reference:\n{result.stderr}"
+
+        rows = c.sql_query(
+            "SELECT name FROM mz_tables WHERE name = 'widgets'", database="app"
+        )
+        assert len(rows) == 0, f"widgets must not have been created, got {rows}"
+
+    with c.test_case("accept-reference-added-upstream"):
+        # A table added upstream after the source was created is absent from the
+        # source's recorded references until they are refreshed. Applying it must
+        # still work.
+        c.exec(
+            "postgres",
+            "psql",
+            "-U",
+            "postgres",
+            "-c",
+            "CREATE TABLE gadgets (gadget_id INT PRIMARY KEY, name TEXT); "
+            "ALTER TABLE gadgets REPLICA IDENTITY FULL",
+        )
+
+        result = run_mz_deploy(c, "source-references/v3", "apply")
+        assert result.returncode == 0, f"apply v3 failed: {result.stderr}"
+
+        rows = c.sql_query(
+            "SELECT name FROM mz_tables WHERE name = 'gadgets'", database="app"
+        )
+        assert len(rows) == 1, f"expected table 'gadgets', got {rows}"
+
+    with c.test_case("suggest-misspelled-reference"):
+        # v4 asks for `public.gadget`, one character off the `public.gadgets`
+        # the source does expose. The error has to name it.
+        result = run_mz_deploy(c, "source-references/v4", "apply", check=False)
+        assert result.returncode != 0, "apply v4 unexpectedly succeeded"
+        for expected in (
+            "app.ingest.gadget",
+            "did you mean: public.gadgets?",
+            "mz_internal.mz_source_references",
+        ):
+            assert (
+                expected in result.stderr
+            ), f"error missing {expected!r}:\n{result.stderr}"
+
+
+def workflow_source_references_mysql(
+    c: Composition, parser: WorkflowArgumentParser
+) -> None:
+    """The source-reference check leaves MySQL's system schemas to the server.
+
+    `mz_source_references` never lists a table in `mysql`, `sys`,
+    `performance_schema`, or `information_schema`, because both `CREATE SOURCE`
+    and `ALTER SOURCE ... REFRESH REFERENCES` retrieve MySQL tables with system
+    schemas excluded. Creating a table from such a reference does resolve it, so
+    the check must skip those references rather than call them missing, while
+    still checking every other reference on the same source."""
+    setup_base(c)
+    c.up("mysql")
+
+    def mysql(sql: str) -> None:
+        c.exec(
+            "mysql",
+            "bash",
+            "-c",
+            f"export MYSQL_PWD={MySql.DEFAULT_ROOT_PASSWORD} && mysql -u root -e {shlex.quote(sql)}",
+        )
+
+    mysql(
+        "CREATE DATABASE inventory; "
+        "CREATE TABLE inventory.items (item_id INT PRIMARY KEY, name TEXT); "
+        "INSERT INTO inventory.items VALUES (1, 'widget'); "
+        "CREATE TABLE mysql.t_in_mysql (f1 INT); "
+        "INSERT INTO mysql.t_in_mysql VALUES (1)"
+    )
+
+    result = run_mz_deploy(c, "source-references-mysql/v1", "apply")
+    assert result.returncode == 0, f"apply v1 failed: {result.stderr}"
+
+    with c.test_case("accept-system-schema-reference"):
+        # `mysql.t_in_mysql` is readable but never recorded, so the check has to
+        # leave it alone.
+        result = run_mz_deploy(c, "source-references-mysql/v2", "apply")
+        assert result.returncode == 0, f"apply v2 failed: {result.stderr}"
+
+        rows = c.sql_query(
+            "SELECT name FROM mz_tables WHERE name = 't_in_mysql'", database="app"
+        )
+        assert len(rows) == 1, f"expected table 't_in_mysql', got {rows}"
+
+    with c.test_case("reject-unknown-reference-mysql"):
+        # Skipping system schemas must not stop the check from catching a
+        # reference the source genuinely cannot read.
+        result = run_mz_deploy(c, "source-references-mysql/v3", "apply", check=False)
+        assert result.returncode != 0, "apply v3 unexpectedly succeeded"
+        for expected in ("does not expose", "app.ingest.absent", "inventory.absent"):
+            assert (
+                expected in result.stderr
+            ), f"error missing {expected!r}:\n{result.stderr}"
+
+
+def workflow_reconcile(c: Composition, parser: WorkflowArgumentParser) -> None:
+    """`apply` reconciles grants and comments against the catalog instead of
+    replaying them, so a converged project produces an empty plan and a drifted
+    one produces only the statements that close the gap."""
+    setup_base(c)
+
+    def rows_as_lists(rows: list) -> list[list]:
+        """`sql_query` hands back tuples; compare against lists."""
+        return [list(row) for row in rows]
+
+    def events_result(args: list[str]) -> dict:
+        """The `tables` phase result for app.ops.events from a dry run.
+
+        Within one object, grants are reconciled before comments, and each
+        reconciler emits its additions before its removals. Assertions below
+        depend on that order."""
+        result = run_mz_deploy(c, *args, "apply", "--dry-run", "--output", "json")
+        plan = parse_dry_run_json(result)
+        tables = find_phase(plan["phases"], "tables")
+        assert tables is not None, f"no tables phase in {plan}"
+        events = [r for r in tables["results"] if r["object"] == "app.ops.events"]
+        assert len(events) == 1, f"expected one app.ops.events result, got {events}"
+        return {"plan": plan, "events": events[0]}
+
+    with c.test_case("reconcile-initial-apply"):
+        result = run_mz_deploy(c, "reconcile/v1", "apply")
+        assert result.returncode == 0, f"apply v1 failed: {result.stderr}"
+
+        rows = c.sql_query(
+            "SELECT c.comment FROM mz_internal.mz_comments c "
+            "JOIN mz_tables t ON c.id = t.id "
+            "JOIN mz_schemas s ON t.schema_id = s.id "
+            "WHERE t.name = 'events' AND s.name = 'ops' "
+            "AND c.object_sub_id IS NULL",
+            database="app",
+        )
+        assert rows_as_lists(rows) == [
+            ["raw event stream"]
+        ], f"unexpected table comment: {rows}"
+
+        rows = c.sql_query(
+            "SELECT col.name, c.comment FROM mz_internal.mz_comments c "
+            "JOIN mz_tables t ON c.id = t.id "
+            "JOIN mz_schemas s ON t.schema_id = s.id "
+            "JOIN mz_columns col ON col.id = c.id "
+            "  AND col.position::int4 = c.object_sub_id "
+            "WHERE t.name = 'events' AND s.name = 'ops'",
+            database="app",
+        )
+        assert rows_as_lists(rows) == [
+            ["id", "event identifier"]
+        ], f"unexpected column comment: {rows}"
+
+        rows = c.sql_query(
+            "SELECT c.comment FROM mz_internal.mz_comments c "
+            "JOIN mz_databases d ON c.id = d.id WHERE d.name = 'app'",
+            database="app",
+        )
+        assert rows_as_lists(rows) == [
+            ["application data"]
+        ], f"unexpected database comment: {rows}"
+
+        rows = c.sql_query(
+            "SELECT c.comment FROM mz_internal.mz_comments c "
+            "JOIN mz_schemas s ON c.id = s.id "
+            "JOIN mz_databases d ON s.database_id = d.id "
+            "WHERE d.name = 'app' AND s.name = 'ops'",
+            database="app",
+        )
+        assert rows_as_lists(rows) == [
+            ["operational tables"]
+        ], f"unexpected schema comment: {rows}"
+
+        rows = c.sql_query(
+            "SELECT dp.object_type, g.name, unnest("
+            "  mz_internal.mz_format_privileges(dp.privileges)) "
+            "FROM mz_default_privileges dp "
+            "JOIN mz_roles g ON dp.grantee = g.id "
+            "JOIN mz_schemas s ON dp.schema_id = s.id "
+            "JOIN mz_databases d ON s.database_id = d.id "
+            "WHERE d.name = 'app' AND s.name = 'ops'",
+            database="app",
+        )
+        assert rows_as_lists(rows) == [
+            ["table", "materialize", "SELECT"]
+        ], f"unexpected default privilege: {rows}"
+
+    with c.test_case("reconcile-second-apply-is-a-no-op"):
+        # The whole point of the change: nothing is left to do, so nothing is
+        # emitted. Both the per-object statements and the database/schema setup
+        # statements have to come back empty.
+        outcome = events_result(["reconcile/v1"])
+        assert (
+            outcome["events"]["action"] == "up_to_date"
+        ), f"expected up_to_date, got {outcome['events']}"
+        assert (
+            outcome["events"]["statements"] == []
+        ), f"expected no statements, got {outcome['events']['statements']}"
+        assert (
+            outcome["plan"]["setup_statements"] == []
+        ), f"expected no setup statements, got {outcome['plan']['setup_statements']}"
+
+    with c.test_case("reconcile-emits-only-the-drift"):
+        # v2 retexts the table comment and grants a privilege the role does not
+        # hold. The column comment and the SELECT grant already match, so only
+        # two statements should appear, and the object is no longer up to date.
+        outcome = events_result(["reconcile/v2"])
+        assert (
+            outcome["events"]["action"] == "altered"
+        ), f"expected altered, got {outcome['events']}"
+        assert outcome["events"]["statements"] == [
+            "GRANT INSERT ON TABLE app.ops.events TO monitor_user",
+            "COMMENT ON TABLE app.ops.events IS 'raw event stream, partitioned by day'",
+        ], f"unexpected statements: {outcome['events']['statements']}"
+
+        result = run_mz_deploy(c, "reconcile/v2", "apply")
+        assert result.returncode == 0, f"apply v2 failed: {result.stderr}"
+
+    with c.test_case("reconcile-clears-what-the-project-drops"):
+        # v3 drops the column comment and the INSERT grant. Reconciliation is
+        # symmetric, so both are removed rather than left behind.
+        outcome = events_result(["reconcile/v3"])
+        assert (
+            outcome["events"]["action"] == "altered"
+        ), f"expected altered, got {outcome['events']}"
+        assert outcome["events"]["statements"] == [
+            "REVOKE INSERT ON TABLE app.ops.events FROM monitor_user",
+            "COMMENT ON COLUMN app.ops.events.id IS NULL",
+        ], f"unexpected statements: {outcome['events']['statements']}"
+
+        result = run_mz_deploy(c, "reconcile/v3", "apply")
+        assert result.returncode == 0, f"apply v3 failed: {result.stderr}"
+
+        rows = c.sql_query(
+            "SELECT count(*) FROM mz_internal.mz_comments c "
+            "JOIN mz_tables t ON c.id = t.id "
+            "WHERE t.name = 'events' AND c.object_sub_id IS NOT NULL",
+            database="app",
+        )
+        assert int(rows[0][0]) == 0, f"column comment was not cleared: {rows}"
+
+        rows = c.sql_query(
+            "SELECT priv.privilege_type FROM ("
+            "  SELECT mz_internal.mz_aclexplode(t.privileges).* "
+            "  FROM mz_tables t "
+            "  JOIN mz_schemas s ON t.schema_id = s.id "
+            "  WHERE t.name = 'events' AND s.name = 'ops'"
+            ") priv "
+            "JOIN mz_roles g ON priv.grantee = g.id "
+            "WHERE g.name = 'monitor_user' ORDER BY 1",
+            database="app",
+        )
+        assert rows_as_lists(rows) == [
+            ["SELECT"]
+        ], f"expected only SELECT to remain, got {rows}"
+
+    with c.test_case("reconcile-scopes-without-a-missing-object"):
+        # Database and schema configuration lives in mod files, and nothing in
+        # this scope needs creating. Reconciliation must still run, so drift in
+        # a mod-file comment or grant is closed.
+        c.sql(
+            "COMMENT ON SCHEMA app.ops IS 'edited by hand'",
+            user="mz_system",
+            port=6877,
+        )
+        c.sql(
+            "GRANT CREATE ON SCHEMA app.ops TO monitor_user",
+            user="mz_system",
+            port=6877,
+        )
+
+        result = run_mz_deploy(
+            c, "reconcile/v3", "apply", "--dry-run", "--output", "json"
+        )
+        setup = parse_dry_run_json(result)["setup_statements"]
+        assert setup == [
+            "REVOKE CREATE ON SCHEMA app.ops FROM monitor_user",
+            "COMMENT ON SCHEMA app.ops IS 'operational tables'",
+        ], f"unexpected setup statements: {setup}"
+
+        result = run_mz_deploy(c, "reconcile/v3", "apply")
+        assert result.returncode == 0, f"apply v3 failed: {result.stderr}"
+
+        result = run_mz_deploy(
+            c, "reconcile/v3", "apply", "--dry-run", "--output", "json"
+        )
+        setup = parse_dry_run_json(result)["setup_statements"]
+        assert setup == [], f"scope reconciliation did not converge: {setup}"
+
+    with c.test_case("reconcile-public-and-quoted-role-grantees"):
+        # PUBLIC is the `p` pseudo-role and has no mz_roles row; a quoted role
+        # name is case-sensitive. Both have to survive the round trip through the
+        # catalog, or apply emits a grant that fails or never converges.
+        c.sql('CREATE ROLE "Reader"', user="mz_system", port=6877)
+
+        outcome = events_result(["reconcile/v4"])
+        assert outcome["events"]["statements"] == [
+            'GRANT SELECT ON TABLE app.ops.events TO "Reader"',
+            "GRANT SELECT ON TABLE app.ops.events TO public",
+        ], f"unexpected statements: {outcome['events']['statements']}"
+        assert outcome["plan"]["setup_statements"] == [
+            "ALTER DEFAULT PRIVILEGES FOR ROLE deploy_user IN SCHEMA app.ops "
+            "GRANT USAGE ON SECRETS TO monitor_user"
+        ], f"unexpected setup statements: {outcome['plan']['setup_statements']}"
+
+        result = run_mz_deploy(c, "reconcile/v4", "apply")
+        assert result.returncode == 0, f"apply v4 failed: {result.stderr}"
+
+        rows = c.sql_query(
+            "SELECT priv.grantee FROM ("
+            "  SELECT mz_internal.mz_aclexplode(t.privileges).* "
+            "  FROM mz_tables t "
+            "  JOIN mz_schemas s ON t.schema_id = s.id "
+            "  WHERE t.name = 'events' AND s.name = 'ops'"
+            ") priv WHERE priv.grantee = 'p'",
+            database="app",
+        )
+        assert len(rows) == 1, f"expected a grant to the PUBLIC pseudo-role, got {rows}"
+
+        # The regression this guards: a grantee the catalog reports as `p` or
+        # under a quoted name used to read as permanently missing.
+        outcome = events_result(["reconcile/v4"])
+        assert (
+            outcome["events"]["statements"] == []
+        ), f"v4 did not converge: {outcome['events']['statements']}"
+        assert (
+            outcome["plan"]["setup_statements"] == []
+        ), f"v4 scopes did not converge: {outcome['plan']['setup_statements']}"
+
+    with c.test_case("reconcile-default-privileges-are-diffed"):
+        # Going back to v3 drops the PUBLIC and "Reader" grants and the SECRETS
+        # default-privilege rule. The rule has to be revoked, not just left in
+        # place because nothing new was added.
+        #
+        # The TABLES rule is unchanged on purpose. It grants SELECT to
+        # `materialize` on creation, and that grant is protected from revocation
+        # only while the rule exists, so changing it would orphan the grant and
+        # confuse what this case is measuring.
+        result = run_mz_deploy(
+            c, "reconcile/v3", "apply", "--dry-run", "--output", "json"
+        )
+        plan = parse_dry_run_json(result)
+        assert plan["setup_statements"] == [
+            "ALTER DEFAULT PRIVILEGES FOR ROLE deploy_user IN SCHEMA app.ops "
+            "REVOKE USAGE ON SECRETS FROM monitor_user"
+        ], f"unexpected setup statements: {plan['setup_statements']}"
+
+        tables = find_phase(plan["phases"], "tables")
+        assert tables is not None, f"no tables phase in {plan}"
+        events = [r for r in tables["results"] if r["object"] == "app.ops.events"][0]
+        assert events["statements"] == [
+            'REVOKE SELECT ON TABLE app.ops.events FROM "Reader"',
+            "REVOKE SELECT ON TABLE app.ops.events FROM public",
+        ], f"unexpected statements: {events['statements']}"
+
+        result = run_mz_deploy(c, "reconcile/v3", "apply")
+        assert result.returncode == 0, f"apply v3 failed: {result.stderr}"
+
+        rows = c.sql_query(
+            "SELECT dp.object_type, "
+            "  unnest(mz_internal.mz_format_privileges(dp.privileges)) "
+            "FROM mz_default_privileges dp "
+            "JOIN mz_schemas s ON dp.schema_id = s.id "
+            "JOIN mz_databases d ON s.database_id = d.id "
+            "WHERE d.name = 'app' AND s.name = 'ops' "
+            "ORDER BY 1",
+            database="app",
+        )
+        assert rows_as_lists(rows) == [
+            ["table", "SELECT"]
+        ], f"default privileges were not reconciled: {rows}"
+
+    with c.test_case("reconcile-restores-drift-made-outside-the-project"):
+        # A comment and a grant changed by hand are drift like any other: the
+        # next apply puts them back without touching anything else.
+        c.sql(
+            "COMMENT ON TABLE app.ops.events IS 'edited by hand'",
+            user="mz_system",
+            port=6877,
+        )
+        c.sql(
+            "GRANT UPDATE ON TABLE app.ops.events TO monitor_user",
+            user="mz_system",
+            port=6877,
+        )
+
+        outcome = events_result(["reconcile/v3"])
+        assert outcome["events"]["statements"] == [
+            "REVOKE UPDATE ON TABLE app.ops.events FROM monitor_user",
+            "COMMENT ON TABLE app.ops.events IS 'raw event stream, partitioned by day'",
+        ], f"unexpected statements: {outcome['events']['statements']}"
+
+        result = run_mz_deploy(c, "reconcile/v3", "apply")
+        assert result.returncode == 0, f"apply v3 failed: {result.stderr}"
+
+        outcome = events_result(["reconcile/v3"])
+        assert (
+            outcome["events"]["statements"] == []
+        ), f"apply did not converge: {outcome['events']['statements']}"

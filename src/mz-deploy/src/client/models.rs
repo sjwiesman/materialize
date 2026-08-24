@@ -125,6 +125,42 @@ pub struct ObjectGrant {
     pub privilege_type: String,
 }
 
+/// A comment recorded in `mz_internal.mz_comments`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectComment {
+    /// `None` for a comment on the object itself, `Some(name)` for a comment on
+    /// one of its columns.
+    pub column: Option<String>,
+    /// The comment text.
+    pub comment: String,
+}
+
+/// Catalog state used to reconcile one object's grants and comments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CurrentObjectState {
+    /// Explicit privileges currently granted on the object.
+    pub grants: Vec<ObjectGrant>,
+    /// Grants supplied by matching default-privilege rules.
+    pub default_privileges: Vec<ObjectGrant>,
+    /// Comments on the object and, where supported, its columns.
+    pub comments: Vec<ObjectComment>,
+}
+
+/// One `mz_default_privileges` row, keyed by everything that identifies it
+/// within a single database or schema scope.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DefaultPrivilege {
+    /// The role whose newly created objects receive the privilege.
+    pub target_role: String,
+    /// The object type, spelled as `mz_default_privileges` spells it: the
+    /// object-type keyword lowercased, for example `table` or `network policy`.
+    pub object_type: String,
+    /// The role receiving the privilege.
+    pub grantee: String,
+    /// The privilege, uppercased.
+    pub privilege: String,
+}
+
 /// Configuration for creating a cluster (managed or unmanaged).
 ///
 /// This captures all the information needed to clone a cluster's configuration
