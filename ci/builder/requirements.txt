@@ -12,19 +12,19 @@
 --only-binary=confluent-kafka
 
 aiohttp==3.14.3
-black==26.3.1
+black==26.5.1
 # Pulls in dependencies that make launchdarkly/cloud tests fail, keep for now
-boto3-stubs[ec2,iam,kinesis,s3,sqs,ssm,sts,s3tables]==1.41.5
-boto3==1.43.72
-click==8.1.3
-cryptography==50.0.0
+boto3-stubs[ec2,iam,kinesis,s3,sqs,ssm,sts,s3tables]==1.43.80
+boto3==1.43.81
+click==8.5.0
+cryptography==50.0.1
 colored==2.3.2
 docker==7.2.0
 ec2instanceconnectcli==1.0.3
 python-frontmatter==1.3.0
 humanize==4.16.0
 ipympl==0.10.0
-ipywidgets==8.1.8
+ipywidgets==8.1.9
 junit-xml==1.9
 junitparser==5.0.1
 jupyterlab==4.6.3
@@ -35,13 +35,13 @@ launchdarkly-api==17.2.0
 # NOTE matplotlib 3.10.9 is required for Python 3.10 compatibility
 matplotlib==3.10.9; python_version < "3.11"
 matplotlib==3.11.1; python_version >= "3.11"
-matplotlib-stubs==0.3.4
+matplotlib-stubs==0.3.11
 # Keep on 3.4.2 for Python 3.10 compatibility
-networkx==3.4.2
+networkx==3.6.1
 networkx-stubs==0.0.1
 # NOTE numpy 2.2.6 is required for Python 3.10 compatibility
 numpy==2.2.6; python_version < "3.11"
-numpy==2.4.2; python_version >= "3.11"
+numpy==2.5.2; python_version >= "3.11"
 pandas==2.3.3
 pandas-stubs==2.3.3.260113
 parameterized==0.9.0
@@ -50,24 +50,24 @@ pdoc==15.0.4
 pg8000==1.31.5
 prettytable==3.18.0
 psutil==7.2.2
-psycopg==3.3.3
-psycopg-binary==3.3.3
-pydantic==2.12.5
+psycopg==3.3.4
+psycopg-binary==3.3.4
+pydantic==2.13.4
 pyelftools==0.33
 pyjwt==2.13.0
 PyMySQL==1.2.0
-pytest==9.0.3
+pytest==9.1.1
 pytest-split==0.11.0
 pyyaml==6.0.3
 requests==2.34.2
-ruamel.yaml==0.18.17
-ruff==0.0.292
+ruamel.yaml==0.19.1
+ruff==0.16.4
 # NOTE scipy 1.15 is required for Python 3.10 compatibility
 scipy==1.15.3; python_version < "3.11"
-scipy==1.17.1; python_version >= "3.11"
-scipy-stubs==1.15.3.0
+scipy==1.18.1; python_version >= "3.11"
+scipy-stubs==1.18.1.0
 semver==3.0.4
-shtab==1.10.0
+shtab==1.12.0
 sqlparse==0.6.0
 toml==0.10.2
 twine==7.0.0
@@ -80,16 +80,16 @@ types-requests==2.33.0.20260712
 types-setuptools==84.0.0.20260812
 types-toml==0.10.8.20260518
 typing-extensions==4.16.0
-xxhash==4.0.0
+xxhash==4.0.1
 yamllint==1.38.0
 # NOTE confluent-kafka only has wheels for a few python versions
 confluent-kafka==2.6.1; python_version < "3.13"
-confluent-kafka[schema-registry]==2.13.2; python_version >= "3.13"
+confluent-kafka[schema-registry]==2.15.0; python_version >= "3.13"
 fastavro==1.12.2
 websocket-client==1.9.0
 pyarrow-stubs==20.0.0.20251215
 pyarrow==23.0.1
-minio==7.2.15
+minio==7.2.20
 zstandard==0.25.0
 build==1.5.1
 hatchling==1.32.0
