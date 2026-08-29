@@ -43,6 +43,7 @@
 
 use mz_repr::namespaces::is_system_schema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::str::FromStr;
 use tower_lsp::lsp_types::Url;
@@ -261,6 +262,35 @@ impl std::fmt::Display for ObjectId {
     }
 }
 
+impl ObjectId {
+    /// The raw `(database, schema, object)` triple used to match this id against
+    /// `mz_catalog` columns. `None` for a system-schema id, which has no database.
+    ///
+    /// NOTE: Match these components separately rather than concatenating them.
+    /// External names may contain `.`, so `(db, "a.b", "c")` and `(db, "a", "b.c")`
+    /// concatenate identically while naming different objects.
+    pub fn catalog_row(&self) -> Option<(&str, &str, &str)> {
+        self.database
+            .as_ref()
+            .map(|db| (db.as_str(), self.schema.as_str(), self.object.as_str()))
+    }
+
+    /// Match `candidates` against catalog rows identified by their raw
+    /// `(database, schema, object)` columns, comparing component-wise (see
+    /// [`catalog_row`](Self::catalog_row)).
+    pub fn intersect_catalog_rows(
+        candidates: &BTreeSet<ObjectId>,
+        rows: impl IntoIterator<Item = (String, String, String)>,
+    ) -> BTreeSet<ObjectId> {
+        rows.into_iter()
+            .filter_map(|(database, schema, object)| {
+                let candidate = ObjectId::new(database, schema, object);
+                candidates.contains(&candidate).then_some(candidate)
+            })
+            .collect()
+    }
+}
+
 impl Serialize for ObjectId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -416,5 +446,59 @@ mod tests {
         );
         assert_eq!(from_ref, from_stem);
         assert_eq!(from_ref.object(), "table");
+    }
+
+    /// `Display` quotes a versioned name and so would not match the raw catalog
+    /// columns, while `catalog_row` exposes the components unquoted.
+    #[mz_ore::test]
+    fn catalog_row_matches_versioned_object() {
+        let id = ObjectId::new(
+            "app".to_string(),
+            "ingest".to_string(),
+            "orders@1".to_string(),
+        );
+        assert_eq!(id.catalog_row(), Some(("app", "ingest", "orders@1")));
+        assert_eq!(id.to_string(), "app.ingest.\"orders@1\"");
+    }
+
+    /// The same, for a reserved word, which `Display` also quotes.
+    #[mz_ore::test]
+    fn catalog_row_matches_reserved_word() {
+        let id: ObjectId = "materialize.public.\"table\"".parse().unwrap();
+        assert_eq!(id.catalog_row(), Some(("materialize", "public", "table")));
+        assert_eq!(id.to_string(), "materialize.public.\"table\"");
+    }
+
+    /// A system-schema id has no database and so has no catalog row.
+    #[mz_ore::test]
+    fn catalog_row_none_for_system_schema() {
+        let id = ObjectId::new_system("mz_internal".to_string(), "snapshot@2".to_string());
+        assert_eq!(id.catalog_row(), None);
+    }
+
+    /// Two ids whose components differ but whose dotted concatenation collides
+    /// (`db.a.b.c` either way) must each resolve to themselves.
+    #[mz_ore::test]
+    fn intersect_catalog_rows_disambiguates_colliding_concatenation() {
+        let split_schema = ObjectId::new("db".to_string(), "a.b".to_string(), "c".to_string());
+        let split_object = ObjectId::new("db".to_string(), "a".to_string(), "b.c".to_string());
+        let candidates: BTreeSet<ObjectId> = [split_schema.clone(), split_object.clone()]
+            .into_iter()
+            .collect();
+
+        let both_rows = [
+            ("db".to_string(), "a.b".to_string(), "c".to_string()),
+            ("db".to_string(), "a".to_string(), "b.c".to_string()),
+        ];
+        assert_eq!(
+            ObjectId::intersect_catalog_rows(&candidates, both_rows),
+            candidates
+        );
+
+        // A row matching only `split_schema` must not also match `split_object`,
+        // which the shared concatenation would not distinguish.
+        let one_row = [("db".to_string(), "a.b".to_string(), "c".to_string())];
+        let matched: BTreeSet<ObjectId> = ObjectId::intersect_catalog_rows(&candidates, one_row);
+        assert_eq!(matched, BTreeSet::from([split_schema]));
     }
 }

@@ -188,8 +188,8 @@ pub(crate) fn validation_diagnostics(
 /// source file is read once per file and cached. If the read fails, all
 /// diagnostics for that file fall back to `(0, 0)`.
 ///
-/// Non-object variants (`DatabaseSetupError`, `SortError`,
-/// `TypesCacheWriteFailed`) have no per-file context and return an empty map;
+/// Non-object variants (`DatabaseSetupError`, `SortError`, `Types`) have no
+/// per-file context and return an empty map;
 /// callers should log them to the client message stream instead.
 pub(crate) fn typecheck_diagnostics(
     fs: &FileSystem,
@@ -200,7 +200,7 @@ pub(crate) fn typecheck_diagnostics(
         TypeCheckError::Multiple(errs) => errs.as_slice(),
         TypeCheckError::DatabaseSetupError(_)
         | TypeCheckError::SortError(_)
-        | TypeCheckError::TypesCacheWriteFailed(_) => &[],
+        | TypeCheckError::Types(_) => &[],
     };
 
     let mut map: BTreeMap<PathBuf, Vec<Diagnostic>> = BTreeMap::new();

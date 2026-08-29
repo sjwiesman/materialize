@@ -47,10 +47,14 @@
 //!   column is added to the table.
 //! - **Object without cached columns** — Shows just the object kind, name,
 //!   and source file path.
+//! - **Versioned object** — A bare reference reports the version it currently
+//!   resolves to. See [`version_note`].
 //! - **Unknown identifier** — Returns `None`.
 
 use super::{functions, goto_definition};
 use crate::project::compiler::cache::ProjectCache;
+use crate::project::ir::object_id::ObjectId;
+use crate::project::ir::version::{EnclosingObject, VersionMap};
 use crate::project::syntax::variables::find_variable_at_position;
 use crate::types::Types;
 use std::collections::BTreeMap;
@@ -102,7 +106,9 @@ pub fn resolve_hover(
     project_cache: &ProjectCache,
     types_lock: &Types,
 ) -> Option<Hover> {
-    let id = goto_definition::resolve_object_id(parts, file_uri, root);
+    let versions = project_cache.version_map();
+    let enclosing = goto_definition::enclosing_object(file_uri, root);
+    let id = goto_definition::resolve_object_id(parts, file_uri, root, &versions);
 
     let cached_obj = id.as_ref().and_then(|id| project_cache.get_object(id));
 
@@ -149,9 +155,14 @@ pub fn resolve_hover(
         }
     }
 
+    let version_note = version_note(&id, parts, &versions, enclosing.as_ref());
+
     let markdown = match columns {
         Some(cols) if !cols.is_empty() => {
             let mut md = format!("**{kind}** `{fqn}`\n\n");
+            if let Some(note) = &version_note {
+                md.push_str(&format!("{note}\n\n"));
+            }
             if let Some(desc) = &description {
                 md.push_str(&format!("{desc}\n\n"));
             }
@@ -179,7 +190,10 @@ pub fn resolve_hover(
         }
         _ => {
             let file_path = &cached_obj.file_path;
-            format!("**{kind}** `{fqn}`\n\n*{file_path}*")
+            match &version_note {
+                Some(note) => format!("**{kind}** `{fqn}`\n\n{note}\n\n*{file_path}*"),
+                None => format!("**{kind}** `{fqn}`\n\n*{file_path}*"),
+            }
         }
     };
 
@@ -190,6 +204,28 @@ pub fn resolve_hover(
         }),
         range: None,
     })
+}
+
+/// Describe which version a bare reference currently resolves to. `None` for a
+/// pin, for an unversioned object, and for a file's reference to itself.
+fn version_note(
+    id: &ObjectId,
+    parts: &[String],
+    versions: &VersionMap,
+    enclosing: Option<&EnclosingObject>,
+) -> Option<String> {
+    let database = id.database()?;
+    let written = parts.last()?;
+
+    if enclosing.is_some_and(|enclosing| enclosing.encloses(database, id.schema(), written)) {
+        return None;
+    }
+
+    let resolved = versions.resolve_reference(database, id.schema(), written, enclosing)?;
+    Some(format!(
+        "*Bare reference, currently resolving to `{resolved}`. Declaring a \
+         newer version changes what this name means.*"
+    ))
 }
 
 /// Resolve hover for a SQL function name.
@@ -476,6 +512,99 @@ mod tests {
         );
         // name has no comment — empty description cell
         assert!(text.contains("| name | text |  |"));
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn hover_on_bare_reference_reports_the_resolved_version() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let file_uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+
+        let hover = resolve_hover(
+            &["raw".to_string(), "orders".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+            &Types::default(),
+        )
+        .unwrap();
+
+        let text = extract_markdown(&hover);
+        assert!(
+            text.contains("`mydb.raw.\"orders@2\"`"),
+            "should name the resolved object: {text}"
+        );
+        assert!(
+            text.contains("Bare reference, currently resolving to `orders@2`"),
+            "should report the resolved version: {text}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn hover_inside_a_versioned_file_reports_that_files_version() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let file_uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/raw/orders@1.sql");
+
+        let hover = resolve_hover(
+            &["orders".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+            &Types::default(),
+        )
+        .unwrap();
+
+        let text = extract_markdown(&hover);
+        assert!(
+            text.contains("`mydb.raw.\"orders@1\"`"),
+            "should name this file's version: {text}"
+        );
+        assert!(
+            !text.contains("Bare reference"),
+            "a declaration is not a moving target: {text}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn hover_on_another_object_inside_a_versioned_file_reports_the_newest() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let file_uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/raw/orders@1.sql");
+
+        let hover = resolve_hover(
+            &["customers".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+            &Types::default(),
+        )
+        .unwrap();
+
+        let text = extract_markdown(&hover);
+        assert!(
+            text.contains("`mydb.raw.\"customers@2\"`"),
+            "should name the newest version: {text}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn hover_on_unversioned_object_says_nothing_about_versions() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let file_uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+
+        let hover = resolve_hover(
+            &["raw".to_string(), "pg_source".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+            &Types::default(),
+        )
+        .unwrap();
+
+        let text = extract_markdown(&hover);
+        assert!(!text.contains("version"), "unexpected version note: {text}");
     }
 
     fn extract_markdown(hover: &Hover) -> &str {

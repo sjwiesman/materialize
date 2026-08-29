@@ -15,6 +15,7 @@
 //! see this as an opaque data structure — SQLite is an implementation detail.
 
 use crate::project::ir::object_id::ObjectId;
+use crate::project::ir::version::{self, VersionMap};
 use crate::types::{ColumnType, ObjectKind};
 use rusqlite::{Connection, OpenFlags, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -124,6 +125,7 @@ pub struct CachedTest {
 /// since the cache is advisory.
 pub struct ProjectCache {
     conn: Connection,
+    profile_suffix: Option<String>,
 }
 
 impl ProjectCache {
@@ -149,7 +151,10 @@ impl ProjectCache {
             path: path.clone(),
             source,
         })?;
-        Ok(Some(Self { conn }))
+        Ok(Some(Self {
+            conn,
+            profile_suffix: profile_suffix.map(str::to_string),
+        }))
     }
 
     /// Run a query and collect mapped rows. Returns an empty `Vec` if the
@@ -428,6 +433,33 @@ impl ProjectCache {
         )
     }
 
+    /// The version map the compiler resolved bare references against, derived by
+    /// folding the deployed object names back through
+    /// [`version::parse_physical_name`].
+    ///
+    /// NOTE: Keyed by the directory-derived database name, with any profile suffix
+    /// removed, unlike every other accessor on this type.
+    pub(crate) fn version_map(&self) -> VersionMap {
+        let mut map = VersionMap::default();
+        for summary in self.list_objects() {
+            let (base, version) = version::parse_physical_name(&summary.name);
+            if let Some(version) = version {
+                let database = self.unsuffixed_database(&summary.database);
+                map.insert(database, &summary.schema, base, version);
+            }
+        }
+        map
+    }
+
+    /// The directory-derived name of a deployed database. Only the trailing copy
+    /// the compiler appended is removed.
+    fn unsuffixed_database<'a>(&self, deployed: &'a str) -> &'a str {
+        let Some(suffix) = self.profile_suffix.as_deref() else {
+            return deployed;
+        };
+        deployed.strip_suffix(suffix).unwrap_or(deployed)
+    }
+
     /// Get mod statements for a database/schema, ordered by position.
     pub fn get_mod_statements(&self, database: &str, schema: Option<&str>) -> Vec<String> {
         self.query_vec(
@@ -678,6 +710,7 @@ mod tests {
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )
             .unwrap(),
+            profile_suffix: None,
         }
     }
 
@@ -715,13 +748,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let cache = ProjectCache {
-            conn: Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap(),
-        };
+        let cache = open_cache(&db_path);
         let columns = cache
             .get_columns(&"db.schema.my_view".parse::<ObjectId>().unwrap())
             .unwrap();
@@ -745,13 +772,7 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let _conn = create_test_db(&db_path);
 
-        let cache = ProjectCache {
-            conn: Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap(),
-        };
+        let cache = open_cache(&db_path);
         assert!(
             cache
                 .get_columns(&"nonexistent.object.x".parse::<ObjectId>().unwrap())
@@ -772,13 +793,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let cache = ProjectCache {
-            conn: Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap(),
-        };
+        let cache = open_cache(&db_path);
         assert_eq!(
             cache.get_kind(&"db.schema.my_mv".parse::<ObjectId>().unwrap()),
             Some(ObjectKind::MaterializedView)
@@ -792,13 +807,7 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let _conn = create_test_db(&db_path);
 
-        let cache = ProjectCache {
-            conn: Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap(),
-        };
+        let cache = open_cache(&db_path);
         assert!(
             cache
                 .get_kind(&"nonexistent.object.x".parse::<ObjectId>().unwrap())
@@ -837,13 +846,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let cache = ProjectCache {
-            conn: Connection::open_with_flags(
-                &db_path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .unwrap(),
-        };
+        let cache = open_cache(&db_path);
 
         let id_a: ObjectId = "db.schema.obj_a".parse().unwrap();
         let id_b: ObjectId = "db.schema.obj_b".parse().unwrap();
@@ -1201,5 +1204,83 @@ mod tests {
         assert_eq!(schema_mods, vec!["CREATE SCHEMA public"]);
 
         assert!(cache.get_mod_statements("unknown", None).is_empty());
+    }
+
+    /// Checked with and without a profile suffix, since the compiler keys its map
+    /// by the directory-derived database name while the objects it deploys carry
+    /// the suffix.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn test_version_map_matches_what_the_compiler_resolved() {
+        assert_version_map_parity(None);
+        assert_version_map_parity(Some("_dev"));
+    }
+
+    /// Compile a project declaring two versions of one source alongside an
+    /// unversioned object, then check the derived map against what the compiler
+    /// deployed a bare reference against.
+    fn assert_version_map_parity(profile_suffix: Option<&str>) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let schema_dir = root.path().join("models/mydb/raw");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        std::fs::write(
+            schema_dir.join("orders@1.sql"),
+            "CREATE SOURCE orders IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            schema_dir.join("orders@2.sql"),
+            "CREATE SOURCE orders IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            schema_dir.join("events.sql"),
+            "CREATE TABLE events (id INT);\n",
+        )
+        .unwrap();
+        // A computation object cannot share a schema with storage objects.
+        let public_dir = root.path().join("models/mydb/public");
+        std::fs::create_dir_all(&public_dir).unwrap();
+        std::fs::write(
+            public_dir.join("latest.sql"),
+            "CREATE VIEW latest AS SELECT * FROM raw.orders;\n",
+        )
+        .unwrap();
+
+        let fs = crate::fs::FileSystem::new();
+        crate::project::plan_sync(&fs, root.path(), None, profile_suffix, &BTreeMap::new())
+            .expect("fixture project should compile");
+
+        // The artifact is namespaced under the empty profile name when no
+        // profile is selected.
+        let cache = ProjectCache::open(root.path(), "", profile_suffix, &BTreeMap::new())
+            .unwrap()
+            .expect("compiling should have created the build artifact");
+
+        let versions = cache.version_map();
+        assert_eq!(
+            versions.entries().collect::<Vec<_>>(),
+            vec![("mydb", "raw", "orders", 1), ("mydb", "raw", "orders", 2)],
+            "only the versioned object contributes, every declared version does, \
+             and the key is the database name a reference spells",
+        );
+
+        let resolved = versions
+            .resolve_reference("mydb", "raw", "orders", None)
+            .expect("a bare reference to a versioned object resolves");
+        let deployed_db = format!("mydb{}", profile_suffix.unwrap_or(""));
+        let latest = cache
+            .get_object(
+                &format!("{deployed_db}.public.latest")
+                    .parse::<ObjectId>()
+                    .unwrap(),
+            )
+            .expect("the view should be cached");
+        assert!(
+            latest.sql_text.contains(&format!("\"{resolved}\"")),
+            "compiler deployed {} against a different version than the derived map names ({resolved})",
+            latest.sql_text,
+        );
     }
 }

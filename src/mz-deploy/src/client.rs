@@ -79,6 +79,22 @@ pub fn sql_placeholders(n: usize) -> String {
         .join(", ")
 }
 
+/// Build a row-value placeholder list for a `WHERE (col1, col2, ...) IN (...)`
+/// clause: `sql_row_placeholders(2, 3)` returns `"($1, $2, $3), ($4, $5, $6)"`.
+/// Params must be bound in row-major order.
+pub fn sql_row_placeholders(rows: usize, cols: usize) -> String {
+    (0..rows)
+        .map(|row| {
+            let group = (1..=cols)
+                .map(|col| format!("${}", row * cols + col))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({group})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Build a `LIKE` pattern (used with `ESCAPE '\'`) matching any name that ends
 /// in the staging suffix `_<deploy_id>`.
 ///
@@ -104,7 +120,14 @@ pub(crate) fn staging_suffix_like_pattern(deploy_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::staging_suffix_like_pattern;
+    use super::{sql_row_placeholders, staging_suffix_like_pattern};
+
+    #[mz_ore::test]
+    fn test_sql_row_placeholders() {
+        assert_eq!(sql_row_placeholders(1, 3), "($1, $2, $3)");
+        assert_eq!(sql_row_placeholders(2, 3), "($1, $2, $3), ($4, $5, $6)");
+        assert_eq!(sql_row_placeholders(0, 3), "");
+    }
 
     #[mz_ore::test]
     fn test_staging_suffix_like_pattern_escapes_separator() {

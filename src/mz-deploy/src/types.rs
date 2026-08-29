@@ -149,7 +149,7 @@ pub enum TypesError {
         #[source]
         source: std::io::Error,
     },
-    #[error("failed to parse types.lock at {path}")]
+    #[error("failed to parse types.lock at {path}: {source}")]
     ParseFailed {
         path: PathBuf,
         #[source]
@@ -450,14 +450,24 @@ fn write_toml(lock: &TypesLock) -> String {
 }
 
 /// Load the types.lock file from the specified directory.
-/// Returns an error if the file doesn't exist or cannot be parsed.
+///
+/// A missing file represents a project with no pinned types. I/O and parse
+/// failures are returned rather than discarded.
 pub(crate) fn load_types_lock(directory: &Path) -> Result<Types, TypesError> {
     let path = directory.join("types.lock");
 
-    let contents = fs::read_to_string(&path).map_err(|source| TypesError::FileReadFailed {
-        path: path.clone(),
-        source,
-    })?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Types::default());
+        }
+        Err(source) => {
+            return Err(TypesError::FileReadFailed {
+                path: path.clone(),
+                source,
+            });
+        }
+    };
 
     let lock: TypesLock =
         toml::from_str(&contents).map_err(|source| TypesError::ParseFailed { path, source })?;
@@ -574,6 +584,69 @@ mod tests {
 
         let loaded = load_types_lock(dir.path()).expect("failed to load types.lock");
         assert_eq!(types, loaded);
+    }
+
+    #[mz_ore::test]
+    fn test_missing_types_lock_returns_default() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let loaded = load_types_lock(dir.path()).expect("missing types.lock should be allowed");
+        assert_eq!(loaded, Types::default());
+    }
+
+    #[mz_ore::test]
+    fn test_malformed_types_lock_returns_error() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        fs::write(
+            dir.path().join("types.lock"),
+            r#"
+version = 1
+
+[[table]]
+name = "app.ingest.orders@1"
+columns = []
+"#,
+        )
+        .expect("failed to write malformed types.lock");
+
+        let error = load_types_lock(dir.path()).expect_err("malformed types.lock should fail");
+        assert!(
+            matches!(error, TypesError::ParseFailed { .. }),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.to_string().contains("invalid object id"),
+            "parse detail missing from error: {error}"
+        );
+    }
+
+    #[mz_ore::test]
+    fn test_versioned_object_round_trip() {
+        let object_id = ObjectId::new(
+            "app".to_string(),
+            "ingest".to_string(),
+            "orders@1".to_string(),
+        );
+        let mut tables = BTreeMap::new();
+        tables.insert(object_id.clone(), BTreeMap::new());
+        let mut kinds = BTreeMap::new();
+        kinds.insert(object_id, ObjectKind::Table);
+        let types = Types {
+            version: 1,
+            tables,
+            kinds,
+            comments: BTreeMap::new(),
+        };
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        types
+            .write_types_lock(dir.path())
+            .expect("failed to write types.lock");
+
+        let contents =
+            fs::read_to_string(dir.path().join("types.lock")).expect("failed to read types.lock");
+        assert!(contents.contains(r#"name = "app.ingest.\"orders@1\"""#));
+        let loaded = load_types_lock(dir.path()).expect("failed to load types.lock");
+        assert_eq!(loaded, types);
     }
 
     #[mz_ore::test]
