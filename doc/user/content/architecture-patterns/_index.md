@@ -5,11 +5,11 @@ disable_list: true
 menu:
   main:
     identifier: "architecture-patterns"
-    name: "Architecture Patterns"
-    weight: 8
+    name: "Architecture patterns"
+    weight: 40
 ---
 
 Pattern | Description
 --------|------------
-[Live Context Graph](/architecture-patterns/live-context-graph/) | Model your business as a compounding ontology of live data products and build apps, services, and AI agents on top of it.
-[Use an ontology table](/architecture-patterns/ontology/) | Create an ontology table of join relationships that agents query before writing multi-table SQL.
+[Live Context Layer](/architecture-patterns/live-context-layer/) | Model your business as a compounding set of semantic objects and build AI agents, apps, and services on top of them.
+[Use an ontology table](/architecture-patterns/ontology/) | Create a table of join relationships that agents query before writing multi-table SQL.

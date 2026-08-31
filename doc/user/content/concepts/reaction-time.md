@@ -1,11 +1,12 @@
 ---
 title: Reaction Time, Freshness, and Query Latency
-description: "Learn about indexes in Materialize."
+description: "How Materialize defines freshness, query latency, and reaction time, and how to measure each."
 menu:
   main:
     parent: concepts
-    weight: 100
+    weight: 10
     identifier: 'concepts-reaction-time'
+    name: "Freshness and reaction time"
 ---
 
 In operational data systems, the performance and responsiveness of queries depend not only on how fast a query runs, but also on how current the underlying data is. This page introduces three foundational concepts for evaluating and understanding system responsiveness in Materialize:

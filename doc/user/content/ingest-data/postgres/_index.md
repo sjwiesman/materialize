@@ -35,7 +35,7 @@ Materialize gives you the following benefits:
 * **Incrementally updated materialized views:** Materialized views in PostgreSQL
     are computationally expensive and require manual refreshes. You can use
     Materialize as a read-replica to build views on top of your PostgreSQL data
-    that are efficiently maintained and always up-to-date.
+    that are maintained incrementally as your data changes.
 
 When a source is created, Materialize parallelizes the initial snapshot
 across the cluster's workers and, on PostgreSQL 14 and later, splits each

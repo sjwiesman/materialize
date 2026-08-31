@@ -4,7 +4,7 @@ description: Learn about sources in Materialize.
 menu:
   main:
     parent: concepts
-    weight: 10
+    weight: 20
     identifier: 'concepts-sources'
 aliases:
   - /get-started/key-concepts/#sources

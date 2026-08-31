@@ -23,8 +23,18 @@ publishDate = ["publishDate"]
 
 [[menu.main]]
 identifier = "get-started"
-name = "Get started"
+name = "Start here"
 weight = 5
+
+[[menu.main]]
+identifier = "define-context-layer"
+name = "Define your context layer"
+weight = 20
+
+[[menu.main]]
+identifier = "put-to-work"
+name = "Put the layer to work"
+weight = 30
 
 #
 # Connect sources
@@ -61,7 +71,8 @@ weight = 35
 [[menu.main]]
 identifier = "transform-data"
 name = "Transform data"
-weight = 12
+parent = 'define-context-layer'
+weight = 50
 
 
 #
@@ -70,7 +81,7 @@ weight = 12
 
 [[menu.main]]
 identifier = "sql"
-name = "SQL Reference"
+name = "SQL reference"
 weight = 75
 
 #

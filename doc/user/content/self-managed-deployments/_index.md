@@ -31,7 +31,8 @@ aliases:
 menu:
   main:
     identifier: "sm-deployments"
-    weight: 5
+    weight: 60
+    name: "Deploy self-managed"
 ---
 
 ## Overview

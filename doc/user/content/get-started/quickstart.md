@@ -3,9 +3,9 @@ title: "Quickstart"
 description: "Learn the basics of Materialize."
 menu:
   main:
-    parent: "get-started"
-    weight: 10
-    name: "Quickstart"
+    parent: 'serve-results'
+    weight: 5
+    name: "Tutorial: views and indexes"
 aliases:
   - /katacoda/
   - /quickstarts/
@@ -14,8 +14,8 @@ aliases:
 
 {{% text-style %}}
 
-Materialize provides always-fresh results while also providing [strong
-consistency guarantees](/reference/isolation-level/). In Materialize, both
+Materialize keeps query results current as new data arrives, while also
+providing [strong consistency guarantees](/reference/isolation-level/). In Materialize, both
 [indexes](/concepts/indexes/ "Indexes represents query results stored in memory
 within a cluster") and [materialized views](/concepts/views/#materialized-views)
 **incrementally update** results when Materialize ingests new data; i.e., work
@@ -290,10 +290,11 @@ get up-to-date results.
 
    In Materialize, to make the queries more performant even as data
    continues to grow, you can create [**indexes**](/concepts/indexes/) on views.
-   Indexes provide always fresh view results in memory within a cluster by
-   performing incremental updates as new data arrives. Queries can then read
-   from the in-memory, already up-to-date results instead of re-running the
-   underlying statement, making queries more performant.
+   An index keeps a view's results in memory within a cluster, performing
+   incremental updates as new data arrives instead of recomputing from
+   scratch. Queries then read the maintained results rather than re-running
+   the underlying statement, which makes them faster and keeps their cost
+   independent of how the query is written.
 
    In the next step, you will create an index on `winning_bids`.
 
@@ -301,9 +302,9 @@ get up-to-date results.
 
 Indexes in Materialize represents query results stored in memory within a
 cluster. In Materialize, you can create [indexes](/concepts/indexes/) on views
-to provide always fresh, up-to-date view results in memory within a cluster.
-Queries can then read from the in-memory, already up-to-date results instead of
-re-running the underlying statement.
+to keep view results in memory within a cluster, maintained as inputs change.
+Queries can then read those results instead of re-running the underlying
+statement.
 
 To provide the up-to-date results, indexes **perform incremental updates** as
 inputs change instead of recalculating the results from scratch. Additionally,

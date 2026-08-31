@@ -76,7 +76,7 @@ restrictions:
 - {{< include-md file="content/headless/mz_now_clause_disjunction_restrictions.md" >}}
 
   To rewrite the query, see [Disjunction (OR)
-  alternatives](http://localhost:1313/docs/transform-data/idiomatic-materialize-sql/mz_now/#disjunctions-or).
+  alternatives](/transform-data/idiomatic-materialize-sql/mz_now/#disjunctions-or).
 
 - If part of a  `WHERE` clause, the `WHERE` clause cannot be an [aggregate
  `FILTER` expression](/sql/functions/filters).

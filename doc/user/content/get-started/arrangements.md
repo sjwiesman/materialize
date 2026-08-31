@@ -4,7 +4,7 @@ description: "Understand how Materialize arrangements work."
 menu:
   main:
     parent: concepts
-    weight: 22
+    weight: 32
     identifier: 'concepts-arrangements'
 aliases:
   - /overview/arrangements/

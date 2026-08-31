@@ -4,9 +4,10 @@ description: "Best practices for ingesting data into Materialize from external s
 disable_list: true
 menu:
   main:
+    parent: 'define-context-layer'
     identifier: "ingest-data"
-    name: "Ingest data"
-    weight: 11
+    name: "Connect your sources"
+    weight: 20
 aliases:
   - /self-managed/v25.1/ingest-data/
   - /self-managed/v25.2/ingest-data/kafka/amazon-msk/

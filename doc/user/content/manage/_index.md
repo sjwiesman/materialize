@@ -6,6 +6,7 @@ menu:
   main:
     identifier: "manage"
     weight: 50
+    name: "Operate"
 aliases:
   - /self-managed/v25.2/manage/
   - /self-managed/v25.2/manage/operational-guidelines/

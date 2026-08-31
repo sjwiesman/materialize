@@ -30,8 +30,8 @@ gives you the following benefits:
 
 - **Incrementally updated materialized views:** Materialized views are **not
   supported in MySQL**, so you can use Materialize as a
-  read-replica to build views on top of your MySQL data that are efficiently
-  maintained and always up-to-date.
+  read-replica to build views on top of your MySQL data that are maintained
+  incrementally as your data changes.
 
 When a source is created, Materialize parallelizes the initial snapshot
 across the cluster's workers and can split the read of large tables that meet

@@ -12,14 +12,15 @@ aliases:
   - /self-managed/v25.2/transform-data/
 ---
 
-With Materialize, you use SQL to transform your fast-changing data into **live
-data products**: the business objects (e.g., a customer, an order, a store) that
-your applications, services, dashboards, and AI agents read.
+With Materialize, you use SQL to transform your fast-changing data into
+[**semantic objects**](/concepts/semantic-objects/): the nouns of your business
+(a customer, an order, a store) that your agents, applications, services, and
+dashboards read.
 
-## From SQL to live data products
+## From SQL to semantic objects
 
 You use [views](/concepts/views/) and [materialized
-views](/concepts/views/#materialized-views) to define your business objects in
+views](/concepts/views/#materialized-views) to define those objects in
 SQL. Materialize keeps the results of **indexed views** and **materialized
 views** up to date as it ingests your data.
 

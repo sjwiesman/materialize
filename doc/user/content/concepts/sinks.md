@@ -4,7 +4,7 @@ description: Learn about sinks in Materialize.
 menu:
   main:
     parent: concepts
-    weight: 25
+    weight: 50
     identifier: 'concepts-sinks'
 aliases:
   - /get-started/key-concepts/#sinks

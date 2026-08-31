@@ -18,7 +18,7 @@ aliases:
 menu:
   main:
     identifier: "integrations"
-    name: "Tools and integrations"
+    name: "Tools"
     weight: 70
 ---
 

@@ -4,7 +4,8 @@ description: "Create an ontology table that helps agents write correct joins."
 menu:
   main:
     parent: architecture-patterns
-    weight: 10
+    weight: 15
+    name: "A relationship registry"
 ---
 
 The ontology table is a curated catalog of join relationships between tables in

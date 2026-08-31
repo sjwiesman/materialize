@@ -4,9 +4,10 @@ description: "This section contains guides for installing Materialize Agent skil
 disable_list: true
 menu:
   main:
-    name: "AI & agents"
+    parent: 'put-to-work'
+    name: "Connect an AI agent"
     identifier: mcp-server
-    weight: 48
+    weight: 10
 aliases:
   - /integrations/mcp-server/llm/
   - /integrations/llm/

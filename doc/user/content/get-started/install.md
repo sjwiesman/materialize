@@ -4,9 +4,9 @@ description: "Install Self-Managed Materialize."
 disable_list: true
 menu:
   main:
-    parent: get-started
+    parent: 'start-choose-deployment'
     identifier: "install"
-    weight: 20
+    weight: 10
 aliases:
   - /get-started/key-concepts/#indexes
   - /self-managed/v25.1/get-started/install/

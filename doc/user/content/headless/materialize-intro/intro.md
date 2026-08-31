@@ -2,6 +2,7 @@
 headless: true
 ---
 
-Materialize is the live data layer for apps and AI agents. To keep results
-up-to-date as new data arrives, Materialize incrementally updates results as it
-ingests data rather than recalculating results from scratch.
+Materialize is the live context layer for AI agents and the applications
+around them. You define the nouns of your business once in SQL, and Materialize
+keeps them current by incrementally updating results as it ingests data rather
+than recalculating from scratch.

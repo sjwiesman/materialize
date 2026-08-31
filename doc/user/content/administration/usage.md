@@ -26,7 +26,7 @@ administration tasks.
 You must provision at least one cluster to power your workloads. You can then
 use the cluster to create the objects ([indexes](/concepts/indexes/) and
 [materialized views](/concepts/views/#materialized-views)) that provide
-always-fresh results. In Materialize, both indexes and materialized views are
+continuously maintained results. In Materialize, both indexes and materialized views are
 incrementally maintained when Materialize ingests new data. That is, Materialize
 performs work on writes such that no work is performed when reading from these
 objects.

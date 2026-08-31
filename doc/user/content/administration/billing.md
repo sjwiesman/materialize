@@ -11,7 +11,7 @@ Materialize determines billing based on your compute and storage usage.
 Materialize bills per second based on the [cluster(s)](/concepts/clusters/) you
 provision for your workloads. Each cluster is a pool of resources (CPU, memory,
 and scratch disk space) that must stay up and running to continually provide you
-with always-fresh results. For pricing details, see [Pricing](https://materialize.com/pricing/).
+with continuously maintained results. For pricing details, see [Pricing](https://materialize.com/pricing/).
 
 ## Compute
 
@@ -33,7 +33,7 @@ default `quickstart` cluster, you are <red>not billed</red> for these system clu
 You must provision at least one cluster to power your workloads. You can then
 use the cluster to create the objects ([indexes](/concepts/indexes/) and
 [materialized views](/concepts/views/#materialized-views)) that provide
-always-fresh results. In Materialize, both indexes and materialized views are
+continuously maintained results. In Materialize, both indexes and materialized views are
 incrementally maintained when Materialize ingests new data. That is, Materialize
 performs work on writes such that no work is performed when reading from these
 objects.

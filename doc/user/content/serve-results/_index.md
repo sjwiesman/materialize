@@ -4,8 +4,10 @@ description: "Serving results from Materialize"
 disable_list: true
 menus:
   main:
-    weight: 15
+    parent: 'put-to-work'
+    weight: 20
     identifier: 'serve-results'
+    name: "Build an application"
 aliases:
   - /self-managed/v25.2/serve-results/
   - /self-managed/v25.2/serve-results/query-results/

@@ -28,7 +28,7 @@ SQL Server Change Data Capture (CDC) in Materialize gives you the following bene
 * **Incrementally updated materialized views:** Incrementally updated Materialized
     views are considerably **limited in SQL Server**, so you can use Materialize as
     a read-replica to build views on top of your SQL Server data that are
-    efficiently maintained and always up-to-date.
+    maintained incrementally as your data changes.
 
 ## Supported versions
 
