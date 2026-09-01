@@ -47,8 +47,9 @@ Materialize is the wrong choice.
 - **What it costs**, in the terms that predict spend: update rate rather than
   data size, plus which views need indexes.
 - **When not to use Materialize** for this workload, and what to use instead.
-- **Where to go next**: the tour that builds a small version, the recipes that
-  generalize it, and the reference pages for the objects involved.
+- **Where to go next**: the tour that builds a small version, the
+  architecture pattern that generalizes it, and the reference pages for the
+  objects involved.
 
 ## Why these pages live in the documentation
 

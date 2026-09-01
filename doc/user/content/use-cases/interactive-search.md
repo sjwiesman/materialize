@@ -36,7 +36,7 @@ both.
 
 ## Related
 
-- [Interactive search pipeline](/recipes/interactive-search-pipeline/) for the
-  end-to-end recipe.
+- [Fan out to downstream systems](/architecture-patterns/fan-out/) for the
+  pattern and its worked example.
 - [Keep embeddings fresh](/agents/patterns/fresh-embeddings/) for the pattern.
 - [Sink results](/serve-results/sink/) for the delivery half.

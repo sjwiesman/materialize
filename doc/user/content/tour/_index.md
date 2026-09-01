@@ -48,7 +48,7 @@ data, so the concepts carry across.
 - A lab per section, collapsed by default, holding the exact command, the
   expected result, and a deliberate breakage to undo.
 - A closing summary and one link onward, either to the matching use case or to
-  the recipe that generalizes what you just built.
+  the architecture pattern that generalizes what you just built.
 
 ## Why labs, not listings
 

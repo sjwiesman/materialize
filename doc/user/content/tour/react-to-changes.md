@@ -34,6 +34,6 @@ that make the count exact.
 
 - [Event-driven architecture](/use-cases/event-driven-architecture/) for the
   use case.
-- [Alert when a condition holds](/recipes/alerting/) and [Produce
-  exactly-once business events](/recipes/business-events/) for the recipes.
+- [Fan out to downstream systems](/architecture-patterns/fan-out/) for the
+  pattern behind both delivery paths.
 - [Sinks](/concepts/sinks/) for the mechanism.

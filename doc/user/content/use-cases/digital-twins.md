@@ -36,5 +36,5 @@ true right now" currently requires joining several systems by hand.
 
 - [Live context graph](/architecture-patterns/live-context-graph/) and
   [Real-time medallion architecture](/architecture-patterns/medallion/)
-- [Build a context graph](/recipes/context-graph/)
+- [Use an ontology table](/architecture-patterns/ontology/)
 - [Views](/concepts/views/) and [Indexes](/concepts/indexes/)

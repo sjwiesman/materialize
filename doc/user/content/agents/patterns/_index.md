@@ -14,9 +14,10 @@ menu:
 
 Each pattern page follows the same shape, so they can be compared: the problem,
 the solution in SQL, when to use it, the trade-offs, the alternatives, and the
-mistakes people make. They are deliberately smaller than a
-[recipe](/recipes/), which builds one thing end to end, and smaller than a [use
-case](/use-cases/), which explains why the workload exists at all.
+mistakes people make. They are deliberately smaller than an
+[architecture pattern](/architecture-patterns/), which shapes a whole system,
+and smaller than a [use case](/use-cases/), which explains why the workload
+exists at all.
 
 | Pattern | Use it when |
 |---------|-------------|

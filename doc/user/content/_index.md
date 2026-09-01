@@ -96,11 +96,11 @@ applications can query, react to, and build on.
 ## Learning resources
 
 {{< multilinkbox >}}
-{{< linkbox title="Recipes" >}}
-- [All recipes](/recipes/)
-- [Serve an agent a live customer view](/recipes/live-context-for-an-agent/)
-- [Keep a search index current](/recipes/interactive-search-pipeline/)
-- [Alert when a condition holds](/recipes/alerting/)
+{{< linkbox title="Take the tour" >}}
+- [All tours](/tour/)
+- [Live context for an agent](/tour/agent-context/)
+- [Serve a live application](/tour/live-app/)
+- [React to changes](/tour/react-to-changes/)
 {{</ linkbox >}}
 
 {{< linkbox title="Query patterns" >}}
