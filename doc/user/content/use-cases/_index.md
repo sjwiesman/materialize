@@ -7,6 +7,8 @@ menu:
     identifier: "use-cases"
     name: "Use cases"
     weight: 15
+    params:
+      group: learn
 ---
 
 {{% include-headless "/headless/restructure-stub" %}}

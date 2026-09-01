@@ -7,6 +7,8 @@ menu:
     identifier: "tour"
     name: "Tour of Materialize"
     weight: 10
+    params:
+      group: learn
 ---
 
 {{% include-headless "/headless/restructure-stub" %}}

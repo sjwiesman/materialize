@@ -7,6 +7,8 @@ menu:
     identifier: "examples"
     name: "Examples"
     weight: 48
+    params:
+      group: build
 ---
 
 {{% include-headless "/headless/restructure-stub" %}}

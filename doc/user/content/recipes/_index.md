@@ -7,6 +7,8 @@ menu:
     identifier: "recipes"
     name: "Recipes"
     weight: 45
+    params:
+      group: build
 ---
 
 {{% include-headless "/headless/restructure-stub" %}}

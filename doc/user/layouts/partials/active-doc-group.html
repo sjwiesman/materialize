@@ -1,0 +1,17 @@
+{{- /* The documentation group that owns the given page.
+
+Groups are declared in `params.docNav`; a top-level menu entry joins one by
+setting `menu.main.params.group`. The header renders the group list and the
+sidebar renders only the active group's sections, so both need the same answer.
+
+Pages outside the menu, the home page among them, fall back to
+`params.defaultDocGroup`. */ -}}
+{{- $page := . -}}
+{{- $group := "" -}}
+{{- range site.Menus.main -}}
+  {{- if and (not $group) (or ($page.IsMenuCurrent "main" .) ($page.HasMenuCurrent "main" .)) -}}
+    {{- $group = .Params.group -}}
+  {{- end -}}
+{{- end -}}
+{{- if not $group -}}{{- $group = site.Params.defaultDocGroup -}}{{- end -}}
+{{- return $group -}}

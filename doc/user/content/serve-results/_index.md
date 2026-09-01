@@ -5,6 +5,8 @@ disable_list: true
 menu:
   main:
     weight: 34
+    params:
+      group: build
     identifier: 'serve-results'
 aliases:
   - /self-managed/v25.2/serve-results/

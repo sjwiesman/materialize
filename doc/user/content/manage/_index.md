@@ -7,6 +7,8 @@ menu:
     identifier: "manage"
     name: "Operate Materialize"
     weight: 60
+    params:
+      group: operate
 aliases:
   - /self-managed/v25.2/manage/
   - /self-managed/v25.2/manage/operational-guidelines/

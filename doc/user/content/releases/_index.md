@@ -6,6 +6,8 @@ menu:
   main:
     identifier: "releases"
     weight: 80
+    params:
+      group: reference
 aliases:
   - /self-managed/v25.1/release-notes/
   - /self-managed/v25.2/release-notes/

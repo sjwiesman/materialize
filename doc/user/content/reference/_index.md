@@ -5,8 +5,10 @@ disable_list: true
 menu:
   main:
     identifier: "reference"
-    name: "Reference"
-    weight: 76
+    name: "System reference"
+    weight: 74
+    params:
+      group: reference
 ---
 
 {{% include-headless "/headless/restructure-stub" %}}

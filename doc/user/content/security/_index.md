@@ -6,6 +6,8 @@ menu:
   main:
     identifier: "security"
     weight: 62
+    params:
+      group: operate
 ---
 
 ## Cloud

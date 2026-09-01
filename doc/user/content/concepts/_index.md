@@ -5,6 +5,8 @@ disable_list: true
 menu:
   main:
     weight: 20
+    params:
+      group: learn
     identifier: concepts
 aliases:
   - /overview/api-components/

@@ -5,8 +5,10 @@ disable_list: true
 menu:
   main:
     identifier: "agents"
-    name: "Agents & AI"
-    weight: 40
+    name: "Overview"
+    weight: 5
+    params:
+      group: agents
 aliases:
   - /integrations/mcp-server/
   - /integrations/mcp-server/llm/
