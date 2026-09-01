@@ -1,3 +1,7 @@
+{{- /* The topic sidebar: every top-level menu section and its descendants.
+
+Rows are rendered by `sidebar-entry.html`, which recurses, so the nav has no
+depth limit. */ -}}
 
 <div class="sidebar-wrapper">
   {{ $currentPage := . }}
@@ -5,73 +9,9 @@
     <ul>
       <div id="docsearch"></div>
 
-      {{ range .Site.Menus.main.ByWeight }}
-      <li class="level-1 {{if .HasChildren }}has-children{{ else }}no-children{{ end }}">
-          <a {{with .URL}}href="{{.}}"{{end}} class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
-            {{.Name | markdownify}}
-            {{- if .HasChildren }}
-              {{ readFile "static/images/icon_sidebar_expander.svg" | safeHTML }}
-            {{ end }}
-          </a>
-
-        {{- if .HasChildren }}
-        <ul>
-          {{- range .Children }}
-          <li class="level-2 {{if .HasChildren }}has-children{{ else }}no-children{{ end }}">
-            <a {{with .URL}}href="{{.}}"{{end}} class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
-              {{.Name | markdownify}}
-              {{- if .HasChildren }}
-                {{ readFile "static/images/icon_sidebar_expander.svg" | safeHTML }}
-              {{ end }}
-            </a>
-
-            {{- if .HasChildren }}
-            <ul>
-              {{- range .Children }}
-              <li class="level-3 {{if .HasChildren }}has-children{{ else }}no-children{{ end }}">
-                <a {{with .URL}}href="{{.}}"{{end}} class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
-                  {{.Name | markdownify}}
-                  {{- if .HasChildren }}
-                    {{ readFile "static/images/icon_sidebar_expander.svg" | safeHTML }}
-                  {{ end }}
-                </a>
-
-                {{- if .HasChildren }}
-                <ul>
-                  {{- range .Children }}
-                  <li class="level-4 {{if .HasChildren }}has-children{{ else }}no-children{{ end }}">
-                    <a {{with .URL}}href="{{.}}"{{end}} class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
-                      {{.Name | markdownify}}
-                      {{- if .HasChildren }}
-                        {{ readFile "static/images/icon_sidebar_expander.svg" | safeHTML }}
-                      {{ end }}
-                    </a>
-
-                    {{- if .HasChildren }}
-                    <ul>
-                      {{- range .Children }}
-                      <li class="level-5">
-                        <a href="{{.URL}}" class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
-                          {{.Name | markdownify}}
-                        </a>
-                      </li>
-                      {{- end}}
-                    </ul>
-                    {{- end}}
-                  </li>
-                  {{- end}}
-                </ul>
-                {{- end}}
-              </li>
-              {{- end}}
-            </ul>
-            {{- end}}
-          </li>
-          {{- end}}
-        </ul>
-        {{- end}}
-      </li>
-      {{- end}}
+      {{- range .Site.Menus.main.ByWeight }}
+        {{- partial "sidebar-entry.html" (dict "entry" . "level" 1 "page" $currentPage) }}
+      {{- end }}
     </ul>
   </nav>
   <button class="close-topics" aria-label="Close the topics sidebar">
