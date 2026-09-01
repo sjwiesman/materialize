@@ -86,3 +86,10 @@ INSERT INTO ontology (table_name, columns, referenced_table, referenced_columns)
 Tables with multiple relationships, like `orders`, contribute one row per
 relationship. Implicit joins, such as `support_tickets` → `customers`, are
 documented exactly like the declared foreign-key relationships.
+
+The [marketplace reference
+application](/architecture-patterns/#the-examples) ships an ontology table
+covering its own entities, along with the agent prompt that reads it. What to
+look at there: an agent question that requires two joins the model was never
+told about, answered correctly because the relationships were published rather
+than guessed.

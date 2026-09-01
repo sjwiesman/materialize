@@ -33,6 +33,18 @@ view that nobody can reason about.
 - **Trade-offs and alternatives.** For a single consumer, one view is clearer
   than three. Deep stacks are for reuse, not for tidiness.
 
+
+## Example
+
+The **marketplace reference application**, read as a stack: raw ingestion,
+conformed entities, and business-ready products, each layer a set of views over
+the one below.
+
+What to look at: where the indexes sit and how many downstream products share
+each one, the memory cost attributable to each layer, and the same question
+answered from the conformed layer and from the business layer so the value of
+the top layer is visible rather than assumed.
+
 ## Related
 
 - [Views](/concepts/views/), [Indexes](/concepts/indexes/), and [Incremental

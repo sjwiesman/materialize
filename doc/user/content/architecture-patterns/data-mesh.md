@@ -33,6 +33,18 @@ version is authoritative.
 - **Trade-offs and alternatives.** A single owning team is simpler while there
   is only one. A mesh adds a coordination surface that has to be staffed.
 
+
+## Example
+
+The **marketplace reference application**, read from the publishing side: each
+team owns a schema, publishes its data products with comments and ownership,
+and grants read access to the teams that consume them.
+
+What to look at: a consumer view built on another team's data product, the
+privileges that make that possible without handing over the raw sources, and
+what a publisher has to do to change the shape of a product other teams already
+depend on.
+
 ## Related
 
 - [Live data products](/concepts/data-products/)

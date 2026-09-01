@@ -33,6 +33,18 @@ results together with no guarantee that they agree.
   history and ad-hoc analysis. Point reads that one system of record already
   serves well should stay there.
 
+
+## Example
+
+The **marketplace reference application**, which brings a PostgreSQL database,
+a MySQL database, and a Kafka topic into one conformed model of customers,
+orders, couriers, and inventory.
+
+What to look at: how identifiers that differ per source system are reconciled
+in the conformed layer, what the combined update rate of the three sources
+costs to maintain, and the freshness figures for a question that spans all
+three.
+
 ## Related
 
 - [Real-time medallion architecture](/architecture-patterns/medallion/) for the

@@ -205,6 +205,23 @@ Write-back happens through your existing systems. Materialize observes the chang
 
 Once you've modeled your business as a context graph, the same graph serves every application, service, dashboard, ML feature, alert, and agent you build on top of it. You stop building bespoke pipelines per consumer; you build the graph once, and every downstream system reads the same truth.
 
+## Example
+
+The **agent context service**, an entity model over a PostgreSQL database and
+an event stream, indexed for point lookups and exposed to an agent as MCP
+tools, with a load generator running underneath it.
+
+What to look at: the comments that become tool descriptions, the reaction time
+measured while the agent is querying and the generator is writing, an agent
+question that traverses two entities and returns a consistent answer, and what
+the numbers do when the update rate is raised.
+
+{{< note >}}
+The example is a proposal. It is only worth publishing if its code is tested in
+CI, with the SQL on this page pulled from those files rather than retyped, so
+the example cannot silently drift from the product.
+{{</ note >}}
+
 ## Learn more
 
 - [Quickstart](/get-started/quickstart/): build your first live data product.

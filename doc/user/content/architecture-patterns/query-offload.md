@@ -34,6 +34,18 @@ or a cache that has to be invalidated by hand.
   cheap. A cache is fine when the answer changes rarely and staleness is
   acceptable. Neither survives a query that has to be both complex and current.
 
+
+## Example
+
+The **query offload application**: an expensive multi-way join with
+aggregation, first run against the source database and timed, then maintained
+as an indexed view and timed again, with a browser client reading the result.
+
+What to look at: the two timings side by side, the client applying diffs rather
+than refetching so the numbers move without polling, the isolation level that
+makes two figures on the same screen agree, and what the client sees while the
+serving cluster rehydrates after a restart.
+
 ## Related
 
 - [Data-intensive applications and UIs](/use-cases/data-intensive-apps/)

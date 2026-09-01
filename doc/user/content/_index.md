@@ -103,14 +103,13 @@ applications can query, react to, and build on.
 - [Alert when a condition holds](/recipes/alerting/)
 {{</ linkbox >}}
 
-{{< linkbox title="Examples" >}}
-- [All examples](/examples/)
-- [Agent context service](/examples/agent-context-service/)
-- [Interactive search](/examples/interactive-search/)
-- [Live dashboard](/examples/live-dashboard/)
+{{< linkbox title="Query patterns" >}}
+- [Idiomatic Materialize SQL](/transform-data/idiomatic-materialize-sql/)
+- [Common query patterns](/transform-data/patterns/)
+- [Ingestion patterns](/ingest-data/patterns/)
 {{</ linkbox >}}
 
-{{< linkbox title="Architecture patterns" >}}
+{{< linkbox title="Patterns and examples" >}}
 - [All patterns](/architecture-patterns/)
 - [Live context graph](/architecture-patterns/live-context-graph/)
 - [Operational data store](/architecture-patterns/operational-data-store/)
