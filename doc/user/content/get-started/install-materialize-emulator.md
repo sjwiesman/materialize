@@ -3,9 +3,9 @@ title: "Download and run Materialize Emulator"
 description: "The Materialize Emulator is an all-in-one Docker image available on Docker Hub, offering the fastest way to get hands-on experience with Materialize in a local environment."
 menu:
   main:
-    parent: "get-started"
-    weight: 15
-    name: "Download and run Materialize Emulator"
+    parent: "run"
+    weight: 20
+    name: "Materialize Emulator"
 
 ---
 
@@ -101,7 +101,7 @@ to work with your Materialize Emulator.
 #### Install the Materialize agent skills
 
 Materialize provides open-source [agent
-skills](/integrations/coding-agent-skills/) that give your coding agent access
+skills](/agents/agent-skills/) that give your coding agent access
 to Materialize documentation and reference material, so it can provide more
 accurate assistance when writing queries, setting up sources, creating
 materialized views, and more.
@@ -117,12 +117,12 @@ materialized views, and more.
    ```
 
 For more details on the available skills, see [Agent
-Skills](/integrations/coding-agent-skills/).
+Skills](/agents/agent-skills/).
 
 #### Connect to the MCP server
 
 The Materialize Emulator includes a built-in `materialize-developer` [MCP
-server](/integrations/mcp-server/mcp-developer/) for troubleshooting and
+server](/agents/mcp-developer/) for troubleshooting and
 observability. The Emulator does not require authentication, so your MCP
 client only needs the MCP server URL
 `http://localhost:6876/api/mcp/developer`.
@@ -140,7 +140,7 @@ client only needs the MCP server URL
    is my cluster using?*
 
 For more details, including instructions for other MCP clients, see [MCP Server
-for Developers](/integrations/mcp-server/mcp-developer/).
+for Developers](/agents/mcp-developer/).
 
 ### Next steps
 

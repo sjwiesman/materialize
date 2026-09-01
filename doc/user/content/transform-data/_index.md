@@ -1,10 +1,11 @@
 ---
-title: "Overview"
+title: "Model data with SQL"
 description: "Learn how to efficiently transform data using Materialize SQL."
 disable_list: true
 menu:
   main:
     parent: transform-data
+    name: "Overview"
     weight: 5
     identifier: transform-overview
 aliases:

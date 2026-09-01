@@ -1,12 +1,14 @@
 ---
-title: MCP Server for Agents
+title: "MCP server for agents"
 description: "Query data products via Materialize's built-in materialize-agent MCP Server."
 make_table_row_headers_searchable: true
 menu:
   main:
-    parent: "mcp-server"
-    weight: 20
+    parent: "agents-build"
+    weight: 10
     identifier: "mcp-server-agent"
+aliases:
+  - /integrations/mcp-server/mcp-agent/
 ---
 
 {{< public-preview />}}
@@ -57,11 +59,11 @@ server](#connect-to-the-mcp-server).*
 {{< note >}}
 
 Starting in v26.27, the [`query`
-tool](/integrations/mcp-server/mcp-agent-tools/#query) is **enabled by default**
+tool](/agents/mcp-agent-tools/#query) is **enabled by default**
 and can execute arbitrary `SELECT` queries (including joins) on **all** objects
 the agent can access (including system catalog objects), not just those
 discoverable by the [`get_data_products`
-tool](/integrations/mcp-server/mcp-agent-tools/#get_data_products).
+tool](/agents/mcp-agent-tools/#get_data_products).
 
 To prevent agents from reading system catalog objects, set
 `restrict_to_user_objects` on each agent role.
@@ -128,7 +130,7 @@ isolated to:
    inherited.
 
 1. Recommended. Restrict the role to user objects only so that the [`query`
-   tool](/integrations/mcp-server/mcp-agent-tools/#query) cannot read system
+   tool](/agents/mcp-agent-tools/#query) cannot read system
    catalog objects. You must run the following as a **superuser**:
 
    ```mzsql
@@ -141,7 +143,7 @@ isolated to:
    run queries.
 
    See also [Restrict `query` tool access to user objects
-   only](/integrations/mcp-server/mcp-agent-tools/#restrict-to-user-objects).
+   only](/agents/mcp-agent-tools/#restrict-to-user-objects).
 
 ### Define data products and grant access
 
@@ -290,7 +292,7 @@ GRANT mcp_agent TO <your_user>;
 {{< /tip >}}
 
 To limit what the agent can reach, set
-[`restrict_to_user_objects`](/integrations/mcp-server/mcp-agent-tools/#restrict-to-user-objects)
+[`restrict_to_user_objects`](/agents/mcp-agent-tools/#restrict-to-user-objects)
 on your role (this excludes the system catalog only). For a confined,
 least-privilege agent, use a token-based [service
 account](#method-2-token-based-authentication) instead.
@@ -506,7 +508,7 @@ connect.
    You set these role configurations on the individual roles as configurations are not inherited.
 
 1. Recommended. Restrict the role to user objects only so that the [`query`
-   tool](/integrations/mcp-server/mcp-agent-tools/#query) cannot read system
+   tool](/agents/mcp-agent-tools/#query) cannot read system
    catalog objects. You must run the following as a **superuser** (an
    Organization Admin):
 
@@ -545,7 +547,7 @@ connect.
    are not inherited.
 
 1. Recommended. Restrict the role to user objects only so that the [`query`
-   tool](/integrations/mcp-server/mcp-agent-tools/#query) cannot read system
+   tool](/agents/mcp-agent-tools/#query) cannot read system
    catalog objects. You must run the following as a **superuser**:
 
    ```mzsql
@@ -580,7 +582,7 @@ connect.
    are not inherited.
 
 1. Recommended. Restrict the role to user objects only so that the [`query`
-   tool](/integrations/mcp-server/mcp-agent-tools/#query) cannot read system
+   tool](/agents/mcp-agent-tools/#query) cannot read system
    catalog objects. You must run the following as a **superuser**:
 
    ```mzsql
@@ -826,15 +828,15 @@ curl -X POST <baseURL>/api/mcp/agent \
 
 {{< warning >}}
 
-By default, the [`query` tool](/integrations/mcp-server/mcp-agent-tools/#query)
+By default, the [`query` tool](/agents/mcp-agent-tools/#query)
 is **enabled**. This tool allows arbitrary `SELECT` queries (including joins) on
 **all** objects for which the agent has the appropriate privileges (`SELECT` on
 the object, `USAGE` on the object's schema).
 
 To disable it, set
-[`enable_mcp_agent_query_tool`](/integrations/mcp-server/mcp-agent-config/#enable_mcp_agent_query_tool)
+[`enable_mcp_agent_query_tool`](/agents/mcp-agent-config/#enable_mcp_agent_query_tool)
 to `false`. See [Agent endpoint
-configuration](/integrations/mcp-server/mcp-agent-config/).
+configuration](/agents/mcp-agent-config/).
 
 {{< /warning >}}
 
@@ -857,10 +859,10 @@ either natural language or SQL:
 
 - [Use an ontology table](/architecture-patterns/ontology/)
 - [`materialize-agent` MCP Server available
-  tools](/integrations/mcp-server/mcp-agent-tools/)
+  tools](/agents/mcp-agent-tools/)
 - [`materialize-agent` MCP Server
-  configuration](/integrations/mcp-server/mcp-agent-config/)
-- [Agent Skills](/integrations/coding-agent-skills/)
+  configuration](/agents/mcp-agent-config/)
+- [Agent Skills](/agents/agent-skills/)
 - [CREATE INDEX](/sql/create-index)
 - [COMMENT ON](/sql/comment-on)
 - [CREATE ROLE](/sql/create-role)

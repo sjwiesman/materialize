@@ -24,7 +24,7 @@ applications can query, react to, and build on.
   other operational systems, then join it into a unified view.
 
 - **Turn raw data into live business objects.** [Use SQL](/transform-data/) to
-  model customers, accounts, orders, inventory, and other business concepts.
+  model [customers](/concepts/data-products/), accounts, orders, inventory, and other business concepts.
   Materialize keeps these data products continuously up to date as the
   underlying data changes.
 
@@ -51,20 +51,20 @@ applications can query, react to, and build on.
 
 ## Common use cases
 
-- **Context engineering for AI agents.** Give agents live, contextual building
-  blocks they can [query directly](/integrations/mcp-server/). Build a shared
+- **[Context engineering for AI agents](/use-cases/context-engineering/).** Give agents live, contextual building
+  blocks they can [query directly](/agents/). Build a shared
   context layer once instead of asking every agent to discover, join, and
   interpret raw operational data on its own.
 
-- **Interactive search and RAG.** Keep search documents, attributes, and
+- **[Interactive search and RAG](/use-cases/interactive-search/).** Keep search documents, attributes, and
   embeddings synchronized with changing source data so retrieval reflects what
   is happening now.
 
-- **Event-driven applications.** Turn raw database and stream updates into
+- **[Event-driven applications](/use-cases/event-driven-architecture/).** Turn raw database and stream updates into
   meaningful business events. Trigger workflows, notifications, agents, and
   downstream systems when important conditions change.
 
-- **Data-intensive applications.** Power APIs, dashboards, customer
+- **[Data-intensive applications](/use-cases/data-intensive-apps/).** Power APIs, dashboards, customer
   experiences, and internal tools with complex views of operational data while
   keeping expensive queries off transactional systems.
 
@@ -73,51 +73,77 @@ applications can query, react to, and build on.
 {{< multilinkbox >}}
 {{< linkbox title="Get started" >}}
 - [Quickstart](/get-started/quickstart/)
+- [Agent quickstart](/get-started/agent-quickstart/)
 - [What is Materialize?](/get-started/)
-- [Materialize Console](/console/)
+- [When to use Materialize](/get-started/when-to-use-materialize/)
+{{</ linkbox >}}
+
+{{< linkbox title="Take the tour" >}}
+- [Live context for an agent](/tour/agent-context/)
+- [Serve a live application](/tour/live-app/)
+- [React to changes](/tour/react-to-changes/)
 {{</ linkbox >}}
 
 {{< linkbox title="Learn the concepts" >}}
 - [Concepts overview](/concepts/)
-- [Sources](/concepts/sources/)
+- [The live context layer](/concepts/live-context-layer/)
+- [Live data products](/concepts/data-products/)
 - [Views and indexes](/concepts/views/)
-- [Clusters](/concepts/clusters/)
-- [Sinks](/concepts/sinks/)
-{{</ linkbox >}}
-
-{{< linkbox title="Code with AI" >}}
-- [Agent skills](/integrations/coding-agent-skills/)
-- [MCP servers](/integrations/mcp-server/)
-- [Use an ontology table](/architecture-patterns/ontology/)
+- [Consistency guarantees](/concepts/consistency/)
 {{</ linkbox >}}
 {{</ multilinkbox >}}
 
 ## Learning resources
 
 {{< multilinkbox >}}
+{{< linkbox title="Recipes" >}}
+- [All recipes](/recipes/)
+- [Serve an agent a live customer view](/recipes/live-context-for-an-agent/)
+- [Keep a search index current](/recipes/interactive-search-pipeline/)
+- [Alert when a condition holds](/recipes/alerting/)
+{{</ linkbox >}}
+
+{{< linkbox title="Examples" >}}
+- [All examples](/examples/)
+- [Agent context service](/examples/agent-context-service/)
+- [Interactive search](/examples/interactive-search/)
+- [Live dashboard](/examples/live-dashboard/)
+{{</ linkbox >}}
+
 {{< linkbox title="Architecture patterns" >}}
-- [Patterns overview](/architecture-patterns/)
-- [Live Context Graph](/architecture-patterns/live-context-graph/)
-- [Use an ontology table](/architecture-patterns/ontology/)
+- [All patterns](/architecture-patterns/)
+- [Live context graph](/architecture-patterns/live-context-graph/)
+- [Operational data store](/architecture-patterns/operational-data-store/)
+- [OLTP query offload](/architecture-patterns/query-offload/)
 {{</ linkbox >}}
+{{</ multilinkbox >}}
 
-{{< linkbox title="Guides" >}}
-- [Ingest data](/ingest-data/)
-- [Transform data](/transform-data/)
-- [Serve results](/serve-results/)
-- [Manage Materialize](/manage/)
-{{</ linkbox >}}
+## Build with Materialize
 
-{{< linkbox title="Query patterns" >}}
-- [Idiomatic Materialize SQL](/transform-data/idiomatic-materialize-sql/)
-- [Common query patterns](/transform-data/patterns/)
+{{< multilinkbox >}}
+{{< linkbox title="Ingest data" >}}
+- [Connect a source](/ingest-data/)
+- [PostgreSQL](/ingest-data/postgres/), [MySQL](/ingest-data/mysql/), [Kafka](/ingest-data/kafka/)
 - [Ingestion patterns](/ingest-data/patterns/)
+{{</ linkbox >}}
+
+{{< linkbox title="Model data" >}}
+- [Model with SQL](/transform-data/)
+- [Publish a data product](/transform-data/publish-a-data-product/)
+- [Idiomatic Materialize SQL](/transform-data/idiomatic-materialize-sql/)
+{{</ linkbox >}}
+
+{{< linkbox title="Serve and react" >}}
+- [Serve results](/serve-results/)
+- [React to changes](/serve-results/react-to-changes/)
+- [Sink results](/serve-results/sink/)
 {{</ linkbox >}}
 {{</ multilinkbox >}}
 
 ## Run Materialize
 
-Choose where Materialize runs and who operates it.
+[Choose where Materialize runs and who operates it](/run/). Your choice does not
+change how you write SQL or how consumers read results.
 
 {{% include-headless "/headless/materialize-intro/offerings" %}}
 
@@ -125,6 +151,7 @@ Choose where Materialize runs and who operates it.
 
 {{< multilinkbox >}}
 {{< linkbox title="SQL" >}}
+- [Reference overview](/reference/)
 - [Commands](/sql/)
 - [Functions and operators](/sql/functions/)
 - [Data types](/sql/types/)
@@ -146,12 +173,13 @@ Choose where Materialize runs and who operates it.
 - [Client libraries](/integrations/client-libraries/)
 - [HTTP API](/integrations/http-api/)
 - [WebSocket API](/integrations/websocket-api/)
-- [MCP servers](/integrations/mcp-server/)
+- [MCP servers](/agents/)
 {{</ linkbox >}}
 {{</ multilinkbox >}}
 
 {{< multilinkbox >}}
 {{< linkbox title="Operate Materialize" >}}
+- [Operate Materialize](/manage/)
 - [Operational guidelines](/manage/operational-guidelines/)
 - [Clusters](/concepts/clusters/)
 - [Security](/security/)
@@ -159,6 +187,7 @@ Choose where Materialize runs and who operates it.
 {{</ linkbox >}}
 
 {{< linkbox title="Deploy and automate" >}}
+- [Run Materialize](/run/)
 - [Self-managed deployments](/self-managed-deployments/)
 - [Terraform](/manage/terraform/)
 - [dbt](/manage/dbt/)

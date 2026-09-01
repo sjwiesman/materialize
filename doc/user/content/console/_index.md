@@ -3,7 +3,7 @@ title: "Materialize console"
 description: "Introduction to the Materialize Console, user interface for Materialize"
 disable_list: true
 disable_toc: true
-menus:
+menu:
   main:
     parent: "get-started"
     weight: 24

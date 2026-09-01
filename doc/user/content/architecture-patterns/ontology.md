@@ -11,7 +11,7 @@ The ontology table is a curated catalog of join relationships between tables in
 your database. Each row describes a single join: the columns in one table that
 reference columns in another.
 
-Through the Materialize [MCP server](/integrations/mcp-server/)'s `query` tool,
+Through the Materialize [MCP server](/agents/)'s `query` tool,
 an agent can query the ontology table before writing multi-table SQL.
 
 {{< note >}}

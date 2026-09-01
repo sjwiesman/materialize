@@ -2,9 +2,9 @@
 title: "Serve results"
 description: "Serving results from Materialize"
 disable_list: true
-menus:
+menu:
   main:
-    weight: 15
+    weight: 34
     identifier: 'serve-results'
 aliases:
   - /self-managed/v25.2/serve-results/

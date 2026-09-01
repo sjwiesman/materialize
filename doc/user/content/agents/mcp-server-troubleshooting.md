@@ -1,11 +1,13 @@
 ---
-title: MCP Server Troubleshooting
+title: "MCP server troubleshooting"
 description: "Troubleshooting guide for the MCP Server."
 make_table_row_headers_searchable: true
 menu:
   main:
-    parent: "mcp-server"
-    weight: 50
+    parent: "agents"
+    weight: 60
+aliases:
+  - /integrations/mcp-server/mcp-server-troubleshooting/
 ---
 
 ## `unable to verify the first certificate`
@@ -55,9 +57,9 @@ Alternatively, configure your deployment with a certificate from a trusted CA
 
 **Fix:** Enable the endpoint. See
 - [Developer endpoint
-  configuration](/integrations/mcp-server/mcp-developer-config/)
+  configuration](/agents/mcp-developer-config/)
 - [Agents endpoint
-  configuration](/integrations/mcp-server/mcp-developer-config/)
+  configuration](/agents/mcp-developer-config/)
 
 ## `HTTP 401 Unauthorized`
 

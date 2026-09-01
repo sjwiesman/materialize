@@ -18,15 +18,15 @@ aliases:
 menu:
   main:
     identifier: "integrations"
-    name: "Tools and integrations"
-    weight: 70
+    name: "Interfaces and tools"
+    weight: 72
 ---
 
 
 ## Agent skills and MCP servers
 
 For Materialize's open-source agent skills and built-in Model Context Protocol
-(MCP) servers, see [AI & agents](/integrations/mcp-server/).
+(MCP) servers, see [AI & agents](/agents/).
 
 ## SQL clients/client libraries
 

@@ -5,7 +5,8 @@ disable_list: true
 menu:
   main:
     identifier: "manage"
-    weight: 50
+    name: "Operate Materialize"
+    weight: 60
 aliases:
   - /self-managed/v25.2/manage/
   - /self-managed/v25.2/manage/operational-guidelines/

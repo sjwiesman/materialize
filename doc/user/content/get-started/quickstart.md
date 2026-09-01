@@ -649,7 +649,7 @@ creating indexes, see [Index Best Practices](/concepts/indexes/#best-practices).
 
 - To have your coding agent (such as Claude Code, Codex, or Cursor) write more
   accurate Materialize SQL, install the [Materialize agent
-  skills](/integrations/coding-agent-skills/). The skills give your agent access
+  skills](/agents/agent-skills/). The skills give your agent access
   to Materialize documentation and reference material:
 
   ```bash
@@ -657,12 +657,12 @@ creating indexes, see [Index Best Practices](/concepts/indexes/#best-practices).
   ```
 
 - To let your agent query your data and inspect your deployment, connect it to
-  Materialize's built-in [MCP servers](/integrations/mcp-server/):
+  Materialize's built-in [MCP servers](/agents/):
 
-  - [MCP Server for agents](/integrations/mcp-server/mcp-agent/) to discover and
+  - [MCP Server for agents](/agents/mcp-agent/) to discover and
     query your data products.
 
-  - [MCP Server for developers](/integrations/mcp-server/mcp-developer/) to
+  - [MCP Server for developers](/agents/mcp-developer/) to
     troubleshoot and observe your deployment through the `mz_*` system catalog
     tables, and to run queries on your objects.
 

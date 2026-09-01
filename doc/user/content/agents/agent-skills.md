@@ -1,10 +1,12 @@
 ---
-title: Agent Skills
+title: "Agent skills"
 description: "Add Materialize skills to coding agents like Claude Code, Codex, Cursor, and others."
 menu:
   main:
-    parent: "mcp-server"
-    weight: 7
+    parent: "agents-code-with-ai"
+    weight: 10
+aliases:
+  - /integrations/coding-agent-skills/
 ---
 
 Coding agents like [Claude
@@ -88,6 +90,6 @@ all tools rather than just this directory.
 
 ## Related Pages
 
-- [MCP Server](/integrations/mcp-server/)
+- [MCP Server](/agents/)
 - [mz-deploy AI agent setup](/manage/mz-deploy/agent-setup/)
 - [GitHub: Materialize Agent Skills](https://github.com/MaterializeInc/agent-skills)

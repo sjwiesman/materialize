@@ -7,6 +7,8 @@ menu:
     weight: 10
     identifier: "developer-endpoint-tools"
     name: "Available tools"
+aliases:
+  - /integrations/mcp-server/mcp-developer-tools/
 ---
 
 ## Tools
@@ -66,7 +68,7 @@ data](/reference/system-catalog/mz_introspection/) is replica-specific.
 
 Only one statement per call is allowed. Write operations (`INSERT`, `UPDATE`,
 `CREATE`, etc.) are rejected. To disable the tool, see
-[`enable_mcp_developer_query_tool`](/integrations/mcp-server/mcp-developer-config/).
+[`enable_mcp_developer_query_tool`](/agents/mcp-developer-config/).
 
 {{< tip >}}
 For system catalog lookups that can run on the `mz_catalog_server` cluster,

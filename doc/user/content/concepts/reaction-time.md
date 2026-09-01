@@ -1,6 +1,6 @@
 ---
-title: Reaction Time, Freshness, and Query Latency
-description: "Learn about indexes in Materialize."
+title: "Reaction time, freshness, and query latency"
+description: "How quickly a change in an upstream system becomes visible in a query result, and how to measure it."
 menu:
   main:
     parent: concepts

@@ -1,5 +1,5 @@
 ---
-title: "Live Context Graph"
+title: "Live context graph"
 description: "Model your business as a compounding ontology of live data products, the context graph, and build apps, services, and AI agents on top of it."
 menu:
   main:
@@ -23,7 +23,7 @@ In this architecture pattern, we'll walk you through how to setup a context grap
 ## Architecture
 ![Context graph architecture: operational sources flow through CDC into Materialize, which maintains live materialized views consumed via SQL by apps and dashboards, and via MCP by AI agents](/images/context_graph_architecture.avif)
 
-Materialize ingests changes from sources, such as Postgres databases and Kafka. Data products can be created via SQL, and are maintained incrementally to ensure they are kept fresh. Finally applications and dashboards read via SQL over the PostgreSQL wire protocol. AI agents can connect via the [Materialize MCP server](/integrations/mcp-server/).
+Materialize ingests changes from sources, such as Postgres databases and Kafka. Data products can be created via SQL, and are maintained incrementally to ensure they are kept fresh. Finally applications and dashboards read via SQL over the PostgreSQL wire protocol. AI agents can connect via the [Materialize MCP server](/agents/).
 
 ## Ingest data from operational sources
 
@@ -192,7 +192,7 @@ For agent builders, Materialize provides two primitives:
 - **Read:** typed queries over live rows in the context graph.
 - **Compose:** SQL functions and views that shape rows for an agent's task.
 
-The [Materialize MCP server](/integrations/mcp-server/) exposes both primitives to agents as tool definitions over the SQL surface. An agent connects to the MCP server, discovers the available data products as tools, and queries them directly:
+The [Materialize MCP server](/agents/) exposes both primitives to agents as tool definitions over the SQL surface. An agent connects to the MCP server, discovers the available data products as tools, and queries them directly:
 
 ```
 agent  ──► MCP server  ──► Materialize  ──► customers / at_risk_orders / stores
@@ -210,4 +210,4 @@ Once you've modeled your business as a context graph, the same graph serves ever
 - [Quickstart](/get-started/quickstart/): build your first live data product.
 - [Reaction time, freshness, and query latency](/concepts/reaction-time/): the freshness contract.
 - [Serve results](/serve-results/): read the context graph from your applications and services.
-- [MCP integration](/integrations/mcp-server/): expose the context graph to AI agents.
+- [MCP integration](/agents/): expose the context graph to AI agents.

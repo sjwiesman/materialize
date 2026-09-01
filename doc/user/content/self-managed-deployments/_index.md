@@ -30,8 +30,9 @@ aliases:
 
 menu:
   main:
+    parent: "run"
     identifier: "sm-deployments"
-    weight: 5
+    weight: 30
 ---
 
 ## Overview

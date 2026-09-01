@@ -4,8 +4,7 @@ description: "Learn about the core concepts in Materialize."
 disable_list: true
 menu:
   main:
-    parent: get-started
-    weight: 25
+    weight: 20
     identifier: concepts
 aliases:
   - /overview/api-components/
@@ -20,6 +19,10 @@ The pages in this section introduces some of the key concepts in Materialize:
 
 Concept                                  | Description
 -----------------------------------------|-----
+[The live context layer](/concepts/live-context-layer/) | What Materialize maintains between your operational systems and the agents and applications that read from them.
+[Live data products](/concepts/data-products/) | The unit Materialize publishes: a business object defined in SQL, kept current, and shared across consumers.
+[Consistency guarantees](/concepts/consistency/) | What Materialize promises about the results you read, across sources, across views, and over time.
+[Incremental computation](/concepts/incremental-computation/) | Why maintaining a result costs in proportion to what changed.
 [Clusters](/concepts/clusters/)          | Clusters are isolated pools of compute resources for sources, sinks, indexes, materialized views, and ad-hoc queries.
 [Sources](/concepts/sources/)            | Sources describe an external system you want Materialize to read data from.
 [Views](/concepts/views/)    | Views represent a named query that you want to save for repeated execution. You can use **indexed views** and **materialized views** to incrementally maintain the results of views.

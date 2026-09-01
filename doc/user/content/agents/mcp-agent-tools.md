@@ -1,5 +1,5 @@
 ---
-title: Agent MCP server tools
+title: "Agent MCP server tools"
 description: "Tools exposed by the `materialize-agent` MCP server."
 menu:
   main:
@@ -7,6 +7,8 @@ menu:
     weight: 10
     identifier: "agent-endpoint-tools"
     name: "Available tools"
+aliases:
+  - /integrations/mcp-server/mcp-agent-tools/
 ---
 
 ## Tools
@@ -136,7 +138,7 @@ default.
   only](#restrict-to-user-objects).
 
 - To disable the tool, set the [`enable_mcp_agent_query_tool`
-  configuration](/integrations/mcp-server/mcp-agent-config/#enable_mcp_agent_query_tool)
+  configuration](/agents/mcp-agent-config/#enable_mcp_agent_query_tool)
   system parameter to `false`. Once disabled, you can only query data products
   that are discoverable by [`get_data_products`](#get_data_products).
 
@@ -145,7 +147,7 @@ default.
 
 #### Restricting `query` tool access to user objects only {#restrict-to-user-objects}
 
-When the [`query` tool](/integrations/mcp-server/mcp-agent-tools/#query) is
+When the [`query` tool](/agents/mcp-agent-tools/#query) is
 enabled, a role can, by default, query any object for which it has appropriate
 privileges, including system catalog objects (`mz_catalog.*`, `mz_internal.*`,
 `pg_catalog.*`, and `information_schema.*`).

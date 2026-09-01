@@ -1,12 +1,14 @@
 ---
-title: MCP Server for Developers
+title: "MCP server for developers"
 description: "Query Materialize system catalog tables for troubleshooting and observability via the built-in materialize-developer MCP server."
 make_table_row_headers_searchable: true
 menu:
   main:
-    parent: "mcp-server"
-    weight: 25
+    parent: "agents-code-with-ai"
+    weight: 20
     identifier: "mcp-server-developer"
+aliases:
+  - /integrations/mcp-server/mcp-developer/
 ---
 
 {{< public-preview />}}
@@ -614,8 +616,8 @@ Once connected to the MCP server, you can ask natural language questions like:
 
 The agent picks the appropriate tool for each question. Most catalog lookups run
 on the catalog server cluster via
-[`query_system_catalog`](/integrations/mcp-server/mcp-developer-tools/#query_system_catalog);
-[`query`](/integrations/mcp-server/mcp-developer-tools/#query) (available
+[`query_system_catalog`](/agents/mcp-developer-tools/#query_system_catalog);
+[`query`](/agents/mcp-developer-tools/#query) (available
 starting in v26.30) is used when the question needs a specific cluster (for
 example, `EXPLAIN ANALYZE` against a materialized view or index, or reading user
 objects).
@@ -634,9 +636,9 @@ The privileges required to use the `materialize-developer` MCP server are:
 
 - [Use an ontology table](/architecture-patterns/ontology/)
 - [`materialize-developer` MCP Server available
-  tools](/integrations/mcp-server/mcp-developer-tools/)
+  tools](/agents/mcp-developer-tools/)
 - [`materialize-developer` MCP Server
-  configuration](/integrations/mcp-server/mcp-developer-config/)
-- [Troubleshooting](/integrations/mcp-server/mcp-server-troubleshooting/)
-- [Agent Skills](/integrations/coding-agent-skills/)
+  configuration](/agents/mcp-developer-config/)
+- [Troubleshooting](/agents/mcp-server-troubleshooting/)
+- [Agent Skills](/agents/agent-skills/)
 - [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
