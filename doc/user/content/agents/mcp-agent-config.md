@@ -8,7 +8,7 @@ menu:
     weight: 20
     identifier: "agent-endpoint-configuration"
 aliases:
-  - /integrations/mcp-server/mcp-agent-config/
+  - /interfaces/mcp-server/mcp-agent-config/
 ---
 
 ## Available configuration parameters

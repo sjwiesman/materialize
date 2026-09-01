@@ -116,7 +116,7 @@ REPLACEMENT...`](/sql/alter-materialized-view/#replacing-a-materialized-view)
 See also:
 
 - [Replace materialized
-views](/transform-data/updating-materialized-views/replace-materialized-view/)
+views](/model-data/updating-materialized-views/replace-materialized-view/)
 guide for a step-by-step tutorial.
 
 #### Query performance of replacement views
@@ -172,7 +172,7 @@ VIEW`](../alter-materialized-view).
 See also:
 
 - [Replace materialized views guide
-](/transform-data/updating-materialized-views/replace-materialized-view/)
+](/model-data/updating-materialized-views/replace-materialized-view/)
 
 
 ## Privileges

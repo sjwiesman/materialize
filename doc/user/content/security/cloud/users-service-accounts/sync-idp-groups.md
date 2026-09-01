@@ -218,7 +218,7 @@ All grants and revokes performed by group sync are also recorded in
 ## Manage with Terraform
 
 Instead of the Console, you can manage SCIM connections and groups with the
-[Materialize Terraform provider](/manage/terraform/):
+[Materialize Terraform provider](/operate/terraform/):
 
 | Resource | Description |
 |----------|-------------|
@@ -232,4 +232,4 @@ Instead of the Console, you can manage SCIM connections and groups with the
 - [Access control (RBAC)](/security/cloud/access-control/)
 - [Configure single sign-on (SSO)](/security/cloud/users-service-accounts/sso/)
 - [Invite users](/security/cloud/users-service-accounts/invite-users/)
-- [Manage with Terraform](/manage/terraform/)
+- [Manage with Terraform](/operate/terraform/)

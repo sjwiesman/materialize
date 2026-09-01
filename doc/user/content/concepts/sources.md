@@ -81,7 +81,7 @@ Sources require compute resources in Materialize. That is, sources must be
 associated with a [cluster](/concepts/clusters/). If possible, dedicate a
 cluster just for sources.
 
-See also [Operational guidelines](/manage/operational-guidelines/).
+See also [Operational guidelines](/operate/operational-guidelines/).
 
 ## Related pages
 

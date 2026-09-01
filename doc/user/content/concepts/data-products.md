@@ -40,5 +40,5 @@ than admire the phrase.
 ## Related
 
 - [Views](/concepts/views/) and [Indexes](/concepts/indexes/)
-- [Publish a data product](/transform-data/publish-a-data-product/)
-- [Operational data mesh](/architecture-patterns/data-mesh/)
+- [Publish a data product](/model-data/publish-a-data-product/)
+- [Operational data mesh](/patterns/data-mesh/)

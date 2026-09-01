@@ -3,7 +3,7 @@ title: "Usage (Self-Managed)"
 description: "Overview of the resource usage for Self-Managed Materialize."
 menu:
   main:
-    parent: "manage"
+    parent: "operate"
     weight: 50
 
 ---

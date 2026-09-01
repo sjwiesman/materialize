@@ -8,7 +8,7 @@ menu:
     weight: 10
     identifier: "mcp-server-agent"
 aliases:
-  - /integrations/mcp-server/mcp-agent/
+  - /interfaces/mcp-server/mcp-agent/
 ---
 
 {{< public-preview />}}
@@ -842,7 +842,7 @@ configuration](/agents/mcp-agent-config/).
 
 {{< tip >}}
 Because the `query` tool can join across objects, consider maintaining an
-[ontology table](/architecture-patterns/ontology/): a curated catalog of the
+[ontology table](/patterns/ontology/): a curated catalog of the
 join relationships in your schema that the agent can query to confirm exact join
 keys before writing multi-table SQL.
 {{< /tip >}}
@@ -857,7 +857,7 @@ either natural language or SQL:
 
 ## Related pages
 
-- [Use an ontology table](/architecture-patterns/ontology/)
+- [Use an ontology table](/patterns/ontology/)
 - [`materialize-agent` MCP Server available
   tools](/agents/mcp-agent-tools/)
 - [`materialize-agent` MCP Server

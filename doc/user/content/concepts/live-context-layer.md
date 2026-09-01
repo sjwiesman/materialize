@@ -37,5 +37,5 @@ maintained, and what is served.
 
 - [Live data products](/concepts/data-products/) for the object this layer
   publishes.
-- [Live context graph](/architecture-patterns/live-context-graph/) for what
+- [Live context graph](/patterns/live-context-graph/) for what
   happens when several teams publish into the layer at once.

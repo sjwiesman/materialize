@@ -59,7 +59,7 @@ weight = 35
 #
 
 [[menu.main]]
-identifier = "transform-data"
+identifier = "model-data"
 name = "Model data"
 weight = 32
 

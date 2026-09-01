@@ -34,5 +34,5 @@ to be current.
 ## Related
 
 - [Tour: serve a live application](/tour/live-app/)
-- [OLTP query offload](/architecture-patterns/query-offload/)
+- [OLTP query offload](/patterns/query-offload/)
 - [Serve results](/serve-results/) for the mechanics.

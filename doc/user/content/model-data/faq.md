@@ -1,0 +1,24 @@
+---
+title: "FAQ: Indexes"
+description: "Frequently asked questions about indexes."
+menu:
+  main:
+    name: "FAQ: Indexes"
+    identifier: faq-indexes
+    parent: model-data
+    weight: 100
+aliases:
+  - /self-managed/v25.2/transform-data/faq/
+---
+
+## Do indexes in Materialize support `ORDER BY`?
+
+No. Indexes in Materialize do not support `ORDER BY` clauses.
+
+{{% include-headless "/headless/index-ordering" %}}
+
+## Do indexes in Materialize support range queries?
+
+No. Indexes in Materialize do not support range queries.
+
+{{% include-headless "/headless/index-ordering" %}}

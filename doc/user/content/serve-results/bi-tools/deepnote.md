@@ -3,7 +3,7 @@ title: "Deepnote"
 description: "How to create collaborative data notebooks with Deepnote"
 aliases:
   - /third-party/deepnote/
-  - /integrations/deepnote/
+  - /interfaces/deepnote/
   - /serve-results/deepnote/
 menu:
   main:

@@ -35,5 +35,5 @@ good idea.
 ## Related
 
 - [Hydration](/concepts/hydration/) and [Snapshotting](/concepts/snapshotting/)
-- [Optimization](/transform-data/optimization/)
+- [Optimization](/model-data/optimization/)
 - [Clusters](/concepts/clusters/) for where the work runs.

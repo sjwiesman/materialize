@@ -23,7 +23,7 @@ metadata, see [CREATE TABLE: Kafka source table](/sql/create-table/kafka/).
 
 {{< note >}}
 The same syntax, supported formats and features can be used to connect to a
-[Redpanda](/integrations/redpanda/) broker.
+[Redpanda](/interfaces/redpanda/) broker.
 {{</ note >}}
 
 ## Prerequisites

@@ -20,7 +20,7 @@ ingestion](/ingest-data/monitoring-data-ingestion/)
 
 If you're looking for troubleshooting guidance for slow or unresponsive queries,
 check out the [`Transform data`
-troubleshooting](/transform-data/troubleshooting) guide instead.
+troubleshooting](/model-data/troubleshooting) guide instead.
 
 {{< tip >}}
 {{< guided-tour-blurb-for-ingest-data >}}

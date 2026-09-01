@@ -10,7 +10,7 @@ rows:
 
   - name: top-k-k-ge-1
     pattern_title: |
-      [Top-K over partition<br>(K >= 1)](/transform-data/idiomatic-materialize-sql/top-k/#for-k--1)
+      [Top-K over partition<br>(K >= 1)](/model-data/idiomatic-materialize-sql/top-k/#for-k--1)
 
     syntax_idiomatic: |
       Use a subquery to
@@ -69,7 +69,7 @@ rows:
 
   - name: top-k-k-eq-1
     pattern_title: |
-      [Top-K over partition<br>(K = 1)](/transform-data/idiomatic-materialize-sql/top-k/#for-k--1-1)
+      [Top-K over partition<br>(K = 1)](/model-data/idiomatic-materialize-sql/top-k/#for-k--1-1)
 
     syntax_idiomatic: |
       ```mzsql
@@ -116,7 +116,7 @@ rows:
 
   - name: first-value
     pattern_title: |
-      [First value over partition<br>order by ...](/transform-data/idiomatic-materialize-sql/first-value/)
+      [First value over partition<br>order by ...](/model-data/idiomatic-materialize-sql/first-value/)
 
     syntax_idiomatic: |
       Use a subquery that uses the [MIN()](/sql/functions/#min) or
@@ -249,7 +249,7 @@ rows:
 
   - name: last-value
     pattern_title: |
-      [Last value over partition<br>order by ...<br>range between unbounded preceding<br>and unbounded following](/transform-data/idiomatic-materialize-sql/last-value/)
+      [Last value over partition<br>order by ...<br>range between unbounded preceding<br>and unbounded following](/model-data/idiomatic-materialize-sql/last-value/)
 
     syntax_idiomatic: |
       Use a subquery that uses the [MIN()](/sql/functions/#min) or
@@ -441,7 +441,7 @@ rows:
   - name: lag
     pattern_title: |
       [Lag over (order by) whose ordering can be represented by some equality
-      condition.](/transform-data/idiomatic-materialize-sql/lag/)
+      condition.](/model-data/idiomatic-materialize-sql/lag/)
 
     syntax_idiomatic: |
       ***To exclude the first row since it has no previous row***
@@ -596,7 +596,7 @@ rows:
   - name: lead
     pattern_title: |
       [Lead over (order by) whose ordering can be represented by some equality
-      condition.](/transform-data/idiomatic-materialize-sql/lead/)
+      condition.](/model-data/idiomatic-materialize-sql/lead/)
 
     syntax_idiomatic: |
       ***To exclude the last row since it has no next row***

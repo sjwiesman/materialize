@@ -32,10 +32,10 @@ is why several of its pages were reachable only through search.
 {{</ linkbox >}}
 
 {{< linkbox title="Interfaces" >}}
-- [SQL clients](/integrations/sql-clients/)
-- [Client libraries](/integrations/client-libraries/)
-- [HTTP API](/integrations/http-api/)
-- [WebSocket API](/integrations/websocket-api/)
+- [SQL clients](/interfaces/sql-clients/)
+- [Client libraries](/interfaces/client-libraries/)
+- [HTTP API](/interfaces/http-api/)
+- [WebSocket API](/interfaces/websocket-api/)
 - [MCP servers](/agents/)
 {{</ linkbox >}}
 {{</ multilinkbox >}}

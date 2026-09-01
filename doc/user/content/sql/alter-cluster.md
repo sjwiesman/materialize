@@ -449,4 +449,4 @@ compute-specific settings. If needed, these can be set explicitly.
 - [`CREATE CLUSTER`](/sql/create-cluster/)
 - [`SHOW CLUSTERS`](/sql/show-clusters/)
 - [`DROP CLUSTER`](/sql/drop-cluster/)
-- [Dictionary compression](/transform-data/dictionary-compression/)
+- [Dictionary compression](/model-data/dictionary-compression/)

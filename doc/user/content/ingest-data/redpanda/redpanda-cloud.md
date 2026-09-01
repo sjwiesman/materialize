@@ -2,7 +2,7 @@
 title: "Redpanda Cloud"
 description: "How to securely connect a Redpanda Cloud cluster as a source to Materialize."
 aliases:
-  - /integrations/redpanda-cloud/
+  - /interfaces/redpanda-cloud/
   - /connect-sources/redpanda-cloud/
   - /ingest-data/redpanda-cloud/
 menu:

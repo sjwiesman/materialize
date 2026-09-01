@@ -207,7 +207,7 @@ At this time, we do not make any guarantees about the exactness or freshness of 
 They are sampled roughly once a minute, so a spike shorter than the sampling interval is not
 visible here at all. For a view of a single replica sampled every few seconds, including high-water
 marks that survive a spike the sampling missed, see [Replica resource
-usage](/manage/monitor/replica-resource-usage/).
+usage](/operate/monitor/replica-resource-usage/).
 
 Where a replica's disk is provided as swap rather than as a filesystem, `disk_bytes` reports swap
 usage.
@@ -438,7 +438,7 @@ At this time, we do not make any guarantees about the freshness of these numbers
 The `mz_history_retention_strategies` describes the history retention strategies
 for tables, sources, indexes, materialized views that are configured with a
 [history retention
-period](/transform-data/patterns/durable-subscriptions/#history-retention-period).
+period](/model-data/patterns/durable-subscriptions/#history-retention-period).
 
 <!-- RELATION_SPEC mz_internal.mz_history_retention_strategies -->
 | Field | Type | Meaning |
@@ -504,12 +504,12 @@ usage. For example:
 - If a materialized view or an index has been created for direct querying, the
   dependency graph will not reflect this nuance and `mz_index_advice` might
   recommend using an unindexed view instead. In this case, you should refer to
-  the reference documentation for [query optimization](/transform-data/optimization/#indexes)
+  the reference documentation for [query optimization](/model-data/optimization/#indexes)
   instead.
 - If a view is depended on by multiple objects that use very selective filters,
   or multiple projections that can be pushed into or even beyond the view,
   adding an index may increase resource usage.
-- If an index has been created to [enable delta joins](/transform-data/optimization/#optimize-multi-way-joins-with-delta-joins),
+- If an index has been created to [enable delta joins](/model-data/optimization/#optimize-multi-way-joins-with-delta-joins),
   removing it may lead to lower memory utilization, but the delta join
   optimization will no longer be used in the join implementation.
 

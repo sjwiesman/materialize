@@ -3,7 +3,7 @@ title: "Hex"
 description: "How to create collaborative data notebooks with Hex"
 aliases:
   - /third-party/hex/
-  - /integrations/hex/
+  - /interfaces/hex/
   - /serve-results/hex/
 menu:
   main:

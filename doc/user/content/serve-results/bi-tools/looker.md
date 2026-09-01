@@ -3,7 +3,7 @@ title: "Looker"
 description: "How to create dashboards with Looker"
 aliases:
   - /third-party/looker/
-  - /integrations/looker/
+  - /interfaces/looker/
   - /serve-results/looker/
 menu:
   main:

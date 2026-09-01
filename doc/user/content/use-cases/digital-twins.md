@@ -34,7 +34,7 @@ true right now" currently requires joining several systems by hand.
 
 ## Related
 
-- [Live context graph](/architecture-patterns/live-context-graph/) and
-  [Real-time medallion architecture](/architecture-patterns/medallion/)
-- [Use an ontology table](/architecture-patterns/ontology/)
+- [Live context graph](/patterns/live-context-graph/) and
+  [Real-time medallion architecture](/patterns/medallion/)
+- [Use an ontology table](/patterns/ontology/)
 - [Views](/concepts/views/) and [Indexes](/concepts/indexes/)

@@ -8,9 +8,9 @@ menu:
     name: "Agents & AI"
     weight: 40
 aliases:
-  - /integrations/mcp-server/
-  - /integrations/mcp-server/llm/
-  - /integrations/llm/
+  - /interfaces/mcp-server/
+  - /interfaces/mcp-server/llm/
+  - /interfaces/llm/
 ---
 
 Two different readers arrive here, and they want opposite things. This section
@@ -31,7 +31,7 @@ developers](/agents/mcp-developer/).
 - [MCP server for agents](/agents/mcp-agent/)
 - [Available tools](/agents/mcp-agent-tools/)
 - [Agent patterns](/agents/patterns/)
-- [Use an ontology table](/architecture-patterns/ontology/)
+- [Use an ontology table](/patterns/ontology/)
 {{</ linkbox >}}
 
 {{< linkbox title="Code with AI" >}}
@@ -43,7 +43,7 @@ developers](/agents/mcp-developer/).
 {{< linkbox title="Go deeper" >}}
 - [Context engineering for agents](/use-cases/context-engineering/)
 - [Tour: live context for an agent](/tour/agent-context/)
-- [Live context graph](/architecture-patterns/live-context-graph/)
+- [Live context graph](/patterns/live-context-graph/)
 {{</ linkbox >}}
 {{</ multilinkbox >}}
 

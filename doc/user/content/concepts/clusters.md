@@ -147,13 +147,13 @@ hydrating objects, see [Hydration](/concepts/hydration/).
 ## Best practices
 
 The following provides some general guidelines for clusters. See also
-[Operational guidelines](/manage/operational-guidelines/).
+[Operational guidelines](/operate/operational-guidelines/).
 
 ### Three-tier architecture in production
 
 {{% include-from-yaml data="best_practices_details" name="architecture-three-tier" %}}
 
-See also [Operational guidelines](/manage/operational-guidelines/).
+See also [Operational guidelines](/operate/operational-guidelines/).
 
 #### Alternatives
 
@@ -162,7 +162,7 @@ to low volume or a non-production setup, a two cluster or a single cluster
 architecture may suffice.
 
 See [Appendix: Alternative cluster
-architectures](/manage/appendix-alternative-cluster-architectures/) for details.
+architectures](/operate/appendix-alternative-cluster-architectures/) for details.
 
 ### Use production clusters for production workloads only
 
@@ -176,7 +176,7 @@ production cluster(s) to run development workloads or non-production tasks.
 - [Hydration](/concepts/hydration/)
 - [System clusters](/sql/system-clusters)
 - [Usage & billing](/administration/billing/)
-- [Operational guidelines](/manage/operational-guidelines/)
+- [Operational guidelines](/operate/operational-guidelines/)
 
 [`SELECT`]: /sql/select/
 [`SUBSCRIBE`]: /sql/subscribe/

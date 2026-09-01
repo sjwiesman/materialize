@@ -3,7 +3,7 @@ title: "Redpanda"
 description: "Get details about using Materialize with Redpanda"
 aliases:
   - /third-party/redpanda/
-  - /integrations/redpanda/
+  - /interfaces/redpanda/
   - /connect-sources/redpanda/
 menu:
   main:

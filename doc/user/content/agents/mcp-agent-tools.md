@@ -8,7 +8,7 @@ menu:
     identifier: "agent-endpoint-tools"
     name: "Available tools"
 aliases:
-  - /integrations/mcp-server/mcp-agent-tools/
+  - /interfaces/mcp-server/mcp-agent-tools/
 ---
 
 ## Tools

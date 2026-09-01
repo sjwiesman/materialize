@@ -7,9 +7,9 @@ menu:
     weight: 15
 aliases:
   - /sql/builtin-roles/
-  - /manage/access-control/manage-privileges/
-  - /manage/access-control/rbac-tutorial/
-  - /manage/access-control/manage-roles/
+  - /operate/access-control/manage-privileges/
+  - /operate/access-control/rbac-tutorial/
+  - /operate/access-control/manage-roles/
   - /security/access-control/manage-privileges/
   - /security/access-control/manage-roles/
 ---
@@ -664,4 +664,4 @@ example="view-privileges-for-previous-owner" %}}
 
 - [Access control best practices](/security/cloud/access-control/#best-practices)
 - [Manage privileges with
-  Terraform](/manage/terraform/manage-rbac/)
+  Terraform](/operate/terraform/manage-rbac/)

@@ -2,7 +2,7 @@
 title: "JOIN"
 description: "`JOIN` lets you combine two or more table expressions."
 aliases:
-  - /transform-data/join/
+  - /model-data/join/
   - /sql/join/
 menu:
   main:
@@ -80,7 +80,7 @@ SELECT * FROM
 ```
 
 For a real-world example of a `LATERAL` subquery, see the [Top-K by group
-idiom](/transform-data/idiomatic-materialize-sql/top-k/).
+idiom](/model-data/idiomatic-materialize-sql/top-k/).
 
 
 ## Examples

@@ -87,10 +87,10 @@ The following query hints are valid within the `OPTIONS` clause.
 Hint | Value type | Description
 ------|------------|------------
 `AGGREGATE INPUT GROUP SIZE` | `uint8` | How many rows will have the same group key in an aggregation. Materialize can render `min` and `max` expressions more efficiently with this information.
-`DISTINCT ON INPUT GROUP SIZE` | `uint8` | How many rows will have the same group key in a `DISTINCT ON` expression. Materialize can render [Top K patterns](/transform-data/idiomatic-materialize-sql/top-k/) based on `DISTINCT ON` more efficiently with this information. To determine the query hint size, see [`EXPLAIN ANALYZE HINTS`](/sql/explain-analyze/#explain-analyze-hints).
-`LIMIT INPUT GROUP SIZE` | `uint8` | How many rows will be given as a group to a `LIMIT` restriction. Materialize can render [Top K patterns](/transform-data/idiomatic-materialize-sql/top-k/) based on `LIMIT` more efficiently with this information.
+`DISTINCT ON INPUT GROUP SIZE` | `uint8` | How many rows will have the same group key in a `DISTINCT ON` expression. Materialize can render [Top K patterns](/model-data/idiomatic-materialize-sql/top-k/) based on `DISTINCT ON` more efficiently with this information. To determine the query hint size, see [`EXPLAIN ANALYZE HINTS`](/sql/explain-analyze/#explain-analyze-hints).
+`LIMIT INPUT GROUP SIZE` | `uint8` | How many rows will be given as a group to a `LIMIT` restriction. Materialize can render [Top K patterns](/model-data/idiomatic-materialize-sql/top-k/) based on `LIMIT` more efficiently with this information.
 
-For examples, see the [Optimization](/transform-data/optimization/#query-hints) page.
+For examples, see the [Optimization](/model-data/optimization/#query-hints) page.
 
 ### Column references
 
@@ -115,7 +115,7 @@ columns. If an unqualified name refers to both an input and output column,
 
 Because Materialize is wire-compatible with PostgreSQL, you can use any
 PostgreSQL connection pooler with Materialize. For example in using PgBouncer,
-see [Connection Pooling](/integrations/connection-pooling).
+see [Connection Pooling](/interfaces/connection-pooling).
 
 ## Examples
 

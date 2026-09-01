@@ -2,9 +2,9 @@
 title: "Configure single sign-on (SSO)"
 description: "Configure single sign-on (SSO) using SAML or Open ID Connect as an additional layer of account security."
 aliases:
-  - /manage/sso/
-  - /manage/access-control/sso/
-  - /manage/users-service-accounts/sso/
+  - /operate/sso/
+  - /operate/access-control/sso/
+  - /operate/users-service-accounts/sso/
   - /security/users-service-accounts/sso/
 menu:
   main:

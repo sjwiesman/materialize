@@ -34,6 +34,6 @@ them.
 ## Related
 
 - [Tour: react to changes](/tour/react-to-changes/)
-- [Fan out to downstream systems](/architecture-patterns/fan-out/) for the
+- [Fan out to downstream systems](/patterns/fan-out/) for the
   delivery pattern and its worked examples
 - [Sinks](/concepts/sinks/) and [`SUBSCRIBE`](/sql/subscribe/)

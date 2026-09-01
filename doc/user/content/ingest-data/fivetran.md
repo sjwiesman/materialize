@@ -2,7 +2,7 @@
 title: "Fivetran"
 description: "How to use Fivetran to sync data into Materialize"
 aliases:
-  - /integrations/fivetran/
+  - /interfaces/fivetran/
 ---
 
 {{< private-preview />}}

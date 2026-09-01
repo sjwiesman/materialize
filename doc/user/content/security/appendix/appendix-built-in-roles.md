@@ -6,7 +6,7 @@ menu:
     parent: security-appendix
     weight: 15
 aliases:
-  - /manage/access-control/appendix-built-in-roles/
+  - /operate/access-control/appendix-built-in-roles/
   - /security/appendix-built-in-roles/
 ---
 

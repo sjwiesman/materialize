@@ -71,7 +71,7 @@ For more information, see [Ingest Data](/ingest-data/).
 Every database needs a protocol to standardize communication with the outside
 world. Materialize uses the [PostgreSQL wire protocol](https://datastation.multiprocess.io/blog/2022-02-08-the-world-of-postgresql-wire-compatibility.html),
 which allows it to integrate out-of-the-box with many SQL clients and other
-tools in the data ecosystem that support PostgreSQL — like [dbt](/integrations/dbt/).
+tools in the data ecosystem that support PostgreSQL — like [dbt](/interfaces/dbt/).
 
 ### Strong consistency guarantees
 

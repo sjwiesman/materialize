@@ -82,7 +82,7 @@ not suitable for full feature set evaluations or production workloads.
    | Port     | `6875`        |
    | Username | `materialize` |
 
-   For example, if using [`psql`](/integrations/sql-clients/#psql):
+   For example, if using [`psql`](/interfaces/sql-clients/#psql):
 
    ```sh
    psql postgres://materialize@localhost:6875/materialize
@@ -175,7 +175,7 @@ mz-debug emulator --docker-container-id <your-container-id>
 
 This debug information can be particularly helpful when troubleshooting issues or when working with the Materialize support team.
 
-For more detailed information about the debug tool, see the [`mz-debug` documentation](/integrations/mz-debug/).
+For more detailed information about the debug tool, see the [`mz-debug` documentation](/interfaces/mz-debug/).
 
 
 ### License and privacy policy

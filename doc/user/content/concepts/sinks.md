@@ -27,7 +27,7 @@ To create a sink, you can:
 
 Avoid putting sinks on the same cluster that hosts sources.
 
-See also [Operational guidelines](/manage/operational-guidelines/).
+See also [Operational guidelines](/operate/operational-guidelines/).
 
 ## Hydration considerations
 

@@ -22,7 +22,7 @@ rows:
 
       - Indexes, **only as needed**, to make transformation fast (such as
       possibly [indexes on join
-      keys](/transform-data/optimization/#optimize-multi-way-joins-with-delta-joins)).
+      keys](/model-data/optimization/#optimize-multi-way-joins-with-delta-joins)).
 
         {{< tip >}}
 

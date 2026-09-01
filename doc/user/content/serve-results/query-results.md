@@ -49,13 +49,13 @@ For more information, see [`SELECT`](/sql/select/) reference page.  See
 also the following client library guides:
 
 {{< multicolumn-list columns="2" >}}
-- [Go](/integrations/client-libraries/golang/#query)</li>
-- [Java](/integrations/client-libraries/java-jdbc/#query)</li>
-- [Node.js](/integrations/client-libraries/node-js/#query)</li>
-- [PHP](/integrations/client-libraries/php/#query)</li>
-- [Python](/integrations/client-libraries/python/#query)</li>
-- [Ruby](/integrations/client-libraries/ruby/#query)</li>
-- [Rust](/integrations/client-libraries/rust/#query)</li>
+- [Go](/interfaces/client-libraries/golang/#query)</li>
+- [Java](/interfaces/client-libraries/java-jdbc/#query)</li>
+- [Node.js](/interfaces/client-libraries/node-js/#query)</li>
+- [PHP](/interfaces/client-libraries/php/#query)</li>
+- [Python](/interfaces/client-libraries/python/#query)</li>
+- [Ruby](/interfaces/client-libraries/ruby/#query)</li>
+- [Rust](/interfaces/client-libraries/rust/#query)</li>
 {{</ multicolumn-list >}}
 
 ## SUBSCRIBE
@@ -88,11 +88,11 @@ For more information, see [`SUBSCRIBE`](/sql/subscribe/) reference page.  See
 also the following client library guides:
 
 {{< multicolumn-list columns="2" >}}
-- [Go](/integrations/client-libraries/golang/#stream)</li>
-- [Java](/integrations/client-libraries/java-jdbc/#stream)</li>
-- [Node.js](/integrations/client-libraries/node-js/#stream)</li>
-- [PHP](/integrations/client-libraries/php/#stream)</li>
-- [Python](/integrations/client-libraries/python/#stream)</li>
-- [Ruby](/integrations/client-libraries/ruby/#stream)</li>
-- [Rust](/integrations/client-libraries/rust/#stream)</li>
+- [Go](/interfaces/client-libraries/golang/#stream)</li>
+- [Java](/interfaces/client-libraries/java-jdbc/#stream)</li>
+- [Node.js](/interfaces/client-libraries/node-js/#stream)</li>
+- [PHP](/interfaces/client-libraries/php/#stream)</li>
+- [Python](/interfaces/client-libraries/python/#stream)</li>
+- [Ruby](/interfaces/client-libraries/ruby/#stream)</li>
+- [Rust](/interfaces/client-libraries/rust/#stream)</li>
 {{</ multicolumn-list >}}

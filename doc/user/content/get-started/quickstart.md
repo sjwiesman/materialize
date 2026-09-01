@@ -262,8 +262,8 @@ get up-to-date results.
      b.buyer;
    ```
 
-   Materialize provides an idiomatic way to perform [Top-K queries](/transform-data/idiomatic-materialize-sql/top-k/)
-   using the [`DISTINCT ON`](/transform-data/idiomatic-materialize-sql/top-k/#for-k--1-1)
+   Materialize provides an idiomatic way to perform [Top-K queries](/model-data/idiomatic-materialize-sql/top-k/)
+   using the [`DISTINCT ON`](/model-data/idiomatic-materialize-sql/top-k/#for-k--1-1)
    clause. This clause is used to group by account `id` and return the first
    element within that group according to the specified ordering.
 
@@ -307,7 +307,7 @@ re-running the underlying statement.
 
 To provide the up-to-date results, indexes **perform incremental updates** as
 inputs change instead of recalculating the results from scratch. Additionally,
-indexes can also help [optimize operations](/transform-data/optimization/) like
+indexes can also help [optimize operations](/model-data/optimization/) like
 point lookups and joins.
 
 1. Use the [`CREATE INDEX`](/sql/create-index/) command to create the following
@@ -324,8 +324,8 @@ point lookups and joins.
    the already up-to-date results.
 
    This index can **also** help [optimize
-   operations](/transform-data/optimization/) like point lookups and [delta
-   joins](/transform-data/optimization/#optimize-multi-way-joins-with-delta-joins)
+   operations](/model-data/optimization/) like point lookups and [delta
+   joins](/model-data/optimization/#optimize-multi-way-joins-with-delta-joins)
    on the index column(s) as well as support ad-hoc queries.
 
 1. Rerun the previous queries on `winning_bids`.
@@ -625,7 +625,7 @@ creating indexes, see [Index Best Practices](/concepts/indexes/#best-practices).
 - [Sources](/concepts/sources)
 - [Views](/concepts/views/)
 - [Idiomatic Materialize SQL
-  chart](/transform-data/idiomatic-materialize-sql/appendix/idiomatic-sql-chart/)
+  chart](/model-data/idiomatic-materialize-sql/appendix/idiomatic-sql-chart/)
 - [Usage & Billing](/administration/billing/#compute)
 - [`CREATE INDEX`](/sql/create-index/)
 - [`CREATE SCHEMA`](/sql/create-schema/)

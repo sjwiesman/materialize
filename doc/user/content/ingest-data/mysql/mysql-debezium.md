@@ -3,7 +3,7 @@ title: "MySQL CDC using Kafka and Debezium"
 description: "How to propagate Change Data Capture (CDC) data from a MySQL database to Materialize using Kafka and Debezium"
 aliases:
   - /guides/cdc-mysql/
-  - /integrations/cdc-mysql/
+  - /interfaces/cdc-mysql/
   - /connect-sources/cdc-mysql/
   - /ingest-data/cdc-mysql/
 ---

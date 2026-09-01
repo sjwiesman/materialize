@@ -36,7 +36,7 @@ both.
 
 ## Related
 
-- [Fan out to downstream systems](/architecture-patterns/fan-out/) for the
+- [Fan out to downstream systems](/patterns/fan-out/) for the
   pattern and its worked example.
 - [Keep embeddings fresh](/agents/patterns/fresh-embeddings/) for the pattern.
 - [Sink results](/serve-results/sink/) for the delivery half.

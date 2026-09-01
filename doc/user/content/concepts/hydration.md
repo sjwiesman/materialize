@@ -66,15 +66,15 @@ size. Some hydration-related strategies you may want to consider:
   (for example, after dropping an index and recreating the dependents), build
   the new version to the side to avoid downtime:
 
-  - A [blue/green deployment](/manage/dbt/blue-green-deployments/) hydrates the
+  - A [blue/green deployment](/operate/dbt/blue-green-deployments/) hydrates the
     new version alongside the old and cuts over when hydrated, with no serving
     gap. Note that blue/green requires sources and sinks to live on dedicated
     clusters that are excluded from the swap. For more information, see
-    [blue/green deployment](/manage/dbt/blue-green-deployments/).
+    [blue/green deployment](/operate/dbt/blue-green-deployments/).
 
   - For a single materialized view, creating and hydrating a [replacement
     materialized view (public preview) and replacing the existing view in
-    place](/transform-data/updating-materialized-views/replace-materialized-view/)
+    place](/model-data/updating-materialized-views/replace-materialized-view/)
     may be simpler, but briefly reduces freshness. The replacement materialized
     view can be either on the same or different cluster.
 
@@ -125,5 +125,5 @@ memory is the bottleneck rather than as a default modeling pattern.
 - [Snapshotting](/concepts/snapshotting/)
 - [Clusters](/concepts/clusters/)
 - [Sources](/concepts/sources/)
-- [Troubleshooting](/transform-data/troubleshooting/#hydrating-objects)
-- [Updating materialized views](/transform-data/updating-materialized-views/)
+- [Troubleshooting](/model-data/troubleshooting/#hydrating-objects)
+- [Updating materialized views](/model-data/updating-materialized-views/)

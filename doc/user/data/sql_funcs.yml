@@ -519,7 +519,7 @@
       value of `s` evaluates to `true`. Avoid using in equi-join conditions as
       its use in the equi-join condition can lead to a significant increase in
       memory usage. See [idiomatic Materialize
-      SQL](/transform-data/idiomatic-materialize-sql/any) for the alternative.
+      SQL](/model-data/idiomatic-materialize-sql/any) for the alternative.
 
   - signature: 'expression IN(s: Scalars) -> bool'
     description: "`true` for each value in `expression` if it matches at least one
@@ -570,7 +570,7 @@
      cross join between the outer relation and the subquery to preserve SQL
      `NULL` semantics, which can significantly increase memory usage. If
      possible, rewrite using [idiomatic Materialize
-     SQL](/transform-data/idiomatic-materialize-sql/not-in/).
+     SQL](/model-data/idiomatic-materialize-sql/not-in/).
 
      {{< /note >}}
 
@@ -868,7 +868,7 @@
     {{< tip >}}
 
     For some window function query patterns, rewriting your query to not use
-    window functions can yield better performance.  See [Idiomatic Materialize SQL](/transform-data/idiomatic-materialize-sql/) for details.
+    window functions can yield better performance.  See [Idiomatic Materialize SQL](/model-data/idiomatic-materialize-sql/) for details.
 
     {{</ tip >}}
 
@@ -895,7 +895,7 @@
     {{< note >}}
     {{% include-headless "/headless/materialize-window-functions" %}}
 
-    See [Idiomatic Materialize SQL](/transform-data/idiomatic-materialize-sql/)
+    See [Idiomatic Materialize SQL](/model-data/idiomatic-materialize-sql/)
     for examples of rewriting window functions.
 
     {{</ note >}}
@@ -916,7 +916,7 @@
       Returns `value` evaluated at the first row of the window frame. The default window frame is
       `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
 
-      See also [Idiomatic Materialize SQL: First value](/transform-data/idiomatic-materialize-sql/first-value/).
+      See also [Idiomatic Materialize SQL: First value](/model-data/idiomatic-materialize-sql/first-value/).
 
   - signature: 'lag(value anycompatible [, offset integer [, default anycompatible ]]) -> int'
     description: |
@@ -926,7 +926,7 @@
       Both `offset` and `default` are evaluated with respect to the current row.
       If omitted, `offset` defaults to 1 and `default` to `NULL`.
 
-      See also [Idiomatic Materialize SQL: Lag over](/transform-data/idiomatic-materialize-sql/lag/).
+      See also [Idiomatic Materialize SQL: Lag over](/model-data/idiomatic-materialize-sql/lag/).
 
   - signature: 'last_value(value anycompatible) -> anyelement'
     description: |
@@ -934,7 +934,7 @@
       `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
 
       See also [Idiomatic Materialize SQL: Last
-      value](/transform-data/idiomatic-materialize-sql/last-value/).
+      value](/model-data/idiomatic-materialize-sql/last-value/).
 
   - signature: 'lead(value anycompatible [, offset integer [, default anycompatible ]]) -> int'
     description: |
@@ -945,7 +945,7 @@
       If omitted, `offset` defaults to 1 and `default` to `NULL`.
 
       See also [Idiomatic Materialize SQL: Lead
-      over](/transform-data/idiomatic-materialize-sql/lead/).
+      over](/model-data/idiomatic-materialize-sql/lead/).
 
   - signature: 'rank() -> int'
     description: |
@@ -957,7 +957,7 @@
       Returns the number of the current row within its partition, counting from 1.
       Rows that compare equal will be ordered in an unspecified way.
 
-      See also [Idiomatic Materialize SQL: Top-K](/transform-data/idiomatic-materialize-sql/top-k/).
+      See also [Idiomatic Materialize SQL: Top-K](/model-data/idiomatic-materialize-sql/top-k/).
 
 
 - type: System information

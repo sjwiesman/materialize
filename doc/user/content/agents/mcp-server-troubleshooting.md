@@ -7,7 +7,7 @@ menu:
     parent: "agents"
     weight: 60
 aliases:
-  - /integrations/mcp-server/mcp-server-troubleshooting/
+  - /interfaces/mcp-server/mcp-server-troubleshooting/
 ---
 
 ## `unable to verify the first certificate`

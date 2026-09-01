@@ -39,5 +39,5 @@ captured at different times, or was too slow to assemble at all.
 
 - [Tour: live context for an agent](/tour/agent-context/)
 - [Agents and AI](/agents/) for the MCP servers, agent skills, and patterns.
-- [Live context graph](/architecture-patterns/live-context-graph/) for the
+- [Live context graph](/patterns/live-context-graph/) for the
   architecture once more than one team is publishing context.

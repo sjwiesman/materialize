@@ -230,7 +230,7 @@ CREATE MATERIALIZED VIEW my_build_jobs_merged AS (
 
 {{< note >}}
 When casting from `text` to `timestamp` you should prefer to use the [`try_parse_monotonic_iso8601_timestamp`](/sql/functions/pushdown/)
-function, which enables [temporal filter pushdown](/transform-data/patterns/temporal-filters/#temporal-filter-pushdown).
+function, which enables [temporal filter pushdown](/model-data/patterns/temporal-filters/#temporal-filter-pushdown).
 {{< /note >}}
 
 ### Handling batch events

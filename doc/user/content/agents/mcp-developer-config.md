@@ -9,7 +9,7 @@ menu:
     identifier: "developer-endpoint-configuration"
     name: "Endpoint configuration"
 aliases:
-  - /integrations/mcp-server/mcp-developer-config/
+  - /interfaces/mcp-server/mcp-developer-config/
 ---
 
 ## Available configuration parameters

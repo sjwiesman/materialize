@@ -67,7 +67,7 @@ ALTER CLUSTER my_cluster SET (EXPERIMENTAL ARRANGEMENT COMPRESSION = true);
 ```
 
 For more information, see:
-- [Guide: Dictionary compression](/transform-data/dictionary-compression/), including [when it helps and when it does not](/transform-data/dictionary-compression/#the-tradeoff)
+- [Guide: Dictionary compression](/model-data/dictionary-compression/), including [when it helps and when it does not](/model-data/dictionary-compression/#the-tradeoff)
 - [`CREATE CLUSTER`: Dictionary compression](/sql/create-cluster/#dictionary-compression)
 - [`ALTER CLUSTER`: Dictionary compression](/sql/alter-cluster/#dictionary-compression)
 
@@ -83,25 +83,25 @@ backend with an Open Telemetry (OTLP) endpoint. Template dashboards and alerts a
 help you get started.
 
 Follow the instructions for your destination:
-- [Datadog](/manage/monitor/self-managed/datadog/)
-- [Honeycomb](/manage/monitor/self-managed/honeycomb/)
-- [Google Cloud Monitoring](/manage/monitor/self-managed/google-cloud-monitoring/)
-- [Prometheus remote write](/manage/monitor/self-managed/prometheus-remote-write/), for Mimir, Amazon Managed Prometheus, or Grafana Cloud
-- [OpenTelemetry](/manage/monitor/self-managed/opentelemetry/), for any other OTLP endpoint, including your own collector
+- [Datadog](/operate/monitor/self-managed/datadog/)
+- [Honeycomb](/operate/monitor/self-managed/honeycomb/)
+- [Google Cloud Monitoring](/operate/monitor/self-managed/google-cloud-monitoring/)
+- [Prometheus remote write](/operate/monitor/self-managed/prometheus-remote-write/), for Mimir, Amazon Managed Prometheus, or Grafana Cloud
+- [OpenTelemetry](/operate/monitor/self-managed/opentelemetry/), for any other OTLP endpoint, including your own collector
 
 If you don't have an observability stack set up, the [Materialize Terraform
 modules](/self-managed-deployments/installation/#install-using-terraform-modules)
 can deploy one alongside Materialize. It collects metrics from Materialize and
 from your Kubernetes cluster, collects Materialize's container logs and
-Kubernetes events, stores both in your own object storage, and ships [Grafana](/manage/monitor/self-managed/grafana/)
+Kubernetes events, stores both in your own object storage, and ships [Grafana](/operate/monitor/self-managed/grafana/)
 dashboards and Alertmanager alert rules to query them. The stack is controlled by
 the `enable_observability` variable, which defaults to `true` starting with
 v11.0.0 of the modules.
 
 For more information, see:
-- [Monitoring Self-Managed Materialize](/manage/monitor/self-managed/)
-- [How logs and metrics are stored and delivered](/manage/monitor/self-managed/storage/)
-- [Alerting](/manage/monitor/self-managed/alerting/)
+- [Monitoring Self-Managed Materialize](/operate/monitor/self-managed/)
+- [How logs and metrics are stored and delivered](/operate/monitor/self-managed/storage/)
+- [Alerting](/operate/monitor/self-managed/alerting/)
 
 ### Improvements {#v26.38-improvements}
 - **Notice for single-replica sources on multi-replica clusters**: Materialize now warns when a command leaves a cluster holding more than one replica alongside PostgreSQL, MySQL, or SQL Server sources, which always run on a single replica, since the extra replicas make those sources neither more fault tolerant nor faster to ingest.
@@ -549,7 +549,7 @@ The MCP server for developers now includes a `query` tool for running `SELECT`, 
 - **mz-debug OIDC and SASL authentication**: The `mz-debug` diagnostic tool now supports OIDC and SASL authentication modes in addition to password authentication.
 - **Faster LIKE pattern matching**: `LIKE` patterns with multiple `%` wildcards (e.g., `%a%a%a`) no longer exhibit super-linear matching time against long strings, while common patterns like `%substring%` remain on the fast string matcher.
 - **Fivetran Destination restored**: The Fivetran Destination integration, which was removed in v26.29.0, has been restored.
-- **Self-managed monitoring docs refreshed**: Self-managed deployments now have a published reference of the metrics Materialize exposes: [essential metrics](/manage/monitor/essential-metrics/) and an [appendix of all metrics](/manage/monitor/appendix-metrics/). The self-managed monitoring guides for [Prometheus and Grafana](/manage/monitor/self-managed/prometheus/) and [Datadog](/manage/monitor/self-managed/datadog/) have been refreshed with updated scrape configurations and dashboards.
+- **Self-managed monitoring docs refreshed**: Self-managed deployments now have a published reference of the metrics Materialize exposes: [essential metrics](/operate/monitor/essential-metrics/) and an [appendix of all metrics](/operate/monitor/appendix-metrics/). The self-managed monitoring guides for [Prometheus and Grafana](/operate/monitor/self-managed/prometheus/) and [Datadog](/operate/monitor/self-managed/datadog/) have been refreshed with updated scrape configurations and dashboards.
 
 ### Bug Fixes {#v26.30.1-bug-fixes}
 - Fixed `IS [NOT] DISTINCT FROM` binding too loosely relative to `AND`/`OR`, causing `a IS DISTINCT FROM b AND c` to silently produce wrong results by parsing as `a IS DISTINCT FROM (b AND c)` instead of `(a IS DISTINCT FROM b) AND c`.
@@ -598,7 +598,7 @@ For more information, see [Bounded Staleness](/reference/isolation-level/#bounde
 
 ### mz-deploy (v0.1) {#v26.29-mz-deploy}
 
-[mz-deploy](/manage/mz-deploy/) is a new CLI for declarative Materialize deployments. You can use mz-deploy to define sources, views, indexes, clusters, and other Materialize objects as code—and so can your coding agents. Projects compile locally with no running Materialize instance required: run unit tests, inspect query plans, and validate changes entirely inside a sandbox before touching a shared environment. Built in Rust, mz-deploy cold-compiles a project with 40,000+ models in under 500ms, with most incremental changes compiling in under 10ms. Deployments only redeploy changed objects, support blue-green deployments, and allow concurrent deployments with conflict detection at promote time.
+[mz-deploy](/operate/mz-deploy/) is a new CLI for declarative Materialize deployments. You can use mz-deploy to define sources, views, indexes, clusters, and other Materialize objects as code—and so can your coding agents. Projects compile locally with no running Materialize instance required: run unit tests, inspect query plans, and validate changes entirely inside a sandbox before touching a shared environment. Built in Rust, mz-deploy cold-compiles a project with 40,000+ models in under 500ms, with most incremental changes compiling in under 10ms. Deployments only redeploy changed objects, support blue-green deployments, and allow concurrent deployments with conflict detection at promote time.
 
 For instance, to create a new Materialize project called `order-monitoring`:
 
@@ -621,7 +621,7 @@ order-monitoring/
 └── .gitignore
 ```
 
-For more information, see [mz-deploy](/manage/mz-deploy/).
+For more information, see [mz-deploy](/operate/mz-deploy/).
 
 ### Iceberg Sinks for Google Cloud Platform {#v26.29-google-cloud-support-for-iceberg-sinks}
 
@@ -963,7 +963,7 @@ include a built-in Model Context Protocol (MCP) [server for agents
 agent can discover your data products, understand the underlying data ontology,
 and run queries to fetch fresh data.
 
-Agents can discover [materialized views](/sql/create-materialized-view/) or [indexed](/sql/create-index/) views. You can use [comments](/sql/comment-on/) to document the data products, and describe them to agents. Agents authenticate as [roles](/sql/create-role/) in Materialize, so [RBAC privileges](/manage/access-control/) govern which data products are visible. Finally, you can set up a dedicated [cluster](/concepts/clusters/) for your agents, so they're isolated from the rest of your environment.
+Agents can discover [materialized views](/sql/create-materialized-view/) or [indexed](/sql/create-index/) views. You can use [comments](/sql/comment-on/) to document the data products, and describe them to agents. Agents authenticate as [roles](/sql/create-role/) in Materialize, so [RBAC privileges](/operate/access-control/) govern which data products are visible. Finally, you can set up a dedicated [cluster](/concepts/clusters/) for your agents, so they're isolated from the rest of your environment.
 
 The MCP server for agents complements the [MCP server for
 developers](/agents/mcp-developer/) released in v26.20.2. The
@@ -1385,7 +1385,7 @@ For more information, refer to:
 - **Improved [`AS OF`](/sql/subscribe/#as-of) error messages**: Error messages
   for `AS OF` queries now use user-facing terminology (e.g., "Indexed
   input", "Storage inputs") instead of internal names.
-- **Streamed [WebSocket](/integrations/websocket-api/) query results**:
+- **Streamed [WebSocket](/interfaces/websocket-api/) query results**:
   WebSocket query results are now streamed directly instead of buffered,
   reducing memory usage for large result sets.
 
@@ -1645,7 +1645,7 @@ and bugfixes.
 Replacement materialized views allow you to modify the definition of an existing materialized view, while preserving all downstream dependencies. Materialize is able to replace a materialized view in place, by calculating the *diff* between the original and the replacement. Once applied, the *diff* flows downstream to all dependent objects.
 
 For more information, refer to:
-- [Guide: Replace Materialized Views](/transform-data/updating-materialized-views/replace-materialized-view)
+- [Guide: Replace Materialized Views](/model-data/updating-materialized-views/replace-materialized-view)
 - [Syntax: CREATE REPLACEMENT MATERIALIZED VIEW](/sql/create-materialized-view)
 - [Syntax: ALTER MATERIALIZED VIEW](/sql/alter-materialized-view)
 
@@ -1861,7 +1861,7 @@ see [Authentication](/security/self-managed/authentication/).
 When SASL authentication is enabled:
 
 - **PostgreSQL connections** (e.g., `psql`, client libraries, [connection
-  poolers](/integrations/connection-pooling/)) use SCRAM-SHA-256 authentication
+  poolers](/interfaces/connection-pooling/)) use SCRAM-SHA-256 authentication
 - **HTTP/Web Console connections** use standard password authentication
 
 This hybrid approach provides maximum security for SQL connections while maintaining

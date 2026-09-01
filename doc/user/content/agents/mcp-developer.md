@@ -8,7 +8,7 @@ menu:
     weight: 20
     identifier: "mcp-server-developer"
 aliases:
-  - /integrations/mcp-server/mcp-developer/
+  - /interfaces/mcp-server/mcp-developer/
 ---
 
 {{< public-preview />}}
@@ -598,7 +598,7 @@ authentication](#method-2-token-based-authentication).
 
 {{< tip >}}
 When the agent reads your user objects with the `query` tool, an [ontology
-table](/architecture-patterns/ontology/) of curated join relationships in your
+table](/patterns/ontology/) of curated join relationships in your
 schema helps it confirm exact join keys before writing multi-table SQL.
 {{< /tip >}}
 
@@ -634,7 +634,7 @@ The privileges required to use the `materialize-developer` MCP server are:
 
 ## Related pages
 
-- [Use an ontology table](/architecture-patterns/ontology/)
+- [Use an ontology table](/patterns/ontology/)
 - [`materialize-developer` MCP Server available
   tools](/agents/mcp-developer-tools/)
 - [`materialize-developer` MCP Server

@@ -78,7 +78,7 @@ memory within that [cluster](/concepts/clusters/). Within the cluster, the
 See also:
 
 - [Indexes](/concepts/indexes)
-- [Optimization](/transform-data/optimization)
+- [Optimization](/model-data/optimization)
 - [`CREATE INDEX`](/sql/create-index/) for complete syntax information
 
 ## Materialized views
@@ -142,7 +142,7 @@ the results are served from memory rather than from storage.
 See also:
 
 - [Indexes](/concepts/indexes)
-- [Optimization](/transform-data/optimization)
+- [Optimization](/model-data/optimization)
 - [`CREATE INDEX`](/sql/create-index/)  for complete syntax information
 
 ### Updating the materialized view definition
@@ -153,12 +153,12 @@ See also:
 %}}
 
 For a step-by-step tutorial, see [Replace Materialized
-Views](/transform-data/updating-materialized-views/replace-materialized-view/).
+Views](/model-data/updating-materialized-views/replace-materialized-view/).
 
 See also:
 
 - [Choosing an update
-  strategy](/transform-data/updating-materialized-views/#choosing-an-update-strategy)
+  strategy](/model-data/updating-materialized-views/#choosing-an-update-strategy)
 
 ## Indexed views vs. materialized views
 

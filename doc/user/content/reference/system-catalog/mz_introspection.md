@@ -181,7 +181,7 @@ queries over this relation.
 The replica samples its sources every few seconds, and reports a high-water mark alongside the
 instantaneous value where one is available. For the sources and metrics that appear here, how to
 interpret them, and an example query, see [Replica resource
-usage](/manage/monitor/replica-resource-usage/).
+usage](/operate/monitor/replica-resource-usage/).
 
 <!-- RELATION_SPEC mz_introspection.mz_cluster_replica_resource_usage NO_COMMENTS -->
 | Field        | Type      | Meaning                                                              |
@@ -344,7 +344,7 @@ The `mz_mappable_objects` identifies indexes (and their underlying views) and ma
 | `name`       | [`text`]  | The name of the object. This name is unquoted, and you might need to call `quote_ident` if you want to reference the name shown here.
 | `global_id`  | [`text`]  | The global ID of the object.
 
-See [Which part of my query runs slowly or uses a lot of memory?](/transform-data/troubleshooting/#which-part-of-my-query-runs-slowly-or-uses-a-lot-of-memory) for examples of debugging with `mz_mappable_objects` and `mz_lir_mapping`.
+See [Which part of my query runs slowly or uses a lot of memory?](/model-data/troubleshooting/#which-part-of-my-query-runs-slowly-or-uses-a-lot-of-memory) for examples of debugging with `mz_mappable_objects` and `mz_lir_mapping`.
 
 ## `mz_lir_mapping`
 
@@ -481,7 +481,7 @@ The `mz_scheduling_parks_histogram` view describes a histogram of [dataflow] wor
 [dataflow]: /get-started/arrangements/#dataflows
 [`MIN`]: /sql/functions/#min
 [`MAX`]: /sql/functions/#max
-[Top K]: /transform-data/patterns/top-k
+[Top K]: /model-data/patterns/top-k
 [query hints]: /sql/select/#query-hints
 
 <!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_compute_hydration_times_per_worker -->

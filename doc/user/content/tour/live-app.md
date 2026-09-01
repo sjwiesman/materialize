@@ -35,7 +35,7 @@ result served from a maintained view over a PostgreSQL connection.
 
 - [Data-intensive applications and UIs](/use-cases/data-intensive-apps/) for
   the use case.
-- [OLTP query offload](/architecture-patterns/query-offload/) for the pattern
+- [OLTP query offload](/patterns/query-offload/) for the pattern
   at architecture scale.
 - [Indexes](/concepts/indexes/) and [Hydration](/concepts/hydration/) for the
   mechanisms this tour leans on.

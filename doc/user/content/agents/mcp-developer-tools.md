@@ -8,7 +8,7 @@ menu:
     identifier: "developer-endpoint-tools"
     name: "Available tools"
 aliases:
-  - /integrations/mcp-server/mcp-developer-tools/
+  - /interfaces/mcp-server/mcp-developer-tools/
 ---
 
 ## Tools

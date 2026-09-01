@@ -261,9 +261,9 @@ FROM segment_source;
 
 ### Timestamp handling
 
-We highly recommend using the [`try_parse_monotonic_iso8601_timestamp`](/transform-data/patterns/temporal-filters/#temporal-filter-pushdown)
+We highly recommend using the [`try_parse_monotonic_iso8601_timestamp`](/model-data/patterns/temporal-filters/#temporal-filter-pushdown)
 function when casting from `text` to `timestamp`, which enables [temporal filter
-pushdown](/transform-data/patterns/temporal-filters/#temporal-filter-pushdown).
+pushdown](/model-data/patterns/temporal-filters/#temporal-filter-pushdown).
 
 ### Deduplication
 

@@ -122,7 +122,7 @@ This envelope treats all records as [change events](https://debezium.io/document
 - Materialize expects a specific message structure that includes the row data
   before and after the change event, which is **not guaranteed** for every
   Debezium connector. For more details, check the [Debezium integration
-  guide](/integrations/debezium/).
+  guide](/interfaces/debezium/).
 
 {{</ note >}}
 

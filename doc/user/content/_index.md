@@ -23,7 +23,7 @@ applications can query, react to, and build on.
   ingest](/ingest-data/) data from databases, streams, SaaS applications, and
   other operational systems, then join it into a unified view.
 
-- **Turn raw data into live business objects.** [Use SQL](/transform-data/) to
+- **Turn raw data into live business objects.** [Use SQL](/model-data/) to
   model [customers](/concepts/data-products/), accounts, orders, inventory, and other business concepts.
   Materialize keeps these data products continuously up to date as the
   underlying data changes.
@@ -44,7 +44,7 @@ applications can query, react to, and build on.
   streams, search indexes, and other downstream systems](/serve-results/sink/).
 
 - **Build a live context graph.** [Link live business objects into a shared
-  model of your business](/architecture-patterns/live-context-graph/). Agents
+  model of your business](/patterns/live-context-graph/). Agents
   can discover relevant context, follow relationships, and reason across
   customers, accounts, orders, products, and other entities without rebuilding
   that context for every request.
@@ -104,16 +104,16 @@ applications can query, react to, and build on.
 {{</ linkbox >}}
 
 {{< linkbox title="Query patterns" >}}
-- [Idiomatic Materialize SQL](/transform-data/idiomatic-materialize-sql/)
-- [Common query patterns](/transform-data/patterns/)
+- [Idiomatic Materialize SQL](/model-data/idiomatic-materialize-sql/)
+- [Common query patterns](/model-data/patterns/)
 - [Ingestion patterns](/ingest-data/patterns/)
 {{</ linkbox >}}
 
 {{< linkbox title="Patterns and examples" >}}
-- [All patterns](/architecture-patterns/)
-- [Live context graph](/architecture-patterns/live-context-graph/)
-- [Operational data store](/architecture-patterns/operational-data-store/)
-- [OLTP query offload](/architecture-patterns/query-offload/)
+- [All patterns](/patterns/)
+- [Live context graph](/patterns/live-context-graph/)
+- [Operational data store](/patterns/operational-data-store/)
+- [OLTP query offload](/patterns/query-offload/)
 {{</ linkbox >}}
 {{</ multilinkbox >}}
 
@@ -127,9 +127,9 @@ applications can query, react to, and build on.
 {{</ linkbox >}}
 
 {{< linkbox title="Model data" >}}
-- [Model with SQL](/transform-data/)
-- [Publish a data product](/transform-data/publish-a-data-product/)
-- [Idiomatic Materialize SQL](/transform-data/idiomatic-materialize-sql/)
+- [Model with SQL](/model-data/)
+- [Publish a data product](/model-data/publish-a-data-product/)
+- [Idiomatic Materialize SQL](/model-data/idiomatic-materialize-sql/)
 {{</ linkbox >}}
 
 {{< linkbox title="Serve and react" >}}
@@ -168,35 +168,35 @@ change how you write SQL or how consumers read results.
 {{</ linkbox >}}
 
 {{< linkbox title="Agent and application interfaces" >}}
-- [SQL clients (PostgreSQL wire protocol)](/integrations/sql-clients/)
-- [Client libraries](/integrations/client-libraries/)
-- [HTTP API](/integrations/http-api/)
-- [WebSocket API](/integrations/websocket-api/)
+- [SQL clients (PostgreSQL wire protocol)](/interfaces/sql-clients/)
+- [Client libraries](/interfaces/client-libraries/)
+- [HTTP API](/interfaces/http-api/)
+- [WebSocket API](/interfaces/websocket-api/)
 - [MCP servers](/agents/)
 {{</ linkbox >}}
 {{</ multilinkbox >}}
 
 {{< multilinkbox >}}
 {{< linkbox title="Operate Materialize" >}}
-- [Operate Materialize](/manage/)
-- [Operational guidelines](/manage/operational-guidelines/)
+- [Operate Materialize](/operate/)
+- [Operational guidelines](/operate/operational-guidelines/)
 - [Clusters](/concepts/clusters/)
 - [Security](/security/)
-- [Monitoring and alerting](/manage/monitor/)
+- [Monitoring and alerting](/operate/monitor/)
 {{</ linkbox >}}
 
 {{< linkbox title="Deploy and automate" >}}
 - [Run Materialize](/run/)
 - [Self-managed deployments](/self-managed-deployments/)
-- [Terraform](/manage/terraform/)
-- [dbt](/manage/dbt/)
-- [mz CLI](/integrations/cli/)
+- [Terraform](/operate/terraform/)
+- [dbt](/operate/dbt/)
+- [mz CLI](/interfaces/cli/)
 {{</ linkbox >}}
 
 {{< linkbox title="Troubleshoot" >}}
 - [Data ingestion](/ingest-data/troubleshooting/)
-- [Transformations and queries](/transform-data/troubleshooting/)
-- [mz-debug](/integrations/mz-debug/)
+- [Transformations and queries](/model-data/troubleshooting/)
+- [mz-debug](/interfaces/mz-debug/)
 {{</ linkbox >}}
 {{</ multilinkbox >}}
 

@@ -672,8 +672,8 @@ password.
     psql -h <materialize-host> -p 6875 -U svc-dbt materialize
     ```
 
-For dbt-specific setup, see [dbt connection profiles](/manage/dbt/get-started/).
-For Terraform, see [Terraform: get started](/manage/terraform/get-started/).
+For dbt-specific setup, see [dbt connection profiles](/operate/dbt/get-started/).
+For Terraform, see [Terraform: get started](/operate/terraform/get-started/).
 
 ### Resource Owner Password flow
 

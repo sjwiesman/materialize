@@ -6,7 +6,7 @@ menu:
     parent: "agents-code-with-ai"
     weight: 10
 aliases:
-  - /integrations/coding-agent-skills/
+  - /interfaces/coding-agent-skills/
 ---
 
 Coding agents like [Claude
@@ -58,9 +58,9 @@ npx skills update
 The same repository also serves as a [Claude Code plugin
 marketplace](https://code.claude.com/docs/en/plugin-marketplaces) named
 `materialize`. Its `mz-sql-lsp` plugin registers the
-[`mz-deploy`](/manage/mz-deploy/) language server for `.sql` files, so Claude
+[`mz-deploy`](/operate/mz-deploy/) language server for `.sql` files, so Claude
 Code navigates your project instead of grepping it. See [AI agent
-setup](/manage/mz-deploy/agent-setup/#configuring-for-claude-code) for
+setup](/operate/mz-deploy/agent-setup/#configuring-for-claude-code) for
 installation and configuration.
 
 ## Reduce permission prompts (Claude Code)
@@ -91,5 +91,5 @@ all tools rather than just this directory.
 ## Related Pages
 
 - [MCP Server](/agents/)
-- [mz-deploy AI agent setup](/manage/mz-deploy/agent-setup/)
+- [mz-deploy AI agent setup](/operate/mz-deploy/agent-setup/)
 - [GitHub: Materialize Agent Skills](https://github.com/MaterializeInc/agent-skills)

@@ -33,7 +33,7 @@ In Materialize, you can create indexes on a [source and its tables or
 subsources](/concepts/sources/) to maintain in-memory up-to-date data within the
 cluster you create the index. This can help improve [query
 performance](#indexes-and-query-optimizations) such as when [using
-joins](/transform-data/optimization/#join) in your transformation. However, in
+joins](/model-data/optimization/#join) in your transformation. However, in
 practice, you may find that you rarely need to index these objects directly.
 
 ```mzsql
@@ -223,7 +223,7 @@ CREATE INDEX idx_orders_view_qty_price on orders_view (quantity, price);
 ### Indexes and query optimizations
 
 By making up-to-date results available in memory, indexes can help [optimize
-query performance](/transform-data/optimization/), such as:
+query performance](/model-data/optimization/), such as:
 
 - Provide faster sequential access than unindexed data.
 
@@ -238,7 +238,7 @@ query performance](/transform-data/optimization/), such as:
 
 ## Related pages
 
-- [Optimization](/transform-data/optimization)
+- [Optimization](/model-data/optimization)
 - [Views](/concepts/views)
 - [`CREATE INDEX`](/sql/create-index)
 

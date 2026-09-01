@@ -26,9 +26,9 @@
     - When used by multiple queries within the same cluster.
 
     - When used to enable [delta
-      joins](/transform-data/optimization/#optimize-multi-way-joins-with-delta-joins).
+      joins](/model-data/optimization/#optimize-multi-way-joins-with-delta-joins).
 
-    For more information, see [Optimization](/transform-data/optimization).
+    For more information, see [Optimization](/model-data/optimization).
 
 - name: table-usage-pattern-intro
   content: |
@@ -48,4 +48,4 @@
     | View used as a building block for stacked views; i.e., views not used to serve results. | View |
     | View results are accessed across [clusters](/concepts/clusters);<br>such as in a 3-cluster architecture. | Materialized view (in the transform cluster)<br>Index on the materialized view (in the serving cluster) |
     | Use with a [sink](/serve-results/sink/) or a [`SUBSCRIBE`](/sql/subscribe) operation | Materialized view  |
-    | Use with [temporal filters](/transform-data/patterns/temporal-filters/) | Materialized view  |
+    | Use with [temporal filters](/model-data/patterns/temporal-filters/) | Materialized view  |

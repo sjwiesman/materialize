@@ -50,7 +50,7 @@ detached, or truncated. Use one of the approaches on this page instead.
 Ingest each partition as its own table, then union them into a **materialized
 view**. Use a materialized view rather than a view so that you can add and remove
 partitions later by [replacing the materialized
-view](/transform-data/updating-materialized-views/replace-materialized-view/),
+view](/model-data/updating-materialized-views/replace-materialized-view/),
 without recreating the objects that depend on it.
 
 {{% include-headless "/headless/replacement-views/public-preview-annotation" %}}

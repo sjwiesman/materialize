@@ -31,7 +31,7 @@ To create a sink, you can:
 ### Operational guideline
 
 - Avoid putting sinks on the same cluster that hosts sources to allow for
-[blue/green deployment](/manage/dbt/blue-green-deployments).
+[blue/green deployment](/operate/dbt/blue-green-deployments).
 
 ### Troubleshooting
 

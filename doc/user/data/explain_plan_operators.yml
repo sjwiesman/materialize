@@ -163,7 +163,7 @@ operators:
       Performs one of `INNER` / `LEFT` / `RIGHT` / `FULL OUTER` / `CROSS` join on the two inputs, using the given predicate.
     uses_memory: True
     memory_details: |
-      Uses memory proportional to the input sizes, unless [the inputs have appropriate indexes](/transform-data/optimization/#join). Certain joins with more than 2 inputs use additional memory, see details in the optimized plan.
+      Uses memory proportional to the input sizes, unless [the inputs have appropriate indexes](/model-data/optimization/#join). Certain joins with more than 2 inputs use additional memory, see details in the optimized plan.
     expansive: True
     expansive_details: |
       For `CrossJoin`s, Cartesian product of the inputs (|N| x |M|). Note that, in many cases, a join that shows up as a cross join in the RAW PLAN will actually be turned into an inner join in the OPTIMIZED PLAN, by making use of an equality WHERE condition.
@@ -178,7 +178,7 @@ operators:
     memory_details: |
       The `Join` operator itself uses memory only for `type=differential` with more than 2 inputs.
       However, `Join` operators need [arrangements](/get-started/arrangements/#arrangements) on their inputs (shown by the `ArrangeBy` operator).
-      These arrangements use memory proportional to the input sizes. If an input has an [appropriate index](/transform-data/optimization/#join), then the arrangement of the index will be reused.
+      These arrangements use memory proportional to the input sizes. If an input has an [appropriate index](/model-data/optimization/#join), then the arrangement of the index will be reused.
     expansive: True
     expansive_details: |
       Depends on the join order and facts about the joined collections.
@@ -194,7 +194,7 @@ operators:
       Joins will indicate the join order of their children, starting from 0.
       For example, `Differential Join %1 » %0` will join its second child into its first.
 
-      The [two joins differ in performance characteristics](/transform-data/optimization/#join).
+      The [two joins differ in performance characteristics](/model-data/optimization/#join).
     uses_memory: True
     memory_details: |
       Uses memory for 3-way or more differential joins.

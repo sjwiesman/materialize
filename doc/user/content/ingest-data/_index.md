@@ -169,7 +169,7 @@ For example, when creating a PostgreSQL source, you may want to create a
 publication with specific tables rather than for all tables in the database.
 
 Once the data is in Materialize, you can further [reduce the size of the
-data](/transform-data/optimization/#reduce-the-size-of-the-data) maintained by
+data](/model-data/optimization/#reduce-the-size-of-the-data) maintained by
 your view definitions.
 
 ### Upsert sources

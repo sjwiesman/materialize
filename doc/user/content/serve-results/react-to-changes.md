@@ -35,5 +35,5 @@ pages with nothing tying them together.
 ## Related
 
 - [`SUBSCRIBE`](/sql/subscribe/) and [Sink results](/serve-results/sink/)
-- [Durable subscriptions](/transform-data/patterns/durable-subscriptions/)
+- [Durable subscriptions](/model-data/patterns/durable-subscriptions/)
 - [Event-driven architecture](/use-cases/event-driven-architecture/)

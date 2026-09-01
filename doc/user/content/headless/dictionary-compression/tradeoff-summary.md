@@ -10,4 +10,4 @@ hydration.
 
 For the full tradeoff, guidance on whether your workload is a good fit, and how
 to measure the effect, see [Dictionary
-compression](/transform-data/dictionary-compression/).
+compression](/model-data/dictionary-compression/).
