@@ -7,8 +7,6 @@ menu:
     identifier: "architecture-patterns"
     name: "Architecture patterns"
     weight: 25
-    params:
-      group: learn
 ---
 
 Pattern | Description

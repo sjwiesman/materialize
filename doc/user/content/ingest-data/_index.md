@@ -7,8 +7,6 @@ menu:
     identifier: "ingest-data"
     name: "Ingest data"
     weight: 30
-    params:
-      group: build
 aliases:
   - /self-managed/v25.1/ingest-data/
   - /self-managed/v25.2/ingest-data/kafka/amazon-msk/

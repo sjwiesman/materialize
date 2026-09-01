@@ -1,20 +1,77 @@
-{{- /* The topic sidebar: the sections of the active documentation group.
 
-The group is picked in the header. Scoping the sidebar to one group is what
-keeps the visible section count small, and it costs no nesting level. */ -}}
 <div class="sidebar-wrapper">
   {{ $currentPage := . }}
-  {{ $activeGroup := partial "active-doc-group.html" . }}
-
   <nav role="navigation" class="sidebar">
     <ul>
       <div id="docsearch"></div>
 
-      {{- range .Site.Menus.main.ByWeight }}
-        {{- if eq (.Params.group | default site.Params.defaultDocGroup) $activeGroup }}
-          {{- partial "sidebar-entry.html" (dict "entry" . "level" 1 "page" $currentPage) }}
-        {{- end }}
-      {{- end }}
+      {{ range .Site.Menus.main.ByWeight }}
+      <li class="level-1 {{if .HasChildren }}has-children{{ else }}no-children{{ end }}">
+          <a {{with .URL}}href="{{.}}"{{end}} class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
+            {{.Name | markdownify}}
+            {{- if .HasChildren }}
+              {{ readFile "static/images/icon_sidebar_expander.svg" | safeHTML }}
+            {{ end }}
+          </a>
+
+        {{- if .HasChildren }}
+        <ul>
+          {{- range .Children }}
+          <li class="level-2 {{if .HasChildren }}has-children{{ else }}no-children{{ end }}">
+            <a {{with .URL}}href="{{.}}"{{end}} class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
+              {{.Name | markdownify}}
+              {{- if .HasChildren }}
+                {{ readFile "static/images/icon_sidebar_expander.svg" | safeHTML }}
+              {{ end }}
+            </a>
+
+            {{- if .HasChildren }}
+            <ul>
+              {{- range .Children }}
+              <li class="level-3 {{if .HasChildren }}has-children{{ else }}no-children{{ end }}">
+                <a {{with .URL}}href="{{.}}"{{end}} class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
+                  {{.Name | markdownify}}
+                  {{- if .HasChildren }}
+                    {{ readFile "static/images/icon_sidebar_expander.svg" | safeHTML }}
+                  {{ end }}
+                </a>
+
+                {{- if .HasChildren }}
+                <ul>
+                  {{- range .Children }}
+                  <li class="level-4 {{if .HasChildren }}has-children{{ else }}no-children{{ end }}">
+                    <a {{with .URL}}href="{{.}}"{{end}} class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
+                      {{.Name | markdownify}}
+                      {{- if .HasChildren }}
+                        {{ readFile "static/images/icon_sidebar_expander.svg" | safeHTML }}
+                      {{ end }}
+                    </a>
+
+                    {{- if .HasChildren }}
+                    <ul>
+                      {{- range .Children }}
+                      <li class="level-5">
+                        <a href="{{.URL}}" class="{{if $currentPage.IsMenuCurrent "main" .}}active{{end}}">
+                          {{.Name | markdownify}}
+                        </a>
+                      </li>
+                      {{- end}}
+                    </ul>
+                    {{- end}}
+                  </li>
+                  {{- end}}
+                </ul>
+                {{- end}}
+              </li>
+              {{- end}}
+            </ul>
+            {{- end}}
+          </li>
+          {{- end}}
+        </ul>
+        {{- end}}
+      </li>
+      {{- end}}
     </ul>
   </nav>
   <button class="close-topics" aria-label="Close the topics sidebar">

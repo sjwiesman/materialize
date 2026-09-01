@@ -4,9 +4,8 @@ description: "Troubleshooting guide for the MCP Server."
 make_table_row_headers_searchable: true
 menu:
   main:
+    parent: "agents"
     weight: 60
-    params:
-      group: agents
 aliases:
   - /integrations/mcp-server/mcp-server-troubleshooting/
 ---

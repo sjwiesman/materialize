@@ -13,13 +13,11 @@
       </div>
     </button>
 
-    {{- $activeGroup := partial "active-doc-group.html" . }}
     <div class="desktop">
-      {{- range site.Params.docNav }}
-      {{- $landing := site.GetPage .page }}
-      {{- if not $landing }}{{ errorf "docNav: no page at %q" .page }}{{ end }}
-      <a role="menuitem" class="{{ if eq .id $activeGroup }}active{{ end }}" href="{{ $landing.RelPermalink }}">{{ .name }}</a>
-      {{- end }}
+      <a role="menuitem" class="active" href="{{.Site.BaseURL}}">Docs</a>
+      <a role="menuitem" href="https://materialize.com/pricing">Pricing</a>
+      <a role="menuitem" href="https://materialize.com/blog">Blog</a>
+      <a role="menuitem" href="https://materialize.com/about">About</a>
     </div>
     <div class="desktop">
       <a role="menuitem" href="https://console.materialize.com/">Sign In</a>
@@ -34,12 +32,10 @@
   </div>
   <div class="mobile">
     <div class="row">
-      {{- range site.Params.docNav }}
-      {{- $landing := site.GetPage .page }}
-      {{- if $landing }}
-      <a role="menuitem" class="{{ if eq .id $activeGroup }}active{{ end }}" href="{{ $landing.RelPermalink }}">{{ .name }}</a>
-      {{- end }}
-      {{- end }}
+      <a role="menuitem" class="active" href="{{.Site.BaseURL}}">Docs</a>
+      <a role="menuitem" href="https://materialize.com/pricing">Pricing</a>
+      <a role="menuitem" href="https://materialize.com/blog">Blog</a>
+      <a role="menuitem" href="https://materialize.com/about">About</a>
       <a role="menuitem" href="https://console.materialize.com/">Sign In</a>
       <div>
         <a

@@ -7,8 +7,6 @@ menu:
     identifier: "run"
     name: "Run Materialize"
     weight: 55
-    params:
-      group: operate
 ---
 
 {{% include-headless "/headless/restructure-stub" %}}

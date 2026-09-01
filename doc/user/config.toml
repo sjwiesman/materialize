@@ -6,7 +6,6 @@ disableKinds = ['taxonomy']
 
 [params]
 repo = "//github.com/MaterializeInc/materialize"
-defaultDocGroup = "learn"
 bannerMessage = ""
 bannerLink = ""
 
@@ -26,8 +25,6 @@ publishDate = ["publishDate"]
 identifier = "get-started"
 name = "Get started"
 weight = 5
-[menu.main.params]
-group = "learn"
 
 #
 # Connect sources
@@ -65,8 +62,6 @@ weight = 35
 identifier = "transform-data"
 name = "Model data"
 weight = 32
-[menu.main.params]
-group = "build"
 
 
 #
@@ -76,16 +71,14 @@ group = "build"
 [[menu.main]]
 identifier = "agents-build"
 name = "Build agents on Materialize"
+parent = "agents"
 weight = 10
-[menu.main.params]
-group = "agents"
 
 [[menu.main]]
 identifier = "agents-code-with-ai"
 name = "Code with AI"
+parent = "agents"
 weight = 30
-[menu.main.params]
-group = "agents"
 
 #
 # Reference
@@ -94,9 +87,7 @@ group = "agents"
 [[menu.main]]
 identifier = "sql"
 name = "SQL Reference"
-weight = 70
-[menu.main.params]
-group = "reference"
+weight = 75
 
 #
 # Legacy Create Source
@@ -121,8 +112,6 @@ weight = 90
 identifier = "about"
 name = "About"
 weight = 90
-[menu.main.params]
-group = "reference"
 
 [[menu.main]]
 name = "Materialize Cloud Security and Compliance"
@@ -171,34 +160,3 @@ include = "docs/**"
 #
 # include = "**.html" # would only include files with ".html" suffix
 # exclude = "**.{jpg, png}" # would exclude files with ".jpg" or ".png" suffix
-
-#
-# Top-level documentation groups. These replace the marketing links in the
-# header; the sidebar shows one group's sections at a time. A top-level menu
-# entry joins a group via `menu.main.params.group`.
-#
-
-[[params.docNav]]
-id = "learn"
-name = "Learn"
-page = "/"
-
-[[params.docNav]]
-id = "build"
-name = "Build"
-page = "/ingest-data"
-
-[[params.docNav]]
-id = "agents"
-name = "Agents & AI"
-page = "/agents"
-
-[[params.docNav]]
-id = "operate"
-name = "Operate"
-page = "/run"
-
-[[params.docNav]]
-id = "reference"
-name = "Reference"
-page = "/reference"

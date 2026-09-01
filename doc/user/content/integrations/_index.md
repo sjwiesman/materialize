@@ -20,8 +20,6 @@ menu:
     identifier: "integrations"
     name: "Interfaces and tools"
     weight: 72
-    params:
-      group: reference
 ---
 
 
