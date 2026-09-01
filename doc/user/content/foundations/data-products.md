@@ -3,7 +3,7 @@ title: "Live data products"
 description: "The unit Materialize publishes: a business object defined in SQL, kept current, and shared across consumers."
 menu:
   main:
-    parent: "concepts"
+    parent: foundations
     weight: 4
 ---
 
@@ -39,6 +39,6 @@ than admire the phrase.
 
 ## Related
 
-- [Views](/concepts/views/) and [Indexes](/concepts/indexes/)
+- [Views](/model-data/views/) and [Indexes](/model-data/indexes/)
 - [Publish a data product](/model-data/publish-a-data-product/)
 - [Operational data mesh](/patterns/data-mesh/)

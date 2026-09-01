@@ -3,8 +3,8 @@ title: Hydration
 description: "Learn about hydration in Materialize: reconstructing an object's in-memory state by reading from the storage layer."
 menu:
   main:
-    parent: concepts
-    weight: 31
+    parent: ingest-data
+    weight: 3
     identifier: 'concepts-hydration'
 ---
 
@@ -31,7 +31,7 @@ table.
 Hydration primarily impacts memory usage, and its speed scales with cluster
 size. Some hydration-related strategies you may want to consider:
 
-- Use a dedicated cluster for [sources](/concepts/sources/).
+- Use a dedicated cluster for [sources](/ingest-data/sources/).
 
 - In addition, use a dedicated cluster for upsert sources; i.e., do not
   co-locate with append-only Kafka sources or CDC database sources.
@@ -93,7 +93,7 @@ potentially longer total hydration time. You can use them when peak hydration
 memory is the bottleneck rather than as a default modeling pattern.
 
 - <a name="index-order"></a>If multiple objects in the **same** cluster consume
-  the same view, add an [index](/concepts/indexes/) to that view **before**
+  the same view, add an [index](/model-data/indexes/) to that view **before**
   creating the consumers. Consumers in that cluster can reuse the indexed
   arrangement instead of each building equivalent in-memory state, which can
   reduce both memory usage during hydration and steady-state memory. Note:
@@ -122,8 +122,8 @@ memory is the bottleneck rather than as a default modeling pattern.
 
 ## Related pages
 
-- [Snapshotting](/concepts/snapshotting/)
-- [Clusters](/concepts/clusters/)
-- [Sources](/concepts/sources/)
+- [Snapshotting](/ingest-data/snapshotting/)
+- [Clusters](/operate/clusters/)
+- [Sources](/ingest-data/sources/)
 - [Troubleshooting](/model-data/troubleshooting/#hydrating-objects)
 - [Updating materialized views](/model-data/updating-materialized-views/)

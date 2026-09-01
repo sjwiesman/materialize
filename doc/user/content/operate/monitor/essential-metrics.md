@@ -20,7 +20,7 @@ Metrics](/operate/monitor/appendix-metrics/).
 
 {{< metrics-table visibility="public" tag="environment" heading="Environment-level metrics" description="Metrics for the SQL control plane: client connections, availability, and the catalog." >}}
 
-{{< metrics-table visibility="public" tag="compute" heading="Compute metrics" description="Metrics for compute objects, such as indexes and materialized views, running on [clusters](/concepts/clusters/) and their replicas." >}}
+{{< metrics-table visibility="public" tag="compute" heading="Compute metrics" description="Metrics for compute objects, such as indexes and materialized views, running on [clusters](/operate/clusters/) and their replicas." >}}
 
 {{< metrics-table visibility="public" tag="source" heading="Source metrics" description="Metrics for data ingestion from external systems." >}}
 

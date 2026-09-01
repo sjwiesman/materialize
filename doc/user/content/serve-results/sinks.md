@@ -3,8 +3,8 @@ title: Sinks
 description: Learn about sinks in Materialize.
 menu:
   main:
-    parent: concepts
-    weight: 25
+    parent: serve-results
+    weight: 3
     identifier: 'concepts-sinks'
 aliases:
   - /get-started/key-concepts/#sinks

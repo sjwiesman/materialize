@@ -3,9 +3,9 @@ title: "Reaction time, freshness, and query latency"
 description: "How quickly a change in an upstream system becomes visible in a query result, and how to measure it."
 menu:
   main:
-    parent: concepts
+    parent: foundations
     weight: 100
-    identifier: 'concepts-reaction-time'
+    identifier: 'foundations-reaction-time'
 ---
 
 In operational data systems, the performance and responsiveness of queries depend not only on how fast a query runs, but also on how current the underlying data is. This page introduces three foundational concepts for evaluating and understanding system responsiveness in Materialize:

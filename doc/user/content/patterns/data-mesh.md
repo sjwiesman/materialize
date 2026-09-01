@@ -47,6 +47,6 @@ depend on.
 
 ## Related
 
-- [Live data products](/concepts/data-products/)
+- [Live data products](/foundations/data-products/)
 - [Publish a data product](/model-data/publish-a-data-product/)
 - [Live context graph](/patterns/live-context-graph/)

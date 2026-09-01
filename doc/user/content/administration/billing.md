@@ -8,14 +8,14 @@ menu:
 ---
 
 Materialize determines billing based on your compute and storage usage.
-Materialize bills per second based on the [cluster(s)](/concepts/clusters/) you
+Materialize bills per second based on the [cluster(s)](/operate/clusters/) you
 provision for your workloads. Each cluster is a pool of resources (CPU, memory,
 and scratch disk space) that must stay up and running to continually provide you
 with always-fresh results. For pricing details, see [Pricing](https://materialize.com/pricing/).
 
 ## Compute
 
-In Materialize, [clusters](/concepts/clusters/) are pools of compute resources
+In Materialize, [clusters](/operate/clusters/) are pools of compute resources
 (CPU, memory, and scratch disk space) for running your workloads, such as
 maintaining up-to-date results while also providing strong [consistency
 guarantees](/reference/isolation-level/). The credit usage for a cluster is
@@ -31,8 +31,8 @@ default `quickstart` cluster, you are <red>not billed</red> for these system clu
 {{</ note >}}
 
 You must provision at least one cluster to power your workloads. You can then
-use the cluster to create the objects ([indexes](/concepts/indexes/) and
-[materialized views](/concepts/views/#materialized-views)) that provide
+use the cluster to create the objects ([indexes](/model-data/indexes/) and
+[materialized views](/model-data/views/#materialized-views)) that provide
 always-fresh results. In Materialize, both indexes and materialized views are
 incrementally maintained when Materialize ingests new data. That is, Materialize
 performs work on writes such that no work is performed when reading from these
@@ -69,10 +69,10 @@ that contribute to compute usage include:
 | Cost factor | Details       |
 |-------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | [Replication factor for a cluster](/sql/create-cluster/#replication-factor). | Cost is calculated (at one second granularity) as cluster [`SIZE`](/sql/create-cluster/#available-sizes) * [`REPLICATION FACTOR`](/sql/create-cluster/#replication-factor). |
-| [Indexes](/concepts/indexes/) and [materialized views](/concepts/views) | As data changes (insert/update/delete), [indexes](/concepts/indexes/) and [materialized views](/concepts/views) perform incremental updates to provide up-to-date results. |
-| [Sources](/concepts/sources/) |• Sources that use upsert logic (i.e., [`ENVELOPE UPSERT`](/sql/create-sink/kafka/#upsert) or [`ENVELOPE DEBEZIUM` Kafka sources](/sql/create-sink/kafka/#debezium)) can lead to high memory and disk utilization.<br>• Other sources consume a negligible amount of resources in steady state. |
+| [Indexes](/model-data/indexes/) and [materialized views](/model-data/views) | As data changes (insert/update/delete), [indexes](/model-data/indexes/) and [materialized views](/model-data/views) perform incremental updates to provide up-to-date results. |
+| [Sources](/ingest-data/sources/) |• Sources that use upsert logic (i.e., [`ENVELOPE UPSERT`](/sql/create-sink/kafka/#upsert) or [`ENVELOPE DEBEZIUM` Kafka sources](/sql/create-sink/kafka/#debezium)) can lead to high memory and disk utilization.<br>• Other sources consume a negligible amount of resources in steady state. |
 | [`SELECT`s](/sql/select/) and [`SUBSCRIBE`s](/sql/subscribe/)  |• [`SELECT`s](/sql/select/) and [`SUBSCRIBE`s](/sql/subscribe/) that do not use indexes and materialized views perform work. <br>• [`SELECT`s](/sql/select/) and [`SUBSCRIBE`s](/sql/subscribe/) that use indexes and materialized views access already-computed results.|
-| [Sinks](/concepts/sinks/) | Only small CPU/memory costs.|
+| [Sinks](/serve-results/sinks/) | Only small CPU/memory costs.|
 
 ## Storage
 

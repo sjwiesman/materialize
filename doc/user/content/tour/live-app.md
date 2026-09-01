@@ -37,5 +37,5 @@ result served from a maintained view over a PostgreSQL connection.
   the use case.
 - [OLTP query offload](/patterns/query-offload/) for the pattern
   at architecture scale.
-- [Indexes](/concepts/indexes/) and [Hydration](/concepts/hydration/) for the
+- [Indexes](/model-data/indexes/) and [Hydration](/ingest-data/hydration/) for the
   mechanisms this tour leans on.

@@ -36,4 +36,4 @@ that make the count exact.
   use case.
 - [Fan out to downstream systems](/patterns/fan-out/) for the
   pattern behind both delivery paths.
-- [Sinks](/concepts/sinks/) for the mechanism.
+- [Sinks](/serve-results/sinks/) for the mechanism.

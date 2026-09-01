@@ -3,8 +3,8 @@ title: "Clusters"
 description: "Learn about clusters in Materialize."
 menu:
   main:
-    parent: 'concepts'
-    weight: 5
+    parent: operate
+    weight: 3
     identifier: 'concepts-clusters'
 aliases:
   - /get-started/key-concepts/#clusters
@@ -20,11 +20,11 @@ for running your workloads.
 
 The following operations require a cluster in Materialize:
 
-- Maintaining [sources](/concepts/sources/), [tables (or
-  subsources)](/concepts/sources/#tables-and-subsources) created from a
-  source, and [sinks](/concepts/sinks/).
-- Maintaining [indexes](/concepts/indexes/) and [materialized
-  views](/concepts/views/#materialized-views).
+- Maintaining [sources](/ingest-data/sources/), [tables (or
+  subsources)](/ingest-data/sources/#tables-and-subsources) created from a
+  source, and [sinks](/serve-results/sinks/).
+- Maintaining [indexes](/model-data/indexes/) and [materialized
+  views](/model-data/views/#materialized-views).
 - Executing [`SELECT`] and [`SUBSCRIBE`] statements.
 
 Each session has an **active cluster**, which you can change with [`SET
@@ -52,7 +52,7 @@ associated with a cluster when they are created, either:
 
 {{% include-from-yaml data="index_details" name="index-cluster-local" %}}
 
-For more on indexes and clusters, see [Indexes](/concepts/indexes/).
+For more on indexes and clusters, see [Indexes](/model-data/indexes/).
 
 ## Resource isolation
 
@@ -142,7 +142,7 @@ un-hydrated objects.
 {{< /tip >}}
 
 For more information, including hydration strategies and the memory usage of
-hydrating objects, see [Hydration](/concepts/hydration/).
+hydrating objects, see [Hydration](/ingest-data/hydration/).
 
 ## Best practices
 
@@ -173,7 +173,7 @@ production cluster(s) to run development workloads or non-production tasks.
 
 - [`CREATE CLUSTER`](/sql/create-cluster)
 - [`ALTER CLUSTER`](/sql/alter-cluster)
-- [Hydration](/concepts/hydration/)
+- [Hydration](/ingest-data/hydration/)
 - [System clusters](/sql/system-clusters)
 - [Usage & billing](/administration/billing/)
 - [Operational guidelines](/operate/operational-guidelines/)

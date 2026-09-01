@@ -165,7 +165,7 @@ objects in other schemas; this allows you to:
 
 - When a view (regular view or materialized view) is indexed, the indexed
   columns are surfaced in the tool input schema as preferred lookup keys,
-  enabling [index point-lookups](/concepts/indexes/#point-lookups) instead of
+  enabling [index point-lookups](/model-data/indexes/#point-lookups) instead of
   index scans.
 
 - Adding [comments](/sql/comment-on/) to the data product and its columns is

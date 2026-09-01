@@ -50,7 +50,7 @@ both Cloud and Self-Managed. See [Release schedule](/releases/schedule) for deta
 {{< public-preview />}}
 
 Dictionary compression reduces the memory that
-[arrangements](/get-started/arrangements/#arrangements) use when a column holds the same values repeatedly. Instead of storing a repeated column value each time it appears, Materialize stores that value once and has each row reference it. This can reduce steady state memory requirements after [hydration](/concepts/hydration/) has completed.
+[arrangements](/model-data/arrangements/#arrangements) use when a column holds the same values repeatedly. Instead of storing a repeated column value each time it appears, Materialize stores that value once and has each row reference it. This can reduce steady state memory requirements after [hydration](/ingest-data/hydration/) has completed.
 
 Dictionary compression is off by default. You opt in per cluster with the
 `EXPERIMENTAL ARRANGEMENT COMPRESSION` option:
@@ -963,7 +963,7 @@ include a built-in Model Context Protocol (MCP) [server for agents
 agent can discover your data products, understand the underlying data ontology,
 and run queries to fetch fresh data.
 
-Agents can discover [materialized views](/sql/create-materialized-view/) or [indexed](/sql/create-index/) views. You can use [comments](/sql/comment-on/) to document the data products, and describe them to agents. Agents authenticate as [roles](/sql/create-role/) in Materialize, so [RBAC privileges](/operate/access-control/) govern which data products are visible. Finally, you can set up a dedicated [cluster](/concepts/clusters/) for your agents, so they're isolated from the rest of your environment.
+Agents can discover [materialized views](/sql/create-materialized-view/) or [indexed](/sql/create-index/) views. You can use [comments](/sql/comment-on/) to document the data products, and describe them to agents. Agents authenticate as [roles](/sql/create-role/) in Materialize, so [RBAC privileges](/operate/access-control/) govern which data products are visible. Finally, you can set up a dedicated [cluster](/operate/clusters/) for your agents, so they're isolated from the rest of your environment.
 
 The MCP server for agents complements the [MCP server for
 developers](/agents/mcp-developer/) released in v26.20.2. The

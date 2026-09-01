@@ -18,7 +18,7 @@ aliases:
   - /self-managed/v25.2/serve-results/sink/sink-troubleshooting/
 ---
 
-A [sink](/concepts/sinks/) describes the external system you want Materialize to
+A [sink](/serve-results/sinks/) describes the external system you want Materialize to
 write data to and details the encoding of that data. You can sink data from a
 **materialized** view, a source, or a table.
 

@@ -7,7 +7,7 @@ menu:
     weight: 5
     identifier: 'architecture-patterns-live-context-graph'
 aliases:
-  - /concepts/live-data-products/
+  - /foundations/live-data-products/
 ---
 
 ## What is a live context graph?
@@ -225,6 +225,6 @@ the example cannot silently drift from the product.
 ## Learn more
 
 - [Quickstart](/get-started/quickstart/): build your first live data product.
-- [Reaction time, freshness, and query latency](/concepts/reaction-time/): the freshness contract.
+- [Reaction time, freshness, and query latency](/foundations/reaction-time/): the freshness contract.
 - [Serve results](/serve-results/): read the context graph from your applications and services.
 - [MCP integration](/agents/): expose the context graph to AI agents.

@@ -244,6 +244,6 @@ documentation.
 - [`CREATE SINK ... INTO KAFKA`](/sql/create-sink/kafka/)
 - [`CREATE CONNECTION`](/sql/create-connection/#kafka)
 - [`CREATE MATERIALIZED VIEW`](/sql/create-materialized-view/)
-- [Sinks](/concepts/sinks/)
+- [Sinks](/serve-results/sinks/)
 - [Kafka and Redpanda](/serve-results/sink/kafka/)
 - [Troubleshooting sinks](/serve-results/sink/sink-troubleshooting/)

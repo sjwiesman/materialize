@@ -21,7 +21,7 @@ For help getting started with your data or other questions about Materialize, yo
 
 ### What are the limits of a free trial?
 
-In Materialize, [clusters](/concepts/clusters/) are the pools of
+In Materialize, [clusters](/operate/clusters/) are the pools of
 compute resources for running your workloads. The size and replication factor
 of each cluster determines its [credit usage](/sql/create-cluster/#credit-usage).
 

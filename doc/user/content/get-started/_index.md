@@ -33,9 +33,9 @@ In Materialize, you don't have to make such compromises. Materialize supports
 incrementally updated view results that are **always fresh** (even when using
 complex SQL statements, like multi-way joins with aggregations) for *both*:
 
-- [Indexed views](/concepts/views/#indexes-on-views) and
+- [Indexed views](/model-data/views/#indexes-on-views) and
 
-- [Materialized views](/concepts/views/#materialized-views).
+- [Materialized views](/model-data/views/#materialized-views).
 
 How?
 Its engine is built on [Timely](https://github.com/TimelyDataflow/timely-dataflow#timely-dataflow)
@@ -85,5 +85,5 @@ consistency and performance requirements.
 
 ## Learn more
 
-- [Key concepts](/concepts/)
+- [Key concepts](/foundations/)
 - [Get started with Materialize](/get-started/quickstart)

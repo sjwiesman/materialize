@@ -40,5 +40,5 @@ Materialize serves directly.
   use case this tour serves.
 - [Shape a view as an agent tool](/agents/patterns/views-as-tools/) for the
   pattern, once you want to do this for real.
-- [Reaction time](/concepts/reaction-time/) for the measurement the freshness
+- [Reaction time](/foundations/reaction-time/) for the measurement the freshness
   labs are demonstrating.

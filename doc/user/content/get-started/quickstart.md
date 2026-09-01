@@ -16,8 +16,8 @@ aliases:
 
 Materialize provides always-fresh results while also providing [strong
 consistency guarantees](/reference/isolation-level/). In Materialize, both
-[indexes](/concepts/indexes/ "Indexes represents query results stored in memory
-within a cluster") and [materialized views](/concepts/views/#materialized-views)
+[indexes](/model-data/indexes/ "Indexes represents query results stored in memory
+within a cluster") and [materialized views](/model-data/views/#materialized-views)
 **incrementally update** results when Materialize ingests new data; i.e., work
 is performed on writes. Because work is performed on writes, reads from these
 objects return the already up-to-date results.
@@ -26,11 +26,11 @@ In this quickstart, you will continuously ingest a sample auction data set to
 build an operational use case around finding auction winners and auction
 flippers. Specifically, you will:
 
-- Create and query various [views](/concepts/views/) on sample auction data. The
+- Create and query various [views](/model-data/views/) on sample auction data. The
   data is continually generated at 1 second intervals to mimic a data-intensive
   workload.
 
-- Create an [index](/concepts/indexes "Indexes represents query results stored
+- Create an [index](/model-data/indexes "Indexes represents query results stored
   in memory within a cluster") to compute and store view results in memory. As
   new auction data arrives, the index **incrementally updates** view
   results instead of recalculating the results from scratch, making fresh
@@ -74,7 +74,7 @@ Emulator does not provide the full experience of using Materialize.
 By default, you are using the `quickstart` cluster, working in the
 `materialize.public` [namespace](/sql/namespaces/), where:
 
-- A [cluster](/concepts/clusters/) is an isolated pool of compute resources
+- A [cluster](/operate/clusters/) is an isolated pool of compute resources
   (CPU, memory, and scratch disk space) for running your workloads),
 
 - `materialize` is the database name, and
@@ -102,11 +102,11 @@ See also [Naming restrictions](/sql/identifiers/#naming-restrictions).
 
 ## Step 2. Create the source
 
-[Sources](/concepts/sources/) are external systems from which Materialize reads
+[Sources](/ingest-data/sources/) are external systems from which Materialize reads
 in data. This tutorial uses Materialize's [sample `Auction` load
 generator](/sql/create-source/load-generator/#auction) to create the source.
 
-1. Create the [source](/concepts/sources "External systems from which
+1. Create the [source](/ingest-data/sources "External systems from which
    Materialize reads data.") using the [`CREATE SOURCE`](/sql/create-source/)
    command.
 
@@ -234,7 +234,7 @@ generator](/sql/create-source/load-generator/#auction) to create the source.
 
 ## Step 3. Create a view to find winning bids
 
-A [view](/concepts/views/) is a saved name for the underlying `SELECT`
+A [view](/model-data/views/) is a saved name for the underlying `SELECT`
 statement, providing an alias/shorthand when referencing the query. The
 underlying query is not executed during the view creation; instead, the
 underlying query is executed when the view is referenced.
@@ -245,7 +245,7 @@ auction ended. As new auction and bid data appears, the query must be rerun to
 get up-to-date results.
 
 1. Using the [`CREATE VIEW`](/sql/create-view/) command, create a
-   [**view**](/concepts/views/ "Saved name/alias for a query") to find the
+   [**view**](/model-data/views/ "Saved name/alias for a query") to find the
    winning (highest) bids.
 
    ```mzsql
@@ -289,7 +289,7 @@ get up-to-date results.
    grows.
 
    In Materialize, to make the queries more performant even as data
-   continues to grow, you can create [**indexes**](/concepts/indexes/) on views.
+   continues to grow, you can create [**indexes**](/model-data/indexes/) on views.
    Indexes provide always fresh view results in memory within a cluster by
    performing incremental updates as new data arrives. Queries can then read
    from the in-memory, already up-to-date results instead of re-running the
@@ -300,7 +300,7 @@ get up-to-date results.
 ## Step 4. Create an index to provide up-to-date results
 
 Indexes in Materialize represents query results stored in memory within a
-cluster. In Materialize, you can create [indexes](/concepts/indexes/) on views
+cluster. In Materialize, you can create [indexes](/model-data/indexes/) on views
 to provide always fresh, up-to-date view results in memory within a cluster.
 Queries can then read from the in-memory, already up-to-date results instead of
 re-running the underlying statement.
@@ -586,7 +586,7 @@ To clean up the quickstart environment:
 
 ## Summary
 
-In Materialize, [indexes](/concepts/indexes/) represent query results stored in
+In Materialize, [indexes](/model-data/indexes/) represent query results stored in
 memory within a cluster. When you create an index on a view, the index
 incrementally updates the view results (instead of recalculating the results
 from scratch) as Materialize ingests new data. These up-to-date results are then
@@ -616,14 +616,14 @@ The quickstart used an index since:
 Before creating an index (which represents query results stored in memory),
 consider its memory usage as well as its [compute cost
 implications](/administration/billing/#compute). For best practices when
-creating indexes, see [Index Best Practices](/concepts/indexes/#best-practices).
+creating indexes, see [Index Best Practices](/model-data/indexes/#best-practices).
 
 ### Additional information
 
-- [Clusters](/concepts/clusters)
-- [Indexes](/concepts/indexes)
-- [Sources](/concepts/sources)
-- [Views](/concepts/views/)
+- [Clusters](/operate/clusters)
+- [Indexes](/model-data/indexes)
+- [Sources](/ingest-data/sources)
+- [Views](/model-data/views/)
 - [Idiomatic Materialize SQL
   chart](/model-data/idiomatic-materialize-sql/appendix/idiomatic-sql-chart/)
 - [Usage & Billing](/administration/billing/#compute)

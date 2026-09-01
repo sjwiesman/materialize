@@ -24,13 +24,13 @@ applications can query, react to, and build on.
   other operational systems, then join it into a unified view.
 
 - **Turn raw data into live business objects.** [Use SQL](/model-data/) to
-  model [customers](/concepts/data-products/), accounts, orders, inventory, and other business concepts.
+  model [customers](/foundations/data-products/), accounts, orders, inventory, and other business concepts.
   Materialize keeps these data products continuously up to date as the
   underlying data changes.
 
 - **Serve complex queries with low latency.** Move joins, aggregations, and
   other expensive computation out of the request path. Materialize
-  [incrementally maintains the results](/concepts/views/) so agents, APIs, and
+  [incrementally maintains the results](/model-data/views/) so agents, APIs, and
   applications can [query them quickly](/serve-results/).
 
 - **Keep applications grounded in what is true now.** Query changing data with
@@ -85,11 +85,11 @@ applications can query, react to, and build on.
 {{</ linkbox >}}
 
 {{< linkbox title="Learn the concepts" >}}
-- [Concepts overview](/concepts/)
-- [The live context layer](/concepts/live-context-layer/)
-- [Live data products](/concepts/data-products/)
-- [Views and indexes](/concepts/views/)
-- [Consistency guarantees](/concepts/consistency/)
+- [Concepts overview](/foundations/)
+- [The live context layer](/foundations/live-context-layer/)
+- [Live data products](/foundations/data-products/)
+- [Views and indexes](/model-data/views/)
+- [Consistency guarantees](/foundations/consistency/)
 {{</ linkbox >}}
 {{</ multilinkbox >}}
 
@@ -180,7 +180,7 @@ change how you write SQL or how consumers read results.
 {{< linkbox title="Operate Materialize" >}}
 - [Operate Materialize](/operate/)
 - [Operational guidelines](/operate/operational-guidelines/)
-- [Clusters](/concepts/clusters/)
+- [Clusters](/operate/clusters/)
 - [Security](/security/)
 - [Monitoring and alerting](/operate/monitor/)
 {{</ linkbox >}}

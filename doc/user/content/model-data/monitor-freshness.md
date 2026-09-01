@@ -9,7 +9,7 @@ menu:
     weight: 84
 ---
 
-[Freshness](/concepts/reaction-time/#freshness) measures the time from when a
+[Freshness](/foundations/reaction-time/#freshness) measures the time from when a
 change occurs in an upstream system to when it becomes visible in the results of
 a query. This guide shows how to track freshness for an object over time and how
 to summarize a whole window of freshness observations with a CCDF or an HDR

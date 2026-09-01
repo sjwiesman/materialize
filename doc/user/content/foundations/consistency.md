@@ -3,7 +3,7 @@ title: "Consistency guarantees"
 description: "What Materialize promises about the results you read, across sources, across views, and over time."
 menu:
   main:
-    parent: "concepts"
+    parent: foundations
     weight: 5
 ---
 
@@ -36,5 +36,5 @@ edges.
 ## Related
 
 - [Isolation levels](/reference/isolation-level/)
-- [Reaction time, freshness, and query latency](/concepts/reaction-time/)
+- [Reaction time, freshness, and query latency](/foundations/reaction-time/)
 - [`mz_now()` and temporal filters](/sql/functions/now_and_mz_now/)

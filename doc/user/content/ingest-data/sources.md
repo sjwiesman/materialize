@@ -3,8 +3,8 @@ title: Sources
 description: Learn about sources in Materialize.
 menu:
   main:
-    parent: concepts
-    weight: 10
+    parent: ingest-data
+    weight: 1
     identifier: 'concepts-sources'
 aliases:
   - /get-started/key-concepts/#sources
@@ -60,12 +60,12 @@ you cannot insert, update, or delete their data directly.
 ## Snapshotting
 
 When you create a table from a source (or, with the legacy syntax, when the
-subsources are created), Materialize [snapshots](/concepts/snapshotting/) the
+subsources are created), Materialize [snapshots](/ingest-data/snapshotting/) the
 data currently available in the upstream system for that table.
 
 {{% include-headless "/headless/ingestion/snapshotting-queries" %}}
 
-See [Snapshotting](/concepts/snapshotting/) for more information.
+See [Snapshotting](/ingest-data/snapshotting/) for more information.
 
 ## Hydration
 
@@ -73,12 +73,12 @@ See [Snapshotting](/concepts/snapshotting/) for more information.
 
 {{% include-from-yaml data="hydration-details" name="sources-summary" %}}
 
-See [Hydration](/concepts/hydration/) for more information.
+See [Hydration](/ingest-data/hydration/) for more information.
 
 ## Sources and clusters
 
 Sources require compute resources in Materialize. That is, sources must be
-associated with a [cluster](/concepts/clusters/). If possible, dedicate a
+associated with a [cluster](/operate/clusters/). If possible, dedicate a
 cluster just for sources.
 
 See also [Operational guidelines](/operate/operational-guidelines/).
@@ -87,5 +87,5 @@ See also [Operational guidelines](/operate/operational-guidelines/).
 
 - [`CREATE SOURCE`](/sql/create-source)
 - [`CREATE TABLE`](/sql/create-table)
-- [Snapshotting](/concepts/snapshotting/)
-- [Hydration](/concepts/hydration/)
+- [Snapshotting](/ingest-data/snapshotting/)
+- [Hydration](/ingest-data/hydration/)

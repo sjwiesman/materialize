@@ -40,6 +40,6 @@ believable.
 ## Related
 
 - [What is Materialize?](/get-started/)
-- [Incremental computation](/concepts/incremental-computation/) for the cost
+- [Incremental computation](/foundations/incremental-computation/) for the cost
   model behind these recommendations.
 - [Use cases](/use-cases/) for the workloads in detail.

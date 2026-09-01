@@ -9,7 +9,7 @@ menu:
     weight: 85
 ---
 
-[Freshness](/concepts/reaction-time/#freshness) measures the time from when a
+[Freshness](/foundations/reaction-time/#freshness) measures the time from when a
 change occurs in an upstream system to when it becomes visible in the results of
 a query. This guide can help diagnose why freshness is degraded for an object as
 well as measure freshness across your deployment.

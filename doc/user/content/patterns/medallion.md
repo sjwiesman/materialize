@@ -47,6 +47,6 @@ the top layer is visible rather than assumed.
 
 ## Related
 
-- [Views](/concepts/views/), [Indexes](/concepts/indexes/), and [Incremental
-  computation](/concepts/incremental-computation/)
+- [Views](/model-data/views/), [Indexes](/model-data/indexes/), and [Incremental
+  computation](/foundations/incremental-computation/)
 - [Operational data store](/patterns/operational-data-store/)

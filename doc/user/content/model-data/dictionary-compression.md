@@ -154,8 +154,8 @@ re-hydrates the cluster, wait until hydration has completed before you measure.
 - [`ALTER CLUSTER`](/sql/alter-cluster/)
 - [`SHOW CREATE CLUSTER`]
 
-[Arrangements]: /get-started/arrangements/
-[indexes]: /concepts/indexes/
+[Arrangements]: /model-data/arrangements/
+[indexes]: /model-data/indexes/
 [`SHOW CREATE CLUSTER`]: /sql/show-create-cluster/
 [`mz_introspection.mz_arrangement_sizes`]: /reference/system-catalog/mz_introspection/#mz_arrangement_sizes
 [`mz_introspection.mz_dataflow_arrangement_sizes`]: /reference/system-catalog/mz_introspection/#mz_dataflow_arrangement_sizes

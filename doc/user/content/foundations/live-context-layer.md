@@ -3,7 +3,7 @@ title: "The live context layer"
 description: "What Materialize maintains between your operational systems and the agents and applications that read from them."
 menu:
   main:
-    parent: "concepts"
+    parent: foundations
     weight: 3
 ---
 
@@ -26,16 +26,16 @@ maintained, and what is served.
   This is where the difference between invalidation and incremental maintenance
   belongs.
 - **What the layer guarantees**, with links to the pages that own each
-  guarantee: freshness and [reaction time](/concepts/reaction-time/),
-  [consistency](/concepts/consistency/), and the cost model in [incremental
-  computation](/concepts/incremental-computation/).
+  guarantee: freshness and [reaction time](/foundations/reaction-time/),
+  [consistency](/foundations/consistency/), and the cost model in [incremental
+  computation](/foundations/incremental-computation/).
 - **What the layer is not.** Not a system of record, not an archival warehouse,
   not a message bus. Each exclusion links to the page that says what to use
   instead.
 
 ## Related
 
-- [Live data products](/concepts/data-products/) for the object this layer
+- [Live data products](/foundations/data-products/) for the object this layer
   publishes.
 - [Live context graph](/patterns/live-context-graph/) for what
   happens when several teams publish into the layer at once.

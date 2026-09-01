@@ -3,8 +3,8 @@ title: Snapshotting
 description: "Learn about snapshotting in Materialize: the initial sync of a source's data from an upstream system."
 menu:
   main:
-    parent: concepts
-    weight: 30
+    parent: ingest-data
+    weight: 2
     identifier: 'concepts-snapshotting'
 ---
 
@@ -46,5 +46,5 @@ Snapshotting has the following upstream impacts:
 ## Related pages
 
 - [Ingest data](/ingest-data/)
-- [Sources](/concepts/sources/)
+- [Sources](/ingest-data/sources/)
 - [Troubleshooting data ingestion](/ingest-data/troubleshooting/)

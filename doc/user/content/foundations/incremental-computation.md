@@ -3,7 +3,7 @@ title: "Incremental computation"
 description: "Why maintaining a result costs in proportion to what changed, and how to predict what a dataflow will cost you."
 menu:
   main:
-    parent: "concepts"
+    parent: foundations
     weight: 6
 ---
 
@@ -20,7 +20,7 @@ good idea.
   size of the data.
 - **What is kept in memory, and why.** Arrangements as the indexed state a
   dataflow maintains, with a pointer to
-  [arrangements](/get-started/arrangements/) for the detail.
+  [arrangements](/model-data/arrangements/) for the detail.
 - **A cost model a reader can apply.** Which operators must retain state, which
   do not, and the handful of SQL shapes that make a view expensive to maintain:
   wide unfiltered joins, high-cardinality group keys, and repeated
@@ -34,6 +34,6 @@ good idea.
 
 ## Related
 
-- [Hydration](/concepts/hydration/) and [Snapshotting](/concepts/snapshotting/)
+- [Hydration](/ingest-data/hydration/) and [Snapshotting](/ingest-data/snapshotting/)
 - [Optimization](/model-data/optimization/)
-- [Clusters](/concepts/clusters/) for where the work runs.
+- [Clusters](/operate/clusters/) for where the work runs.

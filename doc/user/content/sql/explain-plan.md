@@ -227,7 +227,7 @@ In this stage, the planner performs various optimizing rewrites:
 In this stage, the planner:
 
 - Decides on the exact execution details of each operator, and maps plan operators to differential dataflow operators.
-- Makes the final choices about creating or reusing [arrangements](/get-started/arrangements/#arrangements).
+- Makes the final choices about creating or reusing [arrangements](/model-data/arrangements/#arrangements).
 
 #### From physical plan to dataflow
 

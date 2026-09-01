@@ -41,7 +41,7 @@ name="ingest-data-scheduling" %}}
 ### Separate cluster(s) for sources
 
 In production, if possible, use a dedicated cluster for
-[sources](/concepts/sources/); i.e., avoid putting sources on the same cluster
+[sources](/ingest-data/sources/); i.e., avoid putting sources on the same cluster
 that hosts compute objects, sinks, and/or serves queries.
 
 {{% include-from-yaml data="best_practices_details" name="architecture-upsert-source" %}}
@@ -66,7 +66,7 @@ For upsert sources, snapshotting is a resource-intensive operation that can requ
 When sizing a cluster, budget for hydration memory on top of the steady-state
 cost. The table below summarizes, per object type, when each object hydrates and
 the memory it uses. For more on hydration, including strategies to reduce its
-impact, see [Hydration](/concepts/hydration/).
+impact, see [Hydration](/ingest-data/hydration/).
 
 {{% yaml-table data="hydration-objects-table" %}}
 

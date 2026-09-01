@@ -28,7 +28,7 @@ arrives.
 
 Materialize dataflows act on collections of data. To provide fast access to the
 changes to individual records, the records can be stored in an indexed
-representation called [arrangements](/get-started/arrangements/#arrangements).
+representation called [arrangements](/model-data/arrangements/#arrangements).
 Arrangements can be manually created by users on views by creating an index on
 the view. But they are also used internally in dataflows, for instance, when
 joining relations.

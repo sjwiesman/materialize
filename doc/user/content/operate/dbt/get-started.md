@@ -352,7 +352,7 @@ for batch transformations against any other database.
 Depending on your usage patterns, you can transform data using [`view`](#views)
 or [`materialized_view`](#materialized-views) models. For guidance and best
 practices on when to use views and materialized views in Materialize, see
-[Indexed views vs. materialized views](/concepts/views/#indexed-views-vs-materialized-views).
+[Indexed views vs. materialized views](/model-data/views/#indexed-views-vs-materialized-views).
 
 #### Views
 
@@ -390,10 +390,10 @@ function.
 
 {{< tip >}}
 For guidance and best practices on how to use indexes in Materialize, see
-[Indexes on views](/concepts/indexes/#indexes-on-views).
+[Indexes on views](/model-data/indexes/#indexes-on-views).
 {{</ tip >}}
 
-To keep results **up-to-date** in Materialize, you can create [indexes](/concepts/indexes/)
+To keep results **up-to-date** in Materialize, you can create [indexes](/model-data/indexes/)
 on view models using the [`index` configuration](#indexes). This
 allows you to bypass the need for maintaining complex incremental logic or
 re-running dbt to refresh your models.
@@ -420,12 +420,12 @@ CREATE INDEX database.schema.view_a_idx IN CLUSTER cluster_a ON view_a (col_a);
 ```
 
 As new data arrives, indexes keep view results **incrementally updated** in
-memory within a [cluster](/concepts/clusters/). Indexes help optimize query
+memory within a [cluster](/operate/clusters/). Indexes help optimize query
 performance and make queries against views fast since the results are already calculated.
 
 #### Materialized views
 
-To materialize a model as a [materialized view](/concepts/views/#materialized-views),
+To materialize a model as a [materialized view](/model-data/views/#materialized-views),
 set the `materialized` configuration to `materialized_view`.
 
 **Filename:** models/materialized_view_a.sql
@@ -456,7 +456,7 @@ function.
 
 {{< tip >}}
 For guidance and best practices on how to use indexes in Materialize, see
-[Indexes on materialized views](/concepts/views/#indexes-on-materialized-views).
+[Indexes on materialized views](/model-data/views/#indexes-on-materialized-views).
 {{</ tip >}}
 
 With a materialized view, your models are kept **up-to-date** in Materialize as
@@ -465,8 +465,8 @@ incremental logic or re-run dbt to refresh your models.
 
 These results are **incrementally updated** in durable storage — which makes
 them available across clusters — but aren't optimized for performance. To make
-results also available in memory within a [cluster](/concepts/clusters/), you
-can create [indexes](/concepts/indexes/) on materialized view models using the
+results also available in memory within a [cluster](/operate/clusters/), you
+can create [indexes](/model-data/indexes/) on materialized view models using the
 [`index` configuration](#indexes).
 
 **Filename:** models/materialized_view_a.sql
@@ -491,7 +491,7 @@ CREATE INDEX database.schema.materialized_view_a_idx IN CLUSTER cluster_b ON mat
 ```
 
 As new data arrives, results are **incrementally updated** in durable storage
-and also accessible in memory within the [cluster](/concepts/clusters/) the
+and also accessible in memory within the [cluster](/operate/clusters/) the
 index is created in. Indexes help optimize query performance and make queries
 against materialized views faster.
 
@@ -655,10 +655,10 @@ unspecified, the default database for the connection is used.
 
 #### Indexes
 
-Use the `indexes` configuration to define a list of [indexes](/concepts/indexes/) on
+Use the `indexes` configuration to define a list of [indexes](/model-data/indexes/) on
 `source`, `view`, `table` or `materialized view` materializations. In
-Materialize, [indexes](/concepts/indexes/) on a view maintain view results in
-memory within a [cluster](/concepts/clusters/ "pools of compute resources (CPU,
+Materialize, [indexes](/model-data/indexes/) on a view maintain view results in
+memory within a [cluster](/operate/clusters/ "pools of compute resources (CPU,
 memory, and scratch disk space)"). As the underlying data changes, indexes
 **incrementally update** the view results in memory.
 

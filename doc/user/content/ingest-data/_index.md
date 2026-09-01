@@ -21,8 +21,8 @@ You can ingest data into Materialize from various external systems:
 ## Sources and clusters
 
 Materialize ingests data from external systems using
-[sources](/concepts/sources/). For the sources, you need to associate a
-[cluster](/concepts/clusters/) to provide the compute resources needed to ingest
+[sources](/ingest-data/sources/). For the sources, you need to associate a
+[cluster](/operate/clusters/) to provide the compute resources needed to ingest
 data.
 
 {{% tip %}}
@@ -114,7 +114,7 @@ See [Monitoring hydration/data freshness status](/ingest-data/monitoring-data-in
 When a cluster is restarted (such as after resizing), certain objects on that
 cluster  (such as Kafka upsert sources, indexes, materialized views, and sinks)
 undergo hydration. For the full list of events that trigger hydration and the
-affected objects, see [Hydration](/concepts/hydration/).
+affected objects, see [Hydration](/ingest-data/hydration/).
 
 {{% tip %}}
 

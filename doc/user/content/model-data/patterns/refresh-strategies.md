@@ -10,7 +10,7 @@ build:
 {{< private-preview />}}
 
 Materialized views in Materialize are incrementally maintained by default, meaning their results are automatically updated as soon as new data arrives.
-This guarantees that queries returns the most up-to-date information available with minimal delay and that results are always as [fresh](/concepts/reaction-time) as the input data itself.
+This guarantees that queries returns the most up-to-date information available with minimal delay and that results are always as [fresh](/foundations/reaction-time) as the input data itself.
 
 In most cases, this default behavior is ideal.
 However, in some very specific scenarios like reporting over slow changing historical data, it may be acceptable to relax freshness in order to reduce compute usage.

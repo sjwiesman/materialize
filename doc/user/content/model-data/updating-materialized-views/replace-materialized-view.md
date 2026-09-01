@@ -32,10 +32,10 @@ In this guide, you will:
 
 Before using this guide, you should be familiar with:
 
-- [Sources](/concepts/sources/) and how data flows into Materialize
-- [Views and materialized views](/concepts/views/)
-- [Indexes](/concepts/indexes/) and how they improve query performance
-- [Clusters](/concepts/clusters/) and compute resource management
+- [Sources](/ingest-data/sources/) and how data flows into Materialize
+- [Views and materialized views](/model-data/views/)
+- [Indexes](/model-data/indexes/) and how they improve query performance
+- [Clusters](/operate/clusters/) and compute resource management
 
 ### Step 0. Create clusters
 
@@ -366,6 +366,6 @@ name="troubleshooting-lagging-original-view" %}}
 - [Updating materialized views](/model-data/updating-materialized-views/)
 - [`CREATE MATERIALIZED VIEW`](/sql/create-materialized-view)
 - [`ALTER MATERIALIZED VIEW`](/sql/alter-materialized-view)
-- [Views](/concepts/views/)
-- [Indexes](/concepts/indexes/)
-- [Clusters](/concepts/clusters/)
+- [Views](/model-data/views/)
+- [Indexes](/model-data/indexes/)
+- [Clusters](/operate/clusters/)

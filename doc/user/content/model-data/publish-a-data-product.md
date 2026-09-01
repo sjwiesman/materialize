@@ -4,7 +4,7 @@ description: "Turn a working view into something other teams and agents can find
 menu:
   main:
     parent: "model-data"
-    weight: 8
+    weight: 9
 ---
 
 {{% include-headless "/headless/restructure-stub" %}}
@@ -34,7 +34,7 @@ may read it, and committing to a shape they can build on.
 
 ## Related
 
-- [Live data products](/concepts/data-products/)
+- [Live data products](/foundations/data-products/)
 - [Operational data mesh](/patterns/data-mesh/)
 - [`COMMENT ON`](/sql/comment-on/) and [`GRANT
   PRIVILEGE`](/sql/grant-privilege/)

@@ -115,7 +115,7 @@ automatically download and install the most recent version.
 #### Connect to a specific cluster
 
 By default, Materialize connects to the [pre-installed `quickstart` cluster](/sql/show-clusters/#pre-installed-clusters).
-To connect to a specific [cluster](/concepts/clusters), you must
+To connect to a specific [cluster](/operate/clusters), you must
 define a bootstrap query in the connection initialization settings.
 
 <br>

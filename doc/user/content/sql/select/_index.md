@@ -61,7 +61,7 @@ Materialize also quickly returns results for queries that only filter, project, 
 and re-order data that is maintained by an index.
 
 Queries that can't simply read out from an index will create an ephemeral dataflow to compute
-the results. These dataflows are bound to the active [cluster](/concepts/clusters/),
+the results. These dataflows are bound to the active [cluster](/operate/clusters/),
  which you can change using:
 
 ```mzsql
