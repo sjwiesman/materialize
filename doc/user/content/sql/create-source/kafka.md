@@ -29,7 +29,7 @@ across multiple `CREATE SOURCE` and `CREATE SINK` statements. {{%
 
 {{< note >}}
 The same syntax, supported formats and features can be used to connect to a
-[Redpanda](/integrations/redpanda/) broker.
+[Redpanda](/interfaces/redpanda/) broker.
 {{</ note >}}
 
 ## Syntax
@@ -287,4 +287,4 @@ schema with the message, so before creating a source you must:
 - [`CREATE SOURCE`](../)
 - [`SHOW SOURCES`](/sql/show-sources)
 - [`DROP SOURCE`](/sql/drop-source)
-- [Using Debezium](/integrations/debezium/)
+- [Using Debezium](/interfaces/debezium/)

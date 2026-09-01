@@ -2,8 +2,8 @@
 title: "Ingest data from Self-hosted Kafka"
 description: "How to connect a self-hosted Kafka cluster as a source to Materialize."
 aliases:
-  - /integrations/aws-kafka/
-  - /integrations/amazon-kafka/
+  - /interfaces/aws-kafka/
+  - /interfaces/amazon-kafka/
   - /connect-sources/amazon-kafka/
   - /ingest-data/kafka-self-hosted/
   - /ingest-data/kafka/upstash-kafka/

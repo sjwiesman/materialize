@@ -2,8 +2,8 @@
 title: "Amazon Managed Streaming for Apache Kafka (Amazon MSK)"
 description: "How to securely connect an Amazon MSK cluster as a source to Materialize."
 aliases:
-  - /integrations/aws-msk/
-  - /integrations/amazon-msk/
+  - /interfaces/aws-msk/
+  - /interfaces/amazon-msk/
   - /connect-sources/amazon-msk/
   - /ingest-data/amazon-msk/
   - /self-managed/v25.2/ingest-data/kafka/amazon-msk/

@@ -115,7 +115,7 @@ example="example-apply-replacement" %}}
 
 For a step-by-step tutorial on replacing a materialized view, see [Replace
 materialized views
-guide](/transform-data/updating-materialized-views/replace-materialized-view/).
+guide](/model-data/updating-materialized-views/replace-materialized-view/).
 
 
 ## Related pages

@@ -8,7 +8,7 @@ menu:
 
 Use `ALTER SINK` to:
 - Change the relation you want to sink from. This is useful in the context of
-[blue/green deployments](/manage/dbt/blue-green-deployments/).
+[blue/green deployments](/operate/dbt/blue-green-deployments/).
 - Change the commit interval of an [Iceberg sink](/sql/create-sink/iceberg/).
 - Rename a sink.
 - Change owner of a sink.

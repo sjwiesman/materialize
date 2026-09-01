@@ -486,10 +486,10 @@ is established, it persists until disconnected, regardless of token expiry.
 
 *OAuth sign-in for MCP clients is available starting in v26.31.*
 
-Materialize provides built-in [MCP servers](/integrations/mcp-server/) at
+Materialize provides built-in [MCP servers](/agents/) at
 `/api/mcp/agent` and `/api/mcp/developer`. When SSO is enabled, MCP clients
 can authenticate with OAuth instead of an [MCP
-token](/integrations/mcp-server/mcp-agent/#method-2-token-based-authentication).
+token](/agents/mcp-agent/#method-2-token-based-authentication).
 Materialize publishes OAuth 2.0 Protected Resource Metadata ([RFC
 9728](https://datatracker.ietf.org/doc/html/rfc9728)) at
 `/.well-known/oauth-protected-resource`, which MCP-aware clients use to
@@ -566,7 +566,7 @@ requirements:
    The `--callback-port` value must match the port in the
    `http://localhost:<port>/callback` redirect URI registered on the OIDC
    client. For more information, see
-   [MCP servers](/integrations/mcp-server/).
+   [MCP servers](/agents/).
 
 {{< note >}}
 Deployments behind a load balancer or proxy that rewrites the `Host` header
@@ -672,8 +672,8 @@ password.
     psql -h <materialize-host> -p 6875 -U svc-dbt materialize
     ```
 
-For dbt-specific setup, see [dbt connection profiles](/manage/dbt/get-started/).
-For Terraform, see [Terraform: get started](/manage/terraform/get-started/).
+For dbt-specific setup, see [dbt connection profiles](/operate/dbt/get-started/).
+For Terraform, see [Terraform: get started](/operate/terraform/get-started/).
 
 ### Resource Owner Password flow
 

@@ -138,7 +138,7 @@ add a key whose value is `null`.
 
 `coalesce(..., '{}'::jsonb)` pins the column's nullability. A replacement
 materialized view must declare the [same output
-schema](/transform-data/updating-materialized-views/replace-materialized-view/)
+schema](/model-data/updating-materialized-views/replace-materialized-view/)
 as its target, *including nullability*. Materialize infers
 `jsonb_strip_nulls(to_jsonb(t))` as `NOT NULL` when every column of `t` is `NOT
 NULL`, and as nullable otherwise. So the first nullable column added upstream
@@ -508,14 +508,14 @@ and the pre-emptive mitigations are relational-specific.
 ## Considerations
 
 A replacement materialized view does not inherit
-[`RETAIN HISTORY`](/transform-data/patterns/durable-subscriptions/#history-retention-period)
+[`RETAIN HISTORY`](/model-data/patterns/durable-subscriptions/#history-retention-period)
 from its target. Restate the option on the replacement's definition if you
 depend on it. Historical reads that span a swap boundary are not available on
 the new collection.
 
 ## Related pages
 
-- [Replace materialized views](/transform-data/updating-materialized-views/replace-materialized-view/)
+- [Replace materialized views](/model-data/updating-materialized-views/replace-materialized-view/)
 - [`CREATE MATERIALIZED VIEW`](/sql/create-materialized-view/)
 - [`ALTER MATERIALIZED VIEW`](/sql/alter-materialized-view/)
 - [`CREATE TABLE ... FROM SOURCE`](/sql/create-table/)

@@ -7,7 +7,7 @@ menu:
     parent: commands
 ---
 
-`CREATE CLUSTER` creates a new [cluster](/concepts/clusters/).
+`CREATE CLUSTER` creates a new [cluster](/operate/clusters/).
 
 ## Syntax
 
@@ -308,7 +308,7 @@ The privileges required to execute this statement are:
 
 - [`ALTER CLUSTER`]
 - [`DROP CLUSTER`]
-- [Dictionary compression](/transform-data/dictionary-compression/)
+- [Dictionary compression](/model-data/dictionary-compression/)
 
 [AWS availability zone IDs]: https://docs.aws.amazon.com/ram/latest/userguide/working-with-az-ids.html
 [`ALTER CLUSTER`]: /sql/alter-cluster/

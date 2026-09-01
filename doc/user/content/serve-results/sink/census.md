@@ -2,7 +2,7 @@
 title: "Census"
 description: "How to use Census to export data out of Materialize."
 aliases:
-   - /manage/reverse-etl/census/
+   - /operate/reverse-etl/census/
    - /serve-results/census/
 menu:
   main:

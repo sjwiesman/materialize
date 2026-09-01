@@ -26,7 +26,7 @@
 
 **Note:** This function is [unmaterializable](#unmaterializable-functions).{{ end }}{{ if .unmaterializable_unless_temporal_filter }}
 
-**Note:** This function is [unmaterializable](#unmaterializable-functions), but can be used in limited contexts in materialized views as a [temporal filter]({{ $parentPath }}{{ "/transform-data/patterns/temporal-filters/" | relURL }}).{{ end }}{{ if .known_time_zone_limitation_cast }}
+**Note:** This function is [unmaterializable](#unmaterializable-functions), but can be used in limited contexts in materialized views as a [temporal filter]({{ $parentPath }}{{ "/model-data/patterns/temporal-filters/" | relURL }}).{{ end }}{{ if .known_time_zone_limitation_cast }}
 
 **Known limitation:** You must explicitly cast the type for the time zone.{{ end }}{{ if .side_effecting }}
 

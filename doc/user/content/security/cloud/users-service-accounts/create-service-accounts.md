@@ -2,8 +2,8 @@
 title: "Create service accounts"
 description: "Create a new service account (i.e., non-human user) to connect external applications and services to Materialize."
 aliases:
-  - /manage/access-control/create-service-accounts/
-  - /manage/users-service-accounts/create-service-accounts/
+  - /operate/access-control/create-service-accounts/
+  - /operate/users-service-accounts/create-service-accounts/
   - /security/users-service-accounts/create-service-accounts/
 menu:
   main:
@@ -142,7 +142,7 @@ To use a different client to connect,
     ```
 
 For general guidance on using the Materialize Terraform provider to manage
-resources in your region, see the [reference documentation](/manage/terraform/).
+resources in your region, see the [reference documentation](/operate/terraform/).
 
 ## Next steps
 

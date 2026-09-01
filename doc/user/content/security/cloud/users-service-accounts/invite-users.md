@@ -3,8 +3,8 @@ title: "Invite users"
 description: "How to invite new users to a Materialize organization."
 aliases:
   - /invite-users/
-  - /manage/access-control/invite-users/
-  - /manage/users-service-accounts/invite-users/
+  - /operate/access-control/invite-users/
+  - /operate/users-service-accounts/invite-users/
   - /security/users-service-accounts/invite-users/
 disable_toc: true
 menu:

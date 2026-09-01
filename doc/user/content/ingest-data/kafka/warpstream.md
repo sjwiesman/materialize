@@ -2,7 +2,7 @@
 title: "WarpStream"
 description: "How to securely connect WarpStream to Materialize for efficient data streaming."
 aliases:
-  - /integrations/warpstream/
+  - /interfaces/warpstream/
   - /connect-sources/warpstream/
   - /ingest-data/warpstream/
 menu:

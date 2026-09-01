@@ -3,7 +3,7 @@ title: "Ingest data from Amazon RDS"
 description: "How to stream data from Amazon RDS for PostgreSQL to Materialize"
 aliases:
   - /guides/cdc-postgres/
-  - /integrations/cdc-postgres/
+  - /interfaces/cdc-postgres/
   - /connect-sources/cdc-postgres-direct/
   - /ingest-data/postgres-amazon-rds/
 menu:

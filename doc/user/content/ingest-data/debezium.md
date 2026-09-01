@@ -3,7 +3,7 @@ title: "Debezium"
 description: "How to propagate Change Data Capture (CDC) data from a database to Materialize using Debezium"
 aliases:
   - /third-party/debezium/
-  - /integrations/debezium/
+  - /interfaces/debezium/
   - /connect-sources/debezium/
 ---
 

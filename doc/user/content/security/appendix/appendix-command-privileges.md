@@ -7,7 +7,7 @@ menu:
     weight: 10
 disable_toc: true
 aliases:
-  - /manage/access-control/appendix-command-privileges/
+  - /operate/access-control/appendix-command-privileges/
   - /security/appendix-command-privileges/
 ---
 

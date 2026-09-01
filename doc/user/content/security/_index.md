@@ -5,7 +5,7 @@ disable_list: true
 menu:
   main:
     identifier: "security"
-    weight: 45
+    weight: 62
 ---
 
 ## Cloud

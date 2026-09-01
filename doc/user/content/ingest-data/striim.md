@@ -2,7 +2,7 @@
 title: "Striim Cloud"
 description: "How to ingest Striim Change Data Capture (CDC) data into Materialize using the Kafka source"
 aliases:
-  - /integrations/striim/
+  - /interfaces/striim/
 ---
 
 [Striim](https://www.striim.com/) is a real-time data integration platform that

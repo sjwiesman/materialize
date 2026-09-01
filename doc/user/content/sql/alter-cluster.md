@@ -165,7 +165,7 @@ immediately.
 During a graceful resize, Materialize:
 1. Provisions new replicas at the target size, alongside the current replicas.
 2. Waits for the new replicas to
-   [hydrate](/concepts/hydration/).
+   [hydrate](/ingest-data/hydration/).
 3. Retires the old replicas.
 
 Throughout, the cluster keeps serving queries, first from the old replicas,
@@ -449,4 +449,4 @@ compute-specific settings. If needed, these can be set explicitly.
 - [`CREATE CLUSTER`](/sql/create-cluster/)
 - [`SHOW CLUSTERS`](/sql/show-clusters/)
 - [`DROP CLUSTER`](/sql/drop-cluster/)
-- [Dictionary compression](/transform-data/dictionary-compression/)
+- [Dictionary compression](/model-data/dictionary-compression/)

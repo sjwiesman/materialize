@@ -7,7 +7,7 @@
 
 - name: create-a-cluster
   content: |
-    In Materialize, a [cluster](/concepts/clusters/) is an isolated environment,
+    In Materialize, a [cluster](/operate/clusters/) is an isolated environment,
     similar to a virtual warehouse in Snowflake. When you create a cluster, you
     choose the size of its compute resource allocation based on the work you need
     the cluster to do, whether ingesting data from a source, computing
@@ -376,5 +376,5 @@
       or [`SUBSCRIBE`](/sql/subscribe/) or to an external message broker with
       [`CREATE SINK`](/sql/create-sink/).
 
-    - Check out the [tools and integrations](/integrations/) supported by
+    - Check out the [tools and integrations](/interfaces/) supported by
       Materialize.

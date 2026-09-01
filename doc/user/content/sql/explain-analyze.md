@@ -161,7 +161,7 @@ the CPU time (`total_elasped`) column is listed before the `MEMORY` information
 ### `EXPLAIN ANALYZE ... WITH SKEW`
 
 In clusters with more than one worker, [worker
-skew](/transform-data/dataflow-troubleshooting/#is-work-distributed-equally-across-workers)
+skew](/model-data/dataflow-troubleshooting/#is-work-distributed-equally-across-workers)
 can occur when data is unevenly distributed across workers. Extreme cases of
 skew can seriously impact performance. You can use `EXPLAIN ANALYZE ... WITH
 SKEW` to identify this scenario. The `WITH SKEW` option includes the per worker
@@ -225,7 +225,7 @@ little worker skew everywhere but at the top level arrangement, where worker 3 h
 
 `EXPLAIN ANALYZE HINTS` can annotate your plan (specifically, each TopK
 operator) with suggested [TopK hints]; i.e., [`DISTINCT ON INPUT GROUP SIZE=`
-value](/transform-data/idiomatic-materialize-sql/top-k/#query-hints-1).
+value](/model-data/idiomatic-materialize-sql/top-k/#query-hints-1).
 
 For example, the following runs `EXPLAIN ANALYZE HINTS` on the `wins_by_item`
 index:
@@ -351,4 +351,4 @@ EXPLAIN ANALYZE HINTS FOR INDEX wins_by_item AS SQL;
 The results show the SQL that `EXPLAIN ANALYZE` would run to get the TopK hints
 for the `wins_by_items` index.
 
-[TopK hints]: /transform-data/idiomatic-materialize-sql/top-k/#query-hints-1
+[TopK hints]: /model-data/idiomatic-materialize-sql/top-k/#query-hints-1

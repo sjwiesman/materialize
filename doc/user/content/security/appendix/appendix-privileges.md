@@ -6,7 +6,7 @@ menu:
     parent: security-appendix
     weight: 5
 aliases:
-  - /manage/access-control/appendix-privileges/
+  - /operate/access-control/appendix-privileges/
   - /security/appendix-privileges/
 ---
 

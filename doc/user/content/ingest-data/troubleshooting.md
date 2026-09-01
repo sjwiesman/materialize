@@ -20,7 +20,7 @@ ingestion](/ingest-data/monitoring-data-ingestion/)
 
 If you're looking for troubleshooting guidance for slow or unresponsive queries,
 check out the [`Transform data`
-troubleshooting](/transform-data/troubleshooting) guide instead.
+troubleshooting](/model-data/troubleshooting) guide instead.
 
 {{< tip >}}
 {{< guided-tour-blurb-for-ingest-data >}}
@@ -102,7 +102,7 @@ snapshotting](/ingest-data/#use-a-larger-cluster-for-upsert-source-snapshotting)
 ## Is the upstream database overloaded?
 
 Snapshotting can put significant load on the upstream database (see [Impact
-on upstream system](/concepts/snapshotting/#impact-on-upstream-system)).
+on upstream system](/ingest-data/snapshotting/#impact-on-upstream-system)).
 
 Check the upstream database when a snapshot progresses more slowly than
 expected, when applications sharing the database slow down while
@@ -121,7 +121,7 @@ databases. Look for:
 Also watch disk usage on the upstream database during a long-running
 snapshot: CDC database sources must retain their change log until Materialize
 consumes it (see [Impact on upstream
-system](/concepts/snapshotting/#impact-on-upstream-system)).
+system](/ingest-data/snapshotting/#impact-on-upstream-system)).
 
 If the database is overloaded, you can upsize the source database or cancel
 the snapshot by dropping the source, and retry:

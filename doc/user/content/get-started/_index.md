@@ -33,9 +33,9 @@ In Materialize, you don't have to make such compromises. Materialize supports
 incrementally updated view results that are **always fresh** (even when using
 complex SQL statements, like multi-way joins with aggregations) for *both*:
 
-- [Indexed views](/concepts/views/#indexes-on-views) and
+- [Indexed views](/model-data/views/#indexes-on-views) and
 
-- [Materialized views](/concepts/views/#materialized-views).
+- [Materialized views](/model-data/views/#materialized-views).
 
 How?
 Its engine is built on [Timely](https://github.com/TimelyDataflow/timely-dataflow#timely-dataflow)
@@ -71,7 +71,7 @@ For more information, see [Ingest Data](/ingest-data/).
 Every database needs a protocol to standardize communication with the outside
 world. Materialize uses the [PostgreSQL wire protocol](https://datastation.multiprocess.io/blog/2022-02-08-the-world-of-postgresql-wire-compatibility.html),
 which allows it to integrate out-of-the-box with many SQL clients and other
-tools in the data ecosystem that support PostgreSQL — like [dbt](/integrations/dbt/).
+tools in the data ecosystem that support PostgreSQL — like [dbt](/interfaces/dbt/).
 
 ### Strong consistency guarantees
 
@@ -85,5 +85,5 @@ consistency and performance requirements.
 
 ## Learn more
 
-- [Key concepts](/concepts/)
+- [Key concepts](/foundations/)
 - [Get started with Materialize](/get-started/quickstart)

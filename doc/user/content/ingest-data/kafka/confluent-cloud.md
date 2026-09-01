@@ -2,7 +2,7 @@
 title: "Confluent Cloud"
 description: "How to securely connect a Confluent Cloud Kafka cluster as a source to Materialize."
 aliases:
-  - /integrations/confluent-cloud/
+  - /interfaces/confluent-cloud/
   - /connect-sources/confuent-cloud/
   - /ingest-data/confluent-cloud/
 menu:

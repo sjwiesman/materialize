@@ -7,7 +7,7 @@ Cluster autoscaling
 
 When you create an index, materialized view, or Kafka upsert source, or when a
 cluster restarts, the cluster must
-[hydrate](/concepts/hydration/) the affected
+[hydrate](/ingest-data/hydration/) the affected
 objects before they can serve results. Hydration reads the input data
 and rebuilds in-memory state, and its speed scales with the cluster
 [size](#available-sizes).
@@ -22,7 +22,7 @@ burst replica is an ordinary cluster replica, billed only for the time it is
 provisioned. See [Usage & billing](/administration/billing/) for details.
 
 `AUTO SCALING STRATEGY (ON HYDRATION)` is particularly useful for [blue/green
-deployments](/manage/blue-green/), where a new cluster must hydrate before the
+deployments](/operate/blue-green/), where a new cluster must hydrate before the
 cutover. It is only available on **managed clusters**, and cannot be combined
 with a cluster `SCHEDULE` other than the default `MANUAL`.
 

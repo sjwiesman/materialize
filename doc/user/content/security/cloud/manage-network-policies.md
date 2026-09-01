@@ -2,7 +2,7 @@
 title: "Manage network policies"
 description: "Manage/configure network policies to restrict access to a Materialize region using IP-based rules."
 aliases:
-  - /manage/access-control/manage-network-policies/
+  - /operate/access-control/manage-network-policies/
   - /security/manage-network-policies/
 menu:
   main:

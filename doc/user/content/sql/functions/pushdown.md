@@ -63,5 +63,5 @@ SELECT try_parse_monotonic_iso8601_timestamp('nope') AS ts;
 
 [ISO 8601]: https://en.wikipedia.org/wiki/ISO_8601
 [Date.toISOString()]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toISOString
-[temporal filter pushdown]: /transform-data/patterns/temporal-filters/#temporal-filter-pushdown
+[temporal filter pushdown]: /model-data/patterns/temporal-filters/#temporal-filter-pushdown
 [jsonb]: /sql/types/jsonb/

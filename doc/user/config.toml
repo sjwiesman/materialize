@@ -59,10 +59,26 @@ weight = 35
 #
 
 [[menu.main]]
-identifier = "transform-data"
-name = "Transform data"
-weight = 12
+identifier = "model-data"
+name = "Model data"
+weight = 32
 
+
+#
+# Agents & AI
+#
+
+[[menu.main]]
+identifier = "agents-build"
+name = "Build agents on Materialize"
+parent = "agents"
+weight = 10
+
+[[menu.main]]
+identifier = "agents-code-with-ai"
+name = "Code with AI"
+parent = "agents"
+weight = 30
 
 #
 # Reference
@@ -83,11 +99,6 @@ parent = 'create-source'
 identifier = 'create-source-legacy'
 weight = 90
 
-
-[[menu.main]]
-identifier = "reference"
-name = "Reference"
-weight = 76
 
 #
 # Releases

@@ -43,13 +43,13 @@ operators:
 
       There are four types of `Get`.
 
-      1. `Stream` indicates that the results are not [arranged](/get-started/arrangements/#arrangements) in memory
+      1. `Stream` indicates that the results are not [arranged](/model-data/arrangements/#arrangements) in memory
          and will be streamed directly.
 
-      2. `Arranged` indicates that the results are [arranged](/get-started/arrangements/#arrangements) in memory.
+      2. `Arranged` indicates that the results are [arranged](/model-data/arrangements/#arrangements) in memory.
 
       2. `Index Lookup` indicates the results will be
-         _looked up_ in an existing [arrangement]((/get-started/arrangements/#arrangements).
+         _looked up_ in an existing [arrangement]((/model-data/arrangements/#arrangements).
 
       3. `Read` indicates that the results are unarranged,
           and will be processed as they arrive.
@@ -163,7 +163,7 @@ operators:
       Performs one of `INNER` / `LEFT` / `RIGHT` / `FULL OUTER` / `CROSS` join on the two inputs, using the given predicate.
     uses_memory: True
     memory_details: |
-      Uses memory proportional to the input sizes, unless [the inputs have appropriate indexes](/transform-data/optimization/#join). Certain joins with more than 2 inputs use additional memory, see details in the optimized plan.
+      Uses memory proportional to the input sizes, unless [the inputs have appropriate indexes](/model-data/optimization/#join). Certain joins with more than 2 inputs use additional memory, see details in the optimized plan.
     expansive: True
     expansive_details: |
       For `CrossJoin`s, Cartesian product of the inputs (|N| x |M|). Note that, in many cases, a join that shows up as a cross join in the RAW PLAN will actually be turned into an inner join in the OPTIMIZED PLAN, by making use of an equality WHERE condition.
@@ -177,8 +177,8 @@ operators:
     uses_memory: True
     memory_details: |
       The `Join` operator itself uses memory only for `type=differential` with more than 2 inputs.
-      However, `Join` operators need [arrangements](/get-started/arrangements/#arrangements) on their inputs (shown by the `ArrangeBy` operator).
-      These arrangements use memory proportional to the input sizes. If an input has an [appropriate index](/transform-data/optimization/#join), then the arrangement of the index will be reused.
+      However, `Join` operators need [arrangements](/model-data/arrangements/#arrangements) on their inputs (shown by the `ArrangeBy` operator).
+      These arrangements use memory proportional to the input sizes. If an input has an [appropriate index](/model-data/optimization/#join), then the arrangement of the index will be reused.
     expansive: True
     expansive_details: |
       Depends on the join order and facts about the joined collections.
@@ -194,7 +194,7 @@ operators:
       Joins will indicate the join order of their children, starting from 0.
       For example, `Differential Join %1 » %0` will join its second child into its first.
 
-      The [two joins differ in performance characteristics](/transform-data/optimization/#join).
+      The [two joins differ in performance characteristics](/model-data/optimization/#join).
     uses_memory: True
     memory_details: |
       Uses memory for 3-way or more differential joins.
@@ -405,7 +405,7 @@ operators:
   - operator: ArrangeBy
     plan_types: "optimized"
     description: |
-      Indicates a point that will become an [arrangement](/get-started/arrangements/#arrangements) in the dataflow engine (each `keys` element will be a different arrangement). Note that if an appropriate index already exists on the input or the output of the previous operator is already arranged with a key that is also requested here, then this operator will just pass on that existing arrangement instead of creating a new one.
+      Indicates a point that will become an [arrangement](/model-data/arrangements/#arrangements) in the dataflow engine (each `keys` element will be a different arrangement). Note that if an appropriate index already exists on the input or the output of the previous operator is already arranged with a key that is also requested here, then this operator will just pass on that existing arrangement instead of creating a new one.
     uses_memory: True
     memory_details: |
       Depends. If arrangements need to be created, they use memory proportional to the input size.
@@ -415,7 +415,7 @@ operators:
   - operator: Arrange
     plan_types: "LIR"
     description: |
-      Indicates a point that will become an [arrangement](/get-started/arrangements/#arrangements) in the dataflow engine, i.e., it will consume memory to cache results.
+      Indicates a point that will become an [arrangement](/model-data/arrangements/#arrangements) in the dataflow engine, i.e., it will consume memory to cache results.
     uses_memory: True
     memory_details: |
       Uses memory proportional to the input size. Note that in the LIR / physical plan, `Arrange`/`ArrangeBy` almost always means that an arrangement will actually be created. (This is in contrast to the "optimized" plan, where an `ArrangeBy` being present in the plan often does not mean that an arrangement will actually be created.)

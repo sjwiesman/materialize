@@ -8,7 +8,7 @@ menu:
     weight: 160
 ---
 
-This page provides an overview of ingestion performance from internal benchmarks, so you can assess Materialize against a specific workload, size a [cluster](/concepts/clusters/), and estimate cost. The results show that Materialize sustains [fresh data](/concepts/reaction-time/#freshness) with high throughput and predictable load on upstream systems. For the full test methodology and results, see the [ingestion performance litepaper](https://materialize.com/ingestion-performance-litepaper/).
+This page provides an overview of ingestion performance from internal benchmarks, so you can assess Materialize against a specific workload, size a [cluster](/operate/clusters/), and estimate cost. The results show that Materialize sustains [fresh data](/foundations/reaction-time/#freshness) with high throughput and predictable load on upstream systems. For the full test methodology and results, see the [ingestion performance litepaper](https://materialize.com/ingestion-performance-litepaper/).
 
 {{< note >}}
 These are indicative numbers from a controlled test bench. For numbers that reflect your workload, we advise testing against your own data and sources.
@@ -16,7 +16,7 @@ These are indicative numbers from a controlled test bench. For numbers that refl
 
 ## Benchmarks
 
-We run five benchmarks spanning the lifecycle of a typical Materialize installation, from bringing a new [source](/concepts/sources/) online, to running in steady state, to scaling up load and the number of clusters. We run each benchmark across PostgreSQL, MySQL, SQL Server, and Kafka, using Materialize's default isolation level of [strict serializability](/reference/isolation-level/).
+We run five benchmarks spanning the lifecycle of a typical Materialize installation, from bringing a new [source](/ingest-data/sources/) online, to running in steady state, to scaling up load and the number of clusters. We run each benchmark across PostgreSQL, MySQL, SQL Server, and Kafka, using Materialize's default isolation level of [strict serializability](/reference/isolation-level/).
 
 ### Snapshot time
 
@@ -172,7 +172,7 @@ We run these benchmarks on every release. The figures here are from Materialize 
 ## See also
 
 - [Ingestion performance litepaper](https://materialize.com/ingestion-performance-litepaper/)
-- [Reaction time](/concepts/reaction-time/)
+- [Reaction time](/foundations/reaction-time/)
 - [Isolation level](/reference/isolation-level/)
 - [Cluster sizes](/self-managed-deployments/appendix/appendix-cluster-sizes/)
 - [Ingest data](/ingest-data/)

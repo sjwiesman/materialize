@@ -3,14 +3,14 @@ title: "Usage (Self-Managed)"
 description: "Overview of the resource usage for Self-Managed Materialize."
 menu:
   main:
-    parent: "manage"
+    parent: "operate"
     weight: 50
 
 ---
 
 ## Compute
 
-In Materialize, [clusters](/concepts/clusters/) are pools of compute resources
+In Materialize, [clusters](/operate/clusters/) are pools of compute resources
 (CPU, memory, and scratch disk space) for running your workloads, such as
 maintaining up-to-date results while also providing strong [consistency
 guarantees](/reference/isolation-level/).
@@ -24,8 +24,8 @@ administration tasks.
 {{</ note >}}
 
 You must provision at least one cluster to power your workloads. You can then
-use the cluster to create the objects ([indexes](/concepts/indexes/) and
-[materialized views](/concepts/views/#materialized-views)) that provide
+use the cluster to create the objects ([indexes](/model-data/indexes/) and
+[materialized views](/model-data/views/#materialized-views)) that provide
 always-fresh results. In Materialize, both indexes and materialized views are
 incrementally maintained when Materialize ingests new data. That is, Materialize
 performs work on writes such that no work is performed when reading from these
@@ -46,10 +46,10 @@ Factors that contribute to compute usage include:
 | Cost factor | Details       |
 |-------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | [Replication factor for a cluster](/sql/create-cluster/#replication-factor). | {{< include-from-yaml data="cluster_details" name="replica-definition" >}} |
-| [Indexes](/concepts/indexes/) and [materialized views](/concepts/views) | As data changes (insert/update/delete), [indexes](/concepts/indexes/) and [materialized views](/concepts/views) perform incremental updates to provide up-to-date results. |
-| [Sources](/concepts/sources/) |• Sources that use upsert logic (i.e., [`ENVELOPE UPSERT`](/sql/create-sink/kafka/) or [`ENVELOPE DEBEZIUM` Kafka sources](/sql/create-sink/kafka/)) can lead to high memory and disk utilization.<br>• Other sources consume a negligible amount of resources in steady state. |
+| [Indexes](/model-data/indexes/) and [materialized views](/model-data/views) | As data changes (insert/update/delete), [indexes](/model-data/indexes/) and [materialized views](/model-data/views) perform incremental updates to provide up-to-date results. |
+| [Sources](/ingest-data/sources/) |• Sources that use upsert logic (i.e., [`ENVELOPE UPSERT`](/sql/create-sink/kafka/) or [`ENVELOPE DEBEZIUM` Kafka sources](/sql/create-sink/kafka/)) can lead to high memory and disk utilization.<br>• Other sources consume a negligible amount of resources in steady state. |
 | [`SELECT`s](/sql/select/) and [`SUBSCRIBE`s](/sql/subscribe/)  |• [`SELECT`s](/sql/select/) and [`SUBSCRIBE`s](/sql/subscribe/) that do not use indexes and materialized views perform work. <br>• [`SELECT`s](/sql/select/) and [`SUBSCRIBE`s](/sql/subscribe/) that use indexes and materialized views access already-computed results.|
-| [Sinks](/concepts/sinks/) | Only small CPU/memory costs.|
+| [Sinks](/serve-results/sinks/) | Only small CPU/memory costs.|
 
 ## Storage
 

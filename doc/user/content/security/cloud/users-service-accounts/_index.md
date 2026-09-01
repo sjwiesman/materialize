@@ -8,7 +8,7 @@ menu:
     identifier: "user-service-accounts"
     weight: 10
 aliases:
-  - /manage/users-service-accounts/
+  - /operate/users-service-accounts/
   - /security/users-service-accounts/
 ---
 
@@ -45,7 +45,7 @@ applications and services to Materialize.
 
 As an **Organization admin**, you can create a new service account via
 the [Materialize Console](/console/) or via
-[Terraform](/manage/terraform/).
+[Terraform](/operate/terraform/).
 
 {{< note >}}
 
@@ -85,5 +85,5 @@ provider groups to database roles](./sync-idp-groups/).
 ## See also
 
 - [Role-based access control](/security/cloud/access-control/)
-- [Manage with dbt](/manage/dbt/)
-- [Manage with Terraform](/manage/terraform/)
+- [Manage with dbt](/operate/dbt/)
+- [Manage with Terraform](/operate/terraform/)

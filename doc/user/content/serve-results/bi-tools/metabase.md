@@ -3,7 +3,7 @@ title: "Metabase"
 description: "How to create real-time dashboards with Metabase"
 aliases:
   - /third-party/metabase/
-  - /integrations/metabase/
+  - /interfaces/metabase/
   - /serve-results/metabase/
 menu:
   main:

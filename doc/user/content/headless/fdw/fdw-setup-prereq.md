@@ -4,7 +4,7 @@ headless: true
 1. In Materialize, create a dedicated service account `fdw_svc_account` as an
    **Organization Member**. For details on setting up a service account, see
    [Create a service
-   account](https://materialize.com/docs/manage/users-service-accounts/create-service-accounts/)
+   account](https://materialize.com/docs/operate/users-service-accounts/create-service-accounts/)
 
    {{< tip >}}
    Per the linked instructions, be sure you connect at least once with the new
