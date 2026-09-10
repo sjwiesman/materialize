@@ -9,8 +9,10 @@ menu:
 *Available for Materialize Cloud only*
 
 `CREATE NETWORK POLICY` creates a network policy that restricts access to a
-Materialize region using IP-based rules. Network policies are part of
-Materialize's framework for [access control](/security/cloud/).
+Materialize region using IP-based rules. These rules apply to all external
+client connections, including both SQL connections and access from the
+Materialize Console. Network policies are part of Materialize's framework for
+[access control](/security/cloud/).
 
 ## Syntax
 
