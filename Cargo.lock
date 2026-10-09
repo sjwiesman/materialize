@@ -7219,6 +7219,7 @@ dependencies = [
  "reqwest 0.13.5",
  "rlimit",
  "rustls",
+ "schemars 1.2.2",
  "semver",
  "sentry-tracing",
  "serde",
