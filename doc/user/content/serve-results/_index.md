@@ -26,10 +26,13 @@ To serve results, you can:
 
 - [Use Foreign Data Wrapper (FDW)](/serve-results/fdw/)
 
+- [Expose views in AWS Glue Data Catalog](/serve-results/aws-glue-data-catalog/)
+
 {{< multilinkbox >}}
 {{< linkbox title="SELECT/SUBSCRIBE statements" >}}
 - [Query using `SELECT` and `SUBSCRIBE`](/serve-results/query-results/)
 - [Use Foreign Data Wrapper (FDW)](/serve-results/fdw/)
+- [Expose views in AWS Glue Data Catalog](/serve-results/aws-glue-data-catalog/)
 {{</ linkbox >}}
 {{< linkbox title="External BI tools" >}}
 - [Deepnote](/serve-results/bi-tools/deepnote/)
