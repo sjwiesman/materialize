@@ -84,20 +84,29 @@ recorders design.
 
 ### SQL surface
 
-The surface is a polymorphic table function in the style of Flink's windowing
-table-valued functions, extended with a body that is scoped to a single pane.
+The surface is a polymorphic table function (PTF), the construct SQL:2016
+added to ISO/IEC 9075-2 and explains in the technical report ISO/IEC TR
+19075-7. A PTF's output row type is determined when a query calls it, from
+its arguments. Its parameters are table arguments (`TABLE t`), descriptor
+arguments (`DESCRIPTOR(...)`), and scalar arguments. Flink's windowing
+table-valued functions follow this form. This design extends it with a
+`PER PANE` body: a query that is evaluated once per pane, over that pane's
+rows. Standard PTFs have no inline body, because a PTF's logic lives in its
+definition, so `PER PANE` is a Materialize extension.
 
 ```sql
 CREATE MATERIALIZED VIEW hourly_invoice_lines AS
-SELECT hour_start, account_id, plan, credits, charge
+SELECT hour_start, closes_at, account_id, plan, credits, charge
 FROM TUMBLE(
   TABLE usage_events AS u,
   DESCRIPTOR(occurred_at),
   SIZE => INTERVAL '1 hour',
   CLOSE DELAY => INTERVAL '5 minutes'
-) PROCESS (
+) AS w
+PER PANE (
   SELECT
-    mz_window_start() AS hour_start,
+    w.start AS hour_start,
+    w.close AS closes_at,
     u.account_id,
     a.plan,
     sum(u.credits) AS credits,
@@ -113,7 +122,12 @@ Arguments:
 
 - `TABLE <relation> [AS <alias>]`: the windowed input.
 - `DESCRIPTOR(<column>)`: the event-time column, of type `timestamp` or
-  `timestamptz`.
+  `timestamptz`. A descriptor is the SQL standard's argument type for naming
+  columns of a table argument. It is a list of names that the function
+  resolves against its table argument during planning, not an expression
+  evaluated in the caller's scope. A plain column reference would not work,
+  because the columns of `usage_events` are not in scope in the argument list
+  that introduces it.
 - `SIZE`: the pane length. A fixed duration that is a whole number of
   milliseconds.
 - `OFFSET` (optional, default zero): shifts pane boundaries away from the Unix
@@ -123,16 +137,18 @@ Arguments:
   that rows arriving shortly after the pane's end are still included. A whole
   number of milliseconds.
 
-`=>` named arguments and `DESCRIPTOR` are new grammar for Materialize.
+`=>` named arguments, `TABLE` arguments, and `DESCRIPTOR` are new grammar for
+Materialize. PostgreSQL implements none of the SQL standard's PTF syntax, so
+users coming from PostgreSQL will not have seen them, while users coming from
+Flink will recognize the `TUMBLE(TABLE t, DESCRIPTOR(ts), ...)` shape.
 `CLOSE DELAY` is a two-keyword argument name, so `TUMBLE`'s argument names
-are parsed as keywords rather than identifiers. `PROCESS` is a Materialize
-extension to the SQL:2016 polymorphic table function form. `TUMBLE` without `PROCESS` is rejected with a hint pointing at
-`date_bin` for live bucketing.
+are parsed as keywords rather than identifiers. `TUMBLE` without `PER PANE`
+is rejected with a hint pointing at `date_bin` for live bucketing.
 
 Scoping rules:
 
 - The table argument's alias, here `u`, names the rows of the input that fall
-  in exactly one pane. It is visible only inside `PROCESS`. The body never
+  in exactly one pane. It is visible only inside `PER PANE`. The body never
   sees rows of other panes, so per-pane evaluation is a scoping rule, not
   something the optimizer has to infer from a `GROUP BY window_start`.
 - Without an alias, the pane takes the input's name. `TABLE usage_events`
@@ -140,26 +156,30 @@ Scoping rules:
 - The pane binding shadows catalog objects of the same name the way a CTE
   name does. A schema-qualified reference reaches the catalog object, which
   means reading the whole input, not the pane.
-- Inside the body, `mz_window_start()` returns the earliest event time in the
-  current pane and `mz_window_end()` returns the pane's exclusive upper bound.
-  Both have the type of the event-time column. They let a body label,
-  prorate, or compare against its pane without recomputing `date_bin` and
-  risking a mismatch with the pane assignment. They are only valid inside
-  `PROCESS`, where they are constant for the duration of one pane's
-  evaluation.
-- The table function adds no columns of its own. A fixed name such as
-  `window_start` could shadow a real column of the input or the body, so pane
-  bounds enter the output only where the body projects them.
+- The alias on the `TUMBLE` call, here `w`, names the window: a one-row
+  binding, visible only inside `PER PANE`, with the fields `start` (the
+  pane's inclusive lower bound), `end` (its exclusive upper bound), and
+  `close` (`end + CLOSE DELAY`, the time the pane freezes). `start` and `end`
+  have the type of the event-time column. Without an alias, the window takes
+  the function's name, `tumble`, following PostgreSQL's naming of unaliased
+  table functions.
+- `w`'s fields live in their own namespace, so they cannot collide with
+  columns of the input, and the body reads the pane's bounds without
+  recomputing `date_bin` and risking a mismatch with the pane assignment.
+  Inside the body, `w` is an outer reference that is constant for one pane's
+  evaluation, so a grouped body uses `w.start` without listing it in
+  `GROUP BY`, like any correlated column in a `LATERAL` subquery.
+- The table function adds no columns of its own. Pane bounds enter the
+  output only where the body projects them.
 
 The pane column. The sink has to know which pane every output row belongs
 to, both for rows it computes and for rows it reads back from persist. The
-body's first output column must be a bare `mz_window_start()` or
-`mz_window_end()`, under any name the user chooses. That column is the view's
-pane column, and the close time of each output row is derived from it. The
-pane column is always written out by the user, never generated by the table
-function.
+body's first output column must be a bare `w.start` or `w.end`, under any
+name the user chooses. That column is the view's pane column, and the close
+time of each output row is derived from it. The pane column is always
+written out by the user, never generated by the table function.
 
-Restrictions on the enclosing query. The query around `TUMBLE ... PROCESS`
+Restrictions on the enclosing query. The query around `TUMBLE ... PER PANE`
 may only project and filter row by row, and must keep the pane column
 unchanged as its first output column. Joins and aggregates belong inside the
 body.
@@ -213,18 +233,20 @@ Consequences users need to know:
 ### Observing finality
 
 Nothing in the output changes when a pane closes, so readers need a predicate
-to distinguish final rows from live ones:
+to distinguish final rows from live ones. Projecting `w.close`, as the
+example does with `closes_at`, keeps the window arithmetic out of these
+predicates:
 
 ```sql
 -- Final invoice lines. Each line appears exactly once, at its close.
 CREATE VIEW final_invoice_lines AS
 SELECT * FROM hourly_invoice_lines
-WHERE mz_now() >= hour_start + INTERVAL '1 hour 5 minutes';
+WHERE mz_now() >= closes_at;
 
 -- The live, still-changing hour.
 CREATE VIEW live_invoice_lines AS
 SELECT * FROM hourly_invoice_lines
-WHERE mz_now() < hour_start + INTERVAL '1 hour 5 minutes';
+WHERE mz_now() < closes_at;
 ```
 
 `final_invoice_lines` is append-only in practice and suitable for a sink to
@@ -287,9 +309,9 @@ the render as_of would reopen panes on those replicas.
 
 `C_p` is computed by one shared function of the pane's start, used by both
 the input side and the sink. The sink applies it to the pane column, adding
-`SIZE` when the pane column holds `mz_window_start()`. If the two sides computed different close times, the
-sink would see the body's retraction before the read-back's and delete the
-pane.
+`SIZE` when the pane column holds `w.start`. If the two sides computed
+different close times, the sink would see the body's retraction before the
+read-back's and delete the pane.
 
 **Input side.** The lowering computes internal, unnamed `window_start` and
 `window_end` columns from the event-time column, then applies the freeze
@@ -314,13 +336,14 @@ as a lateral join over the distinct open panes, with the pane binding planned
 through CTE scoping in `plan_table_factor` (`src/sql/src/plan/query.rs`):
 
 ```sql
-(SELECT DISTINCT window_start, window_end FROM filtered) w,
-LATERAL (<body> WITH <alias> AS (SELECT * FROM filtered WHERE window_start = w.window_start))
+(SELECT DISTINCT window_start AS start, window_end AS "end", window_end + <close delay> AS close
+ FROM filtered) AS w,
+LATERAL (<body> WITH <alias> AS (SELECT <input columns> FROM filtered WHERE window_start = w.start))
 ```
 
-`mz_window_start()` and `mz_window_end()` in the body lower to the correlated
-references `w.window_start` and `w.window_end`, so they are by construction
-the values the pane was assigned.
+The window binding is the left side of the `LATERAL` join, so `w.start`,
+`w.end`, and `w.close` in the body are correlated references to the values
+the pane was assigned.
 
 Decorrelation is expected to lift the pane key through joins, aggregates,
 `DISTINCT`, and TopK. This is verified as part of the prototype, see below.
@@ -415,14 +438,12 @@ panes, writes nothing, and corrects from the shard's upper once promoted.
 
 ### User-facing errors
 
-- `TUMBLE ... PROCESS` outside `CREATE MATERIALIZED VIEW`, including in
+- `TUMBLE ... PER PANE` outside `CREATE MATERIALIZED VIEW`, including in
   `SELECT`, `CREATE VIEW`, `SUBSCRIBE`, and `CREATE INDEX`.
-- `TUMBLE` without `PROCESS`.
+- `TUMBLE` without `PER PANE`.
 - `mz_now()` in the body.
-- `mz_window_start()` or `mz_window_end()` outside a `PROCESS` body.
 - A body that references the view being defined.
-- A body whose first output column is not a bare `mz_window_start()` or
-  `mz_window_end()`.
+- A body whose first output column is not a bare `w.start` or `w.end`.
 - An enclosing query that joins, aggregates, or does not keep the pane column
   unchanged as its first output column.
 - A `SIZE`, `OFFSET`, or `CLOSE DELAY` that is not a fixed whole number
@@ -469,8 +490,8 @@ surface exists. It proceeds in three milestones.
    extra 50,000 are the pending close-time retractions. After a restart with
    the closed pane's input rows still present, the frozen view kept its output
    and rehydrated with 0 records.
-3. **SQL surface.** `TUMBLE ... PROCESS`, `mz_window_start()` and
-   `mz_window_end()`, lowered to the milestone 2 form. Diff `EXPLAIN` for the
+3. **SQL surface.** `TUMBLE ... AS w PER PANE`, with `w.start`, `w.end`, and
+   `w.close`, lowered to the milestone 2 form. Diff `EXPLAIN` for the
    `LATERAL` form against the `GROUP BY window_start` form to check that
    decorrelation produces the expected per-pane plan without extra products.
 
@@ -523,7 +544,7 @@ Open questions, not here.
 - **The prototype surface is `FREEZE ON` and `FREEZE AFTER`.** The options
   accept any `timestamp` or `timestamptz` column without checking that it
   holds a pane start, and are gated by the unsafe flag
-  `unsafe_enable_materialized_view_freeze`. `TUMBLE ... PROCESS` replaces
+  `unsafe_enable_materialized_view_freeze`. `TUMBLE ... PER PANE` replaces
   them, behind a dyncfg whose production default is a product decision.
 - **`EXPLAIN` shows the input-side predicate with `I` inlined, and does not
   show the sink's freeze.** `I` makes the plan text differ per view, which
@@ -559,7 +580,40 @@ implicit. Scoping the body to a single pane makes finality syntactic.
 This is what Flink's windowing functions do. Fixed column names can shadow
 real columns of the input or the body, and they force two columns onto every
 view whether or not the user wants them. Requiring the body to project
-`mz_window_start()` or `mz_window_end()` lets the user name the column.
+`w.start` or `w.end` lets the user name the column.
+
+**Context functions for the pane bounds, `mz_window_start()` and
+`mz_window_end()`.** They avoid shadowing, but they are functions that are
+valid in one context only, they live in the global function namespace, and
+nothing ties them to a particular window if the construct ever takes more
+than one. Niladic keywords in the style of `CURRENT_TIMESTAMP` have the same
+problems and would need new reserved words.
+
+**Bounds as columns of the pane binding, such as `u.window_start`.** These are
+per-row values, so every grouped body would have to repeat them in
+`GROUP BY`, and the names can still collide with input columns. A separate
+window binding is constant per pane and has its own namespace.
+
+**Naming the bounds with a descriptor, `BOUNDS => DESCRIPTOR(hour_start,
+hour_end)`.** Standard PTFs use descriptors to name output columns, but this
+injects columns into the body's scope where they can collide with input
+columns, and loses the handle on the window.
+
+**Naming the window with a named argument or in the body clause**, such as
+`WINDOW => w` or `PER PANE (u, w) AS (...)`. An argument whose value is a new
+name has no precedent, and binding names in the body clause separates `u`
+from its table. Aliasing the call is ordinary SQL aliasing of a table
+function.
+
+**Other keywords for the body.** `PROCESS`, borrowed from Flink's
+`ProcessTableFunction` class name, has no SQL precedent. `APPLY` follows
+SQL Server's `CROSS APPLY`, and `LATERAL` matches the lowering, but both read
+as ordinary correlated joins and hide that `u` means one pane's rows.
+`COMPUTE`, `DERIVE`, `YIELD`, and `EVALUATE` are neutral but say nothing
+about the scope. `EMIT` is the streaming idiom, but ksqlDB uses it for output
+modes (`EMIT CHANGES`, `EMIT FINAL`), which this design may want later.
+`FOR EACH PANE` is clear but long. `PER PANE` names the scope in the design's
+own vocabulary.
 
 **A hidden pane column in the output shard.** The sink could persist the pane
 as a column that is not part of the view's relation description. That frees
@@ -570,12 +624,10 @@ schema.
 **A fixed name for the pane, such as `pane`.** It collides with any catalog
 object of the same name and cannot be changed by the user.
 
-**Binding the pane to the outer alias, `TUMBLE(...) AS w PROCESS (... FROM w)`.**
-The same name would mean the pane inside the body and the result outside it.
-
-**A separate binding, `PROCESS e AS (...)`.** This reads like a CTE, but the
-name sits away from the table it describes, which becomes awkward once the
-function takes several table arguments.
+**Binding the pane's rows to the call alias, `TUMBLE(...) AS u PER PANE (... FROM u)`.**
+This leaves no name for the window, and an alias that means the input's rows
+on a function that produces windows is misleading. The call alias names the
+window, and the table argument's alias names the rows.
 
 **A materialized view option, `WITH (WINDOW = TUMBLE(...))`.** Simpler to
 parse, but ambiguous about which input is windowed once the body joins
@@ -608,7 +660,7 @@ reuses the optimizer and renderer unchanged.
 ### Empty panes
 
 Panes exist only while they contain at least one row, because the body is
-evaluated over the distinct open panes. `PROCESS (SELECT count(*) FROM u)`
+evaluated over the distinct open panes. `PER PANE (SELECT count(*) FROM u)`
 produces no row for an hour without events, where standard SQL would produce
 `0`. A pane whose rows are all retracted while it is open disappears from
 the output. A body that never references the pane only produces output for
