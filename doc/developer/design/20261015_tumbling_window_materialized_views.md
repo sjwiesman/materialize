@@ -233,9 +233,11 @@ an invoicing system.
 ### Lifecycle
 
 - **Create.** All panes that closed before the view's initial as_of `I` are
-  computed from `input AS OF I` and written at `I`. Backfilled panes are not a
-  replay: they include rows that would have been late, use references as of
-  `I`, and omit rows deleted before `I`.
+  computed from `input AS OF I` and written at `I`. `I` is the inputs' latest
+  complete time when the view is created, so the backfill includes every
+  write that committed before `CREATE MATERIALIZED VIEW`. Backfilled panes are
+  not a replay: they include rows that would have been late, use references
+  as of `I`, and omit rows deleted before `I`.
 - **Replace.** Replacements apply going forward. Closed panes keep the
   results produced by the body that was live when they closed, and open panes
   are corrected to the replacement's body when it is promoted. A replacement
@@ -266,6 +268,14 @@ mz_now() < greatest(C_p, I + 1)
 - For panes with `C_p <= I`, the pane is visible at `I` and frozen at `I + 1`.
   That is the backfill.
 
+An ordinary MV takes the inputs' least valid read as `I`, which can lag the
+latest writes. Under the freeze predicate, a row of a closed pane that commits
+after `I` arrives at or after `I + 1` and is dropped as late, so a backfill at
+the least valid read misses writes that committed just before creation.
+Frozen views therefore take `I` as the join of the least valid read and the
+inputs' greatest available read (`select_timestamps` in
+`src/adapter/src/coord/sequencer/inner/create_materialized_view.rs`).
+
 The predicate is a single upper-bound temporal filter, so `MfpPlan` accepts
 it, `MfpPlan::evaluate` (`src/expr/src/linear.rs`) evaluates it, and persist
 filter pushdown applies to it without changes. It depends only on `I` and the
@@ -282,9 +292,18 @@ sink would see the body's retraction before the read-back's and delete the
 pane.
 
 **Input side.** The lowering computes internal, unnamed `window_start` and
-`window_end` columns from the event-time column, then applies the freeze predicate. `MfpPlan::evaluate`
-emits each row at `max(arrival, lower bound)` and retracts it at the upper
-bound. A row that arrives at or after its upper bound is never emitted.
+`window_end` columns from the event-time column, then applies the freeze
+predicate. `MfpPlan::evaluate` emits each row at `max(arrival, lower bound)`
+and retracts it at the upper bound. A row that arrives at or after its upper
+bound is never emitted.
+
+The input-side predicate is what releases a closed pane's state. Correctness
+does not depend on it: the sink alone drops every change to a closed pane.
+It does need `I` as a literal in the optimized plan, while `I` is selected
+only after `CREATE MATERIALIZED VIEW` optimizes the plan
+(`create_materialized_view_optimize` and `create_materialized_view_finish`).
+Frozen views therefore select `I` before optimizing. On bootstrap, `I` comes
+from the `AS OF` in `create_sql`.
 
 **Body.** Several panes can be open at once, for example panes still inside
 their close delay or panes for future-dated events. The body is lowered
@@ -304,24 +323,45 @@ Decorrelation is expected to lift the pane key through joins, aggregates,
 `DISTINCT`, and TopK. This is verified as part of the prototype, see below.
 
 **Sink.** Left unchanged, the self-correcting sink would see the retraction
-wave at `C_p` and delete the pane from the output. The sink applies the freeze
-predicate to both the desired stream and the persist read-back before they
-enter the correction buffer. At `C_p` both sides retract pane `p`, the
-correction is zero, and the persisted rows remain.
+wave at `C_p` and delete the pane from the output. The sink does two things.
+
+1. It applies the freeze predicate to both the desired stream and the persist
+   read-back before they enter the correction buffer. At `C_p` both sides
+   retract pane `p`, so the correction between them is zero.
+2. When writing a batch, it drops every update at or beyond its row's freeze
+   time, `greatest(C_p, I + 1)`.
+
+The first step alone is not enough. It keeps a row only if the row reached
+persist before its freeze time. A row inserted and frozen within one batch
+has no persisted counterpart yet, so the correction contains both the
+insertion and the freeze-time retraction, and the sink writes both. The
+backfill always hits this, because its rows appear at `I` and freeze at
+`I + 1`. A lagging sink hits it for live panes. The second step drops the
+retraction. Once the insertion is persisted, the read-back synthesizes the
+same retraction through the freeze predicate, which cancels the dropped
+update in the correction buffer. Updates for a pane that closed while the
+sink was catching up get advanced to a batch lower at or beyond the close and
+are dropped the same way, which is correct because the pane is frozen at
+whatever was persisted before its close.
 
 - `MaterializedViewSinkConnection` (`src/compute-types/src/sinks.rs`) gains a
-  `freeze: Option<MapFilterProject>` built at planning time with `I` as a
-  literal, alongside the precedent of `refresh_schedule` and
-  `non_null_assertions`. It is constructed in
-  `src/adapter/src/optimize/materialized_view.rs` and carried through the
-  dataflow rebuilds in `src/compute-client/src/controller/instance.rs` and
-  `src/compute-client/src/as_of_selection.rs`.
-- On the read-back, the sink passes the freeze `MfpPlan` to `persist_source`
-  in place of `None` (`src/compute/src/sink/materialized_view.rs`). The
-  `persist_source` contract allows partial application, so the sink applies
-  whatever is left.
-- On the desired side, the sink applies the same `MfpPlan` before `mint`.
+  `freeze: Option<FreezeSpec>` with the pane column, the time from pane start
+  to close, and `I`. The optimizer sets the first two
+  (`src/adapter/src/optimize/materialized_view.rs`). The compute controller
+  fills in `I` from the dataflow's `initial_storage_as_of` when it attaches
+  storage metadata (`src/compute-client/src/controller/instance.rs`), so the
+  value survives command-history compaction along with the rest of the
+  dataflow description.
+- `FreezeSpec::freeze_time` builds the freeze time expression and
+  `FreezeSpec::mfp_plan` the predicate, so the two sides and the write filter
+  share one definition.
+- The sink builds both at render time. It applies the predicate to the
+  desired rows before `mint`, passes it to the read-back `persist_source`, and
+  evaluates the freeze time per update in the `write` operator.
 - `correction.rs` and `correction_v2.rs` need no changes.
+- The sync sink (`materialized_view_v2.rs`) writes from a blocking thread and
+  does not implement the write filter. Frozen views always render the async
+  sink.
 
 Because the pane column leads the output row, compacted runs are clustered by
 pane, and pushdown can skip the parts of closed panes on the read-back.
@@ -404,23 +444,33 @@ registered so that `bin/lint-test-flags` passes.
 ## Minimal Viable Prototype
 
 The prototype validates the sink mechanics and the lowering before the SQL
-surface exists.
+surface exists. It proceeds in three milestones.
 
-1. Refactor, with no behavior change: thread an optional `MfpPlan` through
-   the sink's read-back `persist_source` and its desired path.
-2. Add the `freeze` field to `MaterializedViewSinkConnection`, set by an
-   unsafe-mode `WITH (FREEZE ON <column>)` option that injects `I`.
-3. Hand-write the lowered form as an ordinary materialized view with that
-   option. Diff `EXPLAIN` for the `LATERAL` form against the
-   `GROUP BY window_start` form to check that decorrelation produces the
-   expected per-pane plan without extra products.
-4. Test deterministically with `clusterd-test-driver`
-   (`src/clusterd-test-driver/src/dataflow.rs`), which builds MV sink
-   dataflows with controlled timestamps: closed panes survive their
-   retraction wave, a restart does not rewrite closed panes, input compaction
-   past closed panes does not affect the output, creation backfills previous
-   panes, and a replica added after creation agrees with the original.
-5. Testdrive with sub-second panes.
+1. **Sink freezing.** Unsafe-mode `FREEZE ON <column>` and
+   `FREEZE AFTER <interval>` options on an ordinary materialized view set the
+   `FreezeSpec`. `<column>` holds the pane start and `<interval>` is
+   `SIZE + CLOSE DELAY`. The view has no input-side predicate, so closed panes
+   keep their state. This milestone is implemented. Against a local
+   environment, a view over a table showed that a pane closed before creation
+   is backfilled, changes to closed panes are ignored, open panes update
+   eagerly on insertion and retraction, closed panes survive the deletion of
+   every input row, and closed panes survive a restart whose rehydration no
+   longer produces them. `test/testdrive/materialized-view-freeze.td` covers
+   the same cases except the restart.
+2. **Input-side predicate.** Select `I` before optimizing, inline it into the
+   input-side predicate, and check that arrangement sizes stop growing as
+   panes close and that compacting inputs past closed panes leaves the output
+   unchanged.
+3. **SQL surface.** `TUMBLE ... PROCESS`, `mz_window_start()` and
+   `mz_window_end()`, lowered to the milestone 2 form. Diff `EXPLAIN` for the
+   `LATERAL` form against the `GROUP BY window_start` form to check that
+   decorrelation produces the expected per-pane plan without extra products.
+
+Deterministic coverage with `clusterd-test-driver`
+(`src/clusterd-test-driver/src/dataflow.rs`), which builds MV sink dataflows
+with controlled timestamps, should follow milestone 1: a row inserted and
+frozen within one batch, a sink that lags past several closes, a restart, and
+a replica added after creation agreeing with the original.
 
 After the prototype, the work proceeds through the parser and HIR lowering
 with sqllogictest coverage of scoping rules, errors, and `EXPLAIN`, then a
@@ -471,6 +521,12 @@ function takes several table arguments.
 **A materialized view option, `WITH (WINDOW = TUMBLE(...))`.** Simpler to
 parse, but ambiguous about which input is windowed once the body joins
 several relations.
+
+**Freezing with the predicate on both sides of the sink only.** Applying the
+freeze predicate to the desired rows and to the read-back makes the two
+retract a pane at the same time, but it keeps a row only if the row reached
+persist before its freeze time. The prototype lost every backfilled pane this
+way. The write filter described under Lowering closes the gap.
 
 **A freeze predicate keyed on the render frontier.** An earlier form of this
 design used the output's write frontier and the render as_of as constants.
