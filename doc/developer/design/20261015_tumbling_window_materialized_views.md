@@ -491,9 +491,17 @@ surface exists. It proceeds in three milestones.
    the closed pane's input rows still present, the frozen view kept its output
    and rehydrated with 0 records.
 3. **SQL surface.** `TUMBLE ... AS w PER PANE`, with `w.start`, `w.end`, and
-   `w.close`, lowered to the milestone 2 form. Diff `EXPLAIN` for the
-   `LATERAL` form against the `GROUP BY window_start` form to check that
-   decorrelation produces the expected per-pane plan without extra products.
+   `w.close`, lowered to the milestone 2 form. This milestone is
+   implemented. The planner builds the `LATERAL` form directly in HIR
+   (`plan_tumble` in `src/sql/src/plan/query.rs`), and the materialized view
+   planner derives the `FreezeSpec` from the query's shape
+   (`plan_tumble_freeze` in `src/sql/src/plan/statement/ddl.rs`). A body
+   that only aggregates the pane decorrelates to a single `Reduce` grouped by
+   the pane start, identical to a hand-written `GROUP BY date_bin(...)` plus
+   the freeze predicate, which the optimizer pushes into the source. The
+   milestone 1 checks pass with the view written as `TUMBLE ... PER PANE`,
+   including across a restart, which replans the view from the `TUMBLE`
+   syntax kept in `create_sql`.
 
 Deterministic coverage with `clusterd-test-driver`
 (`src/clusterd-test-driver/src/dataflow.rs`), which builds MV sink dataflows
@@ -541,19 +549,41 @@ Open questions, not here.
   sources it is whatever the source had ingested. A view whose inputs are not
   readable at `I` when the dataflow is installed fails with an internal error,
   which the purification read holds should prevent.
-- **The prototype surface is `FREEZE ON` and `FREEZE AFTER`.** The options
-  accept any `timestamp` or `timestamptz` column without checking that it
-  holds a pane start, and are gated by the unsafe flag
-  `unsafe_enable_materialized_view_freeze`. `TUMBLE ... PER PANE` replaces
-  them, behind a dyncfg whose production default is a product decision.
+- **`FREEZE ON` and `FREEZE AFTER` remain.** The options accept any
+  `timestamp` or `timestamptz` column without checking that it holds a pane
+  start. Remove them, or keep them internal, now that `TUMBLE ... PER PANE`
+  derives the freeze. Both share the unsafe flag
+  `unsafe_enable_materialized_view_freeze`, which needs to become a dyncfg
+  whose production default is a product decision.
+- **Bodies that project `w.end` or `w.close` keep an extra pane join.** The
+  window binding carries `end` and `close` as columns, and the optimizer
+  cannot see that they are functions of `start`, so it joins the distinct
+  `(start, close)` pairs back to the input instead of eliminating the pane
+  relation. Results are correct. Rewriting `w.end` and `w.close` in the body
+  as expressions of `w.start` before decorrelation should remove the join.
+- **The shape checks on a `TUMBLE` view are syntactic.** `plan_tumble_freeze`
+  checks the AST: the body's first item must be the identifier `w.start` or
+  `w.end`, and the view's first item must be `*` or that column's name. A
+  check on the planned expression would accept equivalent forms and reject
+  renamings the AST check misses.
+- **`TUMBLE` is a keyword at the start of a table factor.** `FROM tumble(...)`
+  always parses as the window construct, so a user-defined table function
+  named `tumble` cannot be called in `FROM`.
+- **mz-deploy does not see `TUMBLE` inputs.** Its dependency and alias
+  analysis (`src/mz-deploy/src/project/analysis/deps.rs`,
+  `src/mz-deploy/src/project/compiler/cache/build_artifact.rs`) visits only
+  `TableFactor::Table`, so a view over `TUMBLE` misses its input as a
+  dependency.
+- **The pretty printer prints `TUMBLE` on one line**, through its display
+  fallback.
 - **`EXPLAIN` shows the input-side predicate with `I` inlined, and does not
   show the sink's freeze.** `I` makes the plan text differ per view, which
   matters for plan snapshot tests. The sink's freeze needs its own line.
 - **Open panes cost about one extra record per input row** for the pending
   close-time retraction. Measure whether temporal bucketing should apply.
-- **Test coverage is local.** The testdrive covers the sink semantics without
-  a restart, and was validated with an equivalent psql script, not through
-  mzcompose. Restart, state release, the same-batch race, a sink lagging past
+- **Test coverage is local.** The testdrive covers the sink semantics and the
+  `TUMBLE` errors without a restart, and was validated with an equivalent psql
+  script, not through mzcompose. Restart, state release, the same-batch race, a sink lagging past
   several closes, and a replica added after creation need deterministic
   coverage with `clusterd-test-driver`, plus a platform check for restarts
   and upgrades.
