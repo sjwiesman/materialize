@@ -129,8 +129,9 @@ use prost::Message;
 
 use crate::ast::display::AstDisplay;
 use crate::catalog::{
-    CatalogCluster, CatalogDatabase, CatalogError, CatalogItem, CatalogItemType,
-    CatalogRecordField, CatalogType, CatalogTypeDetails, ObjectType, SystemObjectType,
+    CatalogCluster, CatalogCollectionItem, CatalogDatabase, CatalogError, CatalogItem,
+    CatalogItemType, CatalogRecordField, CatalogType, CatalogTypeDetails, ObjectType,
+    SystemObjectType,
 };
 use crate::iceberg::IcebergSinkConfigOptionExtracted;
 use crate::kafka_util::{KafkaSinkConfigOptionExtracted, KafkaSourceConfigOptionExtracted};
@@ -3046,13 +3047,8 @@ pub fn plan_create_materialized_view(
         }
     };
 
-    let freeze = match (
-        plan_tumble_freeze(scx, &tumble_query)?,
-        plan_freeze_options(scx, &desc, freeze_on, freeze_after)?,
-    ) {
-        (Some(_), Some(_)) => sql_bail!("FREEZE ON is not compatible with TUMBLE"),
-        (tumble, options) => tumble.or(options),
-    };
+    let frozen = plan_frozen_definition(scx, &tumble_query, &desc, freeze_on, freeze_after)?;
+    let freeze = frozen.as_ref().map(|f| f.spec.clone());
     if freeze.is_some() && refresh_schedule.is_some() {
         sql_bail!("FREEZE ON is not compatible with REFRESH options");
     }
@@ -3174,6 +3170,29 @@ pub fn plan_create_materialized_view(
             );
         }
 
+        // The replacement writes into the target's shard, so the sink must derive the same
+        // freeze time from every persisted row as the target did, or it would retract rows of
+        // open panes at the wrong time and duplicate them in the output.
+        let target_frozen = plan_frozen_definition_of_item(scx, &*target)?;
+        let target_name = scx.catalog.minimal_qualification(target.name());
+        match (&frozen, &target_frozen) {
+            (None, None) => {}
+            (Some(_), None) => sql_bail!(
+                "cannot replace {target_name} with a materialized view that freezes panes, \
+                 because it does not freeze panes"
+            ),
+            (None, Some(_)) => sql_bail!(
+                "cannot replace {target_name} with a materialized view that does not freeze \
+                 panes, because it freezes panes"
+            ),
+            (Some(new), Some(old)) if new != old => sql_bail!(
+                "cannot replace {target_name} because the replacement changes its window: the \
+                 windowed input, the event-time column, SIZE, OFFSET, CLOSE DELAY, and the \
+                 choice of pane column must stay the same"
+            ),
+            (Some(_), Some(_)) => {}
+        }
+
         // Check for dependency cycles.
         for dependent in scx.catalog.item_dependents(target.id()) {
             if let ObjectId::Item(id) = dependent
@@ -3251,6 +3270,70 @@ generate_extracted_config!(
     (Refresh, RefreshOptionValue<Aug>, AllowMultiple)
 );
 
+/// How a materialized view freezes its panes.
+///
+/// A replacement must keep its target's definition, so this covers everything the sink derives
+/// a persisted row's freeze time from, plus the window that assigns rows to panes.
+#[derive(Debug, PartialEq)]
+struct FrozenDefinition {
+    spec: FreezeSpec,
+    /// The `TUMBLE` window, or `None` for a view frozen through the `FREEZE` options.
+    window: Option<TumbleWindow>,
+}
+
+#[derive(Debug, PartialEq)]
+struct TumbleWindow {
+    input: CatalogItemId,
+    time_column: ColumnName,
+    size: Interval,
+    offset: Interval,
+    close_delay: Interval,
+}
+
+/// Plans how a materialized view with the given query and `FREEZE` options freezes its panes,
+/// or `None` if it does not freeze.
+fn plan_frozen_definition(
+    scx: &StatementContext,
+    query: &mz_sql_parser::ast::Query<Aug>,
+    desc: &RelationDesc,
+    freeze_on: Option<Ident>,
+    freeze_after: Option<Duration>,
+) -> Result<Option<FrozenDefinition>, PlanError> {
+    match (
+        plan_tumble_freeze(scx, query)?,
+        plan_freeze_options(scx, desc, freeze_on, freeze_after)?,
+    ) {
+        (Some(_), Some(_)) => sql_bail!("FREEZE ON is not compatible with TUMBLE"),
+        (Some(tumble), None) => Ok(Some(tumble)),
+        (None, Some(spec)) => Ok(Some(FrozenDefinition { spec, window: None })),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Plans how an existing materialized view freezes its panes, from its `create_sql`.
+fn plan_frozen_definition_of_item(
+    scx: &StatementContext,
+    item: &dyn CatalogCollectionItem,
+) -> Result<Option<FrozenDefinition>, PlanError> {
+    let stmts = mz_sql_parser::parser::parse_statements(item.create_sql())?;
+    let [stmt]: [StatementParseResult; 1] = stmts.try_into().map_err(|_| {
+        internal_err!("create SQL of materialized view was not exactly one statement")
+    })?;
+    let Statement::CreateMaterializedView(stmt) = stmt.ast else {
+        bail_internal!("create SQL of materialized view is not a CREATE MATERIALIZED VIEW");
+    };
+    let (stmt, _) = names::resolve(scx.catalog, stmt)?;
+    let MaterializedViewOptionExtracted {
+        freeze_on,
+        freeze_after,
+        ..
+    } = stmt.with_options.try_into()?;
+    let desc = item
+        .relation_desc()
+        .ok_or_else(|| internal_err!("materialized view has no relation description"))?;
+    plan_frozen_definition(scx, &stmt.query, &desc, freeze_on, freeze_after)
+}
+
 /// Derives the freeze of a materialized view defined as
 /// `SELECT <pane column>, ... FROM TUMBLE(...) AS w PER PANE (SELECT w.start | w.end, ...)`.
 ///
@@ -3260,7 +3343,7 @@ generate_extracted_config!(
 fn plan_tumble_freeze(
     scx: &StatementContext,
     query: &mz_sql_parser::ast::Query<Aug>,
-) -> Result<Option<FreezeSpec>, PlanError> {
+) -> Result<Option<FrozenDefinition>, PlanError> {
     use mz_sql_parser::ast::{Query, SelectItem, SetExpr, TableFactor, TableWithJoins};
 
     let tumbles = crate::plan::tumble_table_factors(query);
@@ -3299,10 +3382,17 @@ fn plan_tumble_freeze(
     }
 
     let TableFactor::Tumble {
-        window_alias, body, ..
+        input,
+        time_column,
+        window_alias,
+        body,
+        ..
     } = tumble
     else {
         unreachable!("found by tumble_table_factors");
+    };
+    let ResolvedItemName::Item { id: input, .. } = input else {
+        sql_bail!("TUMBLE input must be a catalog object");
     };
     let window = normalize::ident(
         window_alias
@@ -3345,17 +3435,26 @@ fn plan_tumble_freeze(
         );
     }
 
-    let (size, _offset, close_delay) = crate::plan::query::plan_tumble_intervals(tumble)?;
+    let (size, offset, close_delay) = crate::plan::query::plan_tumble_intervals(tumble)?;
     let close_after = if field == "start" {
         size.checked_add(&close_delay)
             .ok_or_else(|| sql_err!("TUMBLE SIZE plus CLOSE DELAY is out of range"))?
     } else {
         close_delay
     };
-    Ok(Some(FreezeSpec {
-        pane_column: 0,
-        close_after: close_after.duration()?,
-        initial_as_of: None,
+    Ok(Some(FrozenDefinition {
+        spec: FreezeSpec {
+            pane_column: 0,
+            close_after: close_after.duration()?,
+            initial_as_of: None,
+        },
+        window: Some(TumbleWindow {
+            input: *input,
+            time_column: normalize::column_name(time_column.clone()),
+            size,
+            offset,
+            close_delay,
+        }),
     }))
 }
 

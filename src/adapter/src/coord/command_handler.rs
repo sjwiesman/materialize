@@ -40,7 +40,7 @@ use mz_sql::ast::{
     Statement, StatementKind, SubscribeStatement,
 };
 use mz_sql::catalog::RoleAttributesRaw;
-use mz_sql::names::{Aug, PartialItemName, ResolvedIds};
+use mz_sql::names::{Aug, PartialItemName, ResolvedIds, ResolvedItemName};
 use mz_sql::plan::{
     AbortTransactionPlan, CommitTransactionPlan, CreateRolePlan, Params, Plan,
     StatementClassification, TransactionType,
@@ -1998,9 +1998,11 @@ impl Coordinator {
     /// factor, which the planner needs to build the view's freeze filter.
     ///
     /// The initial as-of is the inputs' latest complete time, so the backfill of panes that closed
-    /// before creation includes every write that committed before the statement. Returns `None`
-    /// for views without `FREEZE` options, and for views that also have `REFRESH` options, which
-    /// the planner rejects.
+    /// before creation includes every write that committed before the statement. A replacement
+    /// of a frozen view inherits its target's initial as-of instead: the two views then derive the
+    /// same freeze time from every row of the shared shard, so the replacement never rewrites a
+    /// pane the target has frozen. Returns `None` for views without `FREEZE` options, and for
+    /// views that also have `REFRESH` options, which the planner rejects.
     fn resolve_initial_as_of_for_frozen_materialized_view(
         &mut self,
         cmvs: &CreateMaterializedViewStatement<Aug>,
@@ -2023,17 +2025,37 @@ impl Coordinator {
 
         let catalog = self.catalog().for_session(session);
         let cluster = mz_sql::plan::resolve_cluster_for_materialized_view(&catalog, cmvs)?;
-        let ids = self
+        let mut ids = self
             .index_oracle(cluster)
             .sufficient_collections(resolved_ids.collections().copied());
+
+        let inherited = cmvs.replacement_for.as_ref().and_then(|name| {
+            let ResolvedItemName::Item { id, .. } = name else {
+                return None;
+            };
+            let target = self.catalog().get_entry(id).materialized_view()?;
+            // Only a frozen target has an initial as-of worth inheriting. The planner rejects a
+            // frozen replacement of an unfrozen target, so the fresh choice below is never used.
+            target.freeze.as_ref()?;
+            let initial_as_of = target.initial_as_of.as_ref()?.as_option().copied()?;
+            Some((target.global_id_writes(), initial_as_of))
+        });
+        if let Some((target_gid, _)) = &inherited {
+            // The replacement's sink reads the target's shard back at the dataflow's as-of, so
+            // the shard's since must not pass that as-of before the dataflow is installed.
+            ids.storage_ids.insert(*target_gid);
+        }
 
         // Acquire read holds before reading the frontiers, so the since cannot pass the chosen
         // time before the sequencer installs the dataflow.
         let read_holds = self.acquire_read_holds(&ids);
-        let initial_as_of = read_holds
-            .least_valid_read()
-            .join(&self.greatest_available_read(&ids))
-            .into_option();
+        let initial_as_of = match inherited {
+            Some((_, initial_as_of)) => Some(initial_as_of),
+            None => read_holds
+                .least_valid_read()
+                .join(&self.greatest_available_read(&ids))
+                .into_option(),
+        };
 
         if acquire_read_holds {
             self.store_transaction_read_holds(session.conn_id().clone(), read_holds);

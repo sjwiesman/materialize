@@ -53,6 +53,18 @@ use crate::session::Session;
 use crate::util::ResultExt;
 use crate::{AdapterNotice, CollectionIdBundle, ExecuteContext, TimestampProvider, catalog};
 
+/// The initial as-of of a frozen materialized view, as chosen during purification, and how it
+/// constrains the dataflow's as-of.
+enum FrozenAsOf {
+    /// A new view backfills the panes that closed before its initial as-of from the inputs at
+    /// that time, so its dataflow must start exactly there.
+    Backfill(mz_repr::Timestamp),
+    /// A replacement inherits its target's initial as-of. It parameterizes the freeze predicate
+    /// only, so that the replacement and the target freeze the same rows of the shared shard at
+    /// the same times. The dataflow starts after it.
+    Inherited(mz_repr::Timestamp),
+}
+
 impl Staged for CreateMaterializedViewStage {
     type Ctx = ExecuteContext;
 
@@ -633,10 +645,15 @@ impl Coordinator {
             &read_holds_owned
         };
 
+        let frozen_as_of = match (&freeze, as_of, replacement_target) {
+            (Some(_), Some(as_of), None) => Some(FrozenAsOf::Backfill(as_of)),
+            (Some(_), Some(as_of), Some(_)) => Some(FrozenAsOf::Inherited(as_of)),
+            _ => None,
+        };
         let (dataflow_as_of, storage_as_of, until) = self.select_timestamps(
             id_bundle,
             refresh_schedule.as_ref(),
-            freeze.as_ref().and(as_of),
+            frozen_as_of,
             read_holds,
         )?;
 
@@ -863,7 +880,7 @@ impl Coordinator {
         &self,
         id_bundle: CollectionIdBundle,
         refresh_schedule: Option<&RefreshSchedule>,
-        frozen_as_of: Option<mz_repr::Timestamp>,
+        frozen_as_of: Option<FrozenAsOf>,
         read_holds: &ReadHolds,
     ) -> Result<
         (
@@ -884,18 +901,28 @@ impl Coordinator {
         let mut dataflow_as_of = least_valid_read.clone();
         let mut storage_as_of = least_valid_read.clone();
 
-        // Purification chose the initial as-of of a frozen MV, and the planner built the MV's
-        // freeze filter around it, so the dataflow must start exactly there.
-        if let Some(initial_as_of) = frozen_as_of {
-            let initial_as_of = Antichain::from_elem(initial_as_of);
-            if !timely::PartialOrder::less_equal(&least_valid_read, &initial_as_of) {
-                return Err(AdapterError::internal(
-                    "create materialized view",
-                    "inputs not readable at the initial as-of chosen during purification",
-                ));
+        match frozen_as_of {
+            // Purification chose the initial as-of, and the planner built the MV's freeze filter
+            // around it, so the dataflow must start exactly there.
+            Some(FrozenAsOf::Backfill(initial_as_of)) => {
+                let initial_as_of = Antichain::from_elem(initial_as_of);
+                if !timely::PartialOrder::less_equal(&least_valid_read, &initial_as_of) {
+                    return Err(AdapterError::internal(
+                        "create materialized view",
+                        "inputs not readable at the initial as-of chosen during purification",
+                    ));
+                }
+                dataflow_as_of.clone_from(&initial_as_of);
+                storage_as_of = initial_as_of;
             }
-            dataflow_as_of.clone_from(&initial_as_of);
-            storage_as_of = initial_as_of;
+            // The target backfilled its closed panes at `initial_as_of` and froze them right
+            // after. Starting the replacement past that instant keeps it out of the backfill,
+            // so the only panes it computes and corrects are the ones still open.
+            Some(FrozenAsOf::Inherited(initial_as_of)) => {
+                dataflow_as_of.join_assign(&Antichain::from_elem(initial_as_of.step_forward()));
+                storage_as_of = Antichain::from_elem(initial_as_of);
+            }
+            None => {}
         }
 
         // For MVs with non-trivial REFRESH schedules:

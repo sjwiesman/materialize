@@ -282,7 +282,10 @@ an invoicing system.
   results produced by the body that was live when they closed, and open panes
   are corrected to the replacement's body when it is promoted. A replacement
   that changes `SIZE`, `OFFSET`, `CLOSE DELAY`, `START AT`, the windowed
-  input, or the event-time column is rejected.
+  input, the event-time column, or the choice between `w.start` and `w.end`
+  as the pane column is rejected, as is a replacement that adds or removes
+  freezing. The replacement inherits the target's initial as_of `I`, see
+  Lowering.
 - **Drop and recreate.** The output is the only copy of closed panes once
   input history compacts. Dropping the view loses it. Recreating backfills
   from the inputs' current contents, which can differ from the dropped
@@ -352,6 +355,44 @@ the sequencer reuses, and record it as the statement's `AS OF`
 (`resolve_initial_as_of_for_frozen_materialized_view` in
 `src/adapter/src/coord/command_handler.rs`). On bootstrap, `I` comes from the
 `AS OF` in `create_sql`.
+
+**Replacements.** A replacement shares the target's shard and corrects it
+from the first batch it writes after promotion. The freeze predicate decides,
+on both the desired side and the read-back, which rows are frozen at each
+time, so the replacement must evaluate the same predicate as the target. With
+a fresh `I_r > I`, every pane closed before `I_r` is visible at `I_r` on both
+sides and frozen at `I_r + 1`, and the correction between them holds the new
+body's result for those panes. If the first batch's lower is `I_r`, which
+happens when the target's upper is at `I_r` when writes are allowed, the
+write filter passes that correction and the closed panes are rewritten. A
+later lower cancels it. Correctness must not depend on that timing, so
+purification gives a replacement the target's `I` as its `AS OF`, and the
+sequencer starts the replacement's dataflow at the inputs' least valid read
+joined with `I + 1`, which keeps it out of the backfill instant
+(`FrozenAsOf::Inherited` in
+`src/adapter/src/coord/sequencer/inner/create_materialized_view.rs`).
+Purification also takes a read hold on the target's shard, because the sink
+reads it back at the dataflow's as_of.
+
+The replacement records `I` as its `initial_as_of`, the value the controller
+copies into the sink's `FreezeSpec` and that bootstrap re-registers the
+collection with. `apply_replacement` (`src/catalog/src/memory/objects.rs`)
+carries the replacement's `create_sql` and `initial_as_of` over to the target,
+so promotion and later restarts keep `I`. The storage layer ignores the since
+of a collection that has a `primary`, so registering the replacement at `I`
+does not move the shard's since.
+
+With the inherited `I` the replacement never computes a closed pane. At its
+as_of `A > I` the predicate excludes every pane with `C_p <= A` on both
+sides, and a pane that closes while the replacement hydrates in read-only
+mode retracts on both sides and cancels in the correction buffer. Promotion
+corrects open panes only. The planner rejects a replacement whose window or
+pane column differs from the target's by replanning the target's `create_sql`
+(`plan_frozen_definition_of_item` in `src/sql/src/plan/statement/ddl.rs`).
+Changing the pane column from `w.start` to `w.end` with the same window would
+make the replacement's sink compute an earlier close for the target's
+persisted rows, retract them on the read-back side before the body retracts
+them, and write them again.
 
 **Body.** Several panes can be open at once, for example panes still inside
 their close delay or panes for future-dated events. The body is lowered
@@ -478,7 +519,9 @@ panes, writes nothing, and corrects from the shard's upper once promoted.
   a pane's insertion and its close retraction into the same refresh time, so
   panes that open and close within one refresh interval would never be
   written.
-- A replacement that changes the window definition.
+- A replacement that changes the window definition or the pane column, or
+  that freezes when the target does not, or does not freeze when the target
+  does.
 
 ### EXPLAIN and feature flag
 
@@ -566,9 +609,21 @@ Open questions, not here.
   large batches is unmeasured. An evaluation error writes the update,
   relying on the desired-side filter having already routed that row to the
   error stream.
-- **Replacements are untested and likely wrong.** Purification chooses a new
-  `I` for a `CREATE REPLACEMENT MATERIALIZED VIEW`. Replacements must use the
-  target's `I`, or the replacement's backfill would rewrite closed panes.
+- **Replacement coverage is the healthy path only.** The testdrive promotes a
+  replacement while the target is caught up, where even a fresh `I_r` cancels
+  in the correction buffer. The rewrite that the inherited `I` prevents needs
+  the target's upper to sit at `I_r` when writes are allowed, which a
+  testdrive cannot arrange. A `clusterd-test-driver` script could: write the
+  old body's rows to a shard, render the replacement sink read-only at an
+  as_of equal to the shard's upper, allow writes, and read the shard back.
+  That needs the script language to accept a `FreezeSpec` on a
+  materialized-view export and timestamp-typed cells.
+- **Promotion while the target lags.** The sink reports the shard's upper as
+  its write frontier in read-only mode, so `ALTER ... APPLY REPLACEMENT` waits
+  only until the target's upper reaches the replacement's as_of. A target
+  whose cluster has no replicas never gets there, and a replacement rendered
+  at an as_of beyond the target's upper cannot read the shard back until the
+  target advances. Both are shared with ordinary replacements.
 - **`I` is the greatest available read, not a linearized timestamp.** For
   tables this includes every write acknowledged before the statement. For
   sources it is whatever the source had ingested. A view whose inputs are not

@@ -94,3 +94,101 @@ $ sleep-is-probably-flaky-i-have-justified-my-need-with-a-comment duration=95s
 > DROP MATERIALIZED VIEW per_minute
 
 > DROP TABLE events
+
+# Replacing a frozen view keeps its closed panes and corrects its open panes.
+# The pane of the first row closed an hour ago, so the view backfills it at
+# creation. The pane of the second row stays open for at least five minutes,
+# long enough to promote the replacement while it is open.
+
+> CREATE TABLE replaced_events (ts timestamptz, v int)
+
+> INSERT INTO replaced_events VALUES (now() - INTERVAL '1 hour', 1), (now(), 2)
+
+> CREATE MATERIALIZED VIEW replaced AS
+  SELECT * FROM TUMBLE(
+    TABLE replaced_events,
+    DESCRIPTOR(ts),
+    SIZE => INTERVAL '1 minute',
+    CLOSE DELAY => INTERVAL '5 minutes'
+  ) AS w
+  PER PANE (SELECT w.start AS pane_start, sum(v) AS total FROM replaced_events)
+
+> SELECT total FROM replaced ORDER BY pane_start
+1
+2
+
+# A replacement must keep the window and the pane column, because the sink
+# derives the freeze time of every persisted row from them.
+! CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS
+  SELECT * FROM TUMBLE(
+    TABLE replaced_events,
+    DESCRIPTOR(ts),
+    SIZE => INTERVAL '2 minutes',
+    CLOSE DELAY => INTERVAL '5 minutes'
+  ) AS w
+  PER PANE (SELECT w.start AS pane_start, sum(v) * 10 AS total FROM replaced_events)
+contains:cannot replace replaced because the replacement changes its window
+
+! CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS
+  SELECT * FROM TUMBLE(
+    TABLE replaced_events,
+    DESCRIPTOR(ts),
+    SIZE => INTERVAL '1 minute',
+    CLOSE DELAY => INTERVAL '5 minutes'
+  ) AS w
+  PER PANE (SELECT w.end AS pane_start, sum(v) * 10 AS total FROM replaced_events)
+contains:cannot replace replaced because the replacement changes its window
+
+! CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS
+  SELECT date_bin('1 minute', ts, '1970-01-01'::timestamptz) AS pane_start, sum(v) * 10 AS total
+  FROM replaced_events GROUP BY 1
+contains:cannot replace replaced with a materialized view that does not freeze panes
+
+> CREATE MATERIALIZED VIEW unfrozen AS
+  SELECT date_bin('1 minute', ts, '1970-01-01'::timestamptz) AS pane_start, sum(v) AS total
+  FROM replaced_events GROUP BY 1
+
+! CREATE REPLACEMENT MATERIALIZED VIEW unfrozen_rp FOR unfrozen AS
+  SELECT * FROM TUMBLE(
+    TABLE replaced_events,
+    DESCRIPTOR(ts),
+    SIZE => INTERVAL '1 minute',
+    CLOSE DELAY => INTERVAL '5 minutes'
+  ) AS w
+  PER PANE (SELECT w.start AS pane_start, sum(v) AS total FROM replaced_events)
+contains:cannot replace unfrozen with a materialized view that freezes panes
+
+> DROP MATERIALIZED VIEW unfrozen
+
+> CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS
+  SELECT * FROM TUMBLE(
+    TABLE replaced_events,
+    DESCRIPTOR(ts),
+    SIZE => INTERVAL '1 minute',
+    CLOSE DELAY => INTERVAL '5 minutes'
+  ) AS w
+  PER PANE (SELECT w.start AS pane_start, sum(v) * 10 AS total FROM replaced_events)
+
+# A pending replacement is queried through its definition, which inherits the
+# target's initial as-of and so computes open panes only.
+> SELECT total FROM replaced_rp ORDER BY pane_start
+20
+
+> ALTER MATERIALIZED VIEW replaced APPLY REPLACEMENT replaced_rp
+
+# The closed pane keeps the result of the body that was live when it closed.
+# The open pane is corrected to the replacement's body.
+> SELECT total FROM replaced ORDER BY pane_start
+1
+20
+
+# Changes to the open pane now go through the replacement's body.
+> INSERT INTO replaced_events SELECT max(ts), 3 FROM replaced_events
+
+> SELECT total FROM replaced ORDER BY pane_start
+1
+50
+
+> DROP MATERIALIZED VIEW replaced
+
+> DROP TABLE replaced_events
