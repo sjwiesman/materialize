@@ -60,8 +60,6 @@ recorders design.
 - On creation, the view bootstraps all previous panes from the inputs'
   current contents.
 - Users can tolerate ingestion lag by delaying when panes close.
-- Users can skip panes before a chosen event time, so that creating a view
-  over a long append-only history does not have to backfill all of it.
 - The output is a deterministic function of the input's history and the
   view's definition, so that replicas agree and read-only (0dt) environments
   hydrate without coordination.
@@ -138,11 +136,6 @@ Arguments:
 - `CLOSE DELAY` (optional, default zero): delays each pane's close, so
   that rows arriving shortly after the pane's end are still included. A whole
   number of milliseconds.
-- `START AT` (optional, default the beginning of time): the first pane is
-  the one containing this event time. Panes that end at or before it are
-  never computed or written. A constant of the event-time column's type, or
-  `now()`, which purification replaces with a literal so that restarts reuse
-  the same value.
 
 `=>` named arguments, `TABLE` arguments, and `DESCRIPTOR` are new grammar for
 Materialize. PostgreSQL implements none of the SQL standard's PTF syntax, so
@@ -202,10 +195,6 @@ The close time of pane `p` is
 ```
 C_p = (e_p + CLOSE DELAY) as mz_timestamp
 ```
-
-With `START AT` set to `T`, the view only contains panes with `e_p > T`. A
-pane that contains `T` is included whole, with its rows before `T`, so the
-first pane is never partial.
 
 Because `SIZE`, `OFFSET`, and `CLOSE DELAY` are whole milliseconds,
 `C_p` is exact. Pane membership uses the full microsecond precision of the
@@ -271,17 +260,10 @@ an invoicing system.
   write that committed before `CREATE MATERIALIZED VIEW`. Backfilled panes are
   not a replay: they include rows that would have been late, use references
   as of `I`, and omit rows deleted before `I`.
-- **Bounded backfill.** By default the backfill covers the input's whole
-  history, so the first hydration scales with that history. `START AT` bounds
-  it: only panes ending after `START AT` are backfilled, and
-  `START AT => now()` skips every pane that closed before creation while still
-  computing the open ones from the rows they already have. The input is
-  filtered on the event-time column, so persist filter pushdown can skip the
-  parts that hold only earlier events.
 - **Replace.** Replacements apply going forward. Closed panes keep the
   results produced by the body that was live when they closed, and open panes
   are corrected to the replacement's body when it is promoted. A replacement
-  that changes `SIZE`, `OFFSET`, `CLOSE DELAY`, `START AT`, the windowed
+  that changes `SIZE`, `OFFSET`, `CLOSE DELAY`, the windowed
   input, the event-time column, or the choice between `w.start` and `w.end`
   as the pane column is rejected, as is a replacement that adds or removes
   freezing. The replacement inherits the target's initial as_of `I`, see
@@ -339,11 +321,6 @@ read-back's and delete the pane.
 predicate. `MfpPlan::evaluate` emits each row at `max(arrival, lower bound)`
 and retracts it at the upper bound. A row that arrives at or after its upper
 bound is never emitted.
-
-With `START AT` set to `T`, the lowering also filters the input by
-`date_bin(...) + SIZE > T`. The predicate is not temporal and is monotone in
-the event time, so the optimizer pushes it into the source like any other
-filter, and the panes before `T` never enter the dataflow.
 
 The input-side predicate is what releases a closed pane's state. Correctness
 does not depend on it: the sink alone drops every change to a closed pane.
@@ -512,8 +489,6 @@ panes, writes nothing, and corrects from the shard's upper once promoted.
   unchanged as its first output column.
 - A `SIZE`, `OFFSET`, or `CLOSE DELAY` that is not a fixed whole number
   of milliseconds, including `INTERVAL '1 month'`.
-- A `START AT` that is not a constant of the event-time column's type or
-  `now()`.
 - An event-time column that is not `timestamp` or `timestamptz`.
 - Combining with `REFRESH EVERY` or `REFRESH AT`. Refresh rounding would fold
   a pane's insertion and its close retraction into the same refresh time, so
@@ -671,6 +646,29 @@ Open questions, not here.
 ## Follow-ups
 
 Features that build on this design but are not part of it.
+
+### `START AT`
+
+The backfill covers the input's whole history, so the first hydration of a
+view over a long append-only history scales with that history. An optional
+`START AT` argument to `TUMBLE`, defaulting to the beginning of time, would
+bound it.
+
+- The first pane is the one containing the `START AT` event time. Panes that
+  end at or before it, those with `e_p <= START AT`, are never computed or
+  written. A pane that contains `START AT` is included whole, with its rows
+  before `START AT`, so the first pane is never partial.
+- The value is a constant of the event-time column's type, or `now()`, which
+  purification replaces with a literal, as it does for `REFRESH AT CREATION`,
+  so that restarts reuse the same value. `START AT => now()` skips every pane
+  that closed before creation while still computing the open ones from the
+  rows they already have.
+- The lowering filters the input by `date_bin(...) + SIZE > START AT`. The
+  predicate is not temporal and is monotone in the event time, so the
+  optimizer pushes it into the source, and persist filter pushdown can skip
+  the parts that hold only earlier events.
+- A replacement that changes `START AT` is rejected, like any other change to
+  the window definition.
 
 ### `EMIT FINAL ONLY`
 
