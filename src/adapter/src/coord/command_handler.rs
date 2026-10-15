@@ -36,8 +36,8 @@ use mz_repr::role_id::RoleId;
 use mz_repr::{Diff, GlobalId, SqlScalarType, Timestamp};
 use mz_sql::ast::{
     AlterConnectionAction, AlterConnectionStatement, AlterSourceAction, AstInfo, ConstantVisitor,
-    CopyRelation, CopyStatement, CreateSourceOptionName, Raw, Statement, StatementKind,
-    SubscribeStatement,
+    CopyRelation, CopyStatement, CreateSourceOptionName, MaterializedViewOptionName, Raw,
+    Statement, StatementKind, SubscribeStatement,
 };
 use mz_sql::catalog::RoleAttributesRaw;
 use mz_sql::names::{Aug, PartialItemName, ResolvedIds};
@@ -67,6 +67,7 @@ use tracing::{Instrument, debug_span, info, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use crate::TimestampProvider;
 use crate::client::truncate_sql_for_logging;
 use crate::command::{
     CatalogSnapshot, Command, ExecuteResponse, Response, SASLChallengeResponse,
@@ -1687,6 +1688,16 @@ impl Coordinator {
                     Err(e) => return ctx.retire(Err(e)),
                 };
 
+                let initial_as_of = match self.resolve_initial_as_of_for_frozen_materialized_view(
+                    &cmvs,
+                    &resolved_ids,
+                    ctx.session(),
+                    true,
+                ) {
+                    Ok(initial_as_of) => initial_as_of,
+                    Err(e) => return ctx.retire(Err(e)),
+                };
+
                 let catalog = self.catalog().for_session(ctx.session());
 
                 purify_create_materialized_view_options(
@@ -1706,7 +1717,7 @@ impl Coordinator {
                         in_cluster_replica: cmvs.in_cluster_replica,
                         query: cmvs.query,
                         with_options: cmvs.with_options,
-                        as_of: None,
+                        as_of: initial_as_of.map(u64::from),
                     });
 
                 // (Purifying CreateMaterializedView doesn't happen async, so no need to send
@@ -1733,6 +1744,16 @@ impl Coordinator {
                     Ok(mz_now) => mz_now,
                     Err(e) => return ctx.retire(Err(e)),
                 };
+
+                match self.resolve_initial_as_of_for_frozen_materialized_view(
+                    &cmvs,
+                    &resolved_ids,
+                    ctx.session(),
+                    false,
+                ) {
+                    Ok(initial_as_of) => cmvs.as_of = initial_as_of.map(u64::from),
+                    Err(e) => return ctx.retire(Err(e)),
+                }
 
                 let catalog = self.catalog().for_session(ctx.session());
 
@@ -1971,6 +1992,54 @@ impl Coordinator {
         } else {
             Ok(None)
         }
+    }
+
+    /// Chooses the initial as-of of a materialized view with `FREEZE` options, which the planner
+    /// needs to build the view's freeze filter.
+    ///
+    /// The initial as-of is the inputs' latest complete time, so the backfill of panes that closed
+    /// before creation includes every write that committed before the statement. Returns `None`
+    /// for views without `FREEZE` options, and for views that also have `REFRESH` options, which
+    /// the planner rejects.
+    fn resolve_initial_as_of_for_frozen_materialized_view(
+        &mut self,
+        cmvs: &CreateMaterializedViewStatement<Aug>,
+        resolved_ids: &ResolvedIds,
+        session: &Session,
+        acquire_read_holds: bool,
+    ) -> Result<Option<Timestamp>, AdapterError> {
+        let has_option = |pred: fn(&MaterializedViewOptionName) -> bool| {
+            cmvs.with_options.iter().any(|o| pred(&o.name))
+        };
+        let frozen = has_option(|n| {
+            matches!(
+                n,
+                MaterializedViewOptionName::FreezeOn | MaterializedViewOptionName::FreezeAfter
+            )
+        });
+        if !frozen || has_option(|n| matches!(n, MaterializedViewOptionName::Refresh)) {
+            return Ok(None);
+        }
+
+        let catalog = self.catalog().for_session(session);
+        let cluster = mz_sql::plan::resolve_cluster_for_materialized_view(&catalog, cmvs)?;
+        let ids = self
+            .index_oracle(cluster)
+            .sufficient_collections(resolved_ids.collections().copied());
+
+        // Acquire read holds before reading the frontiers, so the since cannot pass the chosen
+        // time before the sequencer installs the dataflow.
+        let read_holds = self.acquire_read_holds(&ids);
+        let initial_as_of = read_holds
+            .least_valid_read()
+            .join(&self.greatest_available_read(&ids))
+            .into_option();
+
+        if acquire_read_holds {
+            self.store_transaction_read_holds(session.conn_id().clone(), read_holds);
+        }
+
+        Ok(initial_as_of)
     }
 
     /// Instruct the dataflow layer to cancel any ongoing, interactive work for

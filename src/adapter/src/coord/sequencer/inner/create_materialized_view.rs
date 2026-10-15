@@ -586,6 +586,7 @@ impl Coordinator {
                             compaction_window,
                             refresh_schedule,
                             freeze,
+                            as_of,
                             ..
                         },
                     drop_ids,
@@ -635,7 +636,7 @@ impl Coordinator {
         let (dataflow_as_of, storage_as_of, until) = self.select_timestamps(
             id_bundle,
             refresh_schedule.as_ref(),
-            freeze.is_some(),
+            freeze.as_ref().and(as_of),
             read_holds,
         )?;
 
@@ -862,7 +863,7 @@ impl Coordinator {
         &self,
         id_bundle: CollectionIdBundle,
         refresh_schedule: Option<&RefreshSchedule>,
-        freeze: bool,
+        frozen_as_of: Option<mz_repr::Timestamp>,
         read_holds: &ReadHolds,
     ) -> Result<
         (
@@ -883,13 +884,18 @@ impl Coordinator {
         let mut dataflow_as_of = least_valid_read.clone();
         let mut storage_as_of = least_valid_read.clone();
 
-        // A frozen MV backfills the panes that closed before its `storage_as_of` from the inputs'
-        // contents at that time, and treats later updates to those panes as late. Moving the
-        // `as_of` to the latest complete time of the inputs makes the backfill include all
-        // writes that committed before the MV was created.
-        if freeze {
-            dataflow_as_of.join_assign(&self.greatest_available_read(&id_bundle));
-            storage_as_of.clone_from(&dataflow_as_of);
+        // Purification chose the initial as-of of a frozen MV, and the planner built the MV's
+        // freeze filter around it, so the dataflow must start exactly there.
+        if let Some(initial_as_of) = frozen_as_of {
+            let initial_as_of = Antichain::from_elem(initial_as_of);
+            if !timely::PartialOrder::less_equal(&least_valid_read, &initial_as_of) {
+                return Err(AdapterError::internal(
+                    "create materialized view",
+                    "inputs not readable at the initial as-of chosen during purification",
+                ));
+            }
+            dataflow_as_of.clone_from(&initial_as_of);
+            storage_as_of = initial_as_of;
         }
 
         // For MVs with non-trivial REFRESH schedules:

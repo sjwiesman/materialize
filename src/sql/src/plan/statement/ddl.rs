@@ -3051,6 +3051,19 @@ pub fn plan_create_materialized_view(
     }
 
     let as_of = stmt.as_of.map(Timestamp::from);
+
+    // Filtering the output by the freeze predicate lets the optimizer push it to the inputs,
+    // where it releases the state of closed panes. The sink applies the same predicate, so
+    // the filter does not change which rows are persisted.
+    let expr = match &freeze {
+        Some(freeze) => {
+            let Some(initial_as_of) = as_of else {
+                bail_internal!("purification chooses the initial as-of of a frozen view");
+            };
+            expr.filter(vec![freeze_filter(freeze, &desc, initial_as_of)])
+        }
+        None => expr,
+    };
     let compaction_window = plan_retain_history_option(scx, retain_history)?;
     let mut non_null_assertions = assert_not_null
         .into_iter()
@@ -3271,6 +3284,41 @@ fn plan_freeze_options(
         close_after: freeze_after,
         initial_as_of: None,
     }))
+}
+
+/// Returns `mz_now() < greatest(pane_start + close_after, initial_as_of + 1)` over the rows of
+/// `desc`.
+///
+/// NOTE: This must match `FreezeSpec::mfp_plan`, which the sink applies. A row the filter
+/// retracts before the sink freezes it would be deleted from the output.
+fn freeze_filter(
+    freeze: &FreezeSpec,
+    desc: &RelationDesc,
+    initial_as_of: Timestamp,
+) -> crate::plan::HirScalarExpr {
+    use crate::plan::HirScalarExpr;
+    use mz_repr::Datum;
+
+    let close_after = Interval::from_duration(&freeze.close_after).expect("planned as an interval");
+    let close_after = HirScalarExpr::literal(Datum::Interval(close_after), SqlScalarType::Interval);
+    let pane_start = HirScalarExpr::column(freeze.pane_column);
+    let close = match desc.typ().column_types[freeze.pane_column].scalar_type {
+        SqlScalarType::Timestamp { .. } => pane_start
+            .call_binary(close_after, mz_expr::func::AddTimestampInterval)
+            .call_unary(mz_expr::func::CastTimestampToMzTimestamp.into()),
+        SqlScalarType::TimestampTz { .. } => pane_start
+            .call_binary(close_after, mz_expr::func::AddTimestampTzInterval)
+            .call_unary(mz_expr::func::CastTimestampTzToMzTimestamp.into()),
+        ref other => unreachable!("planned pane column has type {other:?}"),
+    };
+    let backfill_end = HirScalarExpr::literal(
+        Datum::MzTimestamp(initial_as_of.step_forward()),
+        SqlScalarType::MzTimestamp,
+    );
+    let freeze_time =
+        HirScalarExpr::call_variadic(mz_expr::func::variadic::Greatest, vec![close, backfill_end]);
+    HirScalarExpr::call_unmaterializable(UnmaterializableFunc::MzNow)
+        .call_binary(freeze_time, mz_expr::func::Lt)
 }
 
 pub fn describe_create_sink(
