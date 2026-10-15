@@ -60,6 +60,8 @@ recorders design.
 - On creation, the view bootstraps all previous panes from the inputs'
   current contents.
 - Users can tolerate ingestion lag by delaying when panes close.
+- Users can skip panes before a chosen event time, so that creating a view
+  over a long append-only history does not have to backfill all of it.
 - The output is a deterministic function of the input's history and the
   view's definition, so that replicas agree and read-only (0dt) environments
   hydrate without coordination.
@@ -136,6 +138,11 @@ Arguments:
 - `CLOSE DELAY` (optional, default zero): delays each pane's close, so
   that rows arriving shortly after the pane's end are still included. A whole
   number of milliseconds.
+- `START AT` (optional, default the beginning of time): the first pane is
+  the one containing this event time. Panes that end at or before it are
+  never computed or written. A constant of the event-time column's type, or
+  `now()`, which purification replaces with a literal so that restarts reuse
+  the same value.
 
 `=>` named arguments, `TABLE` arguments, and `DESCRIPTOR` are new grammar for
 Materialize. PostgreSQL implements none of the SQL standard's PTF syntax, so
@@ -195,6 +202,10 @@ The close time of pane `p` is
 ```
 C_p = (e_p + CLOSE DELAY) as mz_timestamp
 ```
+
+With `START AT` set to `T`, the view only contains panes with `e_p > T`. A
+pane that contains `T` is included whole, with its rows before `T`, so the
+first pane is never partial.
 
 Because `SIZE`, `OFFSET`, and `CLOSE DELAY` are whole milliseconds,
 `C_p` is exact. Pane membership uses the full microsecond precision of the
@@ -260,11 +271,18 @@ an invoicing system.
   write that committed before `CREATE MATERIALIZED VIEW`. Backfilled panes are
   not a replay: they include rows that would have been late, use references
   as of `I`, and omit rows deleted before `I`.
+- **Bounded backfill.** By default the backfill covers the input's whole
+  history, so the first hydration scales with that history. `START AT` bounds
+  it: only panes ending after `START AT` are backfilled, and
+  `START AT => now()` skips every pane that closed before creation while still
+  computing the open ones from the rows they already have. The input is
+  filtered on the event-time column, so persist filter pushdown can skip the
+  parts that hold only earlier events.
 - **Replace.** Replacements apply going forward. Closed panes keep the
   results produced by the body that was live when they closed, and open panes
   are corrected to the replacement's body when it is promoted. A replacement
-  that changes `SIZE`, `OFFSET`, `CLOSE DELAY`, the windowed input, or the
-  event-time column is rejected.
+  that changes `SIZE`, `OFFSET`, `CLOSE DELAY`, `START AT`, the windowed
+  input, or the event-time column is rejected.
 - **Drop and recreate.** The output is the only copy of closed panes once
   input history compacts. Dropping the view loses it. Recreating backfills
   from the inputs' current contents, which can differ from the dropped
@@ -318,6 +336,11 @@ read-back's and delete the pane.
 predicate. `MfpPlan::evaluate` emits each row at `max(arrival, lower bound)`
 and retracts it at the upper bound. A row that arrives at or after its upper
 bound is never emitted.
+
+With `START AT` set to `T`, the lowering also filters the input by
+`date_bin(...) + SIZE > T`. The predicate is not temporal and is monotone in
+the event time, so the optimizer pushes it into the source like any other
+filter, and the panes before `T` never enter the dataflow.
 
 The input-side predicate is what releases a closed pane's state. Correctness
 does not depend on it: the sink alone drops every change to a closed pane.
@@ -448,6 +471,8 @@ panes, writes nothing, and corrects from the shard's upper once promoted.
   unchanged as its first output column.
 - A `SIZE`, `OFFSET`, or `CLOSE DELAY` that is not a fixed whole number
   of milliseconds, including `INTERVAL '1 month'`.
+- A `START AT` that is not a constant of the event-time column's type or
+  `now()`.
 - An event-time column that is not `timestamp` or `timestamptz`.
 - Combining with `REFRESH EVERY` or `REFRESH AT`. Refresh rounding would fold
   a pane's insertion and its close retraction into the same refresh time, so
@@ -587,6 +612,62 @@ Open questions, not here.
   several closes, and a replica added after creation need deterministic
   coverage with `clusterd-test-driver`, plus a platform check for restarts
   and upgrades.
+
+## Follow-ups
+
+Features that build on this design but are not part of it.
+
+### `EMIT FINAL ONLY`
+
+An optional `EMIT FINAL ONLY` clause after the `PER PANE` body would make the
+view contain only closed panes. Each pane's rows appear once, at the pane's
+close, with their final values, and are never retracted. The output is then
+append-only, which is what sinks into append-only systems and stream
+processors downstream want.
+
+```sql
+CREATE MATERIALIZED VIEW final_invoice_lines AS
+SELECT * FROM TUMBLE(
+  TABLE usage_events AS u,
+  DESCRIPTOR(occurred_at),
+  SIZE => INTERVAL '1 hour',
+  CLOSE DELAY => INTERVAL '5 minutes'
+) AS w
+PER PANE (SELECT w.start AS hour_start, u.account_id, sum(u.credits) AS credits FROM u GROUP BY u.account_id)
+EMIT FINAL ONLY;
+```
+
+The freeze predicate gains a lower bound, so each row is visible for one
+instant before it freezes:
+
+```
+mz_now() >= C_p AND mz_now() < greatest(C_p + 1, I + 1)
+```
+
+`MfpPlan::evaluate` delays every update of an open pane to `C_p`, where they
+consolidate to the pane's final value, and the sink's write filter drops the
+retraction at `C_p + 1`. Panes that closed before `I` appear at `I`, as in
+the backfill today. The body still maintains open panes internally. Only the
+output is delayed.
+
+The point of the clause is monotonicity. Today a reader can get final rows
+with `WHERE mz_now() >= closes_at`, which is append-only in practice, but the
+planner cannot prove it, so downstream views lose the monotonic plans for
+`min`, `max`, and TopK. A view declared `EMIT FINAL ONLY` can be marked
+monotonic in the catalog, the way append-only sources are, so that dataflows
+reading it plan it as monotonic. That needs:
+
+- Monotonicity for materialized views. `monotonic_object_inner` in
+  `src/adapter/src/optimize/dataflows.rs` derives it for append-only sources,
+  source-fed tables, and views over them, and returns `false` for every
+  materialized view. It would return `true` for a view declared
+  `EMIT FINAL ONLY`.
+- An argument that nothing can retract a persisted row: closed panes are
+  frozen, open panes are never written, and replacements only change open
+  panes. Errors need a decision, because a body error that is later
+  retracted would retract a row of the error collection.
+- `EMIT FINAL ONLY` combined with an output-side `WHERE` that removes rows is
+  still append-only, because the filter decides once per row at its close.
 
 ## Alternatives
 
