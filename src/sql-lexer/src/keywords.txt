@@ -146,12 +146,14 @@ Decoding
 Decorrelated
 Default
 Defaults
+Delay
 Delegation
 Delete
 Delimited
 Delimiter
 Delta
 Desc
+Descriptor
 Details
 Direction
 Discard
@@ -356,11 +358,13 @@ Outer
 Over
 Owned
 Owner
+Pane
 Partition
 Partitions
 Password
 Path
 Pattern
+Per
 Physical
 Plan
 Plans
@@ -510,6 +514,7 @@ Transactional
 Transform
 Trim
 True
+Tumble
 Tunnel
 Type
 Types

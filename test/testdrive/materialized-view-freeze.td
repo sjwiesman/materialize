@@ -7,9 +7,9 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0.
 
-# Tests the `FREEZE ON` and `FREEZE AFTER` materialized view options. Panes are
-# one-minute bins of `ts` that close 90 seconds after they start. Changes for a
-# closed pane must not reach the materialized view.
+# Tests materialized views over `TUMBLE ... PER PANE`. Panes are one-minute
+# bins of `ts` that close 30 seconds after they end, 90 seconds after they
+# start. Changes for a closed pane must not reach the materialized view.
 
 $ postgres-execute connection=mz_system
 ALTER SYSTEM SET unsafe_enable_materialized_view_freeze = true
@@ -18,11 +18,33 @@ ALTER SYSTEM SET unsafe_enable_materialized_view_freeze = true
 
 > INSERT INTO events VALUES (now() - INTERVAL '1 hour', 1)
 
-> CREATE MATERIALIZED VIEW per_minute
-  WITH (FREEZE ON pane_start, FREEZE AFTER '90s') AS
-  SELECT date_bin('1 minute', ts, '1970-01-01 00:00:00+00') AS pane_start, sum(v) AS total
-  FROM events
-  GROUP BY 1
+! SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => '1 minute') AS w
+  PER PANE (SELECT w.start, sum(v) FROM events)
+contains:TUMBLE ... PER PANE is only supported in materialized views
+
+! CREATE MATERIALIZED VIEW bad
+  AS SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => '1 minute') AS w
+  PER PANE (SELECT sum(v), w.start FROM events)
+contains:the first column of a PER PANE body must be w.start or w.end
+
+! CREATE MATERIALIZED VIEW bad
+  AS SELECT pane, count(*) FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => '1 minute') AS w
+  PER PANE (SELECT w.start AS pane, v FROM events) GROUP BY pane
+contains:must be the only FROM item of a materialized view whose query only projects and filters
+
+! CREATE MATERIALIZED VIEW bad
+  AS SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(v), SIZE => '1 minute') AS w
+  PER PANE (SELECT w.start FROM events)
+contains:must have type timestamp or timestamp with time zone
+
+> CREATE MATERIALIZED VIEW per_minute AS
+  SELECT * FROM TUMBLE(
+    TABLE events,
+    DESCRIPTOR(ts),
+    SIZE => INTERVAL '1 minute',
+    CLOSE DELAY => INTERVAL '30 seconds'
+  ) AS w
+  PER PANE (SELECT w.start AS pane_start, sum(v) AS total FROM events)
 
 # A pane that closed before the view was created is backfilled.
 > SELECT total FROM per_minute ORDER BY pane_start

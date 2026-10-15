@@ -1994,8 +1994,8 @@ impl Coordinator {
         }
     }
 
-    /// Chooses the initial as-of of a materialized view with `FREEZE` options, which the planner
-    /// needs to build the view's freeze filter.
+    /// Chooses the initial as-of of a materialized view with `FREEZE` options or a `TUMBLE` table
+    /// factor, which the planner needs to build the view's freeze filter.
     ///
     /// The initial as-of is the inputs' latest complete time, so the backfill of panes that closed
     /// before creation includes every write that committed before the statement. Returns `None`
@@ -2016,7 +2016,7 @@ impl Coordinator {
                 n,
                 MaterializedViewOptionName::FreezeOn | MaterializedViewOptionName::FreezeAfter
             )
-        });
+        }) || !mz_sql::plan::tumble_table_factors(&cmvs.query).is_empty();
         if !frozen || has_option(|n| matches!(n, MaterializedViewOptionName::Refresh)) {
             return Ok(None);
         }

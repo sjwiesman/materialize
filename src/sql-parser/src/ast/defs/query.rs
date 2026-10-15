@@ -23,7 +23,7 @@ use std::hash::Hash;
 use std::mem;
 
 use crate::ast::display::{self, AstDisplay, AstFormatter, WithOptionName};
-use crate::ast::{AstInfo, Expr, Function, Ident, ShowStatement, WithOptionValue};
+use crate::ast::{AstInfo, Expr, Function, Ident, IntervalValue, ShowStatement, WithOptionValue};
 
 /// The most complete variant of a `SELECT` query expression, optionally
 /// including `WITH`, `UNION` / other set operations, and `ORDER BY`.
@@ -596,6 +596,28 @@ pub enum TableFactor<T: AstInfo> {
         join: Box<TableWithJoins<T>>,
         alias: Option<TableAlias>,
     },
+    /// A tumbling window over `input` whose `body` is evaluated once per pane:
+    ///
+    /// ```text
+    /// TUMBLE(TABLE <input> [AS <pane_alias>], DESCRIPTOR(<time_column>),
+    ///        SIZE => <interval> [, OFFSET => <interval>] [, CLOSE DELAY => <interval>])
+    ///     [AS <window_alias>] PER PANE (<body>)
+    /// ```
+    ///
+    /// Inside `body`, `pane_alias` (by default the input's name) binds the rows of one pane,
+    /// and `window_alias` (by default `tumble`) binds the pane's `start`, `end`, and `close`.
+    Tumble {
+        input: T::ItemName,
+        pane_alias: Option<Ident>,
+        /// The id of the pane binding, which `body` references like a CTE.
+        pane_id: T::CteId,
+        time_column: Ident,
+        size: IntervalValue,
+        offset: Option<IntervalValue>,
+        close_delay: Option<IntervalValue>,
+        window_alias: Option<Ident>,
+        body: Box<Query<T>>,
+    },
 }
 
 impl<T: AstInfo> AstDisplay for TableFactor<T> {
@@ -667,6 +689,44 @@ impl<T: AstInfo> AstDisplay for TableFactor<T> {
                     f.write_str(" AS ");
                     f.write_node(alias);
                 }
+            }
+            TableFactor::Tumble {
+                input,
+                pane_alias,
+                pane_id: _,
+                time_column,
+                size,
+                offset,
+                close_delay,
+                window_alias,
+                body,
+            } => {
+                f.write_str("TUMBLE(TABLE ");
+                f.write_node(input);
+                if let Some(pane_alias) = pane_alias {
+                    f.write_str(" AS ");
+                    f.write_node(pane_alias);
+                }
+                f.write_str(", DESCRIPTOR(");
+                f.write_node(time_column);
+                f.write_str("), SIZE => INTERVAL '");
+                f.write_node(size);
+                if let Some(offset) = offset {
+                    f.write_str(", OFFSET => INTERVAL '");
+                    f.write_node(offset);
+                }
+                if let Some(close_delay) = close_delay {
+                    f.write_str(", CLOSE DELAY => INTERVAL '");
+                    f.write_node(close_delay);
+                }
+                f.write_str(")");
+                if let Some(window_alias) = window_alias {
+                    f.write_str(" AS ");
+                    f.write_node(window_alias);
+                }
+                f.write_str(" PER PANE (");
+                f.write_node(body);
+                f.write_str(")");
             }
         }
     }

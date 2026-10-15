@@ -113,7 +113,7 @@ pub use hir::{
 };
 pub use lowering::Config as HirToMirConfig;
 pub use notice::PlanNotice;
-pub use query::{ExprContext, QueryContext, QueryLifetime};
+pub use query::{ExprContext, QueryContext, QueryLifetime, tumble_table_factors};
 pub use scope::Scope;
 pub use side_effecting_func::SideEffectingFunc;
 pub use statement::ddl::{

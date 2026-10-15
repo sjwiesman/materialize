@@ -2278,6 +2278,48 @@ impl<'a> Fold<Raw, Aug> for NameResolver<'a> {
                 join: Box::new(self.fold_table_with_joins(*join)),
                 alias: alias.map(|alias| self.fold_table_alias(alias)),
             },
+            Tumble {
+                input,
+                pane_alias,
+                pane_id: (),
+                time_column,
+                size,
+                offset,
+                close_delay,
+                window_alias,
+                body,
+            } => {
+                // The pane binding takes the input's unqualified name unless aliased, and is in
+                // scope only inside the body, where it shadows catalog items like a CTE.
+                let pane_name = normalize::ident(match &pane_alias {
+                    Some(alias) => alias.clone(),
+                    None => input
+                        .name()
+                        .0
+                        .last()
+                        .expect("item names are non-empty")
+                        .clone(),
+                });
+                let input = self.fold_item_name(input);
+                let pane_id = self.allocate_cte_id();
+                let shadowed_id = self.ctes.insert(pane_name.clone(), pane_id);
+                let body = Box::new(self.fold_query(*body));
+                match shadowed_id {
+                    Some(id) => self.ctes.insert(pane_name, id),
+                    None => self.ctes.remove(&pane_name),
+                };
+                Tumble {
+                    input,
+                    pane_alias,
+                    pane_id,
+                    time_column,
+                    size,
+                    offset,
+                    close_delay,
+                    window_alias,
+                    body,
+                }
+            }
         }
     }
 

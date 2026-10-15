@@ -8688,6 +8688,76 @@ impl<'a> Parser<'a> {
     }
 
     /// A table name or a parenthesized subquery, followed by optional `[AS] alias`
+    /// Parses `TUMBLE(...) [AS <window_alias>] PER PANE (<query>)`. See [`TableFactor::Tumble`].
+    fn parse_tumble(&mut self) -> Result<TableFactor<Raw>, ParserError> {
+        self.expect_keyword(TUMBLE)?;
+        self.expect_token(&Token::LParen)?;
+        self.expect_keyword(TABLE)?;
+        let input = self.parse_raw_name()?;
+        let pane_alias = if self.parse_keyword(AS) {
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        };
+        self.expect_token(&Token::Comma)?;
+        self.expect_keyword(DESCRIPTOR)?;
+        self.expect_token(&Token::LParen)?;
+        let time_column = self.parse_identifier()?;
+        self.expect_token(&Token::RParen)?;
+
+        let mut size = None;
+        let mut offset = None;
+        let mut close_delay = None;
+        while self.consume_token(&Token::Comma) {
+            let (name, slot) = match self.expect_one_of_keywords(&[SIZE, OFFSET, CLOSE])? {
+                SIZE => ("SIZE", &mut size),
+                OFFSET => ("OFFSET", &mut offset),
+                CLOSE => {
+                    self.expect_keyword(DELAY)?;
+                    ("CLOSE DELAY", &mut close_delay)
+                }
+                _ => unreachable!(),
+            };
+            if slot.is_some() {
+                return parser_err!(
+                    self,
+                    self.peek_prev_pos(),
+                    "{} specified more than once",
+                    name
+                );
+            }
+            self.expect_token(&Token::Arrow)?;
+            let _ = self.parse_keyword(INTERVAL);
+            *slot = Some(self.parse_interval_value()?);
+        }
+        self.expect_token(&Token::RParen)?;
+        let Some(size) = size else {
+            return parser_err!(self, self.peek_prev_pos(), "TUMBLE requires SIZE");
+        };
+
+        let window_alias = if self.parse_keyword(AS) {
+            Some(self.parse_identifier()?)
+        } else {
+            None
+        };
+        self.expect_keywords(&[PER, PANE])?;
+        self.expect_token(&Token::LParen)?;
+        let body = Box::new(self.parse_query()?);
+        self.expect_token(&Token::RParen)?;
+
+        Ok(TableFactor::Tumble {
+            input,
+            pane_alias,
+            pane_id: (),
+            time_column,
+            size,
+            offset,
+            close_delay,
+            window_alias,
+            body,
+        })
+    }
+
     fn parse_table_factor(&mut self) -> Result<TableFactor<Raw>, ParserError> {
         // Guard the nested table-factor recursion. `FROM ((((…` descends
         // parse_table_factor -> parse_table_and_joins -> parse_table_factor,
@@ -8722,6 +8792,10 @@ impl<'a> Parser<'a> {
                     with_ordinality,
                 });
             }
+        }
+
+        if self.peek_keyword(TUMBLE) && self.peek_nth_token(1) == Some(Token::LParen) {
+            return self.parse_tumble();
         }
 
         if self.consume_token(&Token::LParen) {

@@ -2105,3 +2105,31 @@ FROM iffy_colnames
 SELECT "true", "false", "null", "array", "list", map, "case", "cast", coalesce, greatest, least, nullif, exists, extract, "not", row, trim, position, substring FROM iffy_colnames
 =>
 Select(SelectStatement { query: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Expr { expr: Identifier([Ident("true")]), alias: None }, Expr { expr: Identifier([Ident("false")]), alias: None }, Expr { expr: Identifier([Ident("null")]), alias: None }, Expr { expr: Identifier([Ident("array")]), alias: None }, Expr { expr: Identifier([Ident("list")]), alias: None }, Expr { expr: Identifier([Ident("map")]), alias: None }, Expr { expr: Identifier([Ident("case")]), alias: None }, Expr { expr: Identifier([Ident("cast")]), alias: None }, Expr { expr: Identifier([Ident("coalesce")]), alias: None }, Expr { expr: Identifier([Ident("greatest")]), alias: None }, Expr { expr: Identifier([Ident("least")]), alias: None }, Expr { expr: Identifier([Ident("nullif")]), alias: None }, Expr { expr: Identifier([Ident("exists")]), alias: None }, Expr { expr: Identifier([Ident("extract")]), alias: None }, Expr { expr: Identifier([Ident("not")]), alias: None }, Expr { expr: Identifier([Ident("row")]), alias: None }, Expr { expr: Identifier([Ident("trim")]), alias: None }, Expr { expr: Identifier([Ident("position")]), alias: None }, Expr { expr: Identifier([Ident("substring")]), alias: None }], from: [TableWithJoins { relation: Table { name: Name(UnresolvedItemName([Ident("iffy_colnames")])), alias: None }, joins: [] }], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None }, as_of: None })
+
+parse-statement
+SELECT hour_start, n FROM TUMBLE(TABLE usage_events AS u, DESCRIPTOR(occurred_at), SIZE => INTERVAL '1 hour', CLOSE DELAY => '5 minutes') AS w PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+----
+SELECT hour_start, n FROM TUMBLE(TABLE usage_events AS u, DESCRIPTOR(occurred_at), SIZE => INTERVAL '1 hour', CLOSE DELAY => INTERVAL '5 minutes') AS w PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+=>
+Select(SelectStatement { query: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Expr { expr: Identifier([Ident("hour_start")]), alias: None }, Expr { expr: Identifier([Ident("n")]), alias: None }], from: [TableWithJoins { relation: Tumble { input: Name(UnresolvedItemName([Ident("usage_events")])), pane_alias: Some(Ident("u")), pane_id: (), time_column: Ident("occurred_at"), size: IntervalValue { value: "1 hour", precision_high: Year, precision_low: Second, fsec_max_precision: None }, offset: None, close_delay: Some(IntervalValue { value: "5 minutes", precision_high: Year, precision_low: Second, fsec_max_precision: None }), window_alias: Some(Ident("w")), body: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Expr { expr: Identifier([Ident("w"), Ident("start")]), alias: Some(Ident("hour_start")) }, Expr { expr: Function(Function { name: Name(UnresolvedItemName([Ident("count")])), args: Star, filter: None, over: None, distinct: false }), alias: Some(Ident("n")) }], from: [TableWithJoins { relation: Table { name: Name(UnresolvedItemName([Ident("u")])), alias: None }, joins: [] }], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None } }, joins: [] }], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None }, as_of: None })
+
+parse-statement
+SELECT * FROM TUMBLE(TABLE t, DESCRIPTOR(ts), SIZE => '1 minute', OFFSET => '30 seconds') PER PANE (SELECT tumble.end, t.v FROM t)
+----
+SELECT * FROM TUMBLE(TABLE t, DESCRIPTOR(ts), SIZE => INTERVAL '1 minute', OFFSET => INTERVAL '30 seconds') PER PANE (SELECT tumble.end, t.v FROM t)
+=>
+Select(SelectStatement { query: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Wildcard], from: [TableWithJoins { relation: Tumble { input: Name(UnresolvedItemName([Ident("t")])), pane_alias: None, pane_id: (), time_column: Ident("ts"), size: IntervalValue { value: "1 minute", precision_high: Year, precision_low: Second, fsec_max_precision: None }, offset: Some(IntervalValue { value: "30 seconds", precision_high: Year, precision_low: Second, fsec_max_precision: None }), close_delay: None, window_alias: None, body: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Expr { expr: Identifier([Ident("tumble"), Ident("end")]), alias: None }, Expr { expr: Identifier([Ident("t"), Ident("v")]), alias: None }], from: [TableWithJoins { relation: Table { name: Name(UnresolvedItemName([Ident("t")])), alias: None }, joins: [] }], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None } }, joins: [] }], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None }, as_of: None })
+
+parse-statement
+SELECT * FROM TUMBLE(TABLE t, DESCRIPTOR(ts)) PER PANE (SELECT 1)
+----
+error: TUMBLE requires SIZE
+SELECT * FROM TUMBLE(TABLE t, DESCRIPTOR(ts)) PER PANE (SELECT 1)
+                                            ^
+
+parse-statement
+SELECT * FROM TUMBLE(TABLE t, DESCRIPTOR(ts), SIZE => '1 minute', SIZE => '2 minutes') PER PANE (SELECT 1)
+----
+error: SIZE specified more than once
+SELECT * FROM TUMBLE(TABLE t, DESCRIPTOR(ts), SIZE => '1 minute', SIZE => '2 minutes') PER PANE (SELECT 1)
+                                                                  ^

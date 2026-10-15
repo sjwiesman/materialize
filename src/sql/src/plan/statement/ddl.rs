@@ -2879,6 +2879,7 @@ pub fn plan_create_materialized_view(
     let partial_name = normalize::unresolved_item_name(stmt.name)?;
     let name = scx.allocate_qualified_name(partial_name.clone())?;
 
+    let tumble_query = stmt.query.clone();
     let query::PlannedRootQuery {
         expr,
         mut desc,
@@ -3045,7 +3046,13 @@ pub fn plan_create_materialized_view(
         }
     };
 
-    let freeze = plan_freeze_options(scx, &desc, freeze_on, freeze_after)?;
+    let freeze = match (
+        plan_tumble_freeze(scx, &tumble_query)?,
+        plan_freeze_options(scx, &desc, freeze_on, freeze_after)?,
+    ) {
+        (Some(_), Some(_)) => sql_bail!("FREEZE ON is not compatible with TUMBLE"),
+        (tumble, options) => tumble.or(options),
+    };
     if freeze.is_some() && refresh_schedule.is_some() {
         sql_bail!("FREEZE ON is not compatible with REFRESH options");
     }
@@ -3243,6 +3250,114 @@ generate_extracted_config!(
     (FreezeAfter, Duration),
     (Refresh, RefreshOptionValue<Aug>, AllowMultiple)
 );
+
+/// Derives the freeze of a materialized view defined as
+/// `SELECT <pane column>, ... FROM TUMBLE(...) AS w PER PANE (SELECT w.start | w.end, ...)`.
+///
+/// The pane column must be the first column of both the body and the view, because the sink
+/// locates a row's pane by it. The query around `TUMBLE` may only project and filter, because
+/// anything else would combine rows of different panes.
+fn plan_tumble_freeze(
+    scx: &StatementContext,
+    query: &mz_sql_parser::ast::Query<Aug>,
+) -> Result<Option<FreezeSpec>, PlanError> {
+    use mz_sql_parser::ast::{Query, SelectItem, SetExpr, TableFactor, TableWithJoins};
+
+    let tumbles = crate::plan::tumble_table_factors(query);
+    let Some(tumble) = tumbles.first() else {
+        return Ok(None);
+    };
+    scx.require_feature_flag(&vars::UNSAFE_ENABLE_MATERIALIZED_VIEW_FREEZE)?;
+
+    let shape_error = || {
+        sql_err!(
+            "TUMBLE ... PER PANE must be the only FROM item of a materialized view whose query \
+             only projects and filters"
+        )
+    };
+    let select = match query {
+        Query {
+            ctes,
+            body: SetExpr::Select(select),
+            order_by,
+            limit: None,
+            offset: None,
+        } if ctes.is_empty() && order_by.is_empty() && tumbles.len() == 1 => select,
+        _ => return Err(shape_error()),
+    };
+    let only_tumble = matches!(
+        select.from.as_slice(),
+        [TableWithJoins { relation, joins }] if joins.is_empty() && relation == *tumble
+    );
+    if !only_tumble
+        || select.distinct.is_some()
+        || !select.group_by.is_empty()
+        || select.having.is_some()
+        || select.qualify.is_some()
+    {
+        return Err(shape_error());
+    }
+
+    let TableFactor::Tumble {
+        window_alias, body, ..
+    } = tumble
+    else {
+        unreachable!("found by tumble_table_factors");
+    };
+    let window = normalize::ident(
+        window_alias
+            .clone()
+            .unwrap_or_else(|| Ident::new_unchecked("tumble")),
+    );
+    let body_first = match &body.body {
+        SetExpr::Select(body_select) => body_select.projection.first(),
+        _ => None,
+    };
+    let (field, pane_column_name) = match body_first {
+        Some(SelectItem::Expr {
+            expr: Expr::Identifier(parts),
+            alias,
+        }) if parts.len() == 2 && normalize::ident(parts[0].clone()) == window => {
+            let field = normalize::ident(parts[1].clone());
+            let name = alias
+                .clone()
+                .map_or_else(|| field.clone(), normalize::ident);
+            (field, name)
+        }
+        _ => (String::new(), String::new()),
+    };
+    if field != "start" && field != "end" {
+        sql_bail!("the first column of a PER PANE body must be {window}.start or {window}.end");
+    }
+    let outer_keeps_pane_column = match select.projection.first() {
+        Some(SelectItem::Wildcard) => true,
+        Some(SelectItem::Expr {
+            expr: Expr::Identifier(parts),
+            alias: _,
+        }) => parts.len() == 1 && normalize::ident(parts[0].clone()) == pane_column_name,
+        None => false,
+        Some(_) => false,
+    };
+    if !outer_keeps_pane_column {
+        sql_bail!(
+            "the first column of a materialized view over TUMBLE must be the pane column {}",
+            pane_column_name.quoted()
+        );
+    }
+
+    let (size, _offset, close_delay) = crate::plan::query::plan_tumble_intervals(tumble)?;
+    let close_after = if field == "start" {
+        size.checked_add(&close_delay)
+            .ok_or_else(|| sql_err!("TUMBLE SIZE plus CLOSE DELAY is out of range"))?
+    } else {
+        close_delay
+    };
+    Ok(Some(FreezeSpec {
+        pane_column: 0,
+        close_after: close_after.duration()?,
+        initial_as_of: None,
+    }))
+}
 
 /// Plans the `FREEZE ON <column>` and `FREEZE AFTER <interval>` options, which must appear
 /// together.

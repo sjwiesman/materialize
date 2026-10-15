@@ -62,6 +62,7 @@ use mz_ore::option::FallibleMapExt;
 use mz_ore::stack::{CheckedRecursion, RecursionGuard};
 use mz_ore::str::StrExt;
 use mz_repr::adt::char::CharLength;
+use mz_repr::adt::interval::Interval;
 use mz_repr::adt::numeric::{NUMERIC_DATUM_MAX_PRECISION, NumericMaxScale};
 use mz_repr::adt::timestamp::TimestampPrecision;
 use mz_repr::adt::varchar::VarCharMaxLength;
@@ -77,11 +78,11 @@ use mz_sql_parser::ast::visit_mut::{self, VisitMut};
 use mz_sql_parser::ast::{
     AsOf, Assignment, AstInfo, CreateWebhookSourceBody, CreateWebhookSourceCheck,
     CreateWebhookSourceHeader, CreateWebhookSourceSecret, CteBlock, DeleteStatement, Distinct,
-    Expr, Function, FunctionArgs, HomogenizingFunction, Ident, InsertSource, IsExprConstruct, Join,
-    JoinConstraint, JoinOperator, Limit, MapEntry, MutRecBlock, MutRecBlockOption,
-    MutRecBlockOptionName, OrderByExpr, Query, Select, SelectItem, SelectOption, SelectOptionName,
-    SetExpr, SetOperator, ShowStatement, SubscriptPosition, TableAlias, TableFactor,
-    TableWithJoins, UnresolvedItemName, UpdateStatement, Value, Values, WindowFrame,
+    Expr, Function, FunctionArgs, HomogenizingFunction, Ident, InsertSource, IntervalValue,
+    IsExprConstruct, Join, JoinConstraint, JoinOperator, Limit, MapEntry, MutRecBlock,
+    MutRecBlockOption, MutRecBlockOptionName, OrderByExpr, Query, Select, SelectItem, SelectOption,
+    SelectOptionName, SetExpr, SetOperator, ShowStatement, SubscriptPosition, TableAlias,
+    TableFactor, TableWithJoins, UnresolvedItemName, UpdateStatement, Value, Values, WindowFrame,
     WindowFrameBound, WindowFrameUnits, WindowSpec, visit,
 };
 use mz_sql_parser::ident;
@@ -3143,7 +3144,216 @@ fn plan_table_factor(
             let scope = plan_table_alias(scope, alias.as_ref())?;
             Ok((expr, scope))
         }
+
+        TableFactor::Tumble { .. } => plan_tumble(qcx, table_factor),
     }
+}
+
+/// Returns the `TUMBLE` table factors anywhere in `query`.
+pub fn tumble_table_factors<T: AstInfo>(query: &Query<T>) -> Vec<&TableFactor<T>> {
+    struct Finder<'ast, T: AstInfo>(Vec<&'ast TableFactor<T>>);
+    impl<'ast, T: AstInfo> Visit<'ast, T> for Finder<'ast, T> {
+        fn visit_table_factor(&mut self, node: &'ast TableFactor<T>) {
+            if matches!(node, TableFactor::Tumble { .. }) {
+                self.0.push(node);
+            }
+            visit::visit_table_factor(self, node);
+        }
+    }
+    let mut finder = Finder(Vec::new());
+    finder.visit_query(query);
+    finder.0
+}
+
+/// Validates the `SIZE`, `OFFSET`, and `CLOSE DELAY` arguments of a `TUMBLE` table factor,
+/// returning them in that order with defaults filled in.
+pub fn plan_tumble_intervals(
+    table_factor: &TableFactor<Aug>,
+) -> Result<(Interval, Interval, Interval), PlanError> {
+    let TableFactor::Tumble {
+        size,
+        offset,
+        close_delay,
+        ..
+    } = table_factor
+    else {
+        panic!("not a TUMBLE table factor");
+    };
+    let check = |name: &str, value: &IntervalValue| -> Result<Interval, PlanError> {
+        let interval = literal::plan_interval(value)?;
+        if interval.months != 0 {
+            sql_bail!("TUMBLE {name} must not involve units larger than days");
+        }
+        if interval.as_microseconds() < 0 || interval.as_microseconds() % 1000 != 0 {
+            sql_bail!("TUMBLE {name} must be a non-negative whole number of milliseconds");
+        }
+        Ok(interval)
+    };
+    let size = check("SIZE", size)?;
+    if size.as_microseconds() == 0 {
+        sql_bail!("TUMBLE SIZE must be positive");
+    }
+    let offset = offset
+        .as_ref()
+        .map(|o| check("OFFSET", o))
+        .transpose()?
+        .unwrap_or_default();
+    let close_delay = close_delay
+        .as_ref()
+        .map(|d| check("CLOSE DELAY", d))
+        .transpose()?
+        .unwrap_or_default();
+    Ok((size, offset, close_delay))
+}
+
+/// Plans `TUMBLE(...) AS w PER PANE (<body>)` as
+///
+/// ```sql
+/// (SELECT start, start + size AS "end", start + size + close_delay AS close
+///  FROM (SELECT DISTINCT start FROM binned)) AS w,
+/// LATERAL (WITH <pane> AS (SELECT <input columns> FROM binned WHERE start = w.start) <body>)
+/// ```
+///
+/// projected to the body's columns, where `binned` is the input extended by each row's pane
+/// start, `date_bin(size, ts - offset) + offset`. Decorrelation turns the correlated pane binding
+/// into a grouping by the pane start.
+fn plan_tumble(
+    qcx: &QueryContext,
+    table_factor: &TableFactor<Aug>,
+) -> Result<(HirRelationExpr, Scope), PlanError> {
+    let TableFactor::Tumble {
+        input,
+        pane_alias: _,
+        pane_id,
+        time_column,
+        size: _,
+        offset: _,
+        close_delay: _,
+        window_alias,
+        body,
+    } = table_factor
+    else {
+        panic!("not a TUMBLE table factor");
+    };
+    if qcx.lifetime != QueryLifetime::MaterializedView {
+        sql_bail!("TUMBLE ... PER PANE is only supported in materialized views");
+    }
+    let (size, offset, close_delay) = plan_tumble_intervals(table_factor)?;
+
+    let (input_expr, input_scope) = qcx.resolve_table_name(input.clone())?;
+    let input_type = qcx.relation_type(&input_expr);
+    let arity = input_type.arity();
+    let time_column_name = normalize::column_name(time_column.clone());
+    let Some(ts) = input_scope
+        .items
+        .iter()
+        .position(|item| item.column_name == time_column_name)
+    else {
+        sql_bail!(
+            "column {} in DESCRIPTOR not found",
+            time_column_name.quoted()
+        );
+    };
+
+    let lit = |i: Interval| HirScalarExpr::literal(Datum::Interval(i), SqlScalarType::Interval);
+    let (sub, bin, add): (BinaryFunc, BinaryFunc, BinaryFunc) =
+        match input_type.column_types[ts].scalar_type {
+            SqlScalarType::Timestamp { .. } => (
+                expr_func::SubTimestampInterval.into(),
+                expr_func::DateBinTimestamp.into(),
+                expr_func::AddTimestampInterval.into(),
+            ),
+            SqlScalarType::TimestampTz { .. } => (
+                expr_func::SubTimestampTzInterval.into(),
+                expr_func::DateBinTimestampTz.into(),
+                expr_func::AddTimestampTzInterval.into(),
+            ),
+            ref other => sql_bail!(
+                "DESCRIPTOR column {} must have type timestamp or timestamp with time zone, not {}",
+                time_column_name.quoted(),
+                qcx.humanize_sql_scalar_type(other, false),
+            ),
+        };
+    let start = lit(size).call_binary(
+        HirScalarExpr::column(ts).call_binary(lit(offset), sub.clone()),
+        bin,
+    );
+    let start = start.call_binary(lit(offset), add.clone());
+    let binned = input_expr.map(vec![start]);
+
+    // `end` and `close` are computed after the `DISTINCT`, so the optimizer sees that panes are
+    // keyed by `start` alone.
+    let panes = binned.clone().project(vec![arity]).distinct().map(vec![
+        HirScalarExpr::column(0).call_binary(lit(size), add.clone()),
+        HirScalarExpr::column(1).call_binary(lit(close_delay), add),
+    ]);
+    let window_name = normalize::ident(
+        window_alias
+            .clone()
+            .unwrap_or_else(|| Ident::new_unchecked("tumble")),
+    );
+    let window_scope = Scope::from_source(
+        Some(PartialItemName {
+            database: None,
+            schema: None,
+            item: window_name,
+        }),
+        ["start", "end", "close"],
+    );
+
+    // The body sees the window as its nearest outer scope, and nothing beyond it, because a
+    // `TUMBLE` table factor is not `LATERAL`.
+    let mut qcx = qcx.clone();
+    for scope in &mut qcx.outer_scopes {
+        if scope.lateral_barrier {
+            break;
+        }
+        scope.items.clear();
+    }
+    let mut body_qcx = qcx.derived_context(window_scope, qcx.relation_type(&panes));
+    body_qcx.outer_scopes[0].lateral_barrier = true;
+
+    let pane_name = match &table_factor {
+        TableFactor::Tumble {
+            pane_alias: Some(alias),
+            ..
+        } => normalize::ident(alias.clone()),
+        _ => input.full_item_name().item.clone(),
+    };
+    let pane_desc = RelationDesc::new(input_type, input_scope.column_names().cloned());
+    let shadowed = body_qcx.ctes.insert(
+        *pane_id,
+        CteDesc {
+            name: pane_name.clone(),
+            desc: pane_desc,
+        },
+    );
+    let window_start = HirScalarExpr::unnamed_column(ColumnRef {
+        level: 1,
+        column: 0,
+    });
+    let pane = binned
+        .filter(vec![
+            HirScalarExpr::column(arity).call_binary(window_start, expr_func::Eq),
+        ])
+        .project((0..arity).collect());
+    let (body_expr, body_scope) = plan_nested_query(&mut body_qcx, body)?;
+    if let Some(shadowed) = shadowed {
+        body_qcx.ctes.insert(*pane_id, shadowed);
+    }
+    let body_arity = body_qcx.relation_type(&body_expr).arity();
+    let body_expr = HirRelationExpr::Let {
+        name: pane_name,
+        id: *pane_id,
+        value: Box::new(pane),
+        body: Box::new(body_expr),
+    };
+
+    let expr = panes
+        .join(body_expr, HirScalarExpr::literal_true(), JoinKind::Inner)
+        .project((3..3 + body_arity).collect());
+    let scope = Scope::from_source(None, body_scope.column_names().cloned());
+    Ok((expr, scope))
 }
 
 /// Plans a `ROWS FROM` expression.
