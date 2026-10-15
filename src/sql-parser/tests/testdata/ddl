@@ -574,6 +574,13 @@ CREATE MATERIALIZED VIEW v WITH (REFRESH = EVERY '1 day', ASSERT NOT NULL = x) A
 CreateMaterializedView(CreateMaterializedViewStatement { if_exists: Error, name: UnresolvedItemName([Ident("v")]), columns: [], replacement_for: None, in_cluster: None, in_cluster_replica: None, query: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Wildcard], from: [TableWithJoins { relation: Table { name: Name(UnresolvedItemName([Ident("t")])), alias: None }, joins: [] }], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None }, as_of: None, with_options: [MaterializedViewOption { name: Refresh, value: Some(Refresh(Every(RefreshEveryOptionValue { interval: IntervalValue { value: "1 day", precision_high: Year, precision_low: Second, fsec_max_precision: None }, aligned_to: None }))) }, MaterializedViewOption { name: AssertNotNull, value: Some(UnresolvedItemName(UnresolvedItemName([Ident("x")]))) }] })
 
 parse-statement
+CREATE MATERIALIZED VIEW v WITH (FREEZE ON pane_start, FREEZE AFTER '90s') AS SELECT * FROM t
+----
+CREATE MATERIALIZED VIEW v WITH (FREEZE ON = pane_start, FREEZE AFTER = '90s') AS SELECT * FROM t
+=>
+CreateMaterializedView(CreateMaterializedViewStatement { if_exists: Error, name: UnresolvedItemName([Ident("v")]), columns: [], replacement_for: None, in_cluster: None, in_cluster_replica: None, query: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Wildcard], from: [TableWithJoins { relation: Table { name: Name(UnresolvedItemName([Ident("t")])), alias: None }, joins: [] }], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None }, as_of: None, with_options: [MaterializedViewOption { name: FreezeOn, value: Some(UnresolvedItemName(UnresolvedItemName([Ident("pane_start")]))) }, MaterializedViewOption { name: FreezeAfter, value: Some(Value(String("90s"))) }] })
+
+parse-statement
 CREATE REPLACEMENT MATERIALIZED VIEW v FOR target AS SELECT * FROM t
 ----
 CREATE REPLACEMENT MATERIALIZED VIEW v FOR target AS SELECT * FROM t

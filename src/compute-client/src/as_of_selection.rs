@@ -1124,6 +1124,7 @@ mod tests {
                         MaterializedViewSinkConnection {
                             value_desc: RelationDesc::empty(),
                             storage_metadata: Default::default(),
+                            freeze: None,
                         },
                     ),
                     with_snapshot: Default::default(),

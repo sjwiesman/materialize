@@ -125,7 +125,7 @@ use futures::StreamExt;
 use mz_compute_types::dyncfgs::MV_SINK_ADVANCE_PERSIST_FRONTIERS;
 use mz_compute_types::sinks::{ComputeSinkDesc, MaterializedViewSinkConnection};
 use mz_dyncfg::ConfigSet;
-use mz_expr::MfpPlan;
+use mz_expr::{Eval, MfpPlan, MirScalarExpr};
 use mz_ore::cast::CastFrom;
 use mz_persist_client::batch::{Batch, ProtoBatch};
 use mz_persist_client::cache::PersistClientCache;
@@ -134,12 +134,13 @@ use mz_persist_client::operators::shard_source::{ErrorHandler, SnapshotMode};
 use mz_persist_client::write::WriteHandle;
 use mz_persist_client::{Diagnostics, PersistClient};
 use mz_persist_types::codec_impls::UnitSchema;
-use mz_repr::{Diff, GlobalId, Row, Timestamp};
+use mz_repr::{Datum, DatumVec, Diff, GlobalId, Row, RowArena, Timestamp};
 use mz_storage_types::StorageDiff;
 use mz_storage_types::controller::CollectionMetadata;
 use mz_storage_types::sources::SourceData;
 use mz_timely_util::builder_async::PressOnDropButton;
 use mz_timely_util::builder_async::{Event, OperatorBuilder};
+use mz_timely_util::operator::StreamExt as _;
 use mz_timely_util::probe::{Handle, ProbeNotify};
 use serde::{Deserialize, Serialize};
 use timely::PartialOrder;
@@ -198,6 +199,20 @@ impl<'scope> SinkRender<'scope> for MaterializedViewSinkConnection<CollectionMet
 
         let read_only_rx = collection_state.read_only_rx.clone();
 
+        let freeze = match &self.freeze {
+            Some(spec) => {
+                let freeze = SinkFreeze {
+                    mfp: spec.mfp_plan(&self.value_desc),
+                    freeze_time: spec.freeze_time(&self.value_desc),
+                };
+                let (oks, freeze_errs) = apply_mfp_plan(ok_collection, freeze.mfp.clone());
+                ok_collection = oks;
+                err_collection = err_collection.concat(freeze_errs);
+                Some(freeze)
+            }
+            None => None,
+        };
+
         let token = persist_sink(
             sink_id,
             &self.storage_metadata,
@@ -207,10 +222,47 @@ impl<'scope> SinkRender<'scope> for MaterializedViewSinkConnection<CollectionMet
             compute_state,
             start_signal,
             read_only_rx,
-            None,
+            freeze,
         );
         Some(token)
     }
+}
+
+/// Per-pane freezing of a materialized view sink, derived from a [`FreezeSpec`].
+///
+/// The sink applies `mfp` to both the desired and the persisted rows, so a row's retraction
+/// at its freeze time appears on both sides and cancels. That alone does not keep the row: a
+/// row inserted and frozen within one batch has no persisted counterpart yet, and the
+/// correction would write its retraction. The `write` operator therefore also drops every
+/// update at or beyond its row's `freeze_time`.
+///
+/// [`FreezeSpec`]: mz_compute_types::sinks::FreezeSpec
+pub(super) struct SinkFreeze {
+    mfp: MfpPlan,
+    freeze_time: MirScalarExpr,
+}
+
+/// Applies `mfp` to `oks`, returning the resulting rows and the errors raised evaluating it.
+fn apply_mfp_plan<'s>(
+    oks: VecCollection<'s, Timestamp, Row, Diff>,
+    mfp: MfpPlan,
+) -> (
+    VecCollection<'s, Timestamp, Row, Diff>,
+    VecCollection<'s, Timestamp, DataflowErrorSer, Diff>,
+) {
+    let mut datum_vec = DatumVec::new();
+    let mut row_builder = Row::default();
+    type CB<C> = CapacityContainerBuilder<C>;
+    let (oks, errs) = oks.inner.flat_map_fallible::<CB<_>, CB<_>, _, _, _, _>(
+        "ApplyMfpPlan",
+        move |(row, time, diff)| {
+            let arena = RowArena::new();
+            let mut datums = datum_vec.borrow_with(&row);
+            mfp.evaluate(&mut datums, &arena, time, diff, |_| true, &mut row_builder)
+                .collect::<Vec<_>>()
+        },
+    );
+    (oks.as_collection(), errs.as_collection())
 }
 
 /// Type of the `desired` stream, split into `Ok` and `Err` streams.
@@ -236,8 +288,7 @@ pub(super) type SharedSinkFrontier = Rc<RefCell<Antichain<Timestamp>>>;
 
 /// Renders an MV sink writing the given desired collection into the `target` persist collection.
 ///
-/// `read_back_mfp`, if supplied, is applied to the rows the sink reads back from `target`
-/// before they are compared against the desired collection.
+/// `freeze`, if supplied, must already have been applied to `ok_collection`.
 pub(super) fn persist_sink<'s>(
     sink_id: GlobalId,
     target: &CollectionMetadata,
@@ -247,11 +298,14 @@ pub(super) fn persist_sink<'s>(
     compute_state: &mut ComputeState,
     start_signal: StartSignal,
     read_only_rx: watch::Receiver<bool>,
-    read_back_mfp: Option<MfpPlan>,
+    freeze: Option<SinkFreeze>,
 ) -> Rc<dyn Any>
 where
 {
-    if mz_compute_types::dyncfgs::ENABLE_SYNC_MV_SINK.get(&compute_state.worker_config) {
+    // TODO: Support freezing in the sync sink, which writes from a blocking thread.
+    if freeze.is_none()
+        && mz_compute_types::dyncfgs::ENABLE_SYNC_MV_SINK.get(&compute_state.worker_config)
+    {
         return materialized_view_v2::persist_sink(
             sink_id,
             target,
@@ -261,7 +315,6 @@ where
             compute_state,
             start_signal,
             read_only_rx,
-            read_back_mfp,
         );
     }
 
@@ -275,7 +328,7 @@ where
         target.clone(),
         compute_state,
         start_signal,
-        read_back_mfp,
+        freeze.as_ref().map(|f| f.mfp.clone()),
     );
 
     let persist_api = PersistApi {
@@ -302,6 +355,7 @@ where
         descs.clone(),
         read_only_rx,
         Rc::clone(&compute_state.worker_config),
+        freeze.map(|f| f.freeze_time),
     );
 
     let append_token = append::render(sink_id, persist_api, descs, batches);
@@ -802,6 +856,7 @@ mod write {
         descs: DescsStream<'s>,
         mut read_only_rx: watch::Receiver<bool>,
         worker_config: Rc<ConfigSet>,
+        freeze_time: Option<MirScalarExpr>,
     ) -> (BatchesStream<'s>, PressOnDropButton) {
         let scope = desired.ok.scope();
         let worker_id = scope.index();
@@ -862,6 +917,7 @@ mod write {
                 as_of,
                 read_only,
                 &worker_config,
+                freeze_time,
             );
             let mut correction_logger = correction_logger;
 
@@ -990,6 +1046,9 @@ mod write {
         /// batches, so the batch-write path never sweeps `consolidate_before(upper)` forward; the
         /// forced consolidation stands in for it and is re-armed as long as this holds.
         read_only: bool,
+        /// If set, updates at or beyond the time this expression yields for their row are not
+        /// written. See [`SinkFreeze`].
+        freeze_time: Option<MirScalarExpr>,
     }
 
     impl State {
@@ -1002,6 +1061,7 @@ mod write {
             as_of: Antichain<Timestamp>,
             read_only: bool,
             worker_config: &ConfigSet,
+            freeze_time: Option<MirScalarExpr>,
         ) -> Self {
             let worker_metrics = metrics.for_worker(worker_id);
 
@@ -1027,6 +1087,7 @@ mod write {
                 batch_description: None,
                 force_consolidation_after,
                 read_only,
+                freeze_time,
             };
 
             // Immediately advance the persist frontier tracking to the `as_of`.
@@ -1176,6 +1237,22 @@ mod write {
 
             let ok_updates = self.corrections.ok.updates_before(&desc.upper);
             let err_updates = self.corrections.err.updates_before(&desc.upper);
+
+            let freeze_time = self.freeze_time.as_ref();
+            let mut datum_vec = DatumVec::new();
+            let ok_updates = ok_updates.filter(move |(d, t, _)| match freeze_time {
+                Some(expr) => {
+                    let arena = RowArena::new();
+                    let datums = datum_vec.borrow_with(d);
+                    // A row whose freeze time fails to evaluate was also dropped by the
+                    // freeze filter on both inputs, so it cannot reach this point.
+                    match expr.eval(&datums, &arena) {
+                        Ok(Datum::MzTimestamp(frozen)) => *t < frozen,
+                        _ => true,
+                    }
+                }
+                None => true,
+            });
 
             let oks = ok_updates.map(|(d, t, r)| ((SourceData(Ok(d)), ()), t, r.into_inner()));
             let errs = err_updates

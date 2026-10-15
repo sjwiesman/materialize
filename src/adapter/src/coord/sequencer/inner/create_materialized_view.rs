@@ -435,6 +435,7 @@ impl Coordinator {
                     cluster_id,
                     non_null_assertions,
                     refresh_schedule,
+                    freeze,
                     ..
                 },
             ..
@@ -467,6 +468,7 @@ impl Coordinator {
             column_names.clone(),
             non_null_assertions.clone(),
             refresh_schedule.clone(),
+            freeze.clone(),
             debug_name,
             optimizer_config,
             self.optimizer_metrics(),
@@ -583,6 +585,7 @@ impl Coordinator {
                             non_null_assertions,
                             compaction_window,
                             refresh_schedule,
+                            freeze,
                             ..
                         },
                     drop_ids,
@@ -629,8 +632,12 @@ impl Coordinator {
             &read_holds_owned
         };
 
-        let (dataflow_as_of, storage_as_of, until) =
-            self.select_timestamps(id_bundle, refresh_schedule.as_ref(), read_holds)?;
+        let (dataflow_as_of, storage_as_of, until) = self.select_timestamps(
+            id_bundle,
+            refresh_schedule.as_ref(),
+            freeze.is_some(),
+            read_holds,
+        )?;
 
         tracing::info!(
             dataflow_as_of = ?dataflow_as_of,
@@ -691,6 +698,7 @@ impl Coordinator {
                     non_null_assertions,
                     custom_logical_compaction_window: compaction_window,
                     refresh_schedule: refresh_schedule.clone(),
+                    freeze,
                     initial_as_of: Some(initial_as_of.clone()),
                     optimized_plan: None,
                     physical_plan: None,
@@ -854,6 +862,7 @@ impl Coordinator {
         &self,
         id_bundle: CollectionIdBundle,
         refresh_schedule: Option<&RefreshSchedule>,
+        freeze: bool,
         read_holds: &ReadHolds,
     ) -> Result<
         (
@@ -873,6 +882,15 @@ impl Coordinator {
         let least_valid_read = read_holds.least_valid_read();
         let mut dataflow_as_of = least_valid_read.clone();
         let mut storage_as_of = least_valid_read.clone();
+
+        // A frozen MV backfills the panes that closed before its `storage_as_of` from the inputs'
+        // contents at that time, and treats later updates to those panes as late. Moving the
+        // `as_of` to the latest complete time of the inputs makes the backfill include all
+        // writes that committed before the MV was created.
+        if freeze {
+            dataflow_as_of.join_assign(&self.greatest_available_read(&id_bundle));
+            storage_as_of.clone_from(&dataflow_as_of);
+        }
 
         // For MVs with non-trivial REFRESH schedules:
         // 1. it's important to set the `storage_as_of` to the first refresh. This is because we'd

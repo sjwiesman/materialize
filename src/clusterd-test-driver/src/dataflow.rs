@@ -346,6 +346,7 @@ impl DataflowBuilder {
             connection: ComputeSinkConnection::MaterializedView(MaterializedViewSinkConnection {
                 value_desc,
                 storage_metadata: (),
+                freeze: None,
             }),
             with_snapshot: true,
             up_to: Antichain::new(),
@@ -681,6 +682,9 @@ fn augment(
                 ComputeSinkConnection::MaterializedView(MaterializedViewSinkConnection {
                     value_desc: conn.value_desc,
                     storage_metadata: metadata.clone(),
+                    freeze: conn
+                        .freeze
+                        .map(|f| f.with_initial_as_of(lowered.initial_storage_as_of.as_ref())),
                 })
             }
             ComputeSinkConnection::Subscribe(conn) => ComputeSinkConnection::Subscribe(conn),

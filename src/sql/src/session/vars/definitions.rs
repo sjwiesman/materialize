@@ -2007,6 +2007,12 @@ feature_flags!(
         enable_for_item_parsing: true,
     },
     {
+        name: unsafe_enable_materialized_view_freeze,
+        desc: "the FREEZE ON and FREEZE AFTER materialized view options",
+        default: false,
+        enable_for_item_parsing: true,
+    },
+    {
         name: unsafe_enable_unorchestrated_cluster_replicas,
         desc: "unorchestrated cluster replicas",
         default: false,

@@ -36,6 +36,7 @@ use enum_kinds::EnumKind;
 use ipnet::IpNet;
 use maplit::btreeset;
 use mz_adapter_types::compaction::CompactionWindow;
+use mz_compute_types::sinks::FreezeSpec;
 use mz_controller_types::{ClusterId, ReplicaId};
 use mz_expr::{CollectionPlan, ColumnOrder, MapFilterProject, MirScalarExpr, RowSetFinishing};
 use mz_ore::now::{self, NOW_ZERO};
@@ -1980,6 +1981,8 @@ pub struct MaterializedView {
     pub compaction_window: Option<CompactionWindow>,
     pub refresh_schedule: Option<RefreshSchedule>,
     pub as_of: Option<Timestamp>,
+    /// Set by the `FREEZE ON` and `FREEZE AFTER` options. `initial_as_of` is left unset.
+    pub freeze: Option<FreezeSpec>,
 }
 
 #[derive(Clone, Debug)]

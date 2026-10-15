@@ -23,6 +23,7 @@ use itertools::Itertools;
 use mz_adapter_types::compaction::{CompactionWindow, DEFAULT_LOGICAL_COMPACTION_WINDOW_DURATION};
 use mz_arrow_util::builder::ArrowBuilder;
 use mz_auth::password::Password;
+use mz_compute_types::sinks::FreezeSpec;
 use mz_controller_types::{ClusterId, DEFAULT_REPLICA_LOGGING_INTERVAL, ReplicaId};
 use mz_expr::{CollectionPlan, UnmaterializableFunc};
 use mz_interchange::avro::{AvroSchemaGenerator, DocTarget};
@@ -2908,6 +2909,8 @@ pub fn plan_create_materialized_view(
         partition_by,
         retain_history,
         refresh,
+        freeze_on,
+        freeze_after,
         seen: _,
     }: MaterializedViewOptionExtracted = stmt.with_options.try_into()?;
 
@@ -3041,6 +3044,11 @@ pub fn plan_create_materialized_view(
             Some(refresh_schedule)
         }
     };
+
+    let freeze = plan_freeze_options(scx, &desc, freeze_on, freeze_after)?;
+    if freeze.is_some() && refresh_schedule.is_some() {
+        sql_bail!("FREEZE ON is not compatible with REFRESH options");
+    }
 
     let as_of = stmt.as_of.map(Timestamp::from);
     let compaction_window = plan_retain_history_option(scx, retain_history)?;
@@ -3204,6 +3212,7 @@ pub fn plan_create_materialized_view(
             compaction_window,
             refresh_schedule,
             as_of,
+            freeze,
         },
         replace,
         drop_ids,
@@ -3217,8 +3226,52 @@ generate_extracted_config!(
     (AssertNotNull, Ident, AllowMultiple),
     (PartitionBy, Vec<Ident>),
     (RetainHistory, OptionalDuration),
+    (FreezeOn, Ident),
+    (FreezeAfter, Duration),
     (Refresh, RefreshOptionValue<Aug>, AllowMultiple)
 );
+
+/// Plans the `FREEZE ON <column>` and `FREEZE AFTER <interval>` options, which must appear
+/// together.
+fn plan_freeze_options(
+    scx: &StatementContext,
+    desc: &RelationDesc,
+    freeze_on: Option<Ident>,
+    freeze_after: Option<Duration>,
+) -> Result<Option<FreezeSpec>, PlanError> {
+    let (freeze_on, freeze_after) = match (freeze_on, freeze_after) {
+        (None, None) => return Ok(None),
+        (Some(on), Some(after)) => (on, after),
+        _ => sql_bail!("FREEZE ON and FREEZE AFTER must be specified together"),
+    };
+    scx.require_feature_flag(&vars::UNSAFE_ENABLE_MATERIALIZED_VIEW_FREEZE)?;
+
+    let column_name = normalize::column_name(freeze_on);
+    let Some((pane_column, column_type)) = desc.get_by_name(&column_name) else {
+        sql_bail!(
+            "column {} in FREEZE ON option not found",
+            column_name.quoted()
+        );
+    };
+    if !matches!(
+        column_type.scalar_type,
+        SqlScalarType::Timestamp { .. } | SqlScalarType::TimestampTz { .. }
+    ) {
+        sql_bail!(
+            "FREEZE ON column {} must have type timestamp or timestamp with time zone",
+            column_name.quoted()
+        );
+    }
+    if freeze_after.is_zero() || freeze_after.subsec_nanos() % 1_000_000 != 0 {
+        sql_bail!("FREEZE AFTER must be a positive whole number of milliseconds");
+    }
+
+    Ok(Some(FreezeSpec {
+        pane_column,
+        close_after: freeze_after,
+        initial_as_of: None,
+    }))
+}
 
 pub fn describe_create_sink(
     _: &StatementContext,

@@ -145,6 +145,7 @@ def get_minimal_system_parameters(
         "enable_worker_core_affinity": "true",
         "grpc_client_http2_keep_alive_timeout": "5s",
         "ore_overflowing_behavior": "panic",
+        "unsafe_enable_materialized_view_freeze": "true",
         "unsafe_enable_table_keys": "true",
         # Keep the 0dt stability soak out of the critical path for tests. The
         # production default is much higher. Dedicated workflows override this.

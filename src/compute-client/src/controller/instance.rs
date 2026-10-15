@@ -1555,6 +1555,7 @@ impl Instance {
         }
 
         let mut sink_exports = BTreeMap::new();
+        let initial_storage_as_of = dataflow.initial_storage_as_of.clone();
         for (id, se) in dataflow.sink_exports {
             let connection = match se.connection {
                 ComputeSinkConnection::MaterializedView(conn) => {
@@ -1566,6 +1567,9 @@ impl Instance {
                     let conn = MaterializedViewSinkConnection {
                         value_desc: conn.value_desc,
                         storage_metadata: metadata,
+                        freeze: conn
+                            .freeze
+                            .map(|f| f.with_initial_as_of(initial_storage_as_of.as_ref())),
                     };
                     ComputeSinkConnection::MaterializedView(conn)
                 }

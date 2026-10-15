@@ -4272,7 +4272,7 @@ impl<'a> Parser<'a> {
     fn parse_materialized_view_option_name(
         &mut self,
     ) -> Result<MaterializedViewOptionName, ParserError> {
-        let option = self.expect_one_of_keywords(&[ASSERT, PARTITION, RETAIN, REFRESH])?;
+        let option = self.expect_one_of_keywords(&[ASSERT, PARTITION, RETAIN, REFRESH, FREEZE])?;
         let name = match option {
             ASSERT => {
                 self.expect_keywords(&[NOT, NULL])?;
@@ -4287,6 +4287,11 @@ impl<'a> Parser<'a> {
                 MaterializedViewOptionName::RetainHistory
             }
             REFRESH => MaterializedViewOptionName::Refresh,
+            FREEZE => match self.expect_one_of_keywords(&[ON, AFTER])? {
+                ON => MaterializedViewOptionName::FreezeOn,
+                AFTER => MaterializedViewOptionName::FreezeAfter,
+                _ => unreachable!(),
+            },
             _ => unreachable!(),
         };
         Ok(name)

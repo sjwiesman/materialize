@@ -205,6 +205,7 @@ For
 Foreign
 Format
 Forward
+Freeze
 From
 Full
 Fullname

@@ -23,6 +23,7 @@ use mz_adapter_types::connection::ConnectionId;
 use mz_compute_client::logging::LogVariant;
 use mz_compute_types::dataflows::DataflowDescription;
 use mz_compute_types::plan::LirRelationExpr as ComputePlan;
+use mz_compute_types::sinks::FreezeSpec;
 use mz_controller::clusters::{ClusterRole, ClusterStatus, ReplicaConfig, ReplicaLogging};
 use mz_controller_types::{ClusterId, ReplicaId};
 use mz_expr::{MirScalarExpr, OptimizedMirRelationExpr};
@@ -1441,6 +1442,8 @@ pub struct MaterializedView {
     pub custom_logical_compaction_window: Option<CompactionWindow>,
     /// Schedule to refresh this materialized view, e.g. set via `REFRESH EVERY` option.
     pub refresh_schedule: Option<RefreshSchedule>,
+    /// Per-pane freezing of the output, set via the `FREEZE ON` and `FREEZE AFTER` options.
+    pub freeze: Option<FreezeSpec>,
     /// The initial `as_of` of the storage collection associated with the materialized view.
     ///
     /// Note: This doesn't change upon restarts.
@@ -1559,6 +1562,7 @@ impl MaterializedView {
             non_null_assertions: replacement.non_null_assertions,
             custom_logical_compaction_window: replacement.custom_logical_compaction_window,
             refresh_schedule: replacement.refresh_schedule,
+            freeze: replacement.freeze,
             initial_as_of: replacement.initial_as_of,
             optimized_plan: replacement.optimized_plan,
             physical_plan: replacement.physical_plan,

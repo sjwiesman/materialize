@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mz_compute_types::plan::LirRelationExpr;
+use mz_compute_types::sinks::FreezeSpec;
 use mz_compute_types::sinks::{
     ComputeSinkConnection, ComputeSinkDesc, MaterializedViewSinkConnection,
 };
@@ -71,6 +72,8 @@ pub struct Optimizer {
     non_null_assertions: Vec<usize>,
     /// Refresh schedule, e.g., `REFRESH EVERY '1 day'`
     refresh_schedule: Option<RefreshSchedule>,
+    /// Per-pane freezing of the output, e.g. `FREEZE ON pane_start`.
+    freeze: Option<FreezeSpec>,
     /// A human-readable name exposed internally (useful for debugging).
     debug_name: String,
     /// Optimizer config.
@@ -90,6 +93,7 @@ impl Optimizer {
         column_names: Vec<ColumnName>,
         non_null_assertions: Vec<usize>,
         refresh_schedule: Option<RefreshSchedule>,
+        freeze: Option<FreezeSpec>,
         debug_name: String,
         config: OptimizerConfig,
         metrics: OptimizerMetrics,
@@ -103,6 +107,7 @@ impl Optimizer {
             column_names,
             non_null_assertions,
             refresh_schedule,
+            freeze,
             debug_name,
             config,
             metrics,
@@ -254,6 +259,7 @@ impl Optimize<LocalMirPlan> for Optimizer {
             connection: ComputeSinkConnection::MaterializedView(MaterializedViewSinkConnection {
                 value_desc: rel_desc,
                 storage_metadata: (),
+                freeze: self.freeze.clone(),
             }),
             with_snapshot: true,
             up_to: Antichain::default(),

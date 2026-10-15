@@ -36,6 +36,10 @@ pub enum MaterializedViewOptionName {
     RetainHistory,
     /// The `REFRESH [=] ...` option.
     Refresh,
+    /// The `FREEZE ON [=] <ident>` option.
+    FreezeOn,
+    /// The `FREEZE AFTER [=] <interval>` option.
+    FreezeAfter,
 }
 
 impl AstDisplay for MaterializedViewOptionName {
@@ -45,6 +49,8 @@ impl AstDisplay for MaterializedViewOptionName {
             MaterializedViewOptionName::PartitionBy => f.write_str("PARTITION BY"),
             MaterializedViewOptionName::RetainHistory => f.write_str("RETAIN HISTORY"),
             MaterializedViewOptionName::Refresh => f.write_str("REFRESH"),
+            MaterializedViewOptionName::FreezeOn => f.write_str("FREEZE ON"),
+            MaterializedViewOptionName::FreezeAfter => f.write_str("FREEZE AFTER"),
         }
     }
 }
@@ -59,7 +65,9 @@ impl WithOptionName for MaterializedViewOptionName {
         match self {
             MaterializedViewOptionName::AssertNotNull
             | MaterializedViewOptionName::RetainHistory
-            | MaterializedViewOptionName::Refresh => false,
+            | MaterializedViewOptionName::Refresh
+            | MaterializedViewOptionName::FreezeOn
+            | MaterializedViewOptionName::FreezeAfter => false,
             // The value is an arbitrary user expression/literal that may embed
             // sensitive data, so redact it (mirrors `KafkaSinkConfigOptionName`).
             MaterializedViewOptionName::PartitionBy => true,

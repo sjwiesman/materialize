@@ -54,7 +54,6 @@ use std::sync::Arc;
 use differential_dataflow::{Hashable, VecCollection};
 use mz_compute_types::dyncfgs::MV_SINK_ADVANCE_PERSIST_FRONTIERS;
 use mz_dyncfg::ConfigSet;
-use mz_expr::MfpPlan;
 use mz_ore::cast::CastFrom;
 use mz_persist_client::batch::{Batch, ProtoBatch};
 use mz_persist_client::write::WriteHandle;
@@ -93,7 +92,6 @@ pub(super) fn persist_sink<'s>(
     compute_state: &mut ComputeState,
     start_signal: StartSignal,
     read_only_rx: watch::Receiver<bool>,
-    read_back_mfp: Option<MfpPlan>,
 ) -> Rc<dyn Any> {
     let scope = ok_collection.scope();
     let desired = OkErr::new(ok_collection.inner, err_collection.inner);
@@ -105,7 +103,7 @@ pub(super) fn persist_sink<'s>(
         target.clone(),
         compute_state,
         start_signal,
-        read_back_mfp,
+        None,
     );
 
     let persist_api = PersistApi {
