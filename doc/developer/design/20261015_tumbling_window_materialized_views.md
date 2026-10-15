@@ -302,8 +302,11 @@ does not depend on it: the sink alone drops every change to a closed pane.
 It does need `I` as a literal in the optimized plan, while `I` is selected
 only after `CREATE MATERIALIZED VIEW` optimizes the plan
 (`create_materialized_view_optimize` and `create_materialized_view_finish`).
-Frozen views therefore select `I` before optimizing. On bootstrap, `I` comes
-from the `AS OF` in `create_sql`.
+Frozen views therefore select `I` during purification, under read holds that
+the sequencer reuses, and record it as the statement's `AS OF`
+(`resolve_initial_as_of_for_frozen_materialized_view` in
+`src/adapter/src/coord/command_handler.rs`). On bootstrap, `I` comes from the
+`AS OF` in `create_sql`.
 
 **Body.** Several panes can be open at once, for example panes still inside
 their close delay or panes for future-dated events. The body is lowered
@@ -457,10 +460,15 @@ surface exists. It proceeds in three milestones.
    every input row, and closed panes survive a restart whose rehydration no
    longer produces them. `test/testdrive/materialized-view-freeze.td` covers
    the same cases except the restart.
-2. **Input-side predicate.** Select `I` before optimizing, inline it into the
-   input-side predicate, and check that arrangement sizes stop growing as
-   panes close and that compacting inputs past closed panes leaves the output
-   unchanged.
+2. **Input-side predicate.** Select `I` during purification and filter the
+   view's output by the freeze predicate, which the optimizer pushes below
+   the `Reduce` and into the source read. This milestone is implemented. With
+   50,000 rows in one pane under `count(DISTINCT v)`, the frozen view's
+   arrangements held 150,002 records while the pane was open and 0 after it
+   closed, against 100,002 throughout for the same view without `FREEZE`. The
+   extra 50,000 are the pending close-time retractions. After a restart with
+   the closed pane's input rows still present, the frozen view kept its output
+   and rehydrated with 0 records.
 3. **SQL surface.** `TUMBLE ... PROCESS`, `mz_window_start()` and
    `mz_window_end()`, lowered to the milestone 2 form. Diff `EXPLAIN` for the
    `LATERAL` form against the `GROUP BY window_start` form to check that
@@ -477,6 +485,57 @@ with sqllogictest coverage of scoping rules, errors, and `EXPLAIN`, then a
 platform check where a pane closes across a restart and an upgrade and must
 stay frozen, the 0dt mzcompose suite, and parallel-workload coverage of DDL
 churn and replica add and remove.
+
+## Productionization backlog
+
+Shortcuts taken in the prototype, to resolve before the feature leaves unsafe
+mode. This list grows as the prototype does. Open design questions live under
+Open questions, not here.
+
+- **The freeze predicate has two definitions.** The planner builds it in HIR
+  (`freeze_filter` in `src/sql/src/plan/statement/ddl.rs`) and the sink in MIR
+  (`FreezeSpec::freeze_time` and `FreezeSpec::mfp_plan` in
+  `src/compute-types/src/sinks.rs`). If they disagree, the input-side
+  retraction reaches the sink before it freezes the row, and the pane is
+  deleted. Derive both from one definition.
+- **The sync sink does not support freezing.** `materialized_view_v2.rs`
+  writes from a blocking thread and has no write filter, so frozen views
+  ignore `ENABLE_SYNC_MV_SINK` and always render the async sink.
+- **`FreezeSpec::initial_as_of` is an `Option` filled in by the controller.**
+  Rendering panics if it is unset. A type that distinguishes the optimizer's
+  spec from the controller's would make that state unrepresentable, the way
+  `MaterializedViewSinkConnection<S>` does for storage metadata.
+- **`persist_sink` requires its caller to have applied the freeze
+  predicate to the desired rows.** Applying it inside the sink would keep the
+  desired filter, the read-back filter, and the write filter in one place.
+- **The write filter evaluates the freeze time per update.** Its cost on
+  large batches is unmeasured. An evaluation error writes the update,
+  relying on the desired-side filter having already routed that row to the
+  error stream.
+- **Replacements are untested and likely wrong.** Purification chooses a new
+  `I` for a `CREATE REPLACEMENT MATERIALIZED VIEW`. Replacements must use the
+  target's `I`, or the replacement's backfill would rewrite closed panes.
+- **`I` is the greatest available read, not a linearized timestamp.** For
+  tables this includes every write acknowledged before the statement. For
+  sources it is whatever the source had ingested. A view whose inputs are not
+  readable at `I` when the dataflow is installed fails with an internal error,
+  which the purification read holds should prevent.
+- **The prototype surface is `FREEZE ON` and `FREEZE AFTER`.** The options
+  accept any `timestamp` or `timestamptz` column without checking that it
+  holds a pane start, and are gated by the unsafe flag
+  `unsafe_enable_materialized_view_freeze`. `TUMBLE ... PROCESS` replaces
+  them, behind a dyncfg whose production default is a product decision.
+- **`EXPLAIN` shows the input-side predicate with `I` inlined, and does not
+  show the sink's freeze.** `I` makes the plan text differ per view, which
+  matters for plan snapshot tests. The sink's freeze needs its own line.
+- **Open panes cost about one extra record per input row** for the pending
+  close-time retraction. Measure whether temporal bucketing should apply.
+- **Test coverage is local.** The testdrive covers the sink semantics without
+  a restart, and was validated with an equivalent psql script, not through
+  mzcompose. Restart, state release, the same-batch race, a sink lagging past
+  several closes, and a replica added after creation need deterministic
+  coverage with `clusterd-test-driver`, plus a platform check for restarts
+  and upgrades.
 
 ## Alternatives
 
