@@ -125,6 +125,7 @@ use futures::StreamExt;
 use mz_compute_types::dyncfgs::MV_SINK_ADVANCE_PERSIST_FRONTIERS;
 use mz_compute_types::sinks::{ComputeSinkDesc, MaterializedViewSinkConnection};
 use mz_dyncfg::ConfigSet;
+use mz_expr::MfpPlan;
 use mz_ore::cast::CastFrom;
 use mz_persist_client::batch::{Batch, ProtoBatch};
 use mz_persist_client::cache::PersistClientCache;
@@ -206,6 +207,7 @@ impl<'scope> SinkRender<'scope> for MaterializedViewSinkConnection<CollectionMet
             compute_state,
             start_signal,
             read_only_rx,
+            None,
         );
         Some(token)
     }
@@ -233,6 +235,9 @@ pub(super) type BatchesStream<'s> = StreamVec<'s, Timestamp, (BatchDescription, 
 pub(super) type SharedSinkFrontier = Rc<RefCell<Antichain<Timestamp>>>;
 
 /// Renders an MV sink writing the given desired collection into the `target` persist collection.
+///
+/// `read_back_mfp`, if supplied, is applied to the rows the sink reads back from `target`
+/// before they are compared against the desired collection.
 pub(super) fn persist_sink<'s>(
     sink_id: GlobalId,
     target: &CollectionMetadata,
@@ -242,6 +247,7 @@ pub(super) fn persist_sink<'s>(
     compute_state: &mut ComputeState,
     start_signal: StartSignal,
     read_only_rx: watch::Receiver<bool>,
+    read_back_mfp: Option<MfpPlan>,
 ) -> Rc<dyn Any>
 where
 {
@@ -255,6 +261,7 @@ where
             compute_state,
             start_signal,
             read_only_rx,
+            read_back_mfp,
         );
     }
 
@@ -262,8 +269,14 @@ where
     let desired = OkErr::new(ok_collection.inner, err_collection.inner);
 
     // Read back the persist shard.
-    let (persist, persist_token) =
-        persist_source(scope, sink_id, target.clone(), compute_state, start_signal);
+    let (persist, persist_token) = persist_source(
+        scope,
+        sink_id,
+        target.clone(),
+        compute_state,
+        start_signal,
+        read_back_mfp,
+    );
 
     let persist_api = PersistApi {
         persist_clients: Arc::clone(&compute_state.persist_clients),
@@ -393,6 +406,7 @@ pub(super) fn persist_source<'s>(
     target: CollectionMetadata,
     compute_state: &ComputeState,
     start_signal: StartSignal,
+    mut map_filter_project: Option<MfpPlan>,
 ) -> (PersistStreams<'s>, Vec<PressOnDropButton>) {
     // There is no guarantee that the sink as-of is beyond the persist shard's since. If it isn't,
     // instantiating a `persist_source` with it would panic. So instead we leave it to
@@ -407,7 +421,6 @@ pub(super) fn persist_source<'s>(
     let as_of = None;
 
     let until = Antichain::new();
-    let map_filter_project = None;
 
     let (ok_stream, err_stream, token) = mz_storage_operators::persist_source::persist_source::<
         DataflowErrorSer,
@@ -422,11 +435,14 @@ pub(super) fn persist_source<'s>(
         as_of,
         SnapshotMode::Include,
         until,
-        map_filter_project,
+        map_filter_project.as_mut(),
         compute_state.dataflow_max_inflight_bytes(),
         start_signal.into_send_future(),
         ErrorHandler::Halt("compute persist sink"),
     );
+
+    // The sink has no fallback for any part of the MFP that `persist_source` leaves unapplied.
+    assert!(map_filter_project.map_or(true, |mfp| mfp.is_identity()));
 
     let streams = OkErr::new(ok_stream, err_stream);
     (streams, token)
