@@ -1,0 +1,578 @@
+# Tumbling-window materialized views
+
+- Associated:
+  - Continual tasks, removed in #35967 (design history in 9d0a7c3c6f^)
+  - Recorders design, #36909 (closed), and `CHANGES` table function, #36869 (closed)
+  - `doc/developer/design/20210426_temporal_filters.md`
+  - `doc/developer/design/20231027_refresh_mvs.md`
+
+## The Problem
+
+Users want to bucket a stream into fixed, non-overlapping time windows on an
+event-time column and compute an arbitrary transformation per window. Once a
+window is over, its result should be final. It should not change when inputs
+change later, it should not cost memory to maintain, and it should not be
+recomputed when the dataflow restarts.
+
+Usage-based billing is a typical case. Usage is priced per hour against the
+account's plan and the price book. Customers want to see the current hour's
+charge as it accrues, but once the hour is closed its invoice line must not
+move when prices change, plans change, or accounts are deleted.
+
+Materialize can approximate this today with the "periodically emit results"
+pattern in `doc/user/content/transform-data/patterns/temporal-filters.md`,
+which bins rows with `date_bin` and gates them with `mz_now()` predicates.
+That pattern has three problems.
+
+1. Every materialized view is a function of the current contents of its
+   inputs. The self-correcting persist sink recomputes the full desired
+   contents at the as_of and diffs them against the full output shard
+   (`src/compute/src/sink/materialized_view.rs`). Closed windows are
+   recomputed on every rehydration.
+2. Because closed windows must stay recomputable, the input data for every
+   window ever emitted must be retained in the inputs, and the temporal filter
+   must keep admitting it.
+3. Any change to the input for a past window, such as a CDC update or delete,
+   revises the result for that window.
+
+Two earlier efforts attacked the broader problem of writing results down and
+never recomputing them. Continual tasks ran a SQL body whenever an input
+changed, wrote its output once with first-writer-wins `compare_and_append`,
+and were removed after stalling on consistency problems caused by reading
+inputs at `T-1` and references at `T`. Recorders proposed recording
+non-deterministic decisions into a user-writable table and depended on an
+unbuilt OCC commit path through txn-wal. Both targeted a more general problem
+than this one. Tumbling-window finalization is listed as a use case in the
+recorders design.
+
+## Success Criteria
+
+- A user can define a materialized view over a tumbling window on an
+  event-time column, with an arbitrary SQL transformation applied per window
+  pane.
+- Results for an open pane update eagerly as inputs change, including updates
+  and retractions.
+- When a pane closes, its result is frozen. Later input changes do not affect
+  it.
+- When a pane closes, the dataflow releases all internal state for it.
+- On restart, closed panes are not recomputed, and the input history backing
+  them does not need to be retained.
+- On creation, the view bootstraps all previous panes from the inputs'
+  current contents.
+- Users can tolerate ingestion lag by delaying when panes close.
+- The output is a deterministic function of the input's history and the
+  view's definition, so that replicas agree and read-only (0dt) environments
+  hydrate without coordination.
+
+## Out of Scope
+
+- **Late data beyond the close delay.** A row whose pane has already closed
+  when it arrives is dropped. This design does not add side outputs or
+  metrics for dropped rows.
+- **Output retention.** Closed panes accumulate in the output indefinitely.
+- **Other window types.** Hopping windows are likely a straightforward
+  extension, and should follow `date_bin_hopping` and Flink's `HOP` for
+  naming and argument order. Session windows close on data, not on time, and
+  are not addressed.
+- **Calendar windows.** `SIZE` is a fixed duration. Months, years, and
+  DST-aware days are not supported, matching `date_bin`.
+- **User DML on the output.** The output is owned by the view's sink.
+- **Windowed objects other than materialized views.** Frozen results must be
+  durable, so the construct is only valid in `CREATE MATERIALIZED VIEW`.
+
+## Solution Proposal
+
+### SQL surface
+
+The surface is a polymorphic table function in the style of Flink's windowing
+table-valued functions, extended with a body that is scoped to a single pane.
+
+```sql
+CREATE MATERIALIZED VIEW hourly_invoice_lines AS
+SELECT hour_start, account_id, plan, credits, charge
+FROM TUMBLE(
+  TABLE usage_events AS u,
+  DESCRIPTOR(occurred_at),
+  SIZE => INTERVAL '1 hour',
+  CLOSE DELAY => INTERVAL '5 minutes'
+) PROCESS (
+  SELECT
+    mz_window_start() AS hour_start,
+    u.account_id,
+    a.plan,
+    sum(u.credits) AS credits,
+    sum(u.credits) * p.price_per_credit AS charge
+  FROM u
+  LEFT JOIN accounts a ON a.id = u.account_id
+  LEFT JOIN price_book p ON p.plan = a.plan
+  GROUP BY u.account_id, a.plan, p.price_per_credit
+);
+```
+
+Arguments:
+
+- `TABLE <relation> [AS <alias>]`: the windowed input.
+- `DESCRIPTOR(<column>)`: the event-time column, of type `timestamp` or
+  `timestamptz`.
+- `SIZE`: the pane length. A fixed duration that is a whole number of
+  milliseconds.
+- `OFFSET` (optional, default zero): shifts pane boundaries away from the Unix
+  epoch, so that daily panes can align to a fixed UTC offset. A whole number
+  of milliseconds.
+- `CLOSE DELAY` (optional, default zero): delays each pane's close, so
+  that rows arriving shortly after the pane's end are still included. A whole
+  number of milliseconds.
+
+`=>` named arguments and `DESCRIPTOR` are new grammar for Materialize.
+`CLOSE DELAY` is a two-keyword argument name, so `TUMBLE`'s argument names
+are parsed as keywords rather than identifiers. `PROCESS` is a Materialize
+extension to the SQL:2016 polymorphic table function form. `TUMBLE` without `PROCESS` is rejected with a hint pointing at
+`date_bin` for live bucketing.
+
+Scoping rules:
+
+- The table argument's alias, here `u`, names the rows of the input that fall
+  in exactly one pane. It is visible only inside `PROCESS`. The body never
+  sees rows of other panes, so per-pane evaluation is a scoping rule, not
+  something the optimizer has to infer from a `GROUP BY window_start`.
+- Without an alias, the pane takes the input's name. `TABLE usage_events`
+  binds the pane as `usage_events` inside the body.
+- The pane binding shadows catalog objects of the same name the way a CTE
+  name does. A schema-qualified reference reaches the catalog object, which
+  means reading the whole input, not the pane.
+- Inside the body, `mz_window_start()` returns the earliest event time in the
+  current pane and `mz_window_end()` returns the pane's exclusive upper bound.
+  Both have the type of the event-time column. They let a body label,
+  prorate, or compare against its pane without recomputing `date_bin` and
+  risking a mismatch with the pane assignment. They are only valid inside
+  `PROCESS`, where they are constant for the duration of one pane's
+  evaluation.
+- The table function adds no columns of its own. A fixed name such as
+  `window_start` could shadow a real column of the input or the body, so pane
+  bounds enter the output only where the body projects them.
+
+The pane column. The sink has to know which pane every output row belongs
+to, both for rows it computes and for rows it reads back from persist. The
+body's first output column must be a bare `mz_window_start()` or
+`mz_window_end()`, under any name the user chooses. That column is the view's
+pane column, and the close time of each output row is derived from it. The
+pane column is always written out by the user, never generated by the table
+function.
+
+Restrictions on the enclosing query. The query around `TUMBLE ... PROCESS`
+may only project and filter row by row, and must keep the pane column
+unchanged as its first output column. Joins and aggregates belong inside the
+body.
+
+### Semantics
+
+Pane `p` covers the half-open event-time interval `[s_p, e_p)`, where pane
+boundaries are `k * SIZE + OFFSET` for integer `k`. `timestamp` values are
+interpreted as UTC, consistent with existing `mz_now()` comparisons.
+
+The close time of pane `p` is
+
+```
+C_p = (e_p + CLOSE DELAY) as mz_timestamp
+```
+
+Because `SIZE`, `OFFSET`, and `CLOSE DELAY` are whole milliseconds,
+`C_p` is exact. Pane membership uses the full microsecond precision of the
+event time, so a row at `e_p - 1µs` belongs to `p`.
+
+Panes close on `mz_now()`, the time at which Materialize ingested the data,
+not on a watermark derived from event times. The close delay covers the gap
+between event time and ingestion time.
+
+Let `f` be the per-pane transformation. The contents of the view at time `t`
+are the union over panes of:
+
+- `f(rows of p in input AS OF t)` if `C_p > t`, the pane is open.
+- `f(rows of p in input AS OF C_p - 1)` if `C_p <= t`, the pane is closed.
+
+The view is a function of the input's history, not of its current contents.
+Comparing it against a plain query over the same inputs will not match for
+closed panes. That departure from ordinary materialized views is what
+requires closed panes to live in persist.
+
+Consequences users need to know:
+
+- **References are read at close.** A join from the pane sees other relations
+  as of `C_p - 1`. In the example, a price change at 10:58 prices the whole
+  10:00 hour. Pricing each event at its own event time requires an
+  effective-dated price table joined on `occurred_at`.
+- **Inner joins drop rows.** An inner join to `accounts` drops usage for
+  accounts that are deleted, or whose CDC record has not arrived, before the
+  pane closes. The example uses left joins so that such usage appears with a
+  `NULL` plan and charge.
+- **Changes after close are dropped, including halves of moves.** If an upsert
+  moves a row from a closed pane to an open one, the insertion into the open
+  pane is counted and the retraction from the closed pane is dropped.
+- **Panes exist only while they have rows.** See Open questions.
+
+### Observing finality
+
+Nothing in the output changes when a pane closes, so readers need a predicate
+to distinguish final rows from live ones:
+
+```sql
+-- Final invoice lines. Each line appears exactly once, at its close.
+CREATE VIEW final_invoice_lines AS
+SELECT * FROM hourly_invoice_lines
+WHERE mz_now() >= hour_start + INTERVAL '1 hour 5 minutes';
+
+-- The live, still-changing hour.
+CREATE VIEW live_invoice_lines AS
+SELECT * FROM hourly_invoice_lines
+WHERE mz_now() < hour_start + INTERVAL '1 hour 5 minutes';
+```
+
+`final_invoice_lines` is append-only in practice and suitable for a sink to
+an invoicing system.
+
+### Lifecycle
+
+- **Create.** All panes that closed before the view's initial as_of `I` are
+  computed from `input AS OF I` and written at `I`. Backfilled panes are not a
+  replay: they include rows that would have been late, use references as of
+  `I`, and omit rows deleted before `I`.
+- **Replace.** Replacements apply going forward. Closed panes keep the
+  results produced by the body that was live when they closed, and open panes
+  are corrected to the replacement's body when it is promoted. A replacement
+  that changes `SIZE`, `OFFSET`, `CLOSE DELAY`, the windowed input, or the
+  event-time column is rejected.
+- **Drop and recreate.** The output is the only copy of closed panes once
+  input history compacts. Dropping the view loses it. Recreating backfills
+  from the inputs' current contents, which can differ from the dropped
+  view's closed panes. Users who need durable history should sink final panes
+  elsewhere.
+
+### Lowering
+
+The feature lowers onto existing machinery: a temporal filter, lateral
+decorrelation, and one filter in the persist sink. All three use a single
+freeze predicate.
+
+**The freeze predicate.** Every MV already pins its initial as_of `I` in
+`create_sql` (`src/adapter/src/coord/sequencer/inner/create_materialized_view.rs:642-661`).
+A row of pane `p` is visible at time `t` if and only if
+
+```
+mz_now() < greatest(C_p, I + 1)
+```
+
+- For panes with `C_p > I`, this is `mz_now() < C_p`. The pane is live until
+  it closes.
+- For panes with `C_p <= I`, the pane is visible at `I` and frozen at `I + 1`.
+  That is the backfill.
+
+The predicate is a single upper-bound temporal filter, so `MfpPlan` accepts
+it, `MfpPlan::evaluate` (`src/expr/src/linear.rs`) evaluates it, and persist
+filter pushdown applies to it without changes. It depends only on `I` and the
+view's definition, never on a render-time frontier. That is load-bearing:
+the controller advances `dataflow.as_of` when it compacts command history for
+reconnecting or newly added replicas
+(`src/compute-client/src/protocol/history.rs:143-174`). A predicate that read
+the render as_of would reopen panes on those replicas.
+
+`C_p` is computed by one shared function of the pane's start, used by both
+the input side and the sink. The sink applies it to the pane column, adding
+`SIZE` when the pane column holds `mz_window_start()`. If the two sides computed different close times, the
+sink would see the body's retraction before the read-back's and delete the
+pane.
+
+**Input side.** The lowering computes internal, unnamed `window_start` and
+`window_end` columns from the event-time column, then applies the freeze predicate. `MfpPlan::evaluate`
+emits each row at `max(arrival, lower bound)` and retracts it at the upper
+bound. A row that arrives at or after its upper bound is never emitted.
+
+**Body.** Several panes can be open at once, for example panes still inside
+their close delay or panes for future-dated events. The body is lowered
+as a lateral join over the distinct open panes, with the pane binding planned
+through CTE scoping in `plan_table_factor` (`src/sql/src/plan/query.rs`):
+
+```sql
+(SELECT DISTINCT window_start, window_end FROM filtered) w,
+LATERAL (<body> WITH <alias> AS (SELECT * FROM filtered WHERE window_start = w.window_start))
+```
+
+`mz_window_start()` and `mz_window_end()` in the body lower to the correlated
+references `w.window_start` and `w.window_end`, so they are by construction
+the values the pane was assigned.
+
+Decorrelation is expected to lift the pane key through joins, aggregates,
+`DISTINCT`, and TopK. This is verified as part of the prototype, see below.
+
+**Sink.** Left unchanged, the self-correcting sink would see the retraction
+wave at `C_p` and delete the pane from the output. The sink applies the freeze
+predicate to both the desired stream and the persist read-back before they
+enter the correction buffer. At `C_p` both sides retract pane `p`, the
+correction is zero, and the persisted rows remain.
+
+- `MaterializedViewSinkConnection` (`src/compute-types/src/sinks.rs`) gains a
+  `freeze: Option<MapFilterProject>` built at planning time with `I` as a
+  literal, alongside the precedent of `refresh_schedule` and
+  `non_null_assertions`. It is constructed in
+  `src/adapter/src/optimize/materialized_view.rs` and carried through the
+  dataflow rebuilds in `src/compute-client/src/controller/instance.rs` and
+  `src/compute-client/src/as_of_selection.rs`.
+- On the read-back, the sink passes the freeze `MfpPlan` to `persist_source`
+  in place of `None` (`src/compute/src/sink/materialized_view.rs`). The
+  `persist_source` contract allows partial application, so the sink applies
+  whatever is left.
+- On the desired side, the sink applies the same `MfpPlan` before `mint`.
+- `correction.rs` and `correction_v2.rs` need no changes.
+
+Because the pane column leads the output row, compacted runs are clustered by
+pane, and pushdown can skip the parts of closed panes on the read-back.
+
+### Bootstrap
+
+On restart, as_of selection picks `A = U - 1`, which is already a hard bound
+in `apply_downstream_storage_constraints`
+(`src/compute-client/src/as_of_selection.rs`). Because `A >= I` after the
+first write, the `I` term of the freeze predicate is inert.
+
+- Closed panes are excluded from both desired and the read-back. They are
+  never compared and never rewritten.
+- Open panes are rebuilt from `input AS OF A`. Persist filter pushdown on the
+  event-time column can skip input parts that belong to closed panes.
+- The inputs only need `since <= A`. The compute controller holds write-only
+  collections' inputs at `write_frontier - 1`
+  (`src/compute-client/src/controller/instance.rs`), which drives the inputs'
+  durable since. No state carries across panes, so input history for closed
+  panes can compact freely.
+- A restart before the first write gets `A = I` and recomputes the backfill
+  identically.
+- A pane whose final time is exactly `A` is present in desired and in the
+  persisted output at `A`, so the correction is empty.
+
+### State and memory
+
+At `C_p` the input-side temporal filter retracts every row of pane `p`. The
+retraction flows through `f`, and arrangements drop the pane's state by
+consolidation once their frontier passes `C_p`. Steady-state memory is
+proportional to the rows of open panes, with these multipliers:
+
+- Each open-pane row carries a pending retraction at `C_p` in arrangements
+  and batchers, and both sides of the correction buffer hold the matching
+  future retraction for each open-pane output row.
+- Bodies that outer-join from a reference, use set operations against a
+  reference, or contain uncorrelated subqueries decorrelate to a product of
+  open panes and that reference.
+- At creation, every historical pane is open at `I`, so initial hydration
+  scales with the input's full history.
+
+### Determinism, replicas, and read-only mode
+
+The output is a deterministic function of the input's history, the view's
+definition, and `I`. Replicas produce identical corrections, including
+replicas that join after creation. A read-only environment hydrates the open
+panes, writes nothing, and corrects from the shard's upper once promoted.
+
+### User-facing errors
+
+- `TUMBLE ... PROCESS` outside `CREATE MATERIALIZED VIEW`, including in
+  `SELECT`, `CREATE VIEW`, `SUBSCRIBE`, and `CREATE INDEX`.
+- `TUMBLE` without `PROCESS`.
+- `mz_now()` in the body.
+- `mz_window_start()` or `mz_window_end()` outside a `PROCESS` body.
+- A body that references the view being defined.
+- A body whose first output column is not a bare `mz_window_start()` or
+  `mz_window_end()`.
+- An enclosing query that joins, aggregates, or does not keep the pane column
+  unchanged as its first output column.
+- A `SIZE`, `OFFSET`, or `CLOSE DELAY` that is not a fixed whole number
+  of milliseconds, including `INTERVAL '1 month'`.
+- An event-time column that is not `timestamp` or `timestamptz`.
+- Combining with `REFRESH EVERY` or `REFRESH AT`. Refresh rounding would fold
+  a pane's insertion and its close retraction into the same refresh time, so
+  panes that open and close within one refresh interval would never be
+  written.
+- A replacement that changes the window definition.
+
+### EXPLAIN and feature flag
+
+The input-side filter appears in the MIR plan. The sink's freeze predicate
+does not, because sink connection fields are not rendered, so the
+materialized view dataflow `EXPLAIN` gains a `freeze:` line.
+
+The feature is gated by a dyncfg. Its production default is a product
+decision. It is enabled for CI in `get_variable_system_parameters` and
+registered so that `bin/lint-test-flags` passes.
+
+## Minimal Viable Prototype
+
+The prototype validates the sink mechanics and the lowering before the SQL
+surface exists.
+
+1. Refactor, with no behavior change: thread an optional `MfpPlan` through
+   the sink's read-back `persist_source` and its desired path.
+2. Add the `freeze` field to `MaterializedViewSinkConnection`, set by an
+   unsafe-mode `WITH (FREEZE ON <column>)` option that injects `I`.
+3. Hand-write the lowered form as an ordinary materialized view with that
+   option. Diff `EXPLAIN` for the `LATERAL` form against the
+   `GROUP BY window_start` form to check that decorrelation produces the
+   expected per-pane plan without extra products.
+4. Test deterministically with `clusterd-test-driver`
+   (`src/clusterd-test-driver/src/dataflow.rs`), which builds MV sink
+   dataflows with controlled timestamps: closed panes survive their
+   retraction wave, a restart does not rewrite closed panes, input compaction
+   past closed panes does not affect the output, creation backfills previous
+   panes, and a replica added after creation agrees with the original.
+5. Testdrive with sub-second panes.
+
+After the prototype, the work proceeds through the parser and HIR lowering
+with sqllogictest coverage of scoping rules, errors, and `EXPLAIN`, then a
+platform check where a pane closes across a restart and an upgrade and must
+stay frozen, the 0dt mzcompose suite, and parallel-workload coverage of DDL
+churn and replica add and remove.
+
+## Alternatives
+
+**Continual tasks.** Write-once, first-writer-wins appends are a good fit for
+frozen panes, but CTs read inputs at `T-1` and references at `T`, which
+produced inconsistent joins. CTs also emitted output only when inputs changed,
+so they could not close a window on time alone. This design reads everything
+at the same time and closes panes on the frontier.
+
+**Recorders.** Recorders capture non-deterministic decisions into a
+user-writable table, which forces commits through txn-wal and an OCC loop that
+does not exist. Pane results are deterministic and the output is not
+user-writable, so the view can own its shard and use the existing sink.
+
+**Flink-style windowing TVF with `GROUP BY window_start, window_end`.** The
+optimizer would have to prove which outputs are final. That works for
+aggregates but not for arbitrary transformations, and it leaves finality
+implicit. Scoping the body to a single pane makes finality syntactic.
+
+**Attaching `window_start` and `window_end` to the output automatically.**
+This is what Flink's windowing functions do. Fixed column names can shadow
+real columns of the input or the body, and they force two columns onto every
+view whether or not the user wants them. Requiring the body to project
+`mz_window_start()` or `mz_window_end()` lets the user name the column.
+
+**A hidden pane column in the output shard.** The sink could persist the pane
+as a column that is not part of the view's relation description. That frees
+the body from projecting it, but every reader of the shard would need to
+project it away, and the shard schema would diverge from the view's
+schema.
+
+**A fixed name for the pane, such as `pane`.** It collides with any catalog
+object of the same name and cannot be changed by the user.
+
+**Binding the pane to the outer alias, `TUMBLE(...) AS w PROCESS (... FROM w)`.**
+The same name would mean the pane inside the body and the result outside it.
+
+**A separate binding, `PROCESS e AS (...)`.** This reads like a CTE, but the
+name sits away from the table it describes, which becomes awkward once the
+function takes several table arguments.
+
+**A materialized view option, `WITH (WINDOW = TUMBLE(...))`.** Simpler to
+parse, but ambiguous about which input is windowed once the body joins
+several relations.
+
+**A freeze predicate keyed on the render frontier.** An earlier form of this
+design used the output's write frontier and the render as_of as constants.
+Those values are not known when the plan is optimized, differ between
+replicas once command history is compacted, and produce a disjunction that
+`MfpPlan` does not accept as a temporal filter.
+
+**Append-only output with a one-instant pulse.** Each pane's rows pass a
+`mz_now() >= C_p AND mz_now() < C_p + 1` filter, and the sink integrates the
+pulse into an append-only output. This writes each pane exactly once, but it
+gives up eager updates for open panes.
+
+**A native windowing operator.** A dedicated operator would buffer rows per
+pane and run the body when a pane closes. Timely dataflow cannot invoke a
+subplan per pane, so the body would have to be restricted. The lowering above
+reuses the optimizer and renderer unchanged.
+
+## Open questions
+
+### Empty panes
+
+Panes exist only while they contain at least one row, because the body is
+evaluated over the distinct open panes. `PROCESS (SELECT count(*) FROM u)`
+produces no row for an hour without events, where standard SQL would produce
+`0`. A pane whose rows are all retracted while it is open disappears from
+the output. A body that never references the pane only produces output for
+panes that happen to have rows. Either this is specified as the semantics, or
+panes need to be generated from the time domain, which would require a bound
+on how far into the future panes exist.
+
+### Errors
+
+Errors carry no pane column, so the freeze predicate cannot apply to them.
+
+- An error from the body, such as a division by zero, sits in the error
+  stream and retracts with the pane's rows at `C_p`. The closed pane is then
+  frozen without the rows that caused it, and the view shows no error.
+- An event time that cannot be converted to `mz_timestamp`, such as a value
+  before the Unix epoch or `infinity`, makes the view error until the row is
+  deleted.
+- A `NULL` event time is silently dropped.
+
+Candidate behaviors are to freeze errors with the pane they came from, to
+reject such rows at the input with a dropped-row count, or to keep today's
+error semantics and document them.
+
+### Far-future event times
+
+An event time far in the future, for example from a seconds versus
+milliseconds bug, opens a pane that does not close for years. It stays
+mutable, holds state, and is rebuilt on every restart. Options are a bound on
+how far ahead of `mz_now()` an event time may be, beyond which rows are
+dropped or rejected, or documenting the behavior.
+
+### Input since ahead of the output upper
+
+Correct bootstrap requires each input's since `S` to satisfy `S <= U - 1`.
+The compute controller's read hold normally guarantees this. If it is
+violated, as_of selection today fails the hard upper constraint, seals the
+bounds at the lower value, logs a soft panic, and renders at `A = S`. The
+output's history for times `[U, S)` then shows the contents as of `U - 1`.
+
+For an ordinary materialized view this heals at `S`, because the view is
+fully recomputed. For this design it does not. Panes with
+`U <= C_p - 1 < S` are excluded by the freeze predicate at `S` on both sides.
+A pane that was open at `U - 1` stays frozen at its partial value, and a pane
+that opened and closed inside the gap is never written. Settled panes and
+panes still open at `S` are unaffected.
+
+Known ways to reach this state:
+
+- An input shard replaced by a builtin migration starts with a fresh since.
+  This blocked builtin continual tasks (#32506).
+- A bug in read-hold bookkeeping.
+
+Not yet checked: operations that move a materialized view between clusters,
+`ALTER` operations that swap a source table's shard, and the read holds a
+read-only environment takes.
+
+Candidate behaviors:
+
+1. **Stall.** Refuse to install the dataflow and surface the reason in the
+   view's status. The user recreates the view, which backfills every pane.
+2. **Skip and record.** Keep today's behavior, and record the gap durably and
+   visibly.
+3. **Re-backfill the gap at `S`.** Extend the freeze predicate with a second
+   constant `R`, chosen once by the controller when the conflict is detected,
+   recorded durably, and never advanced by command-history compaction:
+   `mz_now() < greatest(C_p, I + 1, CASE WHEN C_p > U THEN R + 1 END)`. Gap
+   panes are then visible at `R` on both sides, the correction replaces each
+   partial persisted result with the full one, and the panes freeze at
+   `R + 1`. Gap panes can include data that would have been late, which
+   matches the backfill semantics. The hard upper constraint becomes a soft
+   one for these views.
+
+Option 1 needs no new mechanism. Option 3 restores completeness but adds a
+durable, controller-owned constant to the dataflow description.
+
+### Cost of the close wave
+
+Each pane close computes a full retraction through `f` that the sink then
+discards. This matches the cost of today's temporal-filter pattern, but large
+panes with expensive joins should be measured, together with the transient
+growth of the correction buffer before write feedback cancels the future
+retractions.
