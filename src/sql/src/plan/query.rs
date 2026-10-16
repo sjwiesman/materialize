@@ -3143,6 +3143,8 @@ fn plan_table_factor(
             let scope = plan_table_alias(scope, alias.as_ref())?;
             Ok((expr, scope))
         }
+
+        TableFactor::Tumble(_) => bail_unsupported!("TUMBLE ... PER PANE"),
     }
 }
 
