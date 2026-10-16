@@ -59,6 +59,10 @@ enum FrozenAsOf {
     /// A new view backfills the panes that closed before its initial as-of from the inputs at
     /// that time, so its dataflow must start exactly there.
     Backfill(mz_repr::Timestamp),
+    /// A replacement inherits its target's initial as-of. It parameterizes the freeze predicate
+    /// only, so that the replacement and the target freeze the same rows of the shared shard at
+    /// the same times. The dataflow starts after it.
+    Inherited(mz_repr::Timestamp),
 }
 
 impl Staged for CreateMaterializedViewStage {
@@ -640,9 +644,10 @@ impl Coordinator {
             &read_holds_owned
         };
 
-        let frozen_as_of = freeze
-            .as_ref()
-            .map(|f| FrozenAsOf::Backfill(f.initial_as_of));
+        let frozen_as_of = freeze.as_ref().map(|f| match replacement_target {
+            None => FrozenAsOf::Backfill(f.initial_as_of),
+            Some(_) => FrozenAsOf::Inherited(f.initial_as_of),
+        });
         let (dataflow_as_of, storage_as_of, until) = self.select_timestamps(
             id_bundle,
             refresh_schedule.as_ref(),
@@ -907,6 +912,13 @@ impl Coordinator {
                 }
                 dataflow_as_of.clone_from(&initial_as_of);
                 storage_as_of = initial_as_of;
+            }
+            // The target backfilled its closed panes at `initial_as_of` and froze them right
+            // after. Starting the replacement past that instant keeps it out of the backfill,
+            // so the only panes it computes and corrects are the ones still open.
+            Some(FrozenAsOf::Inherited(initial_as_of)) => {
+                dataflow_as_of.join_assign(&Antichain::from_elem(initial_as_of.step_forward()));
+                storage_as_of = Antichain::from_elem(initial_as_of);
             }
             None => {}
         }

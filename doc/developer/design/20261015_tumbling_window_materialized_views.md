@@ -566,8 +566,8 @@ Open questions, not here.
 
 - **The write filter evaluates the freeze time per update.** Its cost on
   large batches is unmeasured. An evaluation error writes the update,
-  relying on the desired-side filter having already routed that row to the
-  error stream.
+  relying on the dataflow's freeze filter having already routed that row to
+  the error stream.
 - **Replacement coverage is the healthy path only.** The testdrive promotes a
   replacement while the target is caught up, where even a fresh `I_r` cancels
   in the correction buffer. The rewrite that the inherited `I` prevents needs
@@ -575,8 +575,9 @@ Open questions, not here.
   testdrive cannot arrange. A `clusterd-test-driver` script could: write the
   old body's rows to a shard, render the replacement sink read-only at an
   as_of equal to the shard's upper, allow writes, and read the shard back.
-  That needs the script language to accept a `FreezeSpec` on a
-  materialized-view export and timestamp-typed cells.
+  The script language accepts the freeze on a materialized-view export and
+  timestamp cells, see
+  `test/clusterd-test-driver/scripts/materialized_view_freeze.spec`.
 - **Promotion while the target lags.** The sink reports the shard's upper as
   its write frontier in read-only mode, so `ALTER ... APPLY REPLACEMENT` waits
   only until the target's upper reaches the replacement's as_of. A target
@@ -625,12 +626,14 @@ Open questions, not here.
   matters for plan snapshot tests. The sink's freeze needs its own line.
 - **Open panes cost about one extra record per input row** for the pending
   close-time retraction. Measure whether temporal bucketing should apply.
-- **Test coverage is local.** The testdrive covers the sink semantics and the
-  `TUMBLE` errors without a restart, and was validated with an equivalent psql
-  script, not through mzcompose. Restart, state release, the same-batch race, a sink lagging past
-  several closes, and a replica added after creation need deterministic
-  coverage with `clusterd-test-driver`, plus a platform check for restarts
-  and upgrades.
+- **Test coverage is partial.** `materialized_view_freeze.spec` covers the
+  same-batch race, an open pane following inserts and retractions, and
+  changes to closed panes on the driver. `tumble.slt` covers the window
+  bindings, arguments, and plan. The testdrive covers the sink semantics,
+  the shape errors, and replacements, and was validated with an equivalent
+  psql script, not through mzcompose. Restart, state release, a sink
+  lagging past several closes, and a replica added after creation still
+  need coverage, plus a platform check for restarts and upgrades.
 
 ## Follow-ups
 

@@ -3167,8 +3167,27 @@ pub fn plan_create_materialized_view(
             );
         }
 
-        if frozen.is_some() || plan_frozen_definition_of_item(scx, &*target)?.is_some() {
-            bail_unsupported!("replacing a materialized view over TUMBLE ... PER PANE");
+        // The replacement writes into the target's shard, so the sink must derive the same
+        // freeze time from every persisted row as the target did, or it would retract rows of
+        // open panes at the wrong time and duplicate them in the output.
+        let target_frozen = plan_frozen_definition_of_item(scx, &*target)?;
+        let target_name = scx.catalog.minimal_qualification(target.name());
+        match (&frozen, &target_frozen) {
+            (None, None) => {}
+            (Some(_), None) => sql_bail!(
+                "cannot replace {target_name} with a materialized view that freezes panes, \
+                 because it does not freeze panes"
+            ),
+            (None, Some(_)) => sql_bail!(
+                "cannot replace {target_name} with a materialized view that does not freeze \
+                 panes, because it freezes panes"
+            ),
+            (Some(new), Some(old)) if new != old => sql_bail!(
+                "cannot replace {target_name} because the replacement changes its window: the \
+                 windowed input, the event-time column, SIZE, OFFSET, CLOSE DELAY, and the \
+                 choice of pane column must stay the same"
+            ),
+            (Some(_), Some(_)) => {}
         }
 
         // Check for dependency cycles.
@@ -3247,10 +3266,18 @@ generate_extracted_config!(
 );
 
 /// How a materialized view freezes its panes.
-#[derive(Debug)]
+///
+/// A replacement must keep its target's definition, so this covers everything the sink derives
+/// a persisted row's freeze time from, plus the window that assigns rows to panes.
+#[derive(Debug, PartialEq)]
 struct FrozenDefinition {
     /// See [`FreezeSpec::close_after`]. The pane column is always the view's first column.
     close_after: Duration,
+    input: CatalogItemId,
+    time_column: ColumnName,
+    size: Interval,
+    offset: Interval,
+    close_delay: Interval,
 }
 
 /// Plans how an existing materialized view freezes its panes, from its `create_sql`.
@@ -3317,7 +3344,15 @@ fn plan_tumble_freeze(
         return Err(shape_error());
     }
 
-    let Tumble { body, .. } = tumble;
+    let Tumble {
+        input,
+        time_column,
+        body,
+        ..
+    } = tumble;
+    let ResolvedItemName::Item { id: input, .. } = input else {
+        sql_bail!("TUMBLE input must be a catalog object");
+    };
     let window = normalize::ident(tumble.window_name());
     let body_first = match &body.body {
         SetExpr::Select(body_select) => body_select.projection.first(),
@@ -3355,7 +3390,7 @@ fn plan_tumble_freeze(
         );
     }
 
-    let (size, _offset, close_delay) = crate::plan::query::plan_tumble_intervals(tumble)?;
+    let (size, offset, close_delay) = crate::plan::query::plan_tumble_intervals(tumble)?;
     let close_after = if field == "start" {
         size.checked_add(&close_delay)
             .ok_or_else(|| sql_err!("TUMBLE SIZE plus CLOSE DELAY is out of range"))?
@@ -3364,6 +3399,11 @@ fn plan_tumble_freeze(
     };
     Ok(Some(FrozenDefinition {
         close_after: close_after.duration()?,
+        input: *input,
+        time_column: normalize::column_name(time_column.clone()),
+        size,
+        offset,
+        close_delay,
     }))
 }
 
