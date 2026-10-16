@@ -6852,6 +6852,7 @@ name = "mz-clusterd-test-driver"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "futures",
  "mz-compute-client",
  "mz-compute-types",

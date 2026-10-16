@@ -254,6 +254,7 @@ impl Optimize<LocalMirPlan> for Optimizer {
             connection: ComputeSinkConnection::MaterializedView(MaterializedViewSinkConnection {
                 value_desc: rel_desc,
                 storage_metadata: (),
+                freeze: None,
             }),
             with_snapshot: true,
             up_to: Antichain::default(),
