@@ -3152,6 +3152,20 @@ fn hide_outer_scopes_until_lateral_barrier(qcx: &mut QueryContext) {
     }
 }
 
+/// Returns the `TUMBLE` table factors anywhere in `query`.
+pub fn tumble_table_factors<T: AstInfo>(query: &Query<T>) -> Vec<&Tumble<T>> {
+    struct Finder<'ast, T: AstInfo>(Vec<&'ast Tumble<T>>);
+    impl<'ast, T: AstInfo> Visit<'ast, T> for Finder<'ast, T> {
+        fn visit_tumble(&mut self, node: &'ast Tumble<T>) {
+            self.0.push(node);
+            visit::visit_tumble(self, node);
+        }
+    }
+    let mut finder = Finder(Vec::new());
+    finder.visit_query(query);
+    finder.0
+}
+
 /// Validates the `SIZE`, `OFFSET`, and `CLOSE DELAY` arguments of a `TUMBLE` table factor,
 /// returning them in that order with defaults filled in.
 pub fn plan_tumble_intervals(

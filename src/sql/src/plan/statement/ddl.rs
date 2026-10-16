@@ -23,6 +23,7 @@ use itertools::Itertools;
 use mz_adapter_types::compaction::{CompactionWindow, DEFAULT_LOGICAL_COMPACTION_WINDOW_DURATION};
 use mz_arrow_util::builder::ArrowBuilder;
 use mz_auth::password::Password;
+use mz_compute_types::sinks::FreezeSpec;
 use mz_controller_types::{ClusterId, DEFAULT_REPLICA_LOGGING_INTERVAL, ReplicaId};
 use mz_expr::{CollectionPlan, UnmaterializableFunc};
 use mz_interchange::avro::{AvroSchemaGenerator, DocTarget};
@@ -128,8 +129,9 @@ use prost::Message;
 
 use crate::ast::display::AstDisplay;
 use crate::catalog::{
-    CatalogCluster, CatalogDatabase, CatalogError, CatalogItem, CatalogItemType,
-    CatalogRecordField, CatalogType, CatalogTypeDetails, ObjectType, SystemObjectType,
+    CatalogCluster, CatalogCollectionItem, CatalogDatabase, CatalogError, CatalogItem,
+    CatalogItemType, CatalogRecordField, CatalogType, CatalogTypeDetails, ObjectType,
+    SystemObjectType,
 };
 use crate::iceberg::IcebergSinkConfigOptionExtracted;
 use crate::kafka_util::{KafkaSinkConfigOptionExtracted, KafkaSourceConfigOptionExtracted};
@@ -2879,6 +2881,7 @@ pub fn plan_create_materialized_view(
     let partial_name = normalize::unresolved_item_name(stmt.name)?;
     let name = scx.allocate_qualified_name(partial_name.clone())?;
 
+    let frozen = plan_tumble_freeze(scx, &stmt.query)?;
     let query::PlannedRootQuery {
         expr,
         mut desc,
@@ -3043,7 +3046,24 @@ pub fn plan_create_materialized_view(
         }
     };
 
+    if frozen.is_some() && refresh_schedule.is_some() {
+        sql_bail!("TUMBLE ... PER PANE is not compatible with REFRESH options");
+    }
+
     let as_of = stmt.as_of.map(Timestamp::from);
+    let freeze = match &frozen {
+        Some(frozen) => {
+            let Some(initial_as_of) = as_of else {
+                bail_internal!("purification chooses the initial as-of of a frozen view");
+            };
+            Some(FreezeSpec {
+                pane_column: 0,
+                close_after: frozen.close_after,
+                initial_as_of,
+            })
+        }
+        None => None,
+    };
     let compaction_window = plan_retain_history_option(scx, retain_history)?;
     let mut non_null_assertions = assert_not_null
         .into_iter()
@@ -3147,6 +3167,10 @@ pub fn plan_create_materialized_view(
             );
         }
 
+        if frozen.is_some() || plan_frozen_definition_of_item(scx, &*target)?.is_some() {
+            bail_unsupported!("replacing a materialized view over TUMBLE ... PER PANE");
+        }
+
         // Check for dependency cycles.
         for dependent in scx.catalog.item_dependents(target.id()) {
             if let ObjectId::Item(id) = dependent
@@ -3205,6 +3229,7 @@ pub fn plan_create_materialized_view(
             compaction_window,
             refresh_schedule,
             as_of,
+            freeze,
         },
         replace,
         drop_ids,
@@ -3220,6 +3245,127 @@ generate_extracted_config!(
     (RetainHistory, OptionalDuration),
     (Refresh, RefreshOptionValue<Aug>, AllowMultiple)
 );
+
+/// How a materialized view freezes its panes.
+#[derive(Debug)]
+struct FrozenDefinition {
+    /// See [`FreezeSpec::close_after`]. The pane column is always the view's first column.
+    close_after: Duration,
+}
+
+/// Plans how an existing materialized view freezes its panes, from its `create_sql`.
+fn plan_frozen_definition_of_item(
+    scx: &StatementContext,
+    item: &dyn CatalogCollectionItem,
+) -> Result<Option<FrozenDefinition>, PlanError> {
+    let stmts = mz_sql_parser::parser::parse_statements(item.create_sql())?;
+    let [stmt]: [StatementParseResult; 1] = stmts.try_into().map_err(|_| {
+        internal_err!("create SQL of materialized view was not exactly one statement")
+    })?;
+    let Statement::CreateMaterializedView(stmt) = stmt.ast else {
+        bail_internal!("create SQL of materialized view is not a CREATE MATERIALIZED VIEW");
+    };
+    let (stmt, _) = names::resolve(scx.catalog, stmt)?;
+    plan_tumble_freeze(scx, &stmt.query)
+}
+
+/// Derives the freeze of a materialized view defined as
+/// `SELECT <pane column>, ... FROM TUMBLE(...) AS w PER PANE (SELECT w.start | w.end, ...)`.
+///
+/// The pane column must be the first column of both the body and the view, because the sink
+/// locates a row's pane by it. The query around `TUMBLE` may only project and filter, because
+/// anything else would combine rows of different panes.
+fn plan_tumble_freeze(
+    scx: &StatementContext,
+    query: &mz_sql_parser::ast::Query<Aug>,
+) -> Result<Option<FrozenDefinition>, PlanError> {
+    use mz_sql_parser::ast::{Query, SelectItem, SetExpr, TableFactor, TableWithJoins, Tumble};
+
+    let tumbles = crate::plan::tumble_table_factors(query);
+    let Some(tumble) = tumbles.first() else {
+        return Ok(None);
+    };
+    scx.require_feature_flag(&vars::UNSAFE_ENABLE_MATERIALIZED_VIEW_FREEZE)?;
+
+    let shape_error = || {
+        sql_err!(
+            "TUMBLE ... PER PANE must be the only FROM item of a materialized view whose query \
+             only projects and filters"
+        )
+    };
+    let select = match query {
+        Query {
+            ctes,
+            body: SetExpr::Select(select),
+            order_by,
+            limit: None,
+            offset: None,
+        } if ctes.is_empty() && order_by.is_empty() && tumbles.len() == 1 => select,
+        _ => return Err(shape_error()),
+    };
+    let only_tumble = matches!(
+        select.from.as_slice(),
+        [TableWithJoins { relation: TableFactor::Tumble(only), joins }]
+            if joins.is_empty() && only == *tumble
+    );
+    if !only_tumble
+        || select.distinct.is_some()
+        || !select.group_by.is_empty()
+        || select.having.is_some()
+        || select.qualify.is_some()
+    {
+        return Err(shape_error());
+    }
+
+    let Tumble { body, .. } = tumble;
+    let window = normalize::ident(tumble.window_name());
+    let body_first = match &body.body {
+        SetExpr::Select(body_select) => body_select.projection.first(),
+        _ => None,
+    };
+    let (field, pane_column_name) = match body_first {
+        Some(SelectItem::Expr {
+            expr: Expr::Identifier(parts),
+            alias,
+        }) if parts.len() == 2 && normalize::ident(parts[0].clone()) == window => {
+            let field = normalize::ident(parts[1].clone());
+            let name = alias
+                .clone()
+                .map_or_else(|| field.clone(), normalize::ident);
+            (field, name)
+        }
+        _ => (String::new(), String::new()),
+    };
+    if field != "start" && field != "end" {
+        sql_bail!("the first column of a PER PANE body must be {window}.start or {window}.end");
+    }
+    let outer_keeps_pane_column = match select.projection.first() {
+        Some(SelectItem::Wildcard) => true,
+        Some(SelectItem::Expr {
+            expr: Expr::Identifier(parts),
+            alias: _,
+        }) => parts.len() == 1 && normalize::ident(parts[0].clone()) == pane_column_name,
+        None => false,
+        Some(_) => false,
+    };
+    if !outer_keeps_pane_column {
+        sql_bail!(
+            "the first column of a materialized view over TUMBLE must be the pane column {}",
+            pane_column_name.quoted()
+        );
+    }
+
+    let (size, _offset, close_delay) = crate::plan::query::plan_tumble_intervals(tumble)?;
+    let close_after = if field == "start" {
+        size.checked_add(&close_delay)
+            .ok_or_else(|| sql_err!("TUMBLE SIZE plus CLOSE DELAY is out of range"))?
+    } else {
+        close_delay
+    };
+    Ok(Some(FrozenDefinition {
+        close_after: close_after.duration()?,
+    }))
+}
 
 pub fn describe_create_sink(
     _: &StatementContext,

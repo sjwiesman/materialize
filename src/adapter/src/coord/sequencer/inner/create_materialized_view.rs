@@ -53,6 +53,14 @@ use crate::session::Session;
 use crate::util::ResultExt;
 use crate::{AdapterNotice, CollectionIdBundle, ExecuteContext, TimestampProvider, catalog};
 
+/// The initial as-of of a frozen materialized view, as chosen during purification, and how it
+/// constrains the dataflow's as-of.
+enum FrozenAsOf {
+    /// A new view backfills the panes that closed before its initial as-of from the inputs at
+    /// that time, so its dataflow must start exactly there.
+    Backfill(mz_repr::Timestamp),
+}
+
 impl Staged for CreateMaterializedViewStage {
     type Ctx = ExecuteContext;
 
@@ -435,6 +443,7 @@ impl Coordinator {
                     cluster_id,
                     non_null_assertions,
                     refresh_schedule,
+                    freeze,
                     ..
                 },
             ..
@@ -467,6 +476,7 @@ impl Coordinator {
             column_names.clone(),
             non_null_assertions.clone(),
             refresh_schedule.clone(),
+            freeze.clone(),
             debug_name,
             optimizer_config,
             self.optimizer_metrics(),
@@ -583,6 +593,7 @@ impl Coordinator {
                             non_null_assertions,
                             compaction_window,
                             refresh_schedule,
+                            freeze,
                             ..
                         },
                     drop_ids,
@@ -629,8 +640,15 @@ impl Coordinator {
             &read_holds_owned
         };
 
-        let (dataflow_as_of, storage_as_of, until) =
-            self.select_timestamps(id_bundle, refresh_schedule.as_ref(), read_holds)?;
+        let frozen_as_of = freeze
+            .as_ref()
+            .map(|f| FrozenAsOf::Backfill(f.initial_as_of));
+        let (dataflow_as_of, storage_as_of, until) = self.select_timestamps(
+            id_bundle,
+            refresh_schedule.as_ref(),
+            frozen_as_of,
+            read_holds,
+        )?;
 
         tracing::info!(
             dataflow_as_of = ?dataflow_as_of,
@@ -691,6 +709,7 @@ impl Coordinator {
                     non_null_assertions,
                     custom_logical_compaction_window: compaction_window,
                     refresh_schedule: refresh_schedule.clone(),
+                    freeze,
                     initial_as_of: Some(initial_as_of.clone()),
                     optimized_plan: None,
                     physical_plan: None,
@@ -854,6 +873,7 @@ impl Coordinator {
         &self,
         id_bundle: CollectionIdBundle,
         refresh_schedule: Option<&RefreshSchedule>,
+        frozen_as_of: Option<FrozenAsOf>,
         read_holds: &ReadHolds,
     ) -> Result<
         (
@@ -873,6 +893,23 @@ impl Coordinator {
         let least_valid_read = read_holds.least_valid_read();
         let mut dataflow_as_of = least_valid_read.clone();
         let mut storage_as_of = least_valid_read.clone();
+
+        match frozen_as_of {
+            // Purification chose the initial as-of, and the planner built the MV's freeze predicate
+            // around it, so the dataflow must start exactly there.
+            Some(FrozenAsOf::Backfill(initial_as_of)) => {
+                let initial_as_of = Antichain::from_elem(initial_as_of);
+                if !timely::PartialOrder::less_equal(&least_valid_read, &initial_as_of) {
+                    return Err(AdapterError::internal(
+                        "create materialized view",
+                        "inputs not readable at the initial as-of chosen during purification",
+                    ));
+                }
+                dataflow_as_of.clone_from(&initial_as_of);
+                storage_as_of = initial_as_of;
+            }
+            None => {}
+        }
 
         // For MVs with non-trivial REFRESH schedules:
         // 1. it's important to set the `storage_as_of` to the first refresh. This is because we'd

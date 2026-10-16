@@ -96,7 +96,10 @@ SELECT * FROM per_account
 2026-01-01␠01:00:00  1  3
 
 # A body that aggregates within groups decorrelates to a single Reduce keyed by
-# the pane start.
+# the pane start. The freeze predicate inlines the view's initial as-of, which
+# differs per run.
+replace \d{13}  <INITIAL_AS_OF+1>
+
 query T multiline
 EXPLAIN OPTIMIZED PLAN WITH (humanized expressions) AS VERBOSE TEXT FOR
 CREATE MATERIALIZED VIEW per_account_plan AS
@@ -105,11 +108,11 @@ PER PANE (SELECT w.start AS hour_start, u.account, sum(u.credits) AS credits FRO
 ----
 materialize.public.per_account_plan:
   Reduce group_by=[bin_unix_epoch_timestamp(01:00:00, #0{ts}), #1{account}] aggregates=[sum(#2{credits})]
-    Filter (#0{ts}) IS NOT NULL
+    Filter (#0{ts}) IS NOT NULL AND (mz_now() < greatest(timestamp_to_mz_timestamp((bin_unix_epoch_timestamp(01:00:00, #0{ts}) + 01:00:00)), <INITIAL_AS_OF+1>))
       ReadStorage materialize.public.events
 
 Source materialize.public.events
-  filter=((#0{ts}) IS NOT NULL)
+  filter=((#0{ts}) IS NOT NULL AND (mz_now() < greatest(timestamp_to_mz_timestamp((bin_unix_epoch_timestamp(01:00:00, #0{ts}) + 01:00:00)), <INITIAL_AS_OF+1>)))
 
 Target cluster: quickstart
 
