@@ -645,8 +645,8 @@ impl Coordinator {
         };
 
         let frozen_as_of = freeze.as_ref().map(|f| match replacement_target {
-            None => FrozenAsOf::Backfill(f.initial_as_of),
-            Some(_) => FrozenAsOf::Inherited(f.initial_as_of),
+            None => FrozenAsOf::Backfill(f.initial_as_of()),
+            Some(_) => FrozenAsOf::Inherited(f.initial_as_of()),
         });
         let (dataflow_as_of, storage_as_of, until) = self.select_timestamps(
             id_bundle,

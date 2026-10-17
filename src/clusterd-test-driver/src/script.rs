@@ -160,7 +160,7 @@ pub enum ExportSpec {
         schema: Option<String>,
         /// Per-pane freezing of the sink's rows, see
         /// [`DataflowBuilder::freeze_materialized_view`].
-        freeze: Option<FreezeSpec>,
+        freeze: Option<FreezeArgs>,
     },
     /// A subscribe sink streaming changes back as responses, collected by
     /// `await-subscribe`.
@@ -174,6 +174,16 @@ pub enum ExportSpec {
         /// Exclusive upper at which the subscribe completes; unbounded if absent.
         up_to: Option<u64>,
     },
+}
+
+/// The arguments of a frozen materialized view export. The pane start is the first column of the
+/// export's schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreezeArgs {
+    /// Time from a pane's start to its close.
+    pub close_after: Duration,
+    /// The view's initial as-of.
+    pub initial_as_of: Timestamp,
 }
 
 /// What an `explain` command renders: a dataflow given inline, or a reference to one
@@ -926,8 +936,14 @@ impl ScriptState {
                             location: location.clone(),
                         },
                     );
-                    if let Some(freeze) = freeze {
-                        builder.freeze_materialized_view(sink_id, freeze)?;
+                    if let Some(FreezeArgs {
+                        close_after,
+                        initial_as_of,
+                    }) = freeze
+                    {
+                        let spec = FreezeSpec::new(&desc, close_after, initial_as_of)
+                            .map_err(anyhow::Error::msg)?;
+                        builder.freeze_materialized_view(sink_id, spec)?;
                     }
                     // Record the target shard so a later `peek` of the sink id reads it
                     // via a persist peek (the `SELECT * FROM mv` path), with no separate

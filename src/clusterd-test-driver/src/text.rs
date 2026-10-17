@@ -40,11 +40,11 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail, ensure};
-use mz_compute_types::sinks::FreezeSpec;
 use mz_repr::{GlobalId, Timestamp};
 
 use crate::script::{
-    BuildSpec, ColumnSpec, Command, ConfigSetting, ExplainTarget, ExportSpec, ImportSpec,
+    BuildSpec, ColumnSpec, Command, ConfigSetting, ExplainTarget, ExportSpec, FreezeArgs,
+    ImportSpec,
 };
 
 /// One element of a parsed script file, retained so a `REWRITE` reproduces the
@@ -337,15 +337,14 @@ fn opt_string(args: &BTreeMap<String, String>, key: &str) -> Option<String> {
 }
 
 /// Parse the `freeze-close-after-ms` and `freeze-initial-as-of` arguments of a frozen
-/// materialized view. As for a `TUMBLE` view, the pane column is the first column.
-fn parse_freeze(args: &BTreeMap<String, String>) -> anyhow::Result<Option<FreezeSpec>> {
+/// materialized view.
+fn parse_freeze(args: &BTreeMap<String, String>) -> anyhow::Result<Option<FreezeArgs>> {
     match (
         opt_u64(args, "freeze-close-after-ms")?,
         opt_u64(args, "freeze-initial-as-of")?,
     ) {
         (None, None) => Ok(None),
-        (Some(close_after), Some(initial_as_of)) => Ok(Some(FreezeSpec {
-            pane_column: 0,
+        (Some(close_after), Some(initial_as_of)) => Ok(Some(FreezeArgs {
             close_after: Duration::from_millis(close_after),
             initial_as_of: Timestamp::from(initial_as_of),
         })),

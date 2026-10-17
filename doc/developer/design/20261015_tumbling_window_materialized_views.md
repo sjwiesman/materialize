@@ -421,10 +421,12 @@ are dropped the same way, which is correct because the pane is frozen at
 whatever was persisted before its close.
 
 - `MaterializedViewSinkConnection` (`src/compute-types/src/sinks.rs`) gains a
-  `freeze: Option<FreezeSpec>` with the pane column, the time from pane start
-  to close, and `I`. The planner sets all three, taking `I` from the
-  statement's `AS OF`, so the value is part of the view's definition and
-  survives command-history compaction and restarts.
+  `freeze: Option<FreezeSpec>` with the time from pane start to close and
+  `I`. The pane start is always the row's first column, which keeps persist
+  parts clustered by pane. `FreezeSpec::new` rejects a first column that is not
+  a `timestamp` or `timestamptz`. The planner sets both values, taking `I`
+  from the statement's `AS OF`, so the value is part of the view's
+  definition and survives command-history compaction and restarts.
 - `FreezeSpec::freeze_time` builds the freeze time expression and
   `FreezeSpec::predicate` the predicate, so the dataflow's filter, the
   read-back filter, and the write filter share one definition.

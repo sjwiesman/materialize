@@ -3062,11 +3062,9 @@ pub fn plan_create_materialized_view(
             let Some(initial_as_of) = as_of else {
                 bail_internal!("purification chooses the initial as-of of a frozen view");
             };
-            Some(FreezeSpec {
-                pane_column: 0,
-                close_after: frozen.close_after,
-                initial_as_of,
-            })
+            let spec = FreezeSpec::new(&desc, frozen.close_after, initial_as_of)
+                .map_err(|e| internal_err!("{e}"))?;
+            Some(spec)
         }
         None => None,
     };
