@@ -31,7 +31,7 @@ contains:the first column of a PER PANE body must be w.start
 ! CREATE MATERIALIZED VIEW bad
   AS SELECT pane, count(*) FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => '1 minute') AS w
   PER PANE (SELECT w.start AS pane, v FROM events) GROUP BY pane
-contains:must be the only FROM item of a materialized view whose query only projects and filters
+contains:the query around TUMBLE ... PER PANE may only project and filter its rows
 
 ! CREATE MATERIALIZED VIEW bad
   AS SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(v), SIZE => '1 minute') AS w

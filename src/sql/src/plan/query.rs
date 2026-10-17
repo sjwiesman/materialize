@@ -3231,6 +3231,60 @@ fn is_outer_column(expr: &HirRelationExpr, column: usize, outer: usize) -> bool 
     go(expr, column, outer, &mut BTreeMap::new())
 }
 
+/// The number of columns of a `TUMBLE`'s window binding: `start`, `end`, and `close`.
+const WINDOW_ARITY: usize = 3;
+
+/// Returns whether output column `column` of `expr` is the first column of the `TUMBLE` whose pane
+/// binding is `pane_id`, reached only through projections, maps, and filters that compute no
+/// window function.
+///
+/// This is the shape of a materialized view over `TUMBLE ... PER PANE`. Anything else between the
+/// view's output and the `TUMBLE`, such as an aggregate, `DISTINCT`, `LIMIT`, a join, or a window
+/// function, would combine the rows of different panes, and could move another value into the
+/// first column, by which the sink freezes each row.
+pub fn is_tumble_passthrough(expr: &HirRelationExpr, column: usize, pane_id: LocalId) -> bool {
+    match expr {
+        HirRelationExpr::Project { input, outputs } => {
+            is_tumble_passthrough(input, outputs[column], pane_id)
+        }
+        HirRelationExpr::Map { input, scalars } => {
+            let mut windowing = false;
+            for scalar in scalars {
+                mz_expr::visit::Visit::visit_pre(scalar, &mut |e: &HirScalarExpr| {
+                    windowing |= matches!(e, HirScalarExpr::Windowing(..));
+                });
+            }
+            if windowing {
+                return false;
+            }
+            let arity = input.arity();
+            let mut column = column;
+            while column >= arity {
+                match &scalars[column - arity] {
+                    // A reference to an earlier column of the same `Map`.
+                    HirScalarExpr::Column(
+                        ColumnRef {
+                            level: 0,
+                            column: c,
+                        },
+                        _,
+                    ) => column = *c,
+                    _ => return false,
+                }
+            }
+            is_tumble_passthrough(input, column, pane_id)
+        }
+        HirRelationExpr::Filter { input, .. } => is_tumble_passthrough(input, column, pane_id),
+        // The join `plan_tumble` builds, of the window binding and the body, whose first column
+        // follows the window binding's columns.
+        HirRelationExpr::Join { right, .. } => {
+            matches!(&**right, HirRelationExpr::Let { id, .. } if *id == pane_id)
+                && column == WINDOW_ARITY
+        }
+        _ => false,
+    }
+}
+
 /// Returns the `TUMBLE` table factors anywhere in `query`.
 pub fn tumble_table_factors<T: AstInfo>(query: &Query<T>) -> Vec<&Tumble<T>> {
     struct Finder<'ast, T: AstInfo>(Vec<&'ast Tumble<T>>);
@@ -3421,7 +3475,7 @@ fn plan_tumble(
 
     let expr = panes
         .join(body_expr, HirScalarExpr::literal_true(), JoinKind::Inner)
-        .project((3..3 + body_arity).collect());
+        .project((WINDOW_ARITY..WINDOW_ARITY + body_arity).collect());
     let scope = Scope::from_source(None, body_scope.column_names().cloned());
     Ok((expr, scope))
 }

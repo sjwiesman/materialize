@@ -190,8 +190,10 @@ operation in the body must start with the window's start.
 
 Restrictions on the enclosing query. The query around `TUMBLE ... PER PANE`
 may only project and filter row by row, and must keep the pane column
-unchanged as its first output column. Joins and aggregates belong inside the
-body.
+unchanged as its first output column. Joins, aggregates, and window functions
+belong inside the body. The planner checks the planned query: the view's first
+column must reach the `TUMBLE`'s first column through projections, maps, and
+filters only (`is_tumble_passthrough` in `src/sql/src/plan/query.rs`).
 
 ### Semantics
 
@@ -497,8 +499,10 @@ panes, writes nothing, and corrects from the shard's upper once promoted.
 - A body that references the view being defined.
 - A body whose first output column is not the window's start, including a
   `w.start` that a relation in the body shadows.
-- An enclosing query that joins, aggregates, or does not keep the pane column
-  unchanged as its first output column.
+- An enclosing query that joins, aggregates, uses `DISTINCT`, `LIMIT`, or a
+  window function, or does not keep the pane column unchanged as its first
+  output column.
+- More than one `TUMBLE` in a view.
 - A `SIZE`, `OFFSET`, or `CLOSE DELAY` that is not a fixed whole number
   of milliseconds, including `INTERVAL '1 month'`.
 - An event-time column that is not `timestamp` or `timestamptz`.
@@ -624,10 +628,6 @@ Open questions, not here.
   A pane exists only while it has rows, so that branch never produces
   output, but the optimizer cannot see it. A body with `GROUP BY` plans to a
   single `Reduce`.
-- **The check on the enclosing query is syntactic.** `plan_tumble_freeze`
-  requires the view's first item to be `*` or the name of the body's first
-  column. This is sound, because the enclosing query's only `FROM` item is
-  the `TUMBLE`, but it rejects equivalent forms such as a qualified name.
 - **`TUMBLE` is a keyword at the start of a table factor.** `FROM tumble(...)`
   always parses as the window construct, so a user-defined table function
   named `tumble` cannot be called in `FROM`.

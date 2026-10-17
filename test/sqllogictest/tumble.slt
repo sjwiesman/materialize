@@ -265,7 +265,7 @@ PER PANE (
 
 # The query around TUMBLE may not compute over rows of several panes. The same
 # window function is allowed inside the body, where it sees one pane.
-statement error TUMBLE \.\.\. PER PANE must be the only FROM item of a materialized view whose query only projects and filters
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
 CREATE MATERIALIZED VIEW bad AS
 SELECT hour_start, row_number() OVER (ORDER BY n) AS r FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
 PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
@@ -282,9 +282,53 @@ SELECT * FROM ranked
 2026-01-01␠00:00:00  2  1
 2026-01-01␠01:00:00  1  1
 
-statement error the first column of a materialized view over TUMBLE must be the first column of its PER PANE body
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
 CREATE MATERIALIZED VIEW bad AS
 SELECT n, hour_start FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+
+# The query around TUMBLE may rename, compute, and filter, as long as the
+# body's first column stays first.
+statement ok
+CREATE MATERIALIZED VIEW reshaped AS
+SELECT hour_start AS h, n * 2 AS doubled
+FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+WHERE n > 1
+
+query TI rowsort
+SELECT * FROM reshaped
+----
+2026-01-01␠00:00:00  4
+
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT DISTINCT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT hour_start, max(n) AS n FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+GROUP BY hour_start
+
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+LIMIT 1
+
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u), accounts
+
+statement error a materialized view may contain only one TUMBLE \.\.\. PER PANE
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+UNION ALL
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
 PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
 
 # A body that aggregates within groups decorrelates to a single Reduce keyed by
