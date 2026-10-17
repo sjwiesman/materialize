@@ -217,6 +217,25 @@ PER PANE (
   SELECT w.end, count(*) FROM u
 )
 
+# The query around TUMBLE may not compute over rows of several panes. The same
+# window function is allowed inside the body, where it sees one pane.
+statement error TUMBLE \.\.\. PER PANE must be the only FROM item of a materialized view whose query only projects and filters
+CREATE MATERIALIZED VIEW bad AS
+SELECT hour_start, row_number() OVER (ORDER BY n) AS r FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+
+statement ok
+CREATE MATERIALIZED VIEW ranked AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, u.account, row_number() OVER (ORDER BY u.credits DESC) AS r FROM u)
+
+query TII rowsort
+SELECT * FROM ranked
+----
+2026-01-01␠00:00:00  1  2
+2026-01-01␠00:00:00  2  1
+2026-01-01␠01:00:00  1  1
+
 statement error the first column of a materialized view over TUMBLE must be the first column of its PER PANE body
 CREATE MATERIALIZED VIEW bad AS
 SELECT n, hour_start FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w

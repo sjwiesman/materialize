@@ -3296,6 +3296,34 @@ fn plan_frozen_definition_of_item(
     plan_tumble_freeze(scx, &stmt.query)
 }
 
+/// Returns whether the projection or the `WHERE` clause of `select` calls a window function,
+/// outside of subqueries.
+///
+/// A window function in the query around `TUMBLE` computes over the rows of every pane, so the
+/// rows of a pane would depend on other panes, and the freeze predicate could not be pushed below
+/// it to release the state of closed panes.
+fn has_window_function(select: &mz_sql_parser::ast::Select<Aug>) -> bool {
+    use mz_sql_parser::ast::visit::{self, Visit};
+    use mz_sql_parser::ast::{Function, Query};
+
+    struct Finder(bool);
+    impl<'ast> Visit<'ast, Aug> for Finder {
+        fn visit_function(&mut self, function: &'ast Function<Aug>) {
+            self.0 |= function.over.is_some();
+            visit::visit_function(self, function);
+        }
+        fn visit_query(&mut self, _: &'ast Query<Aug>) {}
+    }
+    let mut finder = Finder(false);
+    for item in &select.projection {
+        finder.visit_select_item(item);
+    }
+    if let Some(selection) = &select.selection {
+        finder.visit_expr(selection);
+    }
+    finder.0
+}
+
 /// Derives the freeze of a materialized view defined as
 /// `SELECT <pane column>, ... FROM TUMBLE(...) AS w PER PANE (SELECT w.start | w.end, ...)`.
 ///
@@ -3340,6 +3368,7 @@ fn plan_tumble_freeze(
         || !select.group_by.is_empty()
         || select.having.is_some()
         || select.qualify.is_some()
+        || has_window_function(select)
     {
         return Err(shape_error());
     }
