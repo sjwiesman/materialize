@@ -3073,7 +3073,12 @@ pub fn plan_create_materialized_view(
             let Some(initial_as_of) = as_of else {
                 bail_internal!("purification chooses the initial as-of of a frozen view");
             };
-            let spec = FreezeSpec::new(&desc, frozen.close_after, initial_as_of)
+            let close_after = frozen
+                .size
+                .checked_add(&frozen.close_delay)
+                .ok_or_else(|| sql_err!("TUMBLE SIZE plus CLOSE DELAY is out of range"))?
+                .duration()?;
+            let spec = FreezeSpec::new(&desc, close_after, initial_as_of)
                 .map_err(|e| internal_err!("{e}"))?;
             Some(spec)
         }
@@ -3286,8 +3291,6 @@ generate_extracted_config!(
 /// a persisted row's freeze time from, plus the window that assigns rows to panes.
 #[derive(Debug, PartialEq)]
 struct FrozenDefinition {
-    /// See [`FreezeSpec::close_after`]. The pane column is always the view's first column.
-    close_after: Duration,
     input: CatalogItemId,
     time_column: ColumnName,
     size: Interval,
@@ -3307,6 +3310,9 @@ fn plan_frozen_definition_of_item(
     let Statement::CreateMaterializedView(stmt) = stmt.ast else {
         bail_internal!("create SQL of materialized view is not a CREATE MATERIALIZED VIEW");
     };
+    if crate::plan::tumble_table_factors(&stmt.query).is_empty() {
+        return Ok(None);
+    }
     let (stmt, _) = names::resolve(scx.catalog, stmt)?;
     Ok(plan_tumble_freeze(scx, &stmt.query)?.map(|(frozen, _)| frozen))
 }
@@ -3331,11 +3337,7 @@ fn plan_tumble_freeze(
     };
 
     let (size, offset, close_delay) = crate::plan::query::plan_tumble_intervals(tumble)?;
-    let close_after = size
-        .checked_add(&close_delay)
-        .ok_or_else(|| sql_err!("TUMBLE SIZE plus CLOSE DELAY is out of range"))?;
     let definition = FrozenDefinition {
-        close_after: close_after.duration()?,
         input: *input,
         time_column: normalize::column_name(tumble.time_column.clone()),
         size,

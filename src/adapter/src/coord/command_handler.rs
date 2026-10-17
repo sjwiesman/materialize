@@ -2006,7 +2006,7 @@ impl Coordinator {
         cmvs: &CreateMaterializedViewStatement<Aug>,
         resolved_ids: &ResolvedIds,
         session: &Session,
-        acquire_read_holds: bool,
+        store_read_holds: bool,
     ) -> Result<Option<Timestamp>, AdapterError> {
         if mz_sql::plan::tumble_table_factors(&cmvs.query).is_empty() {
             return Ok(None);
@@ -2056,7 +2056,7 @@ impl Coordinator {
             }
         };
 
-        if acquire_read_holds {
+        if store_read_holds {
             self.store_transaction_read_holds(session.conn_id().clone(), read_holds);
         }
 
