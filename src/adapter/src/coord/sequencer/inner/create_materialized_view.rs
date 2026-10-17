@@ -900,8 +900,6 @@ impl Coordinator {
         let mut storage_as_of = least_valid_read.clone();
 
         match frozen_as_of {
-            // Purification chose the initial as-of, and the planner built the MV's freeze predicate
-            // around it, so the dataflow must start exactly there.
             Some(FrozenAsOf::Backfill(initial_as_of)) => {
                 let initial_as_of = Antichain::from_elem(initial_as_of);
                 if !timely::PartialOrder::less_equal(&least_valid_read, &initial_as_of) {

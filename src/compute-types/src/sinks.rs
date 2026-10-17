@@ -156,9 +156,8 @@ impl FreezeSpec {
     ///
     /// A frozen view's dataflow must filter its output by this predicate, which releases the
     /// state of closed panes and gives every output row a retraction at its freeze time. The
-    /// sink relies on that filter and applies the same predicate to the rows it reads back from
-    /// persist, so the two retractions cancel. A row the dataflow retracts before the sink
-    /// freezes it is deleted from the output.
+    /// materialized view sink relies on that retraction. A row the dataflow retracts before the
+    /// sink freezes it is deleted from the output.
     ///
     /// # Panics
     ///

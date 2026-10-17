@@ -1999,10 +1999,9 @@ impl Coordinator {
     ///
     /// The initial as-of is the inputs' latest complete time, so the backfill of panes that closed
     /// before creation includes every write that committed before the statement. A replacement
-    /// of a frozen view inherits its target's initial as-of instead: the two views then derive the
-    /// same freeze time from every row of the shared shard, so the replacement never rewrites a
-    /// pane the target has frozen. Returns `None` for views without `TUMBLE`, and for
-    /// views that also have a refresh schedule, which the planner rejects.
+    /// of a frozen view inherits its target's initial as-of instead, see `FrozenAsOf::Inherited`.
+    /// Returns `None` for views without `TUMBLE`, and for views that also have a refresh schedule,
+    /// which the planner rejects.
     fn resolve_initial_as_of_for_frozen_materialized_view(
         &mut self,
         cmvs: &CreateMaterializedViewStatement<Aug>,

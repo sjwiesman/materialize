@@ -3387,7 +3387,7 @@ fn plan_tumble(
         None => input.full_item_name().item.clone(),
     };
     let pane_desc = RelationDesc::new(input_type, input_scope.column_names().cloned());
-    let shadowed = body_qcx.ctes.insert(
+    body_qcx.ctes.insert(
         *pane_id,
         CteDesc {
             name: pane_name.clone(),
@@ -3404,9 +3404,6 @@ fn plan_tumble(
         ])
         .project((0..arity).collect());
     let (body_expr, body_scope) = plan_nested_query(&mut body_qcx, body)?;
-    if let Some(shadowed) = shadowed {
-        body_qcx.ctes.insert(*pane_id, shadowed);
-    }
     let body_arity = body_qcx.relation_type(&body_expr).arity();
     // The sink freezes each row by the pane start in the view's first column, so the body's
     // first column must be the window's `start` itself. Checking the planned body rather than its
