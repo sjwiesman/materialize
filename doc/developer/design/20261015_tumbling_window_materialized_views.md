@@ -488,7 +488,6 @@ panes, writes nothing, and corrects from the shard's upper once promoted.
 - `TUMBLE ... PER PANE` outside `CREATE MATERIALIZED VIEW`, including in
   `SELECT`, `CREATE VIEW`, `SUBSCRIBE`, and `CREATE INDEX`.
 - `TUMBLE` without `PER PANE`.
-- `mz_now()` in the body.
 - A body that references the view being defined.
 - A body whose first output column is not the window's start, including a
   `w.start` that a relation in the body shadows.
@@ -597,6 +596,11 @@ Open questions, not here.
   sources it is whatever the source had ingested. A view whose inputs are not
   readable at `I` when the dataflow is installed fails with an internal error,
   which the purification read holds should prevent.
+  The greatest available read covers the collections the dataflow imports,
+  including indexes. An index on a cluster without replicas does not advance,
+  so `I` falls back to the least valid read and the backfill misses writes
+  committed after it. Computing the greatest available read over storage
+  collections only would avoid that.
 - **The feature is gated by the unsafe flag
   `unsafe_enable_materialized_view_freeze`.** It needs to become the dyncfg
   described under EXPLAIN and feature flag, whose production default is a
