@@ -88,6 +88,7 @@ SCRIPTS = [
     "error_behavior.spec",
     "reduce.spec",
     "materialized_view.spec",
+    "materialized_view_freeze.spec",
     "subscribe.spec",
     "join.spec",
     "index_and_mv.spec",

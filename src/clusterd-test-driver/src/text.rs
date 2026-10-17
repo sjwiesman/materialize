@@ -37,12 +37,14 @@
 //! sub-commands, with a `build`'s MIR as its own deeper-indented sub-body.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail, ensure};
-use mz_repr::GlobalId;
+use mz_repr::{GlobalId, Timestamp};
 
 use crate::script::{
-    BuildSpec, ColumnSpec, Command, ConfigSetting, ExplainTarget, ExportSpec, ImportSpec,
+    BuildSpec, ColumnSpec, Command, ConfigSetting, ExplainTarget, ExportSpec, FreezeArgs,
+    ImportSpec,
 };
 
 /// One element of a parsed script file, retained so a `REWRITE` reproduces the
@@ -334,6 +336,22 @@ fn opt_string(args: &BTreeMap<String, String>, key: &str) -> Option<String> {
     args.get(key).cloned()
 }
 
+/// Parse the `freeze-close-after-ms` and `freeze-initial-as-of` arguments of a frozen
+/// materialized view.
+fn parse_freeze(args: &BTreeMap<String, String>) -> anyhow::Result<Option<FreezeArgs>> {
+    match (
+        opt_u64(args, "freeze-close-after-ms")?,
+        opt_u64(args, "freeze-initial-as-of")?,
+    ) {
+        (None, None) => Ok(None),
+        (Some(close_after), Some(initial_as_of)) => Ok(Some(FreezeArgs {
+            close_after: Duration::from_millis(close_after),
+            initial_as_of: Timestamp::from(initial_as_of),
+        })),
+        _ => bail!("`freeze-close-after-ms` and `freeze-initial-as-of` must appear together"),
+    }
+}
+
 /// Parse a `[a,b,c]` list of `usize`s (`[]` is empty).
 fn parse_usize_list(s: &str) -> anyhow::Result<Vec<usize>> {
     let inner = s
@@ -369,6 +387,7 @@ fn parse_export(args: &BTreeMap<String, String>) -> anyhow::Result<ExportSpec> {
                 on_id,
                 shard: req(args, "shard")?.to_string(),
                 schema: opt_string(args, "schema"),
+                freeze: parse_freeze(args)?,
             },
             "subscribe" => ExportSpec::Subscribe {
                 sink_id: req_id(args, "sink")?,
@@ -520,6 +539,12 @@ fn parse_command(input: &str) -> anyhow::Result<Command> {
             shard: req(&args, "shard")?.to_string(),
             schema: opt_string(&args, "schema"),
             ts: req_u64(&args, "ts")?,
+            diff: match args.get("diff") {
+                Some(diff) => diff
+                    .parse()
+                    .with_context(|| format!("argument `diff` is not an integer: {diff}"))?,
+                None => 1,
+            },
             rows: rows_from_body(body)?,
         },
         "define-index" => Command::DefineIndex {
@@ -753,6 +778,7 @@ mod tests {
                 shard: "ev".to_string(),
                 schema: Some("events".to_string()),
                 ts: 1,
+                diff: 1,
                 rows: vec![
                     vec!["1000".to_string(), "true".to_string(), "alpha".to_string()],
                     vec!["1001".to_string(), "false".to_string(), "null".to_string()],
@@ -872,6 +898,7 @@ mod tests {
                 on_id: GlobalId::User(2000),
                 shard: "out".to_string(),
                 schema: Some("kv".to_string()),
+                freeze: None,
             }]
         );
 

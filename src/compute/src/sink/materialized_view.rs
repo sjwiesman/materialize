@@ -127,7 +127,9 @@ use mz_compute_types::dyncfgs::{
 };
 use mz_compute_types::sinks::{ComputeSinkDesc, MaterializedViewSinkConnection};
 use mz_dyncfg::ConfigSet;
+use mz_expr::{Eval, MfpPlan, MirScalarExpr};
 use mz_ore::cast::CastFrom;
+use mz_ore::soft_panic_or_log;
 use mz_persist_client::batch::{Batch, ProtoBatch};
 use mz_persist_client::cache::PersistClientCache;
 use mz_persist_client::metrics::SinkMetrics;
@@ -135,7 +137,7 @@ use mz_persist_client::operators::shard_source::{ErrorHandler, SnapshotMode};
 use mz_persist_client::write::WriteHandle;
 use mz_persist_client::{Diagnostics, PersistClient};
 use mz_persist_types::codec_impls::UnitSchema;
-use mz_repr::{Diff, GlobalId, Row, Timestamp};
+use mz_repr::{Datum, DatumVec, Diff, GlobalId, ReprRelationType, Row, RowArena, Timestamp};
 use mz_storage_operators::persist::{SharedBatchId, SharedBatches};
 use mz_storage_types::StorageDiff;
 use mz_storage_types::controller::CollectionMetadata;
@@ -201,6 +203,14 @@ impl<'scope> SinkRender<'scope> for MaterializedViewSinkConnection<CollectionMet
 
         let read_only_rx = collection_state.read_only_rx.clone();
 
+        let freeze = self.freeze.as_ref().map(|spec| {
+            let typ = ReprRelationType::from(self.value_desc.typ());
+            SinkFreeze {
+                mfp: spec.mfp_plan(&typ),
+                freeze_time: spec.freeze_time(&typ),
+            }
+        });
+
         let token = persist_sink(
             sink_id,
             &self.storage_metadata,
@@ -210,8 +220,48 @@ impl<'scope> SinkRender<'scope> for MaterializedViewSinkConnection<CollectionMet
             compute_state,
             start_signal,
             read_only_rx,
+            freeze,
         );
         Some(token)
+    }
+}
+
+/// Per-pane freezing of a materialized view sink, derived from a [`FreezeSpec`].
+///
+/// The dataflow's output is already filtered by the freeze predicate, see
+/// [`FreezeSpec::predicate`], and the sink applies the same filter, `mfp`, to the rows it
+/// reads back from persist. A row's retraction at its freeze time therefore appears on both
+/// sides and cancels. That alone does not keep the row: a row inserted and frozen within one
+/// batch has no persisted counterpart yet, and the correction would write its retraction. The
+/// `write` operator therefore also drops every update at or beyond its row's `freeze_time`.
+///
+/// [`FreezeSpec`]: mz_compute_types::sinks::FreezeSpec
+pub(super) struct SinkFreeze {
+    pub(super) mfp: MfpPlan,
+    pub(super) freeze_time: MirScalarExpr,
+}
+
+/// Returns a predicate that keeps the updates the `write` operator may write: all of them if
+/// `freeze_time` is `None`, otherwise those before their row's freeze time. See [`SinkFreeze`].
+pub(super) fn unfrozen(
+    freeze_time: Option<&MirScalarExpr>,
+) -> impl FnMut(&(Row, Timestamp, Diff)) -> bool + '_ {
+    let mut datum_vec = DatumVec::new();
+    move |(row, time, _)| {
+        let Some(freeze_time) = freeze_time else {
+            return true;
+        };
+        let arena = RowArena::new();
+        let datums = datum_vec.borrow_with(row);
+        match freeze_time.eval(&datums, &arena) {
+            Ok(Datum::MzTimestamp(frozen)) => *time < frozen,
+            // The freeze filter in the dataflow and in the read-back routes a row whose freeze
+            // time fails to evaluate to the error stream, so neither side passes it here.
+            other => {
+                soft_panic_or_log!("freeze time of a sink row evaluated to {other:?}");
+                true
+            }
+        }
     }
 }
 
@@ -246,6 +296,7 @@ pub(super) fn persist_sink<'s>(
     compute_state: &mut ComputeState,
     start_signal: StartSignal,
     read_only_rx: watch::Receiver<bool>,
+    freeze: Option<SinkFreeze>,
 ) -> Rc<dyn Any>
 where
 {
@@ -259,6 +310,7 @@ where
             compute_state,
             start_signal,
             read_only_rx,
+            freeze,
         );
     }
 
@@ -266,8 +318,14 @@ where
     let desired = OkErr::new(ok_collection.inner, err_collection.inner);
 
     // Read back the persist shard.
-    let (persist, persist_token) =
-        persist_source(scope, sink_id, target.clone(), compute_state, start_signal);
+    let (persist, persist_token) = persist_source(
+        scope,
+        sink_id,
+        target.clone(),
+        compute_state,
+        start_signal,
+        freeze.as_ref().map(|f| f.mfp.clone()),
+    );
 
     let persist_api = PersistApi {
         persist_clients: Arc::clone(&compute_state.persist_clients),
@@ -294,6 +352,7 @@ where
         descs.clone(),
         read_only_rx,
         Rc::clone(&compute_state.worker_config),
+        freeze.map(|f| f.freeze_time),
     );
 
     let append_token = append::render(sink_id, persist_api, descs, batches);
@@ -399,6 +458,7 @@ pub(super) fn persist_source<'s>(
     target: CollectionMetadata,
     compute_state: &ComputeState,
     start_signal: StartSignal,
+    mut map_filter_project: Option<MfpPlan>,
 ) -> (PersistStreams<'s>, Vec<PressOnDropButton>) {
     // There is no guarantee that the sink as-of is beyond the persist shard's since. If it isn't,
     // instantiating a `persist_source` with it would panic. So instead we leave it to
@@ -413,7 +473,6 @@ pub(super) fn persist_source<'s>(
     let as_of = None;
 
     let until = Antichain::new();
-    let map_filter_project = None;
 
     let (ok_stream, err_stream, token) = mz_storage_operators::persist_source::persist_source::<
         DataflowErrorSer,
@@ -428,11 +487,14 @@ pub(super) fn persist_source<'s>(
         as_of,
         SnapshotMode::Include,
         until,
-        map_filter_project,
+        map_filter_project.as_mut(),
         compute_state.dataflow_max_inflight_bytes(),
         start_signal.into_send_future(),
         ErrorHandler::Halt("compute persist sink"),
     );
+
+    // The sink has no fallback for any part of the MFP that `persist_source` leaves unapplied.
+    assert!(map_filter_project.map_or(true, |mfp| mfp.is_identity()));
 
     let streams = OkErr::new(ok_stream, err_stream);
     (streams, token)
@@ -796,6 +858,7 @@ mod write {
         descs: DescsStream<'s>,
         mut read_only_rx: watch::Receiver<bool>,
         worker_config: Rc<ConfigSet>,
+        freeze_time: Option<MirScalarExpr>,
     ) -> (BatchesStream<'s>, PressOnDropButton) {
         let scope = desired.ok.scope();
         let worker_id = scope.index();
@@ -864,6 +927,7 @@ mod write {
                 as_of,
                 read_only,
                 &worker_config,
+                freeze_time,
             );
             let mut correction_logger = correction_logger;
 
@@ -995,6 +1059,9 @@ mod write {
         /// batches, so the batch-write path never sweeps `consolidate_before(upper)` forward; the
         /// forced consolidation stands in for it and is re-armed as long as this holds.
         read_only: bool,
+        /// If set, updates at or beyond the time this expression yields for their row are not
+        /// written. See [`SinkFreeze`].
+        freeze_time: Option<MirScalarExpr>,
     }
 
     impl State {
@@ -1007,6 +1074,7 @@ mod write {
             as_of: Antichain<Timestamp>,
             read_only: bool,
             worker_config: &ConfigSet,
+            freeze_time: Option<MirScalarExpr>,
         ) -> Self {
             let worker_metrics = metrics.for_worker(worker_id);
 
@@ -1032,6 +1100,7 @@ mod write {
                 batch_description: None,
                 force_consolidation_after,
                 read_only,
+                freeze_time,
             };
 
             // Immediately advance the persist frontier tracking to the `as_of`.
@@ -1181,6 +1250,8 @@ mod write {
 
             let ok_updates = self.corrections.ok.updates_before(&desc.upper);
             let err_updates = self.corrections.err.updates_before(&desc.upper);
+
+            let ok_updates = ok_updates.filter(unfrozen(self.freeze_time.as_ref()));
 
             let oks = ok_updates.map(|(d, t, r)| ((SourceData(Ok(d)), ()), t, r.into_inner()));
             let errs = err_updates

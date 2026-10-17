@@ -1,0 +1,355 @@
+# Copyright Materialize, Inc. and contributors. All rights reserved.
+#
+# Use of this software is governed by the Business Source License
+# included in the LICENSE file at the root of this repository.
+#
+# As of the Change Date specified in that file, in accordance with
+# the Business Source License, use of this software will be governed
+# by the Apache License, Version 2.0.
+
+# Tests planning of `TUMBLE ... PER PANE`: the window and pane bindings, the
+# window arguments, and the plan a body decorrelates to.
+
+mode cockroach
+
+simple conn=mz_system,user=mz_system
+ALTER SYSTEM SET unsafe_enable_materialized_view_freeze = true
+----
+COMPLETE 0
+
+statement ok
+CREATE TABLE events (ts timestamp, account int, credits int)
+
+statement ok
+INSERT INTO events VALUES
+  ('2026-01-01 00:10', 1, 5),
+  ('2026-01-01 00:50', 2, 7),
+  ('2026-01-01 01:20', 1, 3),
+  (NULL, 1, 100)
+
+statement error TUMBLE \.\.\. PER PANE is only supported in materialized views
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => '1 hour') AS w
+PER PANE (SELECT w.start FROM events)
+
+statement error TUMBLE \.\.\. PER PANE is only supported in materialized views
+CREATE VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => '1 hour') AS w
+PER PANE (SELECT w.start FROM events)
+
+statement error TUMBLE \.\.\. PER PANE is only supported in materialized views
+SUBSCRIBE (
+  SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => '1 hour') AS w
+  PER PANE (SELECT w.start FROM events)
+)
+
+# The body sees one pane's rows through the input's alias, and the pane's
+# bounds through the window alias. Rows with a NULL event time belong to no pane.
+statement ok
+CREATE MATERIALIZED VIEW hourly AS
+SELECT * FROM TUMBLE(
+  TABLE events AS u,
+  DESCRIPTOR(ts),
+  SIZE => INTERVAL '1 hour',
+  CLOSE DELAY => INTERVAL '5 minutes'
+) AS w
+PER PANE (
+  SELECT w.start AS hour_start, w.end AS hour_end, w.close AS closes_at, sum(u.credits) AS credits
+  FROM u
+)
+
+query TTTI rowsort
+SELECT * FROM hourly
+----
+2026-01-01␠00:00:00  2026-01-01␠01:00:00  2026-01-01␠01:05:00  12
+2026-01-01␠01:00:00  2026-01-01␠02:00:00  2026-01-01␠02:05:00  3
+
+# Without aliases, the pane is bound to the input's name, which shadows the table
+# inside the body, and the window is bound to `tumble`.
+statement ok
+CREATE MATERIALIZED VIEW defaults AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour')
+PER PANE (SELECT tumble.start, count(*) AS n FROM events)
+
+query TI rowsort
+SELECT * FROM defaults
+----
+2026-01-01␠00:00:00  2
+2026-01-01␠01:00:00  1
+
+# OFFSET shifts the pane boundaries.
+statement ok
+CREATE MATERIALIZED VIEW offset_panes AS
+SELECT * FROM TUMBLE(
+  TABLE events,
+  DESCRIPTOR(ts),
+  SIZE => INTERVAL '1 hour',
+  OFFSET => INTERVAL '30 minutes'
+) AS w
+PER PANE (SELECT w.start AS pane_start, count(*) AS n FROM events)
+
+query TI rowsort
+SELECT * FROM offset_panes
+----
+2025-12-31␠23:30:00  1
+2026-01-01␠00:30:00  2
+
+# A grouped body groups within each pane.
+statement ok
+CREATE MATERIALIZED VIEW per_account AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, u.account, sum(u.credits) AS credits FROM u GROUP BY u.account)
+
+query TII rowsort
+SELECT * FROM per_account
+----
+2026-01-01␠00:00:00  1  5
+2026-01-01␠00:00:00  2  7
+2026-01-01␠01:00:00  1  3
+
+# A body may join the pane to other relations.
+statement ok
+CREATE TABLE accounts (id int, plan text)
+
+statement ok
+INSERT INTO accounts VALUES (1, 'free'), (2, 'pro')
+
+statement ok
+CREATE MATERIALIZED VIEW per_plan AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (
+  SELECT w.start AS hour_start, a.plan, sum(u.credits) AS credits
+  FROM u LEFT JOIN accounts a ON a.id = u.account
+  GROUP BY a.plan
+)
+
+query TTI rowsort
+SELECT * FROM per_plan
+----
+2026-01-01␠00:00:00  free  5
+2026-01-01␠00:00:00  pro  7
+2026-01-01␠01:00:00  free  3
+
+# mz_now() is rejected anywhere in the view's query.
+statement error mz_now\(\) is not supported in a materialized view over TUMBLE \.\.\. PER PANE
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, w.close AS closes_at, count(*) AS n FROM u)
+WHERE mz_now() >= closes_at
+
+statement error mz_now\(\) is not supported in a materialized view over TUMBLE \.\.\. PER PANE
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u WHERE mz_now() <= u.ts + INTERVAL '1 day')
+
+statement error mz_now\(\) is not supported in a materialized view over TUMBLE \.\.\. PER PANE
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (
+  SELECT w.start AS hour_start, count(*) AS n FROM u
+  WHERE EXISTS (SELECT 1 FROM accounts a WHERE a.id = u.account AND mz_now() <= u.ts + INTERVAL '1 day')
+)
+
+# REFRESH ON COMMIT is the default, and any other refresh schedule is rejected.
+statement ok
+CREATE MATERIALIZED VIEW on_commit WITH (REFRESH ON COMMIT) AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS pane_start, count(*) AS n FROM events)
+
+query TI rowsort
+SELECT * FROM on_commit
+----
+2026-01-01␠00:00:00  2
+2026-01-01␠01:00:00  1
+
+statement error TUMBLE \.\.\. PER PANE is not compatible with REFRESH options
+CREATE MATERIALIZED VIEW bad WITH (REFRESH EVERY '1 day') AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS pane_start, count(*) AS n FROM events)
+
+statement error column "missing" in DESCRIPTOR not found
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(missing), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start FROM events)
+
+statement error DESCRIPTOR column "account" must have type timestamp or timestamp with time zone, not integer
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(account), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start FROM events)
+
+statement error TUMBLE SIZE must be positive
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '0 seconds') AS w
+PER PANE (SELECT w.start FROM events)
+
+statement error TUMBLE SIZE must not involve units larger than days
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 month') AS w
+PER PANE (SELECT w.start FROM events)
+
+statement error TUMBLE OFFSET must be a non-negative whole number of milliseconds
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour', OFFSET => INTERVAL '-1 minute') AS w
+PER PANE (SELECT w.start FROM events)
+
+statement error TUMBLE CLOSE DELAY must be a non-negative whole number of milliseconds
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour', CLOSE DELAY => INTERVAL '1 microsecond') AS w
+PER PANE (SELECT w.start FROM events)
+
+# The body's first column must be the window's start itself, as planned, so the
+# sink freezes each row by its pane.
+statement ok
+CREATE TABLE other (start timestamp, k int)
+
+statement error the first column of a PER PANE body must be w\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start, count(*) AS n FROM u, other AS w GROUP BY w.start)
+
+statement error the first column of a PER PANE body must be w\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start + INTERVAL '0 seconds' AS hour_start, count(*) AS n FROM u)
+
+statement error the first column of a PER PANE body must be w\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.end, count(*) AS n FROM u)
+
+statement error the first column of a PER PANE body must be tumble\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour')
+PER PANE (SELECT count(*) AS n, tumble.start FROM events)
+
+# The window's start may reach the first column through a CTE in the body.
+statement ok
+CREATE MATERIALIZED VIEW via_cte AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (
+  WITH totals AS (SELECT w.start AS hour_start, sum(u.credits) AS credits FROM u)
+  SELECT * FROM totals
+)
+
+query TI rowsort
+SELECT * FROM via_cte
+----
+2026-01-01␠00:00:00  12
+2026-01-01␠01:00:00  3
+
+# Every branch of a set operation must start with the window's start.
+statement ok
+CREATE MATERIALIZED VIEW per_branch AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (
+  SELECT w.start AS hour_start, 'credits' AS kind, sum(u.credits) AS total FROM u
+  UNION ALL
+  SELECT w.start, 'rows', count(*) FROM u
+)
+
+query TTI rowsort
+SELECT * FROM per_branch
+----
+2026-01-01␠00:00:00  credits  12
+2026-01-01␠00:00:00  rows  2
+2026-01-01␠01:00:00  credits  3
+2026-01-01␠01:00:00  rows  1
+
+statement error the first column of a PER PANE body must be w\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (
+  SELECT w.start AS hour_start, sum(u.credits) AS total FROM u
+  UNION ALL
+  SELECT w.end, count(*) FROM u
+)
+
+# The query around TUMBLE may not compute over rows of several panes. The same
+# window function is allowed inside the body, where it sees one pane.
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT hour_start, row_number() OVER (ORDER BY n) AS r FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+
+statement ok
+CREATE MATERIALIZED VIEW ranked AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, u.account, row_number() OVER (ORDER BY u.credits DESC) AS r FROM u)
+
+query TII rowsort
+SELECT * FROM ranked
+----
+2026-01-01␠00:00:00  1  2
+2026-01-01␠00:00:00  2  1
+2026-01-01␠01:00:00  1  1
+
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT n, hour_start FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+
+# The query around TUMBLE may rename, compute, and filter, as long as the
+# body's first column stays first.
+statement ok
+CREATE MATERIALIZED VIEW reshaped AS
+SELECT hour_start AS h, n * 2 AS doubled
+FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+WHERE n > 1
+
+query TI rowsort
+SELECT * FROM reshaped
+----
+2026-01-01␠00:00:00  4
+
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT DISTINCT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT hour_start, max(n) AS n FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+GROUP BY hour_start
+
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+LIMIT 1
+
+statement error the query around TUMBLE \.\.\. PER PANE may only project and filter its rows, and must keep the first column of the PER PANE body first
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u), accounts
+
+statement error a materialized view may contain only one TUMBLE \.\.\. PER PANE
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+UNION ALL
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)
+
+# A body that aggregates within groups decorrelates to a single Reduce keyed by
+# the pane start. The freeze predicate inlines the view's initial as-of, which
+# differs per run.
+replace \d{13}  <INITIAL_AS_OF+1>
+
+query T multiline
+EXPLAIN OPTIMIZED PLAN WITH (humanized expressions) AS VERBOSE TEXT FOR
+CREATE MATERIALIZED VIEW per_account_plan AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, u.account, sum(u.credits) AS credits FROM u GROUP BY u.account)
+----
+materialize.public.per_account_plan:
+  Reduce group_by=[bin_unix_epoch_timestamp(01:00:00, #0{ts}), #1{account}] aggregates=[sum(#2{credits})]
+    Filter (#0{ts}) IS NOT NULL AND (mz_now() < greatest(timestamp_to_mz_timestamp((bin_unix_epoch_timestamp(01:00:00, #0{ts}) + 01:00:00)), <INITIAL_AS_OF+1>))
+      ReadStorage materialize.public.events
+
+Source materialize.public.events
+  filter=((#0{ts}) IS NOT NULL AND (mz_now() < greatest(timestamp_to_mz_timestamp((bin_unix_epoch_timestamp(01:00:00, #0{ts}) + 01:00:00)), <INITIAL_AS_OF+1>)))
+
+Target cluster: quickstart
+
+EOF

@@ -33,8 +33,8 @@ use mz_compute_types::dataflows::{
 use mz_compute_types::plan::LirRelationExpr;
 use mz_compute_types::plan::render_plan::RenderPlan;
 use mz_compute_types::sinks::{
-    ComputeSinkConnection, ComputeSinkDesc, MaterializedViewSinkConnection, MetricSinkConnection,
-    SubscribeSinkConnection,
+    ComputeSinkConnection, ComputeSinkDesc, FreezeSpec, MaterializedViewSinkConnection,
+    MetricSinkConnection, SubscribeSinkConnection,
 };
 use mz_compute_types::sources::SourceInstanceDesc;
 use mz_expr::explain::ExplainContext;
@@ -346,6 +346,7 @@ impl DataflowBuilder {
             connection: ComputeSinkConnection::MaterializedView(MaterializedViewSinkConnection {
                 value_desc,
                 storage_metadata: (),
+                freeze: None,
             }),
             with_snapshot: true,
             up_to: Antichain::new(),
@@ -355,6 +356,38 @@ impl DataflowBuilder {
         };
         self.mir.export_sink(sink_id, desc);
         self
+    }
+
+    /// Freezes the rows of the materialized view `sink_id` per window pane, see [`FreezeSpec`].
+    ///
+    /// Like the optimizer for a frozen view, this also filters the collection the sink writes
+    /// by [`FreezeSpec::predicate`], which the sink relies on. That collection must be a built
+    /// object, and no other export may read it.
+    pub fn freeze_materialized_view(
+        &mut self,
+        sink_id: GlobalId,
+        freeze: FreezeSpec,
+    ) -> anyhow::Result<&mut Self> {
+        let sink = self
+            .mir
+            .sink_exports
+            .get_mut(&sink_id)
+            .ok_or_else(|| anyhow::anyhow!("no materialized view sink {sink_id}"))?;
+        let ComputeSinkConnection::MaterializedView(conn) = &mut sink.connection else {
+            anyhow::bail!("sink {sink_id} is not a materialized view");
+        };
+        conn.freeze = Some(freeze.clone());
+        let from_id = sink.from;
+        let build = self
+            .mir
+            .objects_to_build
+            .iter_mut()
+            .find(|build| build.id == from_id)
+            .ok_or_else(|| anyhow::anyhow!("frozen sink {sink_id} must write a built object"))?;
+        let expr = build.plan.as_inner().clone();
+        let predicate = freeze.predicate(&expr.typ());
+        build.plan = OptimizedMirRelationExpr::declare_optimized(expr.filter([predicate]));
+        Ok(self)
     }
 
     /// Export a subscribe sink `sink_id` streaming changes of the collection
@@ -681,6 +714,7 @@ fn augment(
                 ComputeSinkConnection::MaterializedView(MaterializedViewSinkConnection {
                     value_desc: conn.value_desc,
                     storage_metadata: metadata.clone(),
+                    freeze: conn.freeze,
                 })
             }
             ComputeSinkConnection::Subscribe(conn) => ComputeSinkConnection::Subscribe(conn),

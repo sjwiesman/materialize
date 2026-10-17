@@ -12,11 +12,13 @@
 
 use std::sync::Arc;
 
+use chrono::NaiveDateTime;
 use mz_ore::cast::CastFrom;
 use mz_persist_client::Diagnostics;
 use mz_persist_client::PersistClient;
 use mz_persist_types::ShardId;
 use mz_persist_types::codec_impls::UnitSchema;
+use mz_repr::adt::timestamp::CheckedTimestamp;
 use mz_repr::{Datum, RelationDesc, Row, SqlColumnType, SqlScalarType, Timestamp};
 use mz_storage_types::StorageDiff;
 use mz_storage_types::sources::SourceData;
@@ -44,6 +46,8 @@ pub enum Cell {
     Str(String),
     /// `bytea`.
     Bytes(Vec<u8>),
+    /// `timestamp`.
+    Timestamp(CheckedTimestamp<NaiveDateTime>),
 }
 
 impl Cell {
@@ -57,6 +61,7 @@ impl Cell {
             Cell::Bool(v) => Datum::from(*v),
             Cell::Str(v) => Datum::String(v),
             Cell::Bytes(v) => Datum::Bytes(v),
+            Cell::Timestamp(v) => Datum::Timestamp(*v),
         }
     }
 }
@@ -142,14 +147,15 @@ pub fn sample_rows_from(start: u64, n: u64, pad: usize) -> Vec<Row> {
     synth_rows(&sample_desc(), start, n, pad)
 }
 
-/// Writes `rows` to `shard` at `ts`, advancing `upper` to `ts+1`. All rows are
-/// inserted with diff `+1`. Returns once the append succeeds.
+/// Writes `rows` to `shard` at `ts` with diff `diff`, advancing `upper` to `ts+1`.
+/// Returns once the append succeeds.
 pub async fn write_rows_single_ts(
     client: &PersistClient,
     shard: ShardId,
     desc: &RelationDesc,
     rows: &[Row],
     ts: Timestamp,
+    diff: i64,
 ) -> anyhow::Result<()> {
     let mut writer = client
         .open_writer::<SourceData, (), Timestamp, StorageDiff>(
@@ -165,7 +171,7 @@ pub async fn write_rows_single_ts(
 
     let updates: Vec<_> = rows
         .iter()
-        .map(|r| ((SourceData(Ok(r.clone())), ()), ts, 1i64))
+        .map(|r| ((SourceData(Ok(r.clone())), ()), ts, diff))
         .collect();
     let lower = Antichain::from_elem(ts);
     let upper = Antichain::from_elem(ts.step_forward());
@@ -241,7 +247,7 @@ mod tests {
         let shard = ShardId::new();
         let desc = sample_desc();
         let rows = sample_rows(1000, 16);
-        write_rows_single_ts(&client, shard, &desc, &rows, Timestamp::from(0))
+        write_rows_single_ts(&client, shard, &desc, &rows, Timestamp::from(0), 1)
             .await
             .expect("write");
 

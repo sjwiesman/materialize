@@ -56,6 +56,7 @@ use mz_compute_types::dyncfgs::{
     MV_SINK_ADVANCE_PERSIST_FRONTIERS, MV_SINK_SHARED_BATCH_MAX_BYTES,
 };
 use mz_dyncfg::{ConfigSet, ConfigValHandle};
+use mz_expr::MirScalarExpr;
 use mz_ore::cast::CastFrom;
 use mz_persist_client::batch::{Batch, ProtoBatch};
 use mz_persist_client::write::WriteHandle;
@@ -79,7 +80,8 @@ use crate::render::errors::DataflowErrorSer;
 use crate::sink::correction::{ChannelLogging, Correction, CorrectionLogger};
 use crate::sink::materialized_view::{
     BatchDescription, BatchesStream, DescsStream, DesiredStreams, OkErr, PersistApi,
-    PersistStreams, SharedSinkFrontier, advance, operator_name, persist_source,
+    PersistStreams, SharedSinkFrontier, SinkFreeze, advance, operator_name, persist_source,
+    unfrozen,
 };
 use crate::sink::shared_batch::SharedBatchWriter;
 
@@ -95,13 +97,20 @@ pub(super) fn persist_sink<'s>(
     compute_state: &mut ComputeState,
     start_signal: StartSignal,
     read_only_rx: watch::Receiver<bool>,
+    freeze: Option<SinkFreeze>,
 ) -> Rc<dyn Any> {
     let scope = ok_collection.scope();
     let desired = OkErr::new(ok_collection.inner, err_collection.inner);
 
     // Read back the persist shard.
-    let (persist, persist_token) =
-        persist_source(scope, sink_id, target.clone(), compute_state, start_signal);
+    let (persist, persist_token) = persist_source(
+        scope,
+        sink_id,
+        target.clone(),
+        compute_state,
+        start_signal,
+        freeze.as_ref().map(|f| f.mfp.clone()),
+    );
 
     let persist_api = PersistApi {
         persist_clients: Arc::clone(&compute_state.persist_clients),
@@ -133,6 +142,7 @@ pub(super) fn persist_sink<'s>(
         descs.clone(),
         read_only_rx,
         Rc::clone(&compute_state.worker_config),
+        freeze.map(|f| f.freeze_time),
     );
 
     append::render(sink_id, persist_api, descs, batches);
@@ -573,6 +583,7 @@ mod write {
     ///  * `desired`: The ok/err streams that should be sinked to persist.
     ///  * `persist`: The ok/err streams read back from the output persist shard.
     ///  * `descs`: The stream of batch descriptions produced by the `mint` operator.
+    ///  * `freeze_time`: If set, updates at or beyond their row's freeze time are not written.
     pub fn render<'s>(
         sink_id: GlobalId,
         persist_api: PersistApi,
@@ -582,6 +593,7 @@ mod write {
         descs: DescsStream<'s>,
         mut read_only_rx: watch::Receiver<bool>,
         worker_config: Rc<ConfigSet>,
+        freeze_time: Option<MirScalarExpr>,
     ) -> BatchesStream<'s> {
         let scope = desired.ok.scope();
         let worker_id = scope.index();
@@ -694,8 +706,15 @@ mod write {
                     let batch_writer = BatchWriter::new(&persist_api, shared_batch_max_bytes).await;
 
                     while let Some(cmd) = cmd_rx.recv().await {
-                        corrections =
-                            apply_command(sink_id, corrections, &batch_writer, cmd, &resp_tx).await;
+                        corrections = apply_command(
+                            sink_id,
+                            corrections,
+                            &batch_writer,
+                            cmd,
+                            &resp_tx,
+                            freeze_time.as_ref(),
+                        )
+                        .await;
                         // Activate the operator to drain logging events and process batch responses.
                         // ArcActivator suppresses redundant activations, so this is cheap.
                         activator.activate();
@@ -888,6 +907,7 @@ mod write {
         batch_writer: &BatchWriter,
         cmd: WriteCommand,
         resp_tx: &mpsc::UnboundedSender<WriteResponse>,
+        freeze_time: Option<&MirScalarExpr>,
     ) -> Corrections {
         match cmd {
             WriteCommand::Batch(batch) => apply_batch(sink_id, corrections, batch).await,
@@ -905,6 +925,7 @@ mod write {
                 // instead of stranding a core, and this task stays cancellable at every chunk
                 // boundary.
                 let upper = desc.upper.clone();
+                let freeze_time = freeze_time.cloned();
                 let (updates_tx, mut updates_rx) = mpsc::channel(READ_BACK_CHUNKS_IN_FLIGHT);
                 let read_back =
                     mz_ore::task::spawn_blocking(
@@ -916,6 +937,7 @@ mod write {
                             let oks = corrections
                                 .ok
                                 .consolidated_updates_before(&upper)
+                                .filter(unfrozen(freeze_time.as_ref()))
                                 .map(|(d, t, r)| ((SourceData(Ok(d)), ()), t, r.into_inner()));
                             let errs = corrections.err.consolidated_updates_before(&upper).map(
                                 |(d, t, r)| {

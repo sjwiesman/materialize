@@ -2013,6 +2013,12 @@ feature_flags!(
         enable_for_item_parsing: true,
     },
     {
+        name: unsafe_enable_materialized_view_freeze,
+        desc: "materialized views over TUMBLE ... PER PANE",
+        default: false,
+        enable_for_item_parsing: true,
+    },
+    {
         name: unsafe_enable_unorchestrated_cluster_replicas,
         desc: "unorchestrated cluster replicas",
         default: false,

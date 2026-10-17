@@ -1272,7 +1272,8 @@ impl<'ast> Visit<'ast, Raw> for AliasVisitor<'_> {
             // Don't recurse into subqueries or table functions for alias collection
             TableFactor::Derived { .. }
             | TableFactor::Function { .. }
-            | TableFactor::RowsFrom { .. } => {}
+            | TableFactor::RowsFrom { .. }
+            | TableFactor::Tumble(_) => {}
         }
     }
 }

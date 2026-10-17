@@ -40,7 +40,7 @@ use mz_sql::ast::{
     SubscribeStatement,
 };
 use mz_sql::catalog::RoleAttributesRaw;
-use mz_sql::names::{Aug, PartialItemName, ResolvedIds};
+use mz_sql::names::{Aug, PartialItemName, ResolvedIds, ResolvedItemName};
 use mz_sql::plan::{
     AbortTransactionPlan, CommitTransactionPlan, CreateRolePlan, Params, Plan,
     StatementClassification, TransactionType,
@@ -67,6 +67,7 @@ use tracing::{Instrument, debug_span, info, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
+use crate::TimestampProvider;
 use crate::client::truncate_sql_for_logging;
 use crate::command::{
     CatalogSnapshot, Command, ExecuteResponse, Response, SASLChallengeResponse,
@@ -1687,6 +1688,16 @@ impl Coordinator {
                     Err(e) => return ctx.retire(Err(e)),
                 };
 
+                let initial_as_of = match self.resolve_initial_as_of_for_frozen_materialized_view(
+                    &cmvs,
+                    &resolved_ids,
+                    ctx.session(),
+                    true,
+                ) {
+                    Ok(initial_as_of) => initial_as_of,
+                    Err(e) => return ctx.retire(Err(e)),
+                };
+
                 let catalog = self.catalog().for_session(ctx.session());
 
                 purify_create_materialized_view_options(
@@ -1706,7 +1717,7 @@ impl Coordinator {
                         in_cluster_replica: cmvs.in_cluster_replica,
                         query: cmvs.query,
                         with_options: cmvs.with_options,
-                        as_of: None,
+                        as_of: initial_as_of.map(u64::from),
                     });
 
                 // (Purifying CreateMaterializedView doesn't happen async, so no need to send
@@ -1733,6 +1744,16 @@ impl Coordinator {
                     Ok(mz_now) => mz_now,
                     Err(e) => return ctx.retire(Err(e)),
                 };
+
+                match self.resolve_initial_as_of_for_frozen_materialized_view(
+                    &cmvs,
+                    &resolved_ids,
+                    ctx.session(),
+                    false,
+                ) {
+                    Ok(initial_as_of) => cmvs.as_of = initial_as_of.map(u64::from),
+                    Err(e) => return ctx.retire(Err(e)),
+                }
 
                 let catalog = self.catalog().for_session(ctx.session());
 
@@ -1971,6 +1992,75 @@ impl Coordinator {
         } else {
             Ok(None)
         }
+    }
+
+    /// Chooses the initial as-of of a materialized view over `TUMBLE ... PER PANE`, which the
+    /// planner puts into the view's `FreezeSpec`.
+    ///
+    /// The initial as-of is the inputs' latest complete time, so the backfill of panes that closed
+    /// before creation includes every write that committed before the statement. A replacement
+    /// of a frozen view inherits its target's initial as-of instead, see `FrozenAsOf::Inherited`.
+    /// Returns `None` for views without `TUMBLE`.
+    fn resolve_initial_as_of_for_frozen_materialized_view(
+        &mut self,
+        cmvs: &CreateMaterializedViewStatement<Aug>,
+        resolved_ids: &ResolvedIds,
+        session: &Session,
+        store_read_holds: bool,
+    ) -> Result<Option<Timestamp>, AdapterError> {
+        if mz_sql::plan::tumble_table_factors(&cmvs.query).is_empty() {
+            return Ok(None);
+        }
+
+        let catalog = self.catalog().for_session(session);
+        let cluster = mz_sql::plan::resolve_cluster_for_materialized_view(&catalog, cmvs)?;
+        let mut ids = self
+            .index_oracle(cluster)
+            .sufficient_collections(resolved_ids.collections().copied());
+
+        let inherited = cmvs.replacement_for.as_ref().and_then(|name| {
+            let ResolvedItemName::Item { id, .. } = name else {
+                return None;
+            };
+            let target = self.catalog().get_entry(id).materialized_view()?;
+            // Only a frozen target has an initial as-of worth inheriting. The planner rejects a
+            // frozen replacement of an unfrozen target, so the fresh choice below is never used.
+            target.freeze.as_ref()?;
+            let initial_as_of = target.initial_as_of.as_ref()?.as_option().copied()?;
+            Some((target.global_id_writes(), initial_as_of))
+        });
+        if let Some((target_gid, _)) = &inherited {
+            // The replacement's sink reads the target's shard back at the dataflow's as-of, so
+            // the shard's since must not pass that as-of before the dataflow is installed.
+            ids.storage_ids.insert(*target_gid);
+        }
+
+        // Acquire read holds before reading the frontiers, so the since cannot pass the chosen
+        // time before the sequencer installs the dataflow.
+        let read_holds = self.acquire_read_holds(&ids);
+        let initial_as_of = match inherited {
+            Some((_, initial_as_of)) => Some(initial_as_of),
+            None => {
+                let least_valid_read = read_holds.least_valid_read();
+                let greatest_available_read = self.greatest_available_read(&ids);
+                // Inputs that are sealed, such as a `REFRESH AT` view past its last refresh,
+                // contribute nothing to the greatest available read. If all of them are, no input
+                // writes again, and the least valid read already reflects every write.
+                if greatest_available_read.is_empty() {
+                    least_valid_read.into_option()
+                } else {
+                    least_valid_read
+                        .join(&greatest_available_read)
+                        .into_option()
+                }
+            }
+        };
+
+        if store_read_holds {
+            self.store_transaction_read_holds(session.conn_id().clone(), read_holds);
+        }
+
+        Ok(initial_as_of)
     }
 
     /// Instruct the dataflow layer to cancel any ongoing, interactive work for

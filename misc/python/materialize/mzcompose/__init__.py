@@ -387,6 +387,11 @@ def get_variable_system_parameters(
             ["true", "false"],
         ),
         VariableSystemParameter(
+            "unsafe_enable_materialized_view_freeze",
+            "true",
+            ["true", "false"],
+        ),
+        VariableSystemParameter(
             "enable_compute_sync_mv_sink",
             "true",
             ["true", "false"],

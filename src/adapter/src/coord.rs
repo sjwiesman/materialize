@@ -3675,6 +3675,7 @@ impl Coordinator {
                                     mv.desc.latest().iter_names().cloned().collect(),
                                     mv.non_null_assertions.clone(),
                                     mv.refresh_schedule.clone(),
+                                    mv.freeze.clone(),
                                     debug_name,
                                     optimizer_config.clone(),
                                     self.optimizer_metrics(),

@@ -40,6 +40,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use mz_compute_client::protocol::command::{ComputeCommand, PeekTarget};
+use mz_compute_types::sinks::FreezeSpec;
 use mz_dyncfg::{ConfigType, ConfigUpdates, ConfigVal};
 use mz_expr::visit::Visit;
 use mz_expr::{Id, MirRelationExpr};
@@ -157,6 +158,9 @@ pub enum ExportSpec {
         shard: String,
         /// Output schema; defaults to the sample schema. Must match `on_id`'s type.
         schema: Option<String>,
+        /// Per-pane freezing of the sink's rows, see
+        /// [`DataflowBuilder::freeze_materialized_view`].
+        freeze: Option<FreezeArgs>,
     },
     /// A subscribe sink streaming changes back as responses, collected by
     /// `await-subscribe`.
@@ -170,6 +174,16 @@ pub enum ExportSpec {
         /// Exclusive upper at which the subscribe completes; unbounded if absent.
         up_to: Option<u64>,
     },
+}
+
+/// The arguments of a frozen materialized view export. The pane start is the first column of the
+/// export's schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreezeArgs {
+    /// Time from a pane's start to its close.
+    pub close_after: Duration,
+    /// The view's initial as-of.
+    pub initial_as_of: Timestamp,
 }
 
 /// What an `explain` command renders: a dataflow given inline, or a reference to one
@@ -217,6 +231,7 @@ fn scalar_type_from_str(s: &str) -> anyhow::Result<SqlScalarType> {
         "bool" | "boolean" => SqlScalarType::Bool,
         "string" | "text" => SqlScalarType::String,
         "bytes" | "bytea" => SqlScalarType::Bytes,
+        "timestamp" => SqlScalarType::Timestamp { precision: None },
         other => anyhow::bail!("unsupported column type {other:?}"),
     })
 }
@@ -292,6 +307,9 @@ fn cell_from_token(token: &str, col: &SqlColumnType) -> anyhow::Result<Cell> {
         }
         SqlScalarType::String => Cell::Str(unquote(token).to_string()),
         SqlScalarType::Bytes => Cell::Bytes(unquote(token).as_bytes().to_vec()),
+        SqlScalarType::Timestamp { .. } => {
+            Cell::Timestamp(strconv::parse_timestamp(token).map_err(|e| parse("timestamp", e))?)
+        }
         ref other => anyhow::bail!("unsupported column type {other:?}"),
     };
     Ok(cell)
@@ -366,6 +384,10 @@ fn remap_gets(
     })
 }
 
+fn default_diff() -> i64 {
+    1
+}
+
 /// A command read from the script stream.
 ///
 /// Tagged on `"cmd"`, snake_case, e.g.
@@ -428,6 +450,9 @@ pub enum Command {
         schema: Option<String>,
         /// The timestamp to write at.
         ts: u64,
+        /// The diff of every row: `1` inserts, `-1` retracts.
+        #[serde(default = "default_diff")]
+        diff: i64,
         /// Rows as arrays of raw value tokens, typed against the schema by
         /// `cell_from_token`.
         rows: Vec<Vec<String>>,
@@ -896,6 +921,7 @@ impl ScriptState {
                     on_id,
                     shard,
                     schema,
+                    freeze,
                 } => {
                     let desc = self.resolve_schema(&schema)?;
                     self.check_sink_schema(&builder, on_id, &desc)?;
@@ -910,6 +936,15 @@ impl ScriptState {
                             location: location.clone(),
                         },
                     );
+                    if let Some(FreezeArgs {
+                        close_after,
+                        initial_as_of,
+                    }) = freeze
+                    {
+                        let spec = FreezeSpec::new(&desc, close_after, initial_as_of)
+                            .map_err(anyhow::Error::msg)?;
+                        builder.freeze_materialized_view(sink_id, spec)?;
+                    }
                     // Record the target shard so a later `peek` of the sink id reads it
                     // via a persist peek (the `SELECT * FROM mv` path), with no separate
                     // read-back command.
@@ -960,7 +995,7 @@ impl ScriptState {
                 let shard = self.shard_id(&shard);
                 let pad = row_bytes.unwrap_or(DEFAULT_ROW_BYTES);
                 let batch = synth_rows(&desc, start, count, pad);
-                write_rows_single_ts(&self.client, shard, &desc, &batch, Timestamp::from(ts))
+                write_rows_single_ts(&self.client, shard, &desc, &batch, Timestamp::from(ts), 1)
                     .await?;
                 Ok(format!("wrote {count}"))
             }
@@ -983,14 +1018,22 @@ impl ScriptState {
                 shard,
                 schema,
                 ts,
+                diff,
                 rows,
             } => {
                 let desc = self.resolve_schema(&schema)?;
                 let batch = rows_from_tokens(&desc, &rows)?;
                 let written = batch.len();
                 let shard = self.shard_id(&shard);
-                write_rows_single_ts(&self.client, shard, &desc, &batch, Timestamp::from(ts))
-                    .await?;
+                write_rows_single_ts(
+                    &self.client,
+                    shard,
+                    &desc,
+                    &batch,
+                    Timestamp::from(ts),
+                    diff,
+                )
+                .await?;
                 Ok(format!("wrote {written}"))
             }
             Command::DefineIndex {

@@ -381,3 +381,83 @@ simple conn=attacker,user=attacker
 CREATE REPLACEMENT MATERIALIZED VIEW attacker_schema.rp FOR victim_schema.victim_mv AS SELECT a, b FROM attacker_schema.t2;
 ----
 db error: ERROR: must be owner of MATERIALIZED VIEW materialize.victim_schema.victim_mv
+
+
+# Test: a replacement of a frozen materialized view keeps its window and
+# inherits its initial as-of, so promotion never rewrites a closed pane. The
+# open-pane correction after promotion is asynchronous and is covered by
+# test/testdrive/materialized-view-freeze.td, which retries.
+
+simple conn=mz_system,user=mz_system
+ALTER SYSTEM SET unsafe_enable_materialized_view_freeze = true
+----
+COMPLETE 0
+
+statement ok
+CREATE TABLE replaced_events (ts timestamptz, v int)
+
+statement ok
+INSERT INTO replaced_events VALUES (now() - INTERVAL '1 hour', 1), (now(), 2)
+
+statement ok
+CREATE MATERIALIZED VIEW replaced AS
+SELECT * FROM TUMBLE(TABLE replaced_events, DESCRIPTOR(ts), SIZE => INTERVAL '1 minute', CLOSE DELAY => INTERVAL '5 minutes') AS w
+PER PANE (SELECT w.start AS pane_start, sum(v) AS total FROM replaced_events)
+
+query I
+SELECT total FROM replaced ORDER BY pane_start
+----
+1
+2
+
+statement error cannot replace replaced because the replacement changes its window
+CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS
+SELECT * FROM TUMBLE(TABLE replaced_events, DESCRIPTOR(ts), SIZE => INTERVAL '2 minutes', CLOSE DELAY => INTERVAL '5 minutes') AS w
+PER PANE (SELECT w.start AS pane_start, sum(v) * 10 AS total FROM replaced_events)
+
+statement error cannot replace replaced because the replacement changes its window
+CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS
+SELECT * FROM TUMBLE(TABLE replaced_events, DESCRIPTOR(ts), SIZE => INTERVAL '1 minute', CLOSE DELAY => INTERVAL '10 minutes') AS w
+PER PANE (SELECT w.start AS pane_start, sum(v) * 10 AS total FROM replaced_events)
+
+statement error cannot replace replaced with a materialized view that does not freeze panes
+CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS
+SELECT date_bin('1 minute', ts, '1970-01-01'::timestamptz) AS pane_start, sum(v) * 10 AS total FROM replaced_events GROUP BY 1
+
+statement ok
+CREATE MATERIALIZED VIEW unfrozen AS
+SELECT date_bin('1 minute', ts, '1970-01-01'::timestamptz) AS pane_start, sum(v) AS total FROM replaced_events GROUP BY 1
+
+statement error cannot replace unfrozen with a materialized view that freezes panes
+CREATE REPLACEMENT MATERIALIZED VIEW unfrozen_rp FOR unfrozen AS
+SELECT * FROM TUMBLE(TABLE replaced_events, DESCRIPTOR(ts), SIZE => INTERVAL '1 minute', CLOSE DELAY => INTERVAL '5 minutes') AS w
+PER PANE (SELECT w.start AS pane_start, sum(v) AS total FROM replaced_events)
+
+statement ok
+DROP MATERIALIZED VIEW unfrozen
+
+statement ok
+CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS
+SELECT * FROM TUMBLE(TABLE replaced_events, DESCRIPTOR(ts), SIZE => INTERVAL '1 minute', CLOSE DELAY => INTERVAL '5 minutes') AS w
+PER PANE (SELECT w.start AS pane_start, sum(v) * 10 AS total FROM replaced_events)
+
+# A pending replacement is queried through its definition, whose freeze
+# predicate uses the target's initial as-of, so it computes open panes only.
+query I
+SELECT total FROM replaced_rp ORDER BY pane_start
+----
+20
+
+statement ok
+ALTER MATERIALIZED VIEW replaced APPLY REPLACEMENT replaced_rp
+
+query I
+SELECT total FROM replaced WHERE pane_start < now() - INTERVAL '30 minutes'
+----
+1
+
+statement ok
+DROP MATERIALIZED VIEW replaced
+
+statement ok
+DROP TABLE replaced_events

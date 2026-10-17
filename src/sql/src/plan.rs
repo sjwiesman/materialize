@@ -36,6 +36,7 @@ use enum_kinds::EnumKind;
 use ipnet::IpNet;
 use maplit::btreeset;
 use mz_adapter_types::compaction::CompactionWindow;
+use mz_compute_types::sinks::FreezeSpec;
 use mz_controller_types::{ClusterId, ReplicaId};
 use mz_expr::{CollectionPlan, ColumnOrder, MapFilterProject, MirScalarExpr, RowSetFinishing};
 use mz_ore::now::{self, NOW_ZERO};
@@ -115,7 +116,9 @@ pub use hir::{
 };
 pub use lowering::Config as HirToMirConfig;
 pub use notice::PlanNotice;
-pub use query::{ExprContext, QueryContext, QueryLifetime, scalar_type_from_catalog};
+pub use query::{
+    ExprContext, QueryContext, QueryLifetime, scalar_type_from_catalog, tumble_table_factors,
+};
 pub use scope::Scope;
 pub use side_effecting_func::SideEffectingFunc;
 pub use statement::ddl::{
@@ -1983,6 +1986,8 @@ pub struct MaterializedView {
     pub compaction_window: Option<CompactionWindow>,
     pub refresh_schedule: Option<RefreshSchedule>,
     pub as_of: Option<Timestamp>,
+    /// Per-pane freezing of the output, set for views over `TUMBLE ... PER PANE`.
+    pub freeze: Option<FreezeSpec>,
 }
 
 #[derive(Clone, Debug)]
