@@ -2051,10 +2051,20 @@ impl Coordinator {
         let read_holds = self.acquire_read_holds(&ids);
         let initial_as_of = match inherited {
             Some((_, initial_as_of)) => Some(initial_as_of),
-            None => read_holds
-                .least_valid_read()
-                .join(&self.greatest_available_read(&ids))
-                .into_option(),
+            None => {
+                let least_valid_read = read_holds.least_valid_read();
+                let greatest_available_read = self.greatest_available_read(&ids);
+                // Inputs that are sealed, such as a `REFRESH AT` view past its last refresh,
+                // contribute nothing to the greatest available read. If all of them are, no input
+                // writes again, and the least valid read already reflects every write.
+                if greatest_available_read.is_empty() {
+                    least_valid_read.into_option()
+                } else {
+                    least_valid_read
+                        .join(&greatest_available_read)
+                        .into_option()
+                }
+            }
         };
 
         if acquire_read_holds {

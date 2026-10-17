@@ -13,6 +13,7 @@
 
 $ postgres-execute connection=mz_system
 ALTER SYSTEM SET unsafe_enable_materialized_view_freeze = true
+ALTER SYSTEM SET enable_refresh_every_mvs = true
 
 > CREATE TABLE events (ts timestamptz, v int)
 
@@ -94,6 +95,33 @@ $ sleep-is-probably-flaky-i-have-justified-my-need-with-a-comment duration=95s
 > DROP MATERIALIZED VIEW per_minute
 
 > DROP TABLE events
+
+# A view whose inputs never write again backfills from them. A REFRESH AT
+# CREATION view is sealed once its only refresh completes.
+> CREATE TABLE sealed_source (ts timestamptz, v int)
+
+> INSERT INTO sealed_source VALUES (now() - INTERVAL '1 hour', 4)
+
+> CREATE MATERIALIZED VIEW sealed WITH (REFRESH AT CREATION) AS SELECT * FROM sealed_source
+
+> SELECT f.write_frontier IS NULL
+  FROM mz_internal.mz_frontiers f
+  JOIN mz_materialized_views mv ON f.object_id = mv.id
+  WHERE mv.name = 'sealed'
+true
+
+> CREATE MATERIALIZED VIEW over_sealed AS
+  SELECT * FROM TUMBLE(TABLE sealed, DESCRIPTOR(ts), SIZE => INTERVAL '1 minute') AS w
+  PER PANE (SELECT w.start AS pane_start, sum(v) AS total FROM sealed)
+
+> SELECT total FROM over_sealed
+4
+
+> DROP MATERIALIZED VIEW over_sealed
+
+> DROP MATERIALIZED VIEW sealed
+
+> DROP TABLE sealed_source
 
 # Replacing a frozen view keeps its closed panes and corrects its open panes.
 # The pane of the first row closed an hour ago, so the view backfills it at
