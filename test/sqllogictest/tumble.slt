@@ -118,6 +118,23 @@ Target cluster: quickstart
 
 EOF
 
+# REFRESH ON COMMIT is the default, and any other refresh schedule is rejected.
+statement ok
+CREATE MATERIALIZED VIEW on_commit WITH (REFRESH ON COMMIT) AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS pane_start, count(*) AS n FROM events)
+
+query TI rowsort
+SELECT * FROM on_commit
+----
+2026-01-01␠00:00:00  2
+2026-01-01␠01:00:00  1
+
+statement error TUMBLE \.\.\. PER PANE is not compatible with REFRESH options
+CREATE MATERIALIZED VIEW bad WITH (REFRESH EVERY '1 day') AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS pane_start, count(*) AS n FROM events)
+
 statement error column "missing" in DESCRIPTOR not found
 CREATE MATERIALIZED VIEW bad AS
 SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(missing), SIZE => INTERVAL '1 hour') AS w

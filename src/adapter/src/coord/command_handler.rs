@@ -58,7 +58,7 @@ use mz_sql::session::vars::{
 use mz_sql_parser::ast::display::AstDisplay;
 use mz_sql_parser::ast::{
     CreateMaterializedViewStatement, ExplainPlanStatement, Explainee, InsertStatement,
-    WithOptionValue,
+    RefreshOptionValue, WithOptionValue,
 };
 use mz_storage_types::sources::Timeline;
 use opentelemetry::trace::TraceContextExt;
@@ -2002,7 +2002,7 @@ impl Coordinator {
     /// of a frozen view inherits its target's initial as-of instead: the two views then derive the
     /// same freeze time from every row of the shared shard, so the replacement never rewrites a
     /// pane the target has frozen. Returns `None` for views without `TUMBLE`, and for
-    /// views that also have `REFRESH` options, which the planner rejects.
+    /// views that also have a refresh schedule, which the planner rejects.
     fn resolve_initial_as_of_for_frozen_materialized_view(
         &mut self,
         cmvs: &CreateMaterializedViewStatement<Aug>,
@@ -2011,11 +2011,16 @@ impl Coordinator {
         acquire_read_holds: bool,
     ) -> Result<Option<Timestamp>, AdapterError> {
         let frozen = !mz_sql::plan::tumble_table_factors(&cmvs.query).is_empty();
-        let has_refresh = cmvs
-            .with_options
-            .iter()
-            .any(|o| matches!(o.name, MaterializedViewOptionName::Refresh));
-        if !frozen || has_refresh {
+        // `REFRESH ON COMMIT` is the default and plans to no refresh schedule, so only the other
+        // `REFRESH` options make the planner reject the view.
+        let has_refresh_schedule = cmvs.with_options.iter().any(|o| {
+            matches!(o.name, MaterializedViewOptionName::Refresh)
+                && !matches!(
+                    o.value,
+                    Some(WithOptionValue::Refresh(RefreshOptionValue::OnCommit))
+                )
+        });
+        if !frozen || has_refresh_schedule {
             return Ok(None);
         }
 
