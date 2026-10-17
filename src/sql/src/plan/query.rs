@@ -3152,6 +3152,70 @@ fn hide_outer_scopes_until_lateral_barrier(qcx: &mut QueryContext) {
     }
 }
 
+/// Returns whether output column `column` of `expr` is exactly column `outer` of the nearest outer
+/// scope, passed through unchanged.
+///
+/// This recognizes the shapes a `SELECT` list produces. A join is not traversed, because a
+/// lateral join changes what its right input's outer scopes are, so a column that only reaches the
+/// outer reference through a join is reported as `false`.
+fn is_outer_column(expr: &HirRelationExpr, column: usize, outer: usize) -> bool {
+    match expr {
+        HirRelationExpr::Project { input, outputs } => {
+            is_outer_column(input, outputs[column], outer)
+        }
+        HirRelationExpr::Map { input, scalars } => {
+            let arity = input.arity();
+            let mut column = column;
+            while column >= arity {
+                match &scalars[column - arity] {
+                    HirScalarExpr::Column(
+                        ColumnRef {
+                            level: 1,
+                            column: c,
+                        },
+                        _,
+                    ) => {
+                        return *c == outer;
+                    }
+                    // A reference to an earlier column of the same `Map`.
+                    HirScalarExpr::Column(
+                        ColumnRef {
+                            level: 0,
+                            column: c,
+                        },
+                        _,
+                    ) => column = *c,
+                    _ => return false,
+                }
+            }
+            is_outer_column(input, column, outer)
+        }
+        HirRelationExpr::Reduce {
+            input, group_key, ..
+        } => group_key
+            .get(column)
+            .is_some_and(|&key| is_outer_column(input, key, outer)),
+        HirRelationExpr::Filter { input, .. }
+        | HirRelationExpr::Distinct { input }
+        | HirRelationExpr::TopK { input, .. }
+        | HirRelationExpr::Negate { input }
+        | HirRelationExpr::Threshold { input } => is_outer_column(input, column, outer),
+        HirRelationExpr::Let { body, .. } | HirRelationExpr::LetRec { body, .. } => {
+            is_outer_column(body, column, outer)
+        }
+        HirRelationExpr::Union { base, inputs } => {
+            is_outer_column(base, column, outer)
+                && inputs
+                    .iter()
+                    .all(|input| is_outer_column(input, column, outer))
+        }
+        HirRelationExpr::Constant { .. }
+        | HirRelationExpr::Get { .. }
+        | HirRelationExpr::CallTable { .. }
+        | HirRelationExpr::Join { .. } => false,
+    }
+}
+
 /// Returns the `TUMBLE` table factors anywhere in `query`.
 pub fn tumble_table_factors<T: AstInfo>(query: &Query<T>) -> Vec<&Tumble<T>> {
     struct Finder<'ast, T: AstInfo>(Vec<&'ast Tumble<T>>);
@@ -3291,7 +3355,7 @@ fn plan_tumble(
         Some(PartialItemName {
             database: None,
             schema: None,
-            item: window_name,
+            item: window_name.clone(),
         }),
         ["start", "end", "close"],
     );
@@ -3329,6 +3393,13 @@ fn plan_tumble(
         body_qcx.ctes.insert(*pane_id, shadowed);
     }
     let body_arity = body_qcx.relation_type(&body_expr).arity();
+    // The sink freezes each row by the pane start in the view's first column, so the body's
+    // first column must be the window's `start` itself. Checking the planned body rather than its
+    // text rejects a `w.start` that resolves to a column of a relation the body names like the
+    // window.
+    if body_arity == 0 || !is_outer_column(&body_expr, 0, 0) {
+        sql_bail!("the first column of a PER PANE body must be {window_name}.start");
+    }
     let body_expr = HirRelationExpr::Let {
         name: pane_name,
         id: *pane_id,

@@ -417,8 +417,8 @@ PER PANE (SELECT w.start AS pane_start, sum(v) * 10 AS total FROM replaced_event
 
 statement error cannot replace replaced because the replacement changes its window
 CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS
-SELECT * FROM TUMBLE(TABLE replaced_events, DESCRIPTOR(ts), SIZE => INTERVAL '1 minute', CLOSE DELAY => INTERVAL '5 minutes') AS w
-PER PANE (SELECT w.end AS pane_start, sum(v) * 10 AS total FROM replaced_events)
+SELECT * FROM TUMBLE(TABLE replaced_events, DESCRIPTOR(ts), SIZE => INTERVAL '1 minute', CLOSE DELAY => INTERVAL '10 minutes') AS w
+PER PANE (SELECT w.start AS pane_start, sum(v) * 10 AS total FROM replaced_events)
 
 statement error cannot replace replaced with a materialized view that does not freeze panes
 CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS

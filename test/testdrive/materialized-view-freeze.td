@@ -25,7 +25,7 @@ contains:TUMBLE ... PER PANE is only supported in materialized views
 ! CREATE MATERIALIZED VIEW bad
   AS SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => '1 minute') AS w
   PER PANE (SELECT sum(v), w.start FROM events)
-contains:the first column of a PER PANE body must be w.start or w.end
+contains:the first column of a PER PANE body must be w.start
 
 ! CREATE MATERIALIZED VIEW bad
   AS SELECT pane, count(*) FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => '1 minute') AS w
@@ -134,9 +134,9 @@ contains:cannot replace replaced because the replacement changes its window
     TABLE replaced_events,
     DESCRIPTOR(ts),
     SIZE => INTERVAL '1 minute',
-    CLOSE DELAY => INTERVAL '5 minutes'
+    CLOSE DELAY => INTERVAL '10 minutes'
   ) AS w
-  PER PANE (SELECT w.end AS pane_start, sum(v) * 10 AS total FROM replaced_events)
+  PER PANE (SELECT w.start AS pane_start, sum(v) * 10 AS total FROM replaced_events)
 contains:cannot replace replaced because the replacement changes its window
 
 ! CREATE REPLACEMENT MATERIALIZED VIEW replaced_rp FOR replaced AS

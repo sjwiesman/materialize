@@ -147,3 +147,60 @@ statement error TUMBLE CLOSE DELAY must be a non-negative whole number of millis
 CREATE MATERIALIZED VIEW bad AS
 SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour', CLOSE DELAY => INTERVAL '1 microsecond') AS w
 PER PANE (SELECT w.start FROM events)
+
+# The body's first column must be the window's start itself, as planned, so the
+# sink freezes each row by its pane.
+statement ok
+CREATE TABLE other (start timestamp, k int)
+
+statement error the first column of a PER PANE body must be w\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start, count(*) AS n FROM u, other AS w GROUP BY w.start)
+
+statement error the first column of a PER PANE body must be w\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start + INTERVAL '0 seconds' AS hour_start, count(*) AS n FROM u)
+
+statement error the first column of a PER PANE body must be w\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.end, count(*) AS n FROM u)
+
+statement error the first column of a PER PANE body must be tumble\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour')
+PER PANE (SELECT count(*) AS n, tumble.start FROM events)
+
+# Every branch of a set operation must start with the window's start.
+statement ok
+CREATE MATERIALIZED VIEW per_branch AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (
+  SELECT w.start AS hour_start, 'credits' AS kind, sum(u.credits) AS total FROM u
+  UNION ALL
+  SELECT w.start, 'rows', count(*) FROM u
+)
+
+query TTI rowsort
+SELECT * FROM per_branch
+----
+2026-01-01␠00:00:00  credits  12
+2026-01-01␠00:00:00  rows  2
+2026-01-01␠01:00:00  credits  3
+2026-01-01␠01:00:00  rows  1
+
+statement error the first column of a PER PANE body must be w\.start
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (
+  SELECT w.start AS hour_start, sum(u.credits) AS total FROM u
+  UNION ALL
+  SELECT w.end, count(*) FROM u
+)
+
+statement error the first column of a materialized view over TUMBLE must be the first column of its PER PANE body
+CREATE MATERIALIZED VIEW bad AS
+SELECT n, hour_start FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u)

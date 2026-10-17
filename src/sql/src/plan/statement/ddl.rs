@@ -3184,8 +3184,8 @@ pub fn plan_create_materialized_view(
             ),
             (Some(new), Some(old)) if new != old => sql_bail!(
                 "cannot replace {target_name} because the replacement changes its window: the \
-                 windowed input, the event-time column, SIZE, OFFSET, CLOSE DELAY, and the \
-                 choice of pane column must stay the same"
+                 windowed input, the event-time column, SIZE, OFFSET, and CLOSE DELAY must \
+                 stay the same"
             ),
             (Some(_), Some(_)) => {}
         }
@@ -3353,50 +3353,40 @@ fn plan_tumble_freeze(
     let ResolvedItemName::Item { id: input, .. } = input else {
         sql_bail!("TUMBLE input must be a catalog object");
     };
-    let window = normalize::ident(tumble.window_name());
-    let body_first = match &body.body {
-        SetExpr::Select(body_select) => body_select.projection.first(),
+    // `plan_tumble` checks that the body's first column is the window's start. The query around
+    // `TUMBLE` must keep that column first, which it can only name by the body's output name.
+    let pane_column_name = match &body.body {
+        SetExpr::Select(body_select) => match body_select.projection.first() {
+            Some(SelectItem::Expr {
+                alias: Some(alias), ..
+            }) => Some(normalize::ident(alias.clone())),
+            Some(SelectItem::Expr {
+                expr: Expr::Identifier(parts),
+                alias: None,
+            }) => parts.last().map(|part| normalize::ident(part.clone())),
+            _ => None,
+        },
         _ => None,
     };
-    let (field, pane_column_name) = match body_first {
-        Some(SelectItem::Expr {
-            expr: Expr::Identifier(parts),
-            alias,
-        }) if parts.len() == 2 && normalize::ident(parts[0].clone()) == window => {
-            let field = normalize::ident(parts[1].clone());
-            let name = alias
-                .clone()
-                .map_or_else(|| field.clone(), normalize::ident);
-            (field, name)
-        }
-        _ => (String::new(), String::new()),
-    };
-    if field != "start" && field != "end" {
-        sql_bail!("the first column of a PER PANE body must be {window}.start or {window}.end");
-    }
     let outer_keeps_pane_column = match select.projection.first() {
         Some(SelectItem::Wildcard) => true,
         Some(SelectItem::Expr {
             expr: Expr::Identifier(parts),
             alias: _,
-        }) => parts.len() == 1 && normalize::ident(parts[0].clone()) == pane_column_name,
-        None => false,
-        Some(_) => false,
+        }) => parts.len() == 1 && Some(normalize::ident(parts[0].clone())) == pane_column_name,
+        _ => false,
     };
     if !outer_keeps_pane_column {
         sql_bail!(
-            "the first column of a materialized view over TUMBLE must be the pane column {}",
-            pane_column_name.quoted()
+            "the first column of a materialized view over TUMBLE must be the first column of \
+             its PER PANE body"
         );
     }
 
     let (size, offset, close_delay) = crate::plan::query::plan_tumble_intervals(tumble)?;
-    let close_after = if field == "start" {
-        size.checked_add(&close_delay)
-            .ok_or_else(|| sql_err!("TUMBLE SIZE plus CLOSE DELAY is out of range"))?
-    } else {
-        close_delay
-    };
+    let close_after = size
+        .checked_add(&close_delay)
+        .ok_or_else(|| sql_err!("TUMBLE SIZE plus CLOSE DELAY is out of range"))?;
     Ok(Some(FrozenDefinition {
         close_after: close_after.duration()?,
         input: *input,
