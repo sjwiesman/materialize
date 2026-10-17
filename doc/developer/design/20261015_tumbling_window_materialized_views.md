@@ -488,6 +488,10 @@ panes, writes nothing, and corrects from the shard's upper once promoted.
 - `TUMBLE ... PER PANE` outside `CREATE MATERIALIZED VIEW`, including in
   `SELECT`, `CREATE VIEW`, `SUBSCRIBE`, and `CREATE INDEX`.
 - `TUMBLE` without `PER PANE`.
+- `mz_now()` anywhere in the view's query. The freeze predicate already
+  bounds every row by `mz_now()`, and a second temporal filter such as
+  `mz_now() >= closes_at` would leave every pane open at creation with no
+  time at which it is visible.
 - A body that references the view being defined.
 - A body whose first output column is not the window's start, including a
   `w.start` that a relation in the body shadows.

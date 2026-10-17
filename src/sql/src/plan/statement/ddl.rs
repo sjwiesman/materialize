@@ -3049,6 +3049,12 @@ pub fn plan_create_materialized_view(
     if frozen.is_some() && refresh_schedule.is_some() {
         sql_bail!("TUMBLE ... PER PANE is not compatible with REFRESH options");
     }
+    // The optimizer conjoins the freeze predicate, `mz_now() < close`, with the view's own
+    // temporal filters. A filter such as `mz_now() >= close` then leaves every pane that is open
+    // at creation an empty range of times, so it never appears in the output.
+    if frozen.is_some() && expr.contains_temporal() {
+        sql_bail!("mz_now() is not supported in a materialized view over TUMBLE ... PER PANE");
+    }
 
     let as_of = stmt.as_of.map(Timestamp::from);
     let freeze = match &frozen {

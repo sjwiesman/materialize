@@ -129,6 +129,26 @@ SELECT * FROM per_plan
 2026-01-01␠00:00:00  pro  7
 2026-01-01␠01:00:00  free  3
 
+# mz_now() is rejected anywhere in the view's query.
+statement error mz_now\(\) is not supported in a materialized view over TUMBLE \.\.\. PER PANE
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, w.close AS closes_at, count(*) AS n FROM u)
+WHERE mz_now() >= closes_at
+
+statement error mz_now\(\) is not supported in a materialized view over TUMBLE \.\.\. PER PANE
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (SELECT w.start AS hour_start, count(*) AS n FROM u WHERE mz_now() <= u.ts + INTERVAL '1 day')
+
+statement error mz_now\(\) is not supported in a materialized view over TUMBLE \.\.\. PER PANE
+CREATE MATERIALIZED VIEW bad AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (
+  SELECT w.start AS hour_start, count(*) AS n FROM u
+  WHERE EXISTS (SELECT 1 FROM accounts a WHERE a.id = u.account AND mz_now() <= u.ts + INTERVAL '1 day')
+)
+
 # REFRESH ON COMMIT is the default, and any other refresh schedule is rejected.
 statement ok
 CREATE MATERIALIZED VIEW on_commit WITH (REFRESH ON COMMIT) AS
