@@ -136,8 +136,8 @@ pub struct MaterializedViewSinkConnection<S> {
 
 /// Freezes the rows of a materialized view per window pane.
 ///
-/// Each row belongs to the pane whose start is the row's first column, a `timestamp` or
-/// `timestamptz`. The pane closes at that start plus `close_after`. Before the close, the sink
+/// Each row belongs to the pane whose start is the row's first column, see [`FreezeSpec::new`].
+/// The pane closes at that start plus `close_after`. Before the close, the sink
 /// corrects the row like any other. From the close on, the sink neither corrects nor writes it, so
 /// the persisted row survives the retraction that the dataflow emits when the pane's input leaves
 /// its temporal filter.
