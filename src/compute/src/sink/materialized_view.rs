@@ -129,6 +129,7 @@ use mz_compute_types::sinks::{ComputeSinkDesc, MaterializedViewSinkConnection};
 use mz_dyncfg::ConfigSet;
 use mz_expr::{Eval, MfpPlan, MirScalarExpr};
 use mz_ore::cast::CastFrom;
+use mz_ore::soft_panic_or_log;
 use mz_persist_client::batch::{Batch, ProtoBatch};
 use mz_persist_client::cache::PersistClientCache;
 use mz_persist_client::metrics::SinkMetrics;
@@ -252,11 +253,14 @@ pub(super) fn unfrozen(
         };
         let arena = RowArena::new();
         let datums = datum_vec.borrow_with(row);
-        // A row whose freeze time fails to evaluate was routed to the error stream by the freeze
-        // filter in the dataflow and in the read-back, so it cannot reach this point.
         match freeze_time.eval(&datums, &arena) {
             Ok(Datum::MzTimestamp(frozen)) => *time < frozen,
-            _ => true,
+            // The freeze filter in the dataflow and in the read-back routes a row whose freeze
+            // time fails to evaluate to the error stream, so neither side passes it here.
+            other => {
+                soft_panic_or_log!("freeze time of a sink row evaluated to {other:?}");
+                true
+            }
         }
     }
 }

@@ -139,6 +139,9 @@ pub struct MaterializedViewSinkConnection<S> {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FreezeSpec {
     /// Index of the `timestamp` or `timestamptz` column holding the pane start.
+    ///
+    /// The column must be non-null. `greatest` skips a NULL close, so a row with a NULL pane
+    /// start would freeze at `initial_as_of + 1` instead of being rejected.
     pub pane_column: usize,
     /// Time from the pane start to the pane's close.
     pub close_after: Duration,

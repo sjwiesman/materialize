@@ -572,9 +572,9 @@ mode. This list grows as the prototype does. Open design questions live under
 Open questions, not here.
 
 - **The write filter evaluates the freeze time per update.** Its cost on
-  large batches is unmeasured. An evaluation error writes the update,
-  relying on the dataflow's freeze filter having already routed that row to
-  the error stream.
+  large batches is unmeasured. An evaluation error writes the update and
+  soft-panics, because the dataflow's freeze filter routes such a row to the
+  error stream before it reaches the sink.
 - **Replacement coverage is the healthy path only.** The testdrive promotes a
   replacement while the target is caught up, where even a fresh `I_r` cancels
   in the correction buffer. The rewrite that the inherited `I` prevents needs
