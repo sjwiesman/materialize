@@ -36,8 +36,8 @@ use mz_repr::role_id::RoleId;
 use mz_repr::{Diff, GlobalId, SqlScalarType, Timestamp};
 use mz_sql::ast::{
     AlterConnectionAction, AlterConnectionStatement, AlterSourceAction, AstInfo, ConstantVisitor,
-    CopyRelation, CopyStatement, CreateSourceOptionName, MaterializedViewOptionName, Raw,
-    Statement, StatementKind, SubscribeStatement,
+    CopyRelation, CopyStatement, CreateSourceOptionName, Raw, Statement, StatementKind,
+    SubscribeStatement,
 };
 use mz_sql::catalog::RoleAttributesRaw;
 use mz_sql::names::{Aug, PartialItemName, ResolvedIds, ResolvedItemName};
@@ -58,7 +58,7 @@ use mz_sql::session::vars::{
 use mz_sql_parser::ast::display::AstDisplay;
 use mz_sql_parser::ast::{
     CreateMaterializedViewStatement, ExplainPlanStatement, Explainee, InsertStatement,
-    RefreshOptionValue, WithOptionValue,
+    WithOptionValue,
 };
 use mz_storage_types::sources::Timeline;
 use opentelemetry::trace::TraceContextExt;
@@ -2000,8 +2000,7 @@ impl Coordinator {
     /// The initial as-of is the inputs' latest complete time, so the backfill of panes that closed
     /// before creation includes every write that committed before the statement. A replacement
     /// of a frozen view inherits its target's initial as-of instead, see `FrozenAsOf::Inherited`.
-    /// Returns `None` for views without `TUMBLE`, and for views that also have a refresh schedule,
-    /// which the planner rejects.
+    /// Returns `None` for views without `TUMBLE`.
     fn resolve_initial_as_of_for_frozen_materialized_view(
         &mut self,
         cmvs: &CreateMaterializedViewStatement<Aug>,
@@ -2009,17 +2008,7 @@ impl Coordinator {
         session: &Session,
         acquire_read_holds: bool,
     ) -> Result<Option<Timestamp>, AdapterError> {
-        let frozen = !mz_sql::plan::tumble_table_factors(&cmvs.query).is_empty();
-        // `REFRESH ON COMMIT` is the default and plans to no refresh schedule, so only the other
-        // `REFRESH` options make the planner reject the view.
-        let has_refresh_schedule = cmvs.with_options.iter().any(|o| {
-            matches!(o.name, MaterializedViewOptionName::Refresh)
-                && !matches!(
-                    o.value,
-                    Some(WithOptionValue::Refresh(RefreshOptionValue::OnCommit))
-                )
-        });
-        if !frozen || has_refresh_schedule {
+        if mz_sql::plan::tumble_table_factors(&cmvs.query).is_empty() {
             return Ok(None);
         }
 
