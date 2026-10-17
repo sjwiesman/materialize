@@ -3155,65 +3155,80 @@ fn hide_outer_scopes_until_lateral_barrier(qcx: &mut QueryContext) {
 /// Returns whether output column `column` of `expr` is exactly column `outer` of the nearest outer
 /// scope, passed through unchanged.
 ///
-/// This recognizes the shapes a `SELECT` list produces. A join is not traversed, because a
-/// lateral join changes what its right input's outer scopes are, so a column that only reaches the
-/// outer reference through a join is reported as `false`.
+/// This recognizes the shapes a `SELECT` list produces, and follows references to non-recursive
+/// CTEs into their definitions, which are planned in the same outer scopes. A join is not
+/// traversed, because a lateral join changes what its right input's outer scopes are, so a column
+/// that only reaches the outer reference through a join is reported as `false`.
 fn is_outer_column(expr: &HirRelationExpr, column: usize, outer: usize) -> bool {
-    match expr {
-        HirRelationExpr::Project { input, outputs } => {
-            is_outer_column(input, outputs[column], outer)
-        }
-        HirRelationExpr::Map { input, scalars } => {
-            let arity = input.arity();
-            let mut column = column;
-            while column >= arity {
-                match &scalars[column - arity] {
-                    HirScalarExpr::Column(
-                        ColumnRef {
-                            level: 1,
-                            column: c,
-                        },
-                        _,
-                    ) => {
-                        return *c == outer;
+    fn go<'a>(
+        expr: &'a HirRelationExpr,
+        column: usize,
+        outer: usize,
+        ctes: &mut BTreeMap<LocalId, &'a HirRelationExpr>,
+    ) -> bool {
+        match expr {
+            HirRelationExpr::Project { input, outputs } => go(input, outputs[column], outer, ctes),
+            HirRelationExpr::Map { input, scalars } => {
+                let arity = input.arity();
+                let mut column = column;
+                while column >= arity {
+                    match &scalars[column - arity] {
+                        HirScalarExpr::Column(
+                            ColumnRef {
+                                level: 1,
+                                column: c,
+                            },
+                            _,
+                        ) => {
+                            return *c == outer;
+                        }
+                        // A reference to an earlier column of the same `Map`.
+                        HirScalarExpr::Column(
+                            ColumnRef {
+                                level: 0,
+                                column: c,
+                            },
+                            _,
+                        ) => column = *c,
+                        _ => return false,
                     }
-                    // A reference to an earlier column of the same `Map`.
-                    HirScalarExpr::Column(
-                        ColumnRef {
-                            level: 0,
-                            column: c,
-                        },
-                        _,
-                    ) => column = *c,
-                    _ => return false,
                 }
+                go(input, column, outer, ctes)
             }
-            is_outer_column(input, column, outer)
+            HirRelationExpr::Reduce {
+                input, group_key, ..
+            } => group_key
+                .get(column)
+                .is_some_and(|&key| go(input, key, outer, ctes)),
+            HirRelationExpr::Filter { input, .. }
+            | HirRelationExpr::Distinct { input }
+            | HirRelationExpr::TopK { input, .. }
+            | HirRelationExpr::Negate { input }
+            | HirRelationExpr::Threshold { input } => go(input, column, outer, ctes),
+            HirRelationExpr::Let {
+                id, value, body, ..
+            } => {
+                ctes.insert(*id, value);
+                go(body, column, outer, ctes)
+            }
+            HirRelationExpr::LetRec { body, .. } => go(body, column, outer, ctes),
+            HirRelationExpr::Get {
+                id: Id::Local(id), ..
+            } => match ctes.get(id) {
+                Some(value) => go(value, column, outer, ctes),
+                None => false,
+            },
+            HirRelationExpr::Union { base, inputs } => {
+                go(base, column, outer, ctes)
+                    && inputs.iter().all(|input| go(input, column, outer, ctes))
+            }
+            HirRelationExpr::Constant { .. }
+            | HirRelationExpr::Get { .. }
+            | HirRelationExpr::CallTable { .. }
+            | HirRelationExpr::Join { .. } => false,
         }
-        HirRelationExpr::Reduce {
-            input, group_key, ..
-        } => group_key
-            .get(column)
-            .is_some_and(|&key| is_outer_column(input, key, outer)),
-        HirRelationExpr::Filter { input, .. }
-        | HirRelationExpr::Distinct { input }
-        | HirRelationExpr::TopK { input, .. }
-        | HirRelationExpr::Negate { input }
-        | HirRelationExpr::Threshold { input } => is_outer_column(input, column, outer),
-        HirRelationExpr::Let { body, .. } | HirRelationExpr::LetRec { body, .. } => {
-            is_outer_column(body, column, outer)
-        }
-        HirRelationExpr::Union { base, inputs } => {
-            is_outer_column(base, column, outer)
-                && inputs
-                    .iter()
-                    .all(|input| is_outer_column(input, column, outer))
-        }
-        HirRelationExpr::Constant { .. }
-        | HirRelationExpr::Get { .. }
-        | HirRelationExpr::CallTable { .. }
-        | HirRelationExpr::Join { .. } => false,
     }
+    go(expr, column, outer, &mut BTreeMap::new())
 }
 
 /// Returns the `TUMBLE` table factors anywhere in `query`.

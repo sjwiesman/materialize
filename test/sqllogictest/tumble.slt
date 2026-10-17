@@ -190,6 +190,21 @@ CREATE MATERIALIZED VIEW bad AS
 SELECT * FROM TUMBLE(TABLE events, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour')
 PER PANE (SELECT count(*) AS n, tumble.start FROM events)
 
+# The window's start may reach the first column through a CTE in the body.
+statement ok
+CREATE MATERIALIZED VIEW via_cte AS
+SELECT * FROM TUMBLE(TABLE events AS u, DESCRIPTOR(ts), SIZE => INTERVAL '1 hour') AS w
+PER PANE (
+  WITH totals AS (SELECT w.start AS hour_start, sum(u.credits) AS credits FROM u)
+  SELECT * FROM totals
+)
+
+query TI rowsort
+SELECT * FROM via_cte
+----
+2026-01-01␠00:00:00  12
+2026-01-01␠01:00:00  3
+
 # Every branch of a set operation must start with the window's start.
 statement ok
 CREATE MATERIALIZED VIEW per_branch AS
