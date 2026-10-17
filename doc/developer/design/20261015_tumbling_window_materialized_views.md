@@ -143,7 +143,7 @@ users coming from PostgreSQL will not have seen them, while users coming from
 Flink will recognize the `TUMBLE(TABLE t, DESCRIPTOR(ts), ...)` shape.
 `CLOSE DELAY` is a two-keyword argument name, so `TUMBLE`'s argument names
 are parsed as keywords rather than identifiers. `TUMBLE` without `PER PANE`
-is rejected with a hint pointing at `date_bin` for live bucketing.
+is a parse error.
 
 Scoping rules:
 
@@ -185,15 +185,18 @@ must be the window's `start` passed through unchanged
 (`is_outer_column` in `src/sql/src/plan/query.rs`). A relation in the body
 named like the window shadows `w.start`, and an expression over it, such as
 a cast, is a different value. Both are rejected, so the sink never freezes
-rows by a column that only looks like the pane start. Each branch of a set
+rows by a column that only looks like the pane start. The check follows the
+column through non-recursive CTEs in the body, and each branch of a set
 operation in the body must start with the window's start.
 
 Restrictions on the enclosing query. The query around `TUMBLE ... PER PANE`
 may only project and filter row by row, and must keep the pane column
-unchanged as its first output column. Joins, aggregates, and window functions
+unchanged as its first output column. It may rename columns and compute new
+ones from a row. Joins, aggregates, `DISTINCT`, `LIMIT`, and window functions
 belong inside the body. The planner checks the planned query: the view's first
 column must reach the `TUMBLE`'s first column through projections, maps, and
-filters only (`is_tumble_passthrough` in `src/sql/src/plan/query.rs`).
+filters that compute no window function (`is_tumble_passthrough` in
+`src/sql/src/plan/query.rs`). A view contains at most one `TUMBLE`.
 
 ### Semantics
 
@@ -270,7 +273,8 @@ an invoicing system.
   complete time when the view is created, so the backfill includes every
   write that committed before `CREATE MATERIALIZED VIEW`. Backfilled panes are
   not a replay: they include rows that would have been late, use references
-  as of `I`, and omit rows deleted before `I`.
+  as of `I`, and omit rows deleted before `I`. Rows with a `NULL` event time
+  belong to no pane and are dropped.
 - **Replace.** Replacements apply going forward. Closed panes keep the
   results produced by the body that was live when they closed, and open panes
   are corrected to the replacement's body when it is promoted. A replacement
@@ -291,7 +295,8 @@ decorrelation, and one filter in the persist sink. All three use a single
 freeze predicate.
 
 **The freeze predicate.** Every MV already pins its initial as_of `I` in
-`create_sql` (`src/adapter/src/coord/sequencer/inner/create_materialized_view.rs:642-661`).
+`create_sql` (`create_materialized_view_finish` in
+`src/adapter/src/coord/sequencer/inner/create_materialized_view.rs`).
 A row of pane `p` is visible at time `t` if and only if
 
 ```
@@ -308,8 +313,13 @@ latest writes. Under the freeze predicate, a row of a closed pane that commits
 after `I` arrives at or after `I + 1` and is dropped as late, so a backfill at
 the least valid read misses writes that committed just before creation.
 Frozen views therefore take `I` as the join of the least valid read and the
-inputs' greatest available read (`select_timestamps` in
-`src/adapter/src/coord/sequencer/inner/create_materialized_view.rs`).
+inputs' greatest available read, chosen during purification
+(`resolve_initial_as_of_for_frozen_materialized_view` in
+`src/adapter/src/coord/command_handler.rs`), and the sequencer starts the
+dataflow exactly there (`FrozenAsOf::Backfill` in `select_timestamps`). A
+sealed input, one whose upper is empty such as a `REFRESH AT` view past its
+last refresh, contributes nothing to the greatest available read. When every
+input is sealed, no input writes again, and `I` is the least valid read.
 
 The predicate is a single upper-bound temporal filter, so `MfpPlan` accepts
 it, `MfpPlan::evaluate` (`src/expr/src/linear.rs`) evaluates it, and persist
@@ -317,14 +327,14 @@ filter pushdown applies to it without changes. It depends only on `I` and the
 view's definition, never on a render-time frontier. That is load-bearing:
 the controller advances `dataflow.as_of` when it compacts command history for
 reconnecting or newly added replicas
-(`src/compute-client/src/protocol/history.rs:143-174`). A predicate that read
-the render as_of would reopen panes on those replicas.
+(`src/compute-client/src/protocol/history.rs`). A predicate that read the
+render as_of would reopen panes on those replicas.
 
 The input side and the sink evaluate one predicate,
-`FreezeSpec::predicate` (`src/compute-types/src/sinks.rs`), over the pane
-column, adding `SIZE` when the pane column holds `w.start`. If the two sides
-computed different close times, the sink would see the body's retraction
-before the read-back's and delete the pane.
+`FreezeSpec::predicate` (`src/compute-types/src/sinks.rs`), which computes
+`C_p` as the row's first column, the pane start, plus `SIZE + CLOSE DELAY`.
+If the two sides computed different close times, the sink would see the
+body's retraction before the read-back's and delete the pane.
 
 **Input side.** The lowering computes internal, unnamed `window_start` and
 `window_end` columns from the event-time column. The MV optimizer filters the
@@ -384,7 +394,8 @@ read-back side at a different time than the body, and write them again.
 **Body.** Several panes can be open at once, for example panes still inside
 their close delay or panes for future-dated events. The body is lowered
 as a lateral join over the distinct open panes, with the pane binding planned
-through CTE scoping in `plan_table_factor` (`src/sql/src/plan/query.rs`):
+like a CTE (`plan_tumble` in `src/sql/src/plan/query.rs`). `filtered` is the
+input with each row's pane start, without rows whose event time is `NULL`:
 
 ```sql
 (SELECT DISTINCT window_start AS start, window_end AS "end", window_end + <close delay> AS close
@@ -396,8 +407,9 @@ The window binding is the left side of the `LATERAL` join, so `w.start`,
 `w.end`, and `w.close` in the body are correlated references to the values
 the pane was assigned.
 
-Decorrelation is expected to lift the pane key through joins, aggregates,
-`DISTINCT`, and TopK. This is verified as part of the prototype, see below.
+Decorrelation lifts the pane key through the body, so a grouped body plans
+to a single `Reduce` keyed by the pane start. Two body shapes keep a join
+back to the distinct panes, see the productionization backlog.
 
 **Sink.** Left unchanged, the self-correcting sink would see the retraction
 wave at `C_p` and delete the pane from the output. The sink does two things.
@@ -432,16 +444,17 @@ whatever was persisted before its close.
 - `FreezeSpec::freeze_time` builds the freeze time expression and
   `FreezeSpec::predicate` the predicate, so the dataflow's filter, the
   read-back filter, and the write filter share one definition.
-- `persist_sink` builds both at render time. It passes the predicate to the
-  read-back `persist_source` and evaluates the freeze time per update in the
-  `write` operator. Both sink
-  implementations share this. The sync sink (`materialized_view_v2.rs`)
-  evaluates the write filter in the blocking closure that consolidates the
-  correction buffer for a batch.
+- The sink builds both at render time (`SinkFreeze` in
+  `src/compute/src/sink/materialized_view.rs`). It passes the predicate to
+  the read-back `persist_source` and evaluates the freeze time per update when
+  writing a batch (`unfrozen`). Both sink implementations share this. The sync
+  sink (`materialized_view_v2.rs`) evaluates the write filter in the blocking
+  closure that consolidates the correction buffer for a batch.
 - `correction.rs` and `correction_v2.rs` need no changes.
 
-Because the pane column leads the output row, compacted runs are clustered by
-pane, and pushdown can skip the parts of closed panes on the read-back.
+Because the pane column leads the output row, compacted parts are clustered by
+pane. The read-back's pushdown skips the parts whose newest pane closed before
+the shard's since, by their statistics on the pane column.
 
 ### Bootstrap
 
@@ -490,39 +503,41 @@ panes, writes nothing, and corrects from the shard's upper once promoted.
 ### User-facing errors
 
 - `TUMBLE ... PER PANE` outside `CREATE MATERIALIZED VIEW`, including in
-  `SELECT`, `CREATE VIEW`, `SUBSCRIBE`, and `CREATE INDEX`.
+  `SELECT`, `CREATE VIEW`, and `SUBSCRIBE`.
 - `TUMBLE` without `PER PANE`.
 - `mz_now()` anywhere in the view's query. The freeze predicate already
   bounds every row by `mz_now()`, and a second temporal filter such as
   `mz_now() >= closes_at` would leave every pane open at creation with no
   time at which it is visible.
-- A body that references the view being defined.
+- A `TUMBLE` input that is not a catalog object, such as a CTE.
 - A body whose first output column is not the window's start, including a
   `w.start` that a relation in the body shadows.
 - An enclosing query that joins, aggregates, uses `DISTINCT`, `LIMIT`, or a
   window function, or does not keep the pane column unchanged as its first
   output column.
 - More than one `TUMBLE` in a view.
-- A `SIZE`, `OFFSET`, or `CLOSE DELAY` that is not a fixed whole number
-  of milliseconds, including `INTERVAL '1 month'`.
+- A `SIZE`, `OFFSET`, or `CLOSE DELAY` that is not a fixed, non-negative
+  whole number of milliseconds, including `INTERVAL '1 month'`, and a `SIZE`
+  of zero.
 - An event-time column that is not `timestamp` or `timestamptz`.
 - Combining with `REFRESH EVERY` or `REFRESH AT`. Refresh rounding would fold
   a pane's insertion and its close retraction into the same refresh time, so
   panes that open and close within one refresh interval would never be
-  written.
-- A replacement that changes the window definition or the pane column, or
-  that freezes when the target does not, or does not freeze when the target
-  does.
+  written. `REFRESH ON COMMIT`, the default, is allowed.
+- A replacement that changes the window definition, or that freezes when the
+  target does not, or does not freeze when the target does.
 
 ### EXPLAIN and feature flag
 
-The input-side filter appears in the MIR plan. The sink's freeze predicate
-does not, because sink connection fields are not rendered, so the
-materialized view dataflow `EXPLAIN` gains a `freeze:` line.
+The input-side filter appears in the MIR plan, with `I` inlined. The sink's
+freeze predicate does not, because sink connection fields are not rendered.
+The materialized view dataflow `EXPLAIN` should gain a `freeze:` line, which
+is not built yet.
 
-The feature is gated by a dyncfg. Its production default is a product
-decision. It is enabled for CI in `get_variable_system_parameters` and
-registered so that `bin/lint-test-flags` passes.
+The feature is gated by the unsafe flag
+`unsafe_enable_materialized_view_freeze`, which CI varies through
+`get_variable_system_parameters`. Leaving unsafe mode means turning it into a
+dyncfg whose production default is a product decision.
 
 ## Minimal Viable Prototype
 
@@ -564,16 +579,15 @@ surface exists. It proceeds in three milestones.
    options, which were removed.
 
 Deterministic coverage with `clusterd-test-driver`
-(`src/clusterd-test-driver/src/dataflow.rs`), which builds MV sink dataflows
-with controlled timestamps, should follow milestone 1: a row inserted and
-frozen within one batch, a sink that lags past several closes, a restart, and
-a replica added after creation agreeing with the original.
+(`test/clusterd-test-driver/scripts/materialized_view_freeze.spec`) covers a
+row inserted and frozen within one batch. A sink that lags past several
+closes, a restart, and a replica added after creation agreeing with the
+original are not covered yet. `test/sqllogictest/tumble.slt` covers the
+scoping rules, the errors, and `EXPLAIN`.
 
-After the prototype, the work proceeds through the parser and HIR lowering
-with sqllogictest coverage of scoping rules, errors, and `EXPLAIN`, then a
-platform check where a pane closes across a restart and an upgrade and must
-stay frozen, the 0dt mzcompose suite, and parallel-workload coverage of DDL
-churn and replica add and remove.
+The remaining work is a platform check where a pane closes across a restart
+and an upgrade and must stay frozen, the 0dt mzcompose suite, and
+parallel-workload coverage of DDL churn and replica add and remove.
 
 ## Productionization backlog
 
@@ -646,10 +660,12 @@ Open questions, not here.
 - **Test coverage is partial.** `materialized_view_freeze.spec` covers the
   same-batch race, an open pane following inserts and retractions, and
   changes to closed panes on the driver. `tumble.slt` covers the window
-  bindings, arguments, and plan. The testdrive covers the sink semantics,
-  the shape errors, and replacements, and was validated with an equivalent
-  psql script, not through mzcompose. Restart, state release, a sink
-  lagging past several closes, and a replica added after creation still
+  bindings and arguments, bodies with joins, CTEs, set operations, and window
+  functions, the checks on the body's first column and the enclosing query,
+  `mz_now()`, `REFRESH`, and the plan. The testdrive covers the sink
+  semantics, sealed inputs, and replacements, and was validated with an
+  equivalent psql script, not through mzcompose. Restart, state release, a
+  sink lagging past several closes, and a replica added after creation still
   need coverage, plus a platform check for restarts and upgrades.
 
 ## Follow-ups
