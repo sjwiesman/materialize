@@ -7,8 +7,8 @@
 # the Business Source License, use of this software will be governed
 # by the Apache License, Version 2.0.
 
-# Tests materialized views over `TUMBLE ... PER PANE`. Panes are one-minute
-# bins of `ts` that close 30 seconds after they end, 90 seconds after they
+# Tests materialized views over `TUMBLE ... PER PANE`. Panes are 30-second
+# bins of `ts` that close 15 seconds after they end, 45 seconds after they
 # start. Changes for a closed pane must not reach the materialized view.
 
 $ postgres-execute connection=mz_system
@@ -42,8 +42,8 @@ contains:must have type timestamp or timestamp with time zone
   SELECT * FROM TUMBLE(
     TABLE events,
     DESCRIPTOR(ts),
-    SIZE => INTERVAL '1 minute',
-    CLOSE DELAY => INTERVAL '30 seconds'
+    SIZE => INTERVAL '30 seconds',
+    CLOSE DELAY => INTERVAL '15 seconds'
   ) AS w
   PER PANE (SELECT w.start AS pane_start, sum(v) AS total FROM events)
 
@@ -77,10 +77,11 @@ contains:must have type timestamp or timestamp with time zone
 1
 7
 
-# Wait for the open pane to close. It started at most a minute ago and closes
-# 90 seconds after its start, so 95 seconds is always enough. There is no
-# event to wait on, because closing a pane changes nothing in the output.
-$ sleep-is-probably-flaky-i-have-justified-my-need-with-a-comment duration=95s
+# Wait for the open pane to close. It started at most 30 seconds before the
+# insertion of 5 and closes 45 seconds after its start, so 50 seconds is always
+# enough. There is no event to wait on, because closing a pane changes nothing
+# in the output.
+$ sleep-is-probably-flaky-i-have-justified-my-need-with-a-comment duration=50s
 
 # Retracting every input row leaves both closed panes in place.
 > DELETE FROM events
