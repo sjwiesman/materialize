@@ -59,6 +59,8 @@ use super::super::ast::Statement;
 use crate::project::SchemaQualifier;
 use crate::project::error::{ValidationError, ValidationErrorKind, ValidationErrors};
 use crate::project::ir::compiled::{Database, DatabaseObject, FullyQualifiedName, Project, Schema};
+use crate::project::ir::object_id::ObjectId;
+use crate::project::ir::version::VersionMap;
 use crate::project::resolve::normalize::NormalizingVisitor;
 use crate::project::syntax::input;
 use crate::project::syntax::parser::{LocatedStatement, statement_type_name};
@@ -154,6 +156,51 @@ fn object_type_name(t: ObjectType) -> &'static str {
     }
 }
 
+/// Require a `CREATE TABLE ... FROM SOURCE` to name the version of the source it
+/// reads, since a table's definition pins its schema.
+///
+/// Must run before normalization, which resolves the bare name and so erases the
+/// evidence.
+fn validate_source_version_pinned(
+    fqn: &FullyQualifiedName,
+    stmt: &Statement,
+    offset: usize,
+    version_map: Option<&VersionMap>,
+    errors: &mut Vec<ValidationError>,
+) {
+    let (Statement::CreateTableFromSource(from_source), Some(version_map)) = (stmt, version_map)
+    else {
+        return;
+    };
+
+    let source = ObjectId::from_raw_item_name(&from_source.source, fqn.database(), fqn.schema());
+    let Some(database) = source.database() else {
+        return;
+    };
+    // Resolution yields `None` for a spelling that already pins and for one whose
+    // object declares no versions, the two cases this check lets through.
+    let Some(newest_name) =
+        version_map.resolve_reference(database, source.schema(), source.object(), None)
+    else {
+        return;
+    };
+
+    let pinned = ObjectId::new(
+        database.to_string(),
+        source.schema().to_string(),
+        newest_name,
+    );
+    errors.push(ValidationError::with_file_and_offset(
+        ValidationErrorKind::SourceVersionNotPinned {
+            table_name: fqn.object().to_string(),
+            source_name: source.to_string(),
+            pinned_example: pinned.to_string(),
+        },
+        fqn.path.clone(),
+        offset,
+    ));
+}
+
 /// Validate a single variant's statements fully and produce a compiled object.
 ///
 /// This runs all existing validation (classify statements, check name/fqn, indexes,
@@ -161,10 +208,12 @@ fn object_type_name(t: ObjectType) -> &'static str {
 /// the source file so that validation errors can point to the exact location.
 fn validate_single_variant(
     name: &str,
+    version: Option<u32>,
     database: &str,
     schema: &str,
     path: &std::path::Path,
     located_statements: Vec<LocatedStatement>,
+    version_map: Option<&VersionMap>,
 ) -> Result<DatabaseObject, ValidationErrors> {
     let mut errors = Vec::new();
     let mut main_stmt: Option<(Statement, usize)> = None;
@@ -356,7 +405,31 @@ fn validate_single_variant(
     let (stmt, main_offset) = main_stmt.unwrap();
     let obj_type = object_type.unwrap();
 
-    let fqn = match FullyQualifiedName::with_names(path, name, database, schema) {
+    // Only the two object kinds whose schema Materialize locks at creation are
+    // versionable. CREATE TABLE and CREATE TABLE ... FROM SOURCE share
+    // ObjectType::Table, so the check matches the statement variant instead.
+    if version.is_some()
+        && !matches!(
+            stmt,
+            Statement::CreateSource(_) | Statement::CreateTableFromSource(_)
+        )
+    {
+        errors.push(ValidationError::with_file_and_offset(
+            ValidationErrorKind::ObjectTypeNotVersionable {
+                object_name: name.to_string(),
+                object_type: object_type_name(obj_type).to_string(),
+            },
+            path.to_path_buf(),
+            main_offset,
+        ));
+        return Err(ValidationErrors::new(errors));
+    }
+
+    let fqn = match version {
+        Some(v) => FullyQualifiedName::with_versioned_name(path, name, v, database, schema),
+        None => FullyQualifiedName::with_names(path, name, database, schema),
+    };
+    let fqn = match fqn {
         Ok(fqn) => fqn,
         Err(e) => {
             errors.push(e);
@@ -373,8 +446,10 @@ fn validate_single_variant(
     // Validate identifier format (lowercase, valid characters)
     validate_fqn_identifiers(&fqn, main_offset, &mut errors);
 
+    validate_source_version_pinned(&fqn, &stmt, main_offset, version_map, &mut errors);
+
     // Normalize statement name and dependencies
-    let stmt = stmt.normalize_stmt(&fqn);
+    let stmt = stmt.normalize_stmt(&fqn, version_map);
 
     // Normalize index, grant, and comment references to be fully qualified
     let visitor = NormalizingVisitor::fully_qualifying(&fqn);
@@ -411,6 +486,19 @@ fn validate_single_variant(
         return Err(ValidationErrors::new(errors));
     }
 
+    // Each version is a distinct catalog object with its own comment and
+    // privileges, so its companion statements have to name the version too. Must
+    // run after reference validation, which establishes that every such statement
+    // names this object.
+    //
+    // Indexes need no handling: `validate_indexes_supported` already rejects them
+    // on the versionable kinds.
+    if fqn.version().is_some() {
+        let visitor = NormalizingVisitor::self_referencing(&fqn);
+        visitor.normalize_grant_references(&mut grants);
+        visitor.normalize_comment_references(&mut comments);
+    }
+
     Ok(DatabaseObject {
         path: path.to_path_buf(),
         stmt,
@@ -424,9 +512,10 @@ fn validate_single_variant(
 impl DatabaseObject {
     /// Validate all variants of a source-owned database object, check cross-variant consistency,
     /// and resolve the active variant for the given profile.
-    pub fn validate(
+    pub(crate) fn validate(
         value: input::DatabaseObject,
         profile: &str,
+        version_map: Option<&VersionMap>,
     ) -> Result<Option<Self>, ValidationErrors> {
         let mut errors = Vec::new();
 
@@ -526,10 +615,12 @@ impl DatabaseObject {
         // Step 5: Fully validate the active variant
         validate_single_variant(
             &value.name,
+            value.version,
             &value.database,
             &value.schema,
             &active_variant.path,
             active_variant.statements.clone(),
+            version_map,
         )
         .map(Some)
     }

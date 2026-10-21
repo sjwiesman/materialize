@@ -270,6 +270,408 @@ mod plan_tests {
             "statement's own name should be suffixed; got: {serialized}",
         );
     }
+
+    fn plan_and_typecheck(
+        root: &Path,
+        profile: Option<&str>,
+        external_types: crate::types::Types,
+    ) -> Result<(ir::graph::Project, compiler::typecheck::TypecheckStats), String> {
+        let fs = crate::fs::FileSystem::new();
+        let project = plan_sync(&fs, root, profile, None, &Default::default())
+            .map_err(|err| err.to_string())?;
+        let (_, stats) = compiler::typecheck::run(
+            root,
+            profile.unwrap_or(""),
+            None,
+            &Default::default(),
+            &project,
+            external_types,
+        )
+        .map_err(|err| err.to_string())?;
+        Ok((project, stats))
+    }
+
+    /// Build an external-types map exposing a single-column relation under each id
+    /// in `ids`, standing in for a `types.lock` entry.
+    fn stub_types(ids: &[ir::object_id::ObjectId]) -> crate::types::Types {
+        use crate::types::{ColumnType, Types};
+        let mut types = Types::default();
+        for id in ids {
+            let mut columns = BTreeMap::new();
+            columns.insert(
+                "counter".to_string(),
+                ColumnType {
+                    r#type: "int8".to_string(),
+                    nullable: false,
+                    position: 0,
+                    comment: None,
+                },
+            );
+            types.tables.insert(id.clone(), columns);
+        }
+        types
+    }
+
+    /// A referencing object's cache entry must be invalidated when a new
+    /// version of the object it references appears, even though the referencing
+    /// file's own bytes never changed.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn plan_sync_invalidates_cache_when_a_new_version_appears() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let raw_dir = root.path().join("models/mydb/raw");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        std::fs::write(
+            raw_dir.join("events@1.sql"),
+            "CREATE SOURCE events IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+        )
+        .unwrap();
+
+        let public_dir = root.path().join("models/mydb/public");
+        std::fs::create_dir_all(&public_dir).unwrap();
+        std::fs::write(
+            public_dir.join("tracking.sql"),
+            "CREATE VIEW tracking AS SELECT * FROM raw.events;\n",
+        )
+        .unwrap();
+
+        // Both ids are stubbed up front so that one `Types` value covers both
+        // compiles below.
+        let external_types = stub_types(&[
+            ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "raw".to_string(),
+                "events@1".to_string(),
+            ),
+            ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "raw".to_string(),
+                "events@2".to_string(),
+            ),
+        ]);
+
+        // Only events@1 exists so far. This also warms the on-disk build
+        // artifact cache under `root`.
+        let (project, _stats) = plan_and_typecheck(root.path(), None, external_types.clone())
+            .expect("project should compile and typecheck");
+        let tracking = project
+            .find_object(&ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "public".to_string(),
+                "tracking".to_string(),
+            ))
+            .expect("tracking view should be present");
+        assert!(
+            tracking
+                .typed_object
+                .stmt
+                .to_string()
+                .contains("\"events@1\""),
+            "first compile should resolve to the only declared version"
+        );
+
+        // tracking.sql is not touched, so a fingerprint ignoring the version map
+        // would report a cache hit and reuse the stale artifact.
+        std::fs::write(
+            raw_dir.join("events@2.sql"),
+            "CREATE SOURCE events IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+        )
+        .unwrap();
+
+        let (project, _stats) = plan_and_typecheck(root.path(), None, external_types)
+            .expect("project should compile and typecheck against the same warm cache");
+        let tracking = project
+            .find_object(&ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "public".to_string(),
+                "tracking".to_string(),
+            ))
+            .expect("tracking view should be present");
+        let tracking_sql = tracking.typed_object.stmt.to_string();
+        assert!(
+            tracking_sql.contains("\"events@2\""),
+            "cache must be invalidated so the bare reference re-resolves to \
+             the newest version, got: {tracking_sql}"
+        );
+    }
+
+    /// A user-populated table classifies as `ObjectType::Table`, exactly like
+    /// `CREATE TABLE ... FROM SOURCE`, so this is the case that pins the
+    /// restriction to the statement variant rather than the object type.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn plan_sync_rejects_versioned_plain_table() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let schema_dir = root.path().join("models/mydb/public");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        std::fs::write(
+            schema_dir.join("orders@1.sql"),
+            "CREATE TABLE orders (id int);\n",
+        )
+        .unwrap();
+
+        let err = plan_and_typecheck(root.path(), None, crate::types::Types::default())
+            .expect_err("versioning a user-populated table should fail");
+        assert!(
+            err.contains("cannot be versioned"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn plan_sync_rejects_versioned_view() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let schema_dir = root.path().join("models/mydb/public");
+        std::fs::create_dir_all(&schema_dir).unwrap();
+        std::fs::write(
+            schema_dir.join("order_ids@1.sql"),
+            "CREATE VIEW order_ids AS SELECT 1 AS id;\n",
+        )
+        .unwrap();
+
+        let err = plan_and_typecheck(root.path(), None, crate::types::Types::default())
+            .expect_err("versioning a view should fail");
+        assert!(
+            err.contains("cannot be versioned"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Every version gets its own project-cache row, keyed by its deployed name.
+    /// The key is a primary key, so two versions keyed on the base name would
+    /// evict each other.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn plan_sync_caches_every_version_under_its_deployed_name() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let raw_dir = root.path().join("models/mydb/raw");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        for version in [1, 2] {
+            std::fs::write(
+                raw_dir.join(format!("events@{version}.sql")),
+                "CREATE SOURCE events IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+            )
+            .unwrap();
+        }
+
+        plan_and_typecheck(root.path(), None, crate::types::Types::default())
+            .expect("project should compile and typecheck");
+
+        let cache = compiler::cache::ProjectCache::open(root.path(), "", None, &Default::default())
+            .expect("cache should open")
+            .expect("compiling should have written a cache");
+        for version in [1, 2] {
+            let id = ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "raw".to_string(),
+                format!("events@{version}"),
+            );
+            let cached = cache
+                .get_object(&id)
+                .unwrap_or_else(|| panic!("version {version} should be cached under {id}"));
+            assert_eq!(cached.name, format!("events@{version}"));
+        }
+    }
+
+    /// A versioned object's comment and privileges belong to that version, so
+    /// its companion statements have to name the version and not the base
+    /// name, which names no object at all.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn plan_sync_points_companion_statements_at_the_versioned_name() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let raw_dir = root.path().join("models/mydb/raw");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        std::fs::write(
+            raw_dir.join("events@1.sql"),
+            "CREATE SOURCE events IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n\
+             COMMENT ON SOURCE events IS 'raw event stream';\n\
+             GRANT SELECT ON TABLE events TO analyst;\n",
+        )
+        .unwrap();
+
+        let (project, _stats) =
+            plan_and_typecheck(root.path(), None, crate::types::Types::default())
+                .expect("project should compile and typecheck");
+
+        let object = project
+            .find_object(&ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "raw".to_string(),
+                "events@1".to_string(),
+            ))
+            .expect("versioned source should be present");
+
+        let comment = object.typed_object.comments[0].to_string();
+        assert!(
+            comment.contains("mydb.raw.\"events@1\""),
+            "comment should target the deployed name, got: {comment}"
+        );
+        let grant = object.typed_object.grants[0].to_string();
+        assert!(
+            grant.contains("mydb.raw.\"events@1\""),
+            "grant should target the deployed name, got: {grant}"
+        );
+    }
+
+    /// A version declared only as an override for one profile does not exist
+    /// under any other profile, so it must not be what a bare reference
+    /// resolves to there.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn plan_sync_ignores_a_version_declared_only_for_another_profile() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let raw_dir = root.path().join("models/mydb/raw");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        std::fs::write(
+            raw_dir.join("events@1.sql"),
+            "CREATE SOURCE events IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            raw_dir.join("events@2#dev.sql"),
+            "CREATE SOURCE events IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+        )
+        .unwrap();
+
+        let public_dir = root.path().join("models/mydb/public");
+        std::fs::create_dir_all(&public_dir).unwrap();
+        std::fs::write(
+            public_dir.join("tracking.sql"),
+            "CREATE VIEW tracking AS SELECT * FROM raw.events;\n",
+        )
+        .unwrap();
+
+        let tracking_id = ir::object_id::ObjectId::new(
+            "mydb".to_string(),
+            "public".to_string(),
+            "tracking".to_string(),
+        );
+        let external_types = stub_types(&[
+            ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "raw".to_string(),
+                "events@1".to_string(),
+            ),
+            ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "raw".to_string(),
+                "events@2".to_string(),
+            ),
+        ]);
+
+        let (project, _stats) = plan_and_typecheck(root.path(), None, external_types.clone())
+            .expect("a dev-only version must not break the default profile");
+        let tracking_sql = project
+            .find_object(&tracking_id)
+            .expect("tracking view should be present")
+            .typed_object
+            .stmt
+            .to_string();
+        assert!(
+            tracking_sql.contains("\"events@1\""),
+            "the default profile should see only the version it declares, got: {tracking_sql}"
+        );
+
+        let (project, _stats) = plan_and_typecheck(root.path(), Some("dev"), external_types)
+            .expect("project should compile and typecheck under the dev profile");
+        let tracking_sql = project
+            .find_object(&tracking_id)
+            .expect("tracking view should be present")
+            .typed_object
+            .stmt
+            .to_string();
+        assert!(
+            tracking_sql.contains("\"events@2\""),
+            "the dev profile should see its own version, got: {tracking_sql}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn plan_sync_accepts_a_table_that_names_its_source_version() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let raw_dir = root.path().join("models/mydb/raw");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        std::fs::write(
+            raw_dir.join("upstream@1.sql"),
+            "CREATE SOURCE upstream IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            raw_dir.join("orders.sql"),
+            "CREATE TABLE orders FROM SOURCE \"upstream@1\" (REFERENCE public.orders);\n",
+        )
+        .unwrap();
+
+        let (project, _stats) =
+            plan_and_typecheck(root.path(), None, crate::types::Types::default())
+                .expect("a pinned source reference should compile and typecheck");
+        let orders = project
+            .find_object(&ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "raw".to_string(),
+                "orders".to_string(),
+            ))
+            .expect("table should be present");
+        assert!(
+            orders.dependencies.contains(&ir::object_id::ObjectId::new(
+                "mydb".to_string(),
+                "raw".to_string(),
+                "upstream@1".to_string(),
+            )),
+            "table should depend on the version it names, got: {:?}",
+            orders.dependencies
+        );
+    }
+
+    /// Adopting a version suffix changes the name typecheck requires for the
+    /// object, from the base name written in the file to the physical deployed
+    /// name, so a `types.lock` entry keyed on the base name stops matching.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn plan_sync_versioned_source_typecheck_fails_on_base_name_external_type() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let raw_dir = root.path().join("models/mydb/raw");
+        std::fs::create_dir_all(&raw_dir).unwrap();
+        std::fs::write(
+            raw_dir.join("orders@1.sql"),
+            "CREATE SOURCE orders IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+        )
+        .unwrap();
+
+        let public_dir = root.path().join("models/mydb/public");
+        std::fs::create_dir_all(&public_dir).unwrap();
+        std::fs::write(
+            public_dir.join("downstream.sql"),
+            "CREATE VIEW downstream AS SELECT * FROM raw.orders;\n",
+        )
+        .unwrap();
+
+        // Keyed on the base name the file declares, not the physical name the
+        // object deploys under.
+        let external_types = stub_types(&[ir::object_id::ObjectId::new(
+            "mydb".to_string(),
+            "raw".to_string(),
+            "orders".to_string(),
+        )]);
+
+        let err = plan_and_typecheck(root.path(), None, external_types)
+            .expect_err("typecheck should fail: no catalog entry exists under the physical name");
+        assert!(
+            err.contains("unknown catalog item"),
+            "unexpected error: {err}"
+        );
+    }
 }
 
 /// Compile a project root into a planned deployment representation.

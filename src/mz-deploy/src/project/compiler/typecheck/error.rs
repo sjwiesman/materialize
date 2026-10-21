@@ -31,8 +31,8 @@ pub enum TypeCheckError {
     #[error("failed to get sorted objects: {0}")]
     SortError(#[from] crate::project::error::DependencyError),
 
-    #[error("failed to write types cache: {0}")]
-    TypesCacheWriteFailed(#[from] TypesError),
+    #[error(transparent)]
+    Types(#[from] TypesError),
 }
 
 fn format_multiple(errors: &[ObjectTypeCheckError]) -> String {

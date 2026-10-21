@@ -219,7 +219,7 @@ fn typecheck_to_positional(error: &TypeCheckError) -> Vec<PositionalDiagnostic> 
         TypeCheckError::Multiple(es) => es.iter().collect(),
         TypeCheckError::DatabaseSetupError(_)
         | TypeCheckError::SortError(_)
-        | TypeCheckError::TypesCacheWriteFailed(_) => return Vec::new(),
+        | TypeCheckError::Types(_) => return Vec::new(),
     };
 
     errors
@@ -337,5 +337,142 @@ mod tests {
     #[mz_ore::test]
     fn origin_string_preserves_bare_curdir() {
         assert_eq!(origin_string(std::path::Path::new(".")), ".");
+    }
+
+    /// On the real `compile` path the failure arrives as
+    /// `ObjectTypeCheckErrorKind::Plan` wrapping `CatalogError::UnknownItem`,
+    /// never as a direct `Catalog` kind.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn compile_pipeline_versioned_unknown_item_renders_footer() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let ingest_dir = root.path().join("models/app/ingest");
+        std::fs::create_dir_all(&ingest_dir).unwrap();
+        std::fs::write(
+            ingest_dir.join("orders@1.sql"),
+            "CREATE SOURCE orders IN CLUSTER ingest FROM LOAD GENERATOR COUNTER;\n",
+        )
+        .unwrap();
+        let core_dir = root.path().join("models/app/core");
+        std::fs::create_dir_all(&core_dir).unwrap();
+        std::fs::write(
+            core_dir.join("v.sql"),
+            "CREATE VIEW v AS SELECT counter FROM app.ingest.orders;\n",
+        )
+        .unwrap();
+
+        let fs = crate::fs::FileSystem::new();
+        let project = crate::project::plan_sync(&fs, root.path(), None, None, &Default::default())
+            .expect("project should plan");
+        let type_check_error = crate::project::compiler::typecheck::run(
+            root.path(),
+            "",
+            None,
+            &Default::default(),
+            &project,
+            crate::types::Types::default(),
+        )
+        .expect_err("view references a source absent from types.lock, typecheck should fail");
+
+        let cli_error = CliError::from(type_check_error);
+        let positional = to_positional(&cli_error);
+        assert_eq!(positional.len(), 1);
+        let rendered = render(&positional[0]);
+        assert!(
+            rendered.contains("unknown catalog item"),
+            "unexpected rendering: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "'@1' in 'orders@1' is a version suffix mz-deploy derived from a filename"
+            ),
+            "footer missing from rendered output: {rendered}"
+        );
+        assert!(
+            rendered.contains("re-run 'mz-deploy lock'"),
+            "footer missing from rendered output: {rendered}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn compile_pipeline_ordinary_unknown_item_has_no_footer() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let core_dir = root.path().join("models/app/core");
+        std::fs::create_dir_all(&core_dir).unwrap();
+        std::fs::write(
+            core_dir.join("v.sql"),
+            "CREATE VIEW v AS SELECT 1 AS x FROM app.core.missing;\n",
+        )
+        .unwrap();
+
+        let fs = crate::fs::FileSystem::new();
+        let project = crate::project::plan_sync(&fs, root.path(), None, None, &Default::default())
+            .expect("project should plan");
+        let type_check_error = crate::project::compiler::typecheck::run(
+            root.path(),
+            "",
+            None,
+            &Default::default(),
+            &project,
+            crate::types::Types::default(),
+        )
+        .expect_err("view references an object that is declared nowhere, typecheck should fail");
+
+        let cli_error = CliError::from(type_check_error);
+        let positional = to_positional(&cli_error);
+        assert_eq!(positional.len(), 1);
+        let rendered = render(&positional[0]);
+        assert!(
+            rendered.contains("unknown catalog item"),
+            "unexpected rendering: {rendered}"
+        );
+        assert!(
+            !rendered.contains("is a version suffix mz-deploy derived from a filename"),
+            "ordinary unknown item should not gain the versioned-item footer: {rendered}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn compile_pipeline_at_sign_without_valid_version_has_no_footer() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("project.toml"), "").unwrap();
+        let core_dir = root.path().join("models/app/core");
+        std::fs::create_dir_all(&core_dir).unwrap();
+        std::fs::write(
+            core_dir.join("v.sql"),
+            "CREATE VIEW v AS SELECT 1 AS x FROM app.core.\"missing@01\";\n",
+        )
+        .unwrap();
+
+        let fs = crate::fs::FileSystem::new();
+        let project = crate::project::plan_sync(&fs, root.path(), None, None, &Default::default())
+            .expect("project should plan");
+        let type_check_error = crate::project::compiler::typecheck::run(
+            root.path(),
+            "",
+            None,
+            &Default::default(),
+            &project,
+            crate::types::Types::default(),
+        )
+        .expect_err("view references an object that is declared nowhere, typecheck should fail");
+
+        let cli_error = CliError::from(type_check_error);
+        let positional = to_positional(&cli_error);
+        assert_eq!(positional.len(), 1);
+        let rendered = render(&positional[0]);
+        assert!(
+            rendered.contains("unknown catalog item"),
+            "unexpected rendering: {rendered}"
+        );
+        assert!(
+            !rendered.contains("is a version suffix mz-deploy derived from a filename"),
+            "a name with an invalid version suffix should not gain the versioned-item footer: \
+             {rendered}"
+        );
     }
 }

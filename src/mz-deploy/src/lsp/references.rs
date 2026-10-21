@@ -17,7 +17,9 @@
 //! ## Algorithm
 //!
 //! 1. Resolve identifier parts to an `ObjectId` (reuses
-//!    [`goto_definition::resolve_object_id`]).
+//!    [`goto_definition::resolve_object_id`]). A bare reference to a versioned
+//!    object resolves to the physical name, which is what the compiler recorded
+//!    its dependency edges against.
 //! 2. Query [`ProjectCache::get_dependents`] to find all objects that depend on
 //!    the target.
 //! 3. For each dependent, look up its source file path via
@@ -49,7 +51,8 @@ pub(super) fn find_references(
     project_cache: &ProjectCache,
     include_declaration: bool,
 ) -> Vec<Location> {
-    let id = match goto_definition::resolve_object_id(parts, file_uri, root) {
+    let versions = project_cache.version_map();
+    let id = match goto_definition::resolve_object_id(parts, file_uri, root, &versions) {
         Some(id) => id,
         None => return Vec::new(),
     };
@@ -157,6 +160,69 @@ mod tests {
         assert_eq!(locations.len(), 1);
         let expected = Url::from_file_path(root.path().join("models/mydb/public/b.sql")).unwrap();
         assert_eq!(locations[0].uri, expected);
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn bare_reference_finds_the_consumers_of_the_resolved_version() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let file_uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+
+        let locations = find_references(
+            &["raw".to_string(), "orders".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+            false,
+        );
+
+        let expected = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+        assert_eq!(
+            locations.iter().map(|l| &l.uri).collect::<Vec<_>>(),
+            vec![&expected]
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn bare_reference_includes_the_resolved_version_as_the_declaration() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let file_uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+
+        let locations = find_references(
+            &["raw".to_string(), "orders".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+            true,
+        );
+
+        let declaration = crate::lsp::fixtures::model_uri(root.path(), "mydb/raw/orders@2.sql");
+        assert_eq!(locations[0].uri, declaration);
+    }
+
+    /// Only the older version's consumer pins it, so landing on the newer
+    /// version instead would be visible in the results.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn declaration_inside_a_versioned_file_finds_that_versions_consumers() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let file_uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/raw/orders@1.sql");
+
+        let locations = find_references(
+            &["orders".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+            true,
+        );
+
+        let declaration = crate::lsp::fixtures::model_uri(root.path(), "mydb/raw/orders@1.sql");
+        let consumer = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/pinned.sql");
+        assert_eq!(
+            locations.iter().map(|l| &l.uri).collect::<Vec<_>>(),
+            vec![&declaration, &consumer]
+        );
     }
 
     /// Compile a project and open a ProjectCache from its SQLite DB.

@@ -483,7 +483,10 @@ impl Backend {
         variables: &BTreeMap<String, String>,
     ) -> Option<TypeCheckError> {
         let root = self.root.read().await.clone();
-        let types_lock = types::load_types_lock(&root).unwrap_or_default();
+        let types_lock = match types::load_types_lock(&root) {
+            Ok(types_lock) => types_lock,
+            Err(error) => return Some(error.into()),
+        };
         match project::compiler::typecheck::run(
             &root,
             profile,
@@ -494,6 +497,20 @@ impl Backend {
         ) {
             Ok((_, _stats)) => None,
             Err(e) => Some(e),
+        }
+    }
+
+    /// Load types for non-validating language features, logging a malformed lock
+    /// file and returning an empty contract rather than failing.
+    async fn load_types_lock_or_log(&self, root: &Path) -> types::Types {
+        match types::load_types_lock(root) {
+            Ok(types_lock) => types_lock,
+            Err(error) => {
+                self.client
+                    .log_message(MessageType::ERROR, error.to_string())
+                    .await;
+                types::Types::default()
+            }
         }
     }
 }
@@ -715,13 +732,12 @@ impl LanguageServer for Backend {
         };
 
         let root = self.root.read().await.clone();
+        let types_lock = self.load_types_lock_or_log(&root).await;
         let cache_guard = self.project_cache.lock().await;
         let cache = match cache_guard.as_ref() {
             Some(c) => c,
             None => return Ok(None),
         };
-
-        let types_lock = types::load_types_lock(&root).unwrap_or_default();
 
         Ok(hover::resolve_hover(
             &parts,
@@ -744,8 +760,8 @@ impl LanguageServer for Backend {
         let text = doc_text.as_deref().unwrap_or("");
         let prefix = completion::prefix_context(text, position);
 
+        let types_lock = self.load_types_lock_or_log(&root).await;
         let cache_guard = self.project_cache.lock().await;
-        let types_lock = types::load_types_lock(&root).unwrap_or_default();
         let items =
             completion::complete(cache_guard.as_ref(), &types_lock, &file_uri, &root, &prefix);
 

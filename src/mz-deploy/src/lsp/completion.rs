@@ -55,6 +55,11 @@
 //!
 //! Sort: `1_` same-schema, `2_` cross-schema, `3_` cross-database.
 //!
+//! A versioned object is offered under two spellings: the bare name, whose detail
+//! names the version it resolves to, and the newest physical name. Older versions
+//! are not offered. A physical label reads `raw.orders@1` while the text inserted
+//! for it is `raw."orders@1"`.
+//!
 //! ### Column names ([`gather_columns`])
 //!
 //! Dynamic per-request from the types cache. **Only offered for objects that
@@ -81,8 +86,10 @@
 
 use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::object_id::ObjectId;
+use crate::project::ir::version::{self, EnclosingObject};
 use crate::types::{ColumnType, ObjectKind, Types};
 use mz_sql_lexer::keywords::KEYWORDS;
+use mz_sql_parser::ast::Ident;
 use ropey::Rope;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -109,6 +116,8 @@ struct CompletionContext<'a> {
     prefix: &'a PrefixContext<'a>,
     /// The current file's dependencies and alias map (None if file not in project).
     file_object: Option<FileObject>,
+    /// The versioned object this file declares, if any.
+    enclosing: Option<EnclosingObject>,
 }
 
 /// The current file's resolved context for column completions.
@@ -152,6 +161,7 @@ fn resolve_context<'a>(
         default_schema,
         prefix,
         file_object,
+        enclosing: super::goto_definition::enclosing_object(file_uri, root),
     })
 }
 
@@ -191,10 +201,10 @@ enum CompletionCandidate<'a> {
         label: String,
     },
     Object {
-        label: String,
-        sort_key: String,
+        spelling: ObjectSpelling,
         kind: ObjectKind,
         is_external: bool,
+        resolves_to: Option<String>,
     },
     Column {
         name: String,
@@ -236,6 +246,7 @@ fn gather_objects<'a>(
     types_lock: &Types,
 ) -> Vec<CompletionCandidate<'a>> {
     let mut candidates = Vec::new();
+    let versions = project_cache.version_map();
 
     for summary in project_cache.list_objects() {
         let id = ObjectId::new(
@@ -243,14 +254,60 @@ fn gather_objects<'a>(
             summary.schema.clone(),
             summary.name.clone(),
         );
-        if let Some((label, sort_key)) =
+
+        let (base, version_suffix) = version::parse_physical_name(&summary.name);
+        if version_suffix.is_none() {
+            if let Some(spelling) =
+                qualify_and_filter(&id, &ctx.default_db, &ctx.default_schema, ctx.prefix)
+            {
+                candidates.push(CompletionCandidate::Object {
+                    spelling,
+                    kind: summary.kind,
+                    is_external: false,
+                    resolves_to: None,
+                });
+            }
+            continue;
+        }
+
+        // Which version the bare name resolves to is asked of the shared rule, so
+        // every other declared version is skipped rather than offered.
+        let Some(resolves_to) = versions.resolve_reference(
+            &summary.database,
+            &summary.schema,
+            base,
+            ctx.enclosing.as_ref(),
+        ) else {
+            continue;
+        };
+        if resolves_to != summary.name {
+            continue;
+        }
+
+        if let Some(spelling) =
             qualify_and_filter(&id, &ctx.default_db, &ctx.default_schema, ctx.prefix)
         {
             candidates.push(CompletionCandidate::Object {
-                label,
-                sort_key,
+                spelling,
                 kind: summary.kind,
                 is_external: false,
+                resolves_to: None,
+            });
+        }
+
+        let bare_id = ObjectId::new(
+            summary.database.clone(),
+            summary.schema.clone(),
+            base.to_string(),
+        );
+        if let Some(spelling) =
+            qualify_and_filter(&bare_id, &ctx.default_db, &ctx.default_schema, ctx.prefix)
+        {
+            candidates.push(CompletionCandidate::Object {
+                spelling,
+                kind: summary.kind,
+                is_external: false,
+                resolves_to: Some(resolves_to),
             });
         }
     }
@@ -260,14 +317,14 @@ fn gather_objects<'a>(
             .get_kind(&id)
             .or_else(|| types_lock.kinds.get(&id).copied())
             .unwrap_or(ObjectKind::Table);
-        if let Some((label, sort_key)) =
+        if let Some(spelling) =
             qualify_and_filter(&id, &ctx.default_db, &ctx.default_schema, ctx.prefix)
         {
             candidates.push(CompletionCandidate::Object {
-                label,
-                sort_key,
+                spelling,
                 kind,
                 is_external: true,
+                resolves_to: None,
             });
         }
     }
@@ -431,19 +488,20 @@ fn format_candidate(candidate: &CompletionCandidate<'_>) -> CompletionItem {
             ..Default::default()
         },
         CompletionCandidate::Object {
-            label,
-            sort_key,
+            spelling,
             kind,
             is_external,
+            resolves_to,
         } => CompletionItem {
-            label: label.clone(),
+            label: spelling.label.clone(),
+            insert_text: Some(spelling.insert_text.clone()),
             kind: Some(object_kind_to_completion_kind(*kind)),
-            detail: Some(if *is_external {
-                format!("{} (external)", kind)
-            } else {
-                kind.to_string()
+            detail: Some(match (is_external, resolves_to) {
+                (true, _) => format!("{} (external)", kind),
+                (false, Some(physical)) => format!("{} (resolves to {})", kind, physical),
+                (false, None) => kind.to_string(),
             }),
-            sort_text: Some(sort_key.clone()),
+            sort_text: Some(spelling.sort_key.clone()),
             ..Default::default()
         },
         CompletionCandidate::Column { name, col_type } => CompletionItem {
@@ -503,7 +561,18 @@ pub(super) fn complete(
     candidates.iter().map(format_candidate).collect()
 }
 
-/// Compute the label and sort prefix for an object, filtered by the typed prefix.
+/// How one object candidate is presented and inserted. The label is dotted and
+/// unquoted for the editor's own filtering, while the insertion text renders SQL
+/// identifiers, since a label like `raw.orders@1` does not parse.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ObjectSpelling {
+    pub label: String,
+    pub insert_text: String,
+    pub sort_key: String,
+}
+
+/// Compute the label, insertion text, and sort key for an object, filtered by
+/// the typed prefix.
 ///
 /// For `dots == 0`, returns minimum qualification (bare name if same-schema,
 /// `schema.object` if cross-schema, `db.schema.object` if cross-database).
@@ -515,9 +584,9 @@ pub(crate) fn qualify_and_filter(
     default_db: &str,
     default_schema: &str,
     prefix: &PrefixContext<'_>,
-) -> Option<(String, String)> {
+) -> Option<ObjectSpelling> {
     let in_default_db = id.database() == Some(default_db);
-    let sort_key = if in_default_db && id.schema() == default_schema {
+    let sort_prefix = if in_default_db && id.schema() == default_schema {
         "1"
     } else if in_default_db {
         "2"
@@ -525,29 +594,61 @@ pub(crate) fn qualify_and_filter(
         "3"
     };
 
+    let two_part = [id.schema(), id.object()];
+    let qualified: Vec<&str> = match id.database() {
+        Some(database) => vec![database, id.schema(), id.object()],
+        None => two_part.to_vec(),
+    };
+
     if prefix.dots == 0 {
-        let label = if in_default_db && id.schema() == default_schema {
-            id.object().to_string()
+        let minimal: &[&str] = if in_default_db && id.schema() == default_schema {
+            &qualified[qualified.len() - 1..]
         } else if in_default_db || id.database().is_none() {
-            format!("{}.{}", id.schema(), id.object())
+            &qualified[qualified.len() - 2..]
         } else {
-            id.to_string()
+            &qualified
         };
-        return Some((label.clone(), format!("{}_{}", sort_key, label)));
+        let (label, insert_text) = spell(minimal);
+        return Some(ObjectSpelling {
+            sort_key: format!("{}_{}", sort_prefix, label),
+            label,
+            insert_text,
+        });
     }
 
-    let candidates = [format!("{}.{}", id.schema(), id.object()), id.to_string()];
-
     let prefix_lower = prefix.text.to_lowercase();
-    for candidate in &candidates {
-        if candidate.to_lowercase().starts_with(&prefix_lower) {
-            let last_dot = prefix.text.rfind('.').expect("dots >= 1 guarantees a dot");
-            let label = candidate[last_dot + 1..].to_string();
-            return Some((label, format!("{}_{}", sort_key, candidate)));
+    for candidate in [two_part.as_slice(), qualified.as_slice()] {
+        let matched = candidate.join(".");
+        if !matched.to_lowercase().starts_with(&prefix_lower) {
+            continue;
         }
+        // The prefix's last dot lines up with a component boundary of
+        // `matched`, so the prefix covers exactly `prefix.dots` components and
+        // the rest is what to offer.
+        let Some(remainder) = candidate.get(prefix.dots..).filter(|r| !r.is_empty()) else {
+            continue;
+        };
+        let (label, insert_text) = spell(remainder);
+        return Some(ObjectSpelling {
+            label,
+            insert_text,
+            sort_key: format!("{}_{}", sort_prefix, matched),
+        });
     }
 
     None
+}
+
+/// Render name components as a plain dotted label and as dotted SQL
+/// identifiers.
+fn spell(components: &[&str]) -> (String, String) {
+    let label = components.join(".");
+    let insert_text = components
+        .iter()
+        .map(|component| Ident::new_unchecked(*component).to_string())
+        .collect::<Vec<_>>()
+        .join(".");
+    (label, insert_text)
 }
 
 /// Map an [`ObjectKind`] to the corresponding LSP [`CompletionItemKind`].
@@ -580,6 +681,36 @@ mod tests {
     /// about prefix context.
     fn no_prefix() -> PrefixContext<'static> {
         PrefixContext { dots: 0, text: "" }
+    }
+
+    fn spelling(label: &str, insert_text: &str, sort_key: &str) -> ObjectSpelling {
+        ObjectSpelling {
+            label: label.to_string(),
+            insert_text: insert_text.to_string(),
+            sort_key: sort_key.to_string(),
+        }
+    }
+
+    /// The text a client would put in the buffer for a completion item. LSP
+    /// falls back to the label when no `insertText` is set.
+    fn inserted(item: &CompletionItem) -> &str {
+        item.insert_text.as_deref().unwrap_or(&item.label)
+    }
+
+    /// The components of a completion's insertion text, panicking if it is not
+    /// parseable SQL.
+    fn parse_inserted(text: &str) -> Vec<String> {
+        let name = mz_sql_parser::parser::parse_item_name(text)
+            .unwrap_or_else(|e| panic!("completion inserted unparseable SQL `{text}`: {e}"));
+        assert_eq!(
+            name.to_string(),
+            text,
+            "inserted text should round-trip through the parser"
+        );
+        name.0
+            .iter()
+            .map(|part| part.as_str().to_string())
+            .collect()
     }
 
     fn write_project_toml(root: &Path) {
@@ -1033,6 +1164,135 @@ mod tests {
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"id"), "expected 'id', got: {:?}", labels);
         assert!(labels.contains(&"bar"), "expected 'bar', got: {:?}", labels);
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn versioned_object_offers_the_bare_name_and_the_newest_physical_name() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+        let items = object_completions(&cache, None, &uri, root.path(), &no_prefix());
+
+        let bare = items
+            .iter()
+            .find(|i| i.label == "raw.orders")
+            .expect("bare name should be offered");
+        assert_eq!(bare.detail.as_deref(), Some("table (resolves to orders@2)"));
+
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"raw.orders@2"), "got: {labels:?}");
+        assert!(
+            !labels.contains(&"raw.orders@1"),
+            "an older version is a deliberate pin, not a candidate: {labels:?}"
+        );
+
+        let physical = items
+            .iter()
+            .find(|i| i.label == "raw.orders@2")
+            .expect("physical name should be offered");
+        assert!(bare.sort_text < physical.sort_text);
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn accepting_a_versioned_completion_inserts_parseable_sql() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+        let items = object_completions(&cache, None, &uri, root.path(), &no_prefix());
+
+        for (label, object) in [("raw.orders@2", "orders@2"), ("raw.orders", "orders")] {
+            let item = items
+                .iter()
+                .find(|i| i.label == label)
+                .unwrap_or_else(|| panic!("{label} should be offered"));
+            assert_eq!(parse_inserted(inserted(item)), vec!["raw", object]);
+        }
+
+        let physical = items.iter().find(|i| i.label == "raw.orders@2").unwrap();
+        assert_eq!(inserted(physical), "raw.\"orders@2\"");
+    }
+
+    /// The prefixed path slices the label down to the name's tail, and the
+    /// quoting has to survive that.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn accepting_a_versioned_completion_after_a_schema_prefix_inserts_parseable_sql() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+        let prefix = PrefixContext {
+            dots: 1,
+            text: "raw.",
+        };
+        let items = object_completions(&cache, None, &uri, root.path(), &prefix);
+
+        let item = items
+            .iter()
+            .find(|i| i.label == "orders@2")
+            .expect("orders@2 should be offered");
+        assert_eq!(inserted(item), "\"orders@2\"");
+        assert_eq!(parse_inserted(inserted(item)), vec!["orders@2"]);
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn the_bare_and_physical_candidates_are_distinguishable() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+        let items = object_completions(&cache, None, &uri, root.path(), &no_prefix());
+
+        let bare = items.iter().find(|i| i.label == "raw.orders").unwrap();
+        let physical = items.iter().find(|i| i.label == "raw.orders@2").unwrap();
+
+        assert_eq!(inserted(bare), "raw.orders");
+        assert_eq!(parse_inserted(inserted(bare)), vec!["raw", "orders"]);
+        assert_ne!(bare.label, physical.label);
+        assert_eq!(bare.detail.as_deref(), Some("table (resolves to orders@2)"));
+        assert_eq!(physical.detail.as_deref(), Some("table"));
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn bare_name_offered_inside_a_versioned_file_resolves_to_that_file() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/raw/orders@1.sql");
+        let items = object_completions(&cache, None, &uri, root.path(), &no_prefix());
+
+        let bare = items
+            .iter()
+            .find(|i| i.label == "orders")
+            .expect("bare name should be offered");
+        assert_eq!(bare.detail.as_deref(), Some("table (resolves to orders@1)"));
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn unversioned_object_is_offered_once_with_a_plain_detail() {
+        let (root, cache) = crate::lsp::fixtures::versioned_project();
+        let uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+        let items = object_completions(&cache, None, &uri, root.path(), &no_prefix());
+
+        let sources: Vec<&CompletionItem> = items
+            .iter()
+            .filter(|i| i.label == "raw.pg_source")
+            .collect();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].detail.as_deref(), Some("source"));
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn bare_name_offered_for_a_version_is_the_one_the_profile_resolves() {
+        let (root, cache) = crate::lsp::fixtures::profile_versioned_project("prod");
+        let uri = crate::lsp::fixtures::model_uri(root.path(), "mydb/core/report.sql");
+        let items = object_completions(&cache, None, &uri, root.path(), &no_prefix());
+
+        // Version 2 is a `dev` override, so under `prod` the bare name must
+        // point at version 1.
+        let bare = items
+            .iter()
+            .find(|i| i.label == "raw.orders")
+            .expect("bare name should be offered");
+        assert_eq!(bare.detail.as_deref(), Some("table (resolves to orders@1)"));
     }
 
     #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
@@ -1767,7 +2027,7 @@ mod tests {
         let id = ObjectId::new("mydb".to_string(), "public".to_string(), "foo".to_string());
         let prefix = no_prefix();
         let result = qualify_and_filter(&id, "mydb", "public", &prefix);
-        assert_eq!(result, Some(("foo".to_string(), "1_foo".to_string())));
+        assert_eq!(result, Some(spelling("foo", "foo", "1_foo")));
     }
 
     #[mz_ore::test]
@@ -1777,7 +2037,7 @@ mod tests {
         let result = qualify_and_filter(&id, "mydb", "public", &prefix);
         assert_eq!(
             result,
-            Some(("other.bar".to_string(), "2_other.bar".to_string()))
+            Some(spelling("other.bar", "other.bar", "2_other.bar"))
         );
     }
 
@@ -1788,7 +2048,7 @@ mod tests {
         let result = qualify_and_filter(&id, "mydb", "public", &prefix);
         assert_eq!(
             result,
-            Some(("otherdb.s.x".to_string(), "3_otherdb.s.x".to_string()))
+            Some(spelling("otherdb.s.x", "otherdb.s.x", "3_otherdb.s.x"))
         );
     }
 
@@ -1800,10 +2060,7 @@ mod tests {
             text: "public.",
         };
         let result = qualify_and_filter(&id, "mydb", "public", &prefix);
-        assert_eq!(
-            result,
-            Some(("foo".to_string(), "1_public.foo".to_string()))
-        );
+        assert_eq!(result, Some(spelling("foo", "foo", "1_public.foo")));
     }
 
     #[mz_ore::test]
@@ -1825,10 +2082,7 @@ mod tests {
             text: "PUBLIC.F",
         };
         let result = qualify_and_filter(&id, "mydb", "public", &prefix);
-        assert_eq!(
-            result,
-            Some(("foo".to_string(), "1_public.foo".to_string()))
-        );
+        assert_eq!(result, Some(spelling("foo", "foo", "1_public.foo")));
     }
 
     #[mz_ore::test]

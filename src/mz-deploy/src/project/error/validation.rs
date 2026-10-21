@@ -339,6 +339,18 @@ pub enum ValidationErrorKind {
         override_profile: String,
         override_path: PathBuf,
     },
+    /// A versioned file declares a statement type that cannot be versioned
+    ObjectTypeNotVersionable {
+        object_name: String,
+        object_type: String,
+    },
+    /// A `CREATE TABLE ... FROM SOURCE` names a versioned source without
+    /// saying which version
+    SourceVersionNotPinned {
+        table_name: String,
+        source_name: String,
+        pinned_example: String,
+    },
 }
 
 impl ValidationErrorKind {
@@ -771,6 +783,22 @@ impl ValidationErrorKind {
                     object_type, object_name, override_profile
                 )
             }
+            Self::ObjectTypeNotVersionable {
+                object_name,
+                object_type,
+            } => {
+                format!("{} '{}' cannot be versioned", object_type, object_name)
+            }
+            Self::SourceVersionNotPinned {
+                table_name,
+                source_name,
+                ..
+            } => {
+                format!(
+                    "table '{}' reads versioned source '{}' without naming a version",
+                    table_name, source_name
+                )
+            }
         }
     }
 
@@ -957,6 +985,17 @@ impl ValidationErrorKind {
             Self::ProfileOverrideNotAllowed { .. } => {
                 Some("views and materialized views cannot have profile-specific overrides because their definitions should be consistent across environments".to_string())
             }
+            Self::ObjectTypeNotVersionable { .. } => Some(
+                "only sources and tables created with CREATE TABLE ... FROM SOURCE can carry an \
+                 @version filename suffix, because Materialize locks their schema at creation"
+                    .to_string(),
+            ),
+            Self::SourceVersionNotPinned { pinned_example, .. } => Some(format!(
+                "name the version, for example '{}'. a table's schema is fixed when the table is \
+                 created, so following the newest version would silently repoint the table and \
+                 re-snapshot everything it holds",
+                pinned_example
+            )),
         }
     }
 }

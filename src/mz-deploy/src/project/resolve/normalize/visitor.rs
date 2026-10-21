@@ -48,7 +48,7 @@
 use super::overlay_transformer::OverlayTransformer;
 use super::transformers::{
     ClusterTransformer, ExplainTransformer, FlatteningTransformer, FullyQualifyingTransformer,
-    NameTransformer, StagingTransformer,
+    NameTransformer, SelfReferenceTransformer, StagingTransformer,
 };
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::object_id::ObjectId;
@@ -397,6 +397,7 @@ impl<'a> NormalizingVisitor<FullyQualifyingTransformer<'a>> {
         Self::new(FullyQualifyingTransformer {
             fqn,
             database_name_map: None,
+            version_map: None,
         })
     }
 
@@ -409,7 +410,29 @@ impl<'a> NormalizingVisitor<FullyQualifyingTransformer<'a>> {
         Self::new(FullyQualifyingTransformer {
             fqn,
             database_name_map,
+            version_map: None,
         })
+    }
+
+    /// Create a visitor that fully qualifies names and resolves bare
+    /// references to versioned objects to their newest version.
+    pub(crate) fn fully_qualifying_with_versions(
+        fqn: &'a FullyQualifiedName,
+        version_map: Option<&'a crate::project::ir::version::VersionMap>,
+    ) -> Self {
+        Self::new(FullyQualifyingTransformer {
+            fqn,
+            database_name_map: None,
+            version_map,
+        })
+    }
+}
+
+impl<'a> NormalizingVisitor<SelfReferenceTransformer<'a>> {
+    /// Create a visitor that rewrites every name it visits to `fqn`'s
+    /// deployed name.
+    pub(crate) fn self_referencing(fqn: &'a FullyQualifiedName) -> Self {
+        Self::new(SelfReferenceTransformer { fqn })
     }
 }
 

@@ -117,4 +117,12 @@ pub enum LoadError {
         path1: PathBuf,
         path2: PathBuf,
     },
+
+    /// A model filename carries a malformed `@version` suffix
+    #[error("Invalid version suffix in file name: {path} ({reason})")]
+    InvalidVersionSuffix { path: PathBuf, reason: String },
+
+    /// An object is declared both with and without a version suffix
+    #[error("Object '{name}' has both versioned and unversioned files: {path}")]
+    MixedVersionedAndUnversioned { name: String, path: PathBuf },
 }

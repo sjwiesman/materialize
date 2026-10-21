@@ -421,7 +421,7 @@ async fn run_tests(
         return Ok(None);
     }
 
-    let types_lock = types::load_types_lock(directory).unwrap_or_default();
+    let types_lock = types::load_types_lock(directory)?;
     let types_cache = load_or_generate_types_cache(settings, &planned_project)?;
 
     let mut test_entries: Vec<TestResultEntry> = Vec::new();
@@ -925,7 +925,7 @@ fn load_or_generate_types_cache(
     use crate::project::compiler::typecheck;
 
     let directory = &settings.directory;
-    let external_types = types::load_types_lock(directory).unwrap_or_default();
+    let external_types = types::load_types_lock(directory)?;
 
     typecheck::run(
         directory,

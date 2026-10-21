@@ -1405,32 +1405,46 @@ mod tests {
     }
 
     fn make_project(db_name: &str, schema_name: &str, stmt: Statement) -> graph::Project {
+        make_project_with_objects(db_name, schema_name, vec![stmt])
+    }
+
+    fn make_project_with_objects(
+        db_name: &str,
+        schema_name: &str,
+        stmts: Vec<Statement>,
+    ) -> graph::Project {
         use crate::project::ir::compiled;
 
-        let typed_obj = compiled::DatabaseObject {
-            path: PathBuf::from("test.sql"),
-            stmt,
-            indexes: vec![],
-            grants: vec![],
-            comments: vec![],
-            tests: vec![],
-        };
-        let obj_id = ObjectId::new(
-            db_name.to_string(),
-            schema_name.to_string(),
-            typed_obj.stmt.ident().object.as_str().to_string(),
-        );
-        let db_obj = graph::DatabaseObject {
-            id: obj_id,
-            typed_object: typed_obj,
-            dependencies: BTreeSet::new(),
-        };
+        let objects = stmts
+            .into_iter()
+            .map(|stmt| {
+                let typed_obj = compiled::DatabaseObject {
+                    path: PathBuf::from("test.sql"),
+                    stmt,
+                    indexes: vec![],
+                    grants: vec![],
+                    comments: vec![],
+                    tests: vec![],
+                };
+                let obj_id = ObjectId::new(
+                    db_name.to_string(),
+                    schema_name.to_string(),
+                    typed_obj.stmt.ident().object.as_str().to_string(),
+                );
+                graph::DatabaseObject {
+                    id: obj_id,
+                    typed_object: typed_obj,
+                    dependencies: BTreeSet::new(),
+                }
+            })
+            .collect();
+
         graph::Project {
             databases: vec![graph::Database {
                 name: db_name.to_string(),
                 schemas: vec![graph::Schema {
                     name: schema_name.to_string(),
-                    objects: vec![db_obj],
+                    objects,
                     mod_statements: None,
                     schema_type: graph::SchemaType::Compute,
                 }],
@@ -1494,5 +1508,76 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM project_aliases", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// The deployed object names are where the version map comes from, so every
+    /// declared version has to show up and an unversioned object has to
+    /// contribute nothing.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn write_project_version_map_follows_the_deployed_names() {
+        let temp = tempdir().unwrap();
+        let mut db = open_db(temp.path());
+
+        let project = make_project_with_objects(
+            "mydb",
+            "raw",
+            vec![
+                parse_stmt(r#"CREATE TABLE "orders@1" (id INT)"#),
+                parse_stmt(r#"CREATE TABLE "orders@2" (id INT)"#),
+                parse_stmt("CREATE TABLE events (id INT)"),
+            ],
+        );
+        let changed = all_object_keys(&project);
+        db.write_project(&project, &changed, &BTreeSet::new(), temp.path())
+            .unwrap();
+
+        let cache =
+            super::super::ProjectCache::open(temp.path(), "default", None, &BTreeMap::new())
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            cache.version_map().entries().collect::<Vec<_>>(),
+            vec![("mydb", "raw", "orders", 1), ("mydb", "raw", "orders", 2)]
+        );
+    }
+
+    /// Deleting the object that carried a version drops the version too.
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn write_project_drops_versions_no_longer_declared() {
+        let temp = tempdir().unwrap();
+        let mut db = open_db(temp.path());
+
+        let both = make_project_with_objects(
+            "mydb",
+            "raw",
+            vec![
+                parse_stmt(r#"CREATE TABLE "orders@1" (id INT)"#),
+                parse_stmt(r#"CREATE TABLE "orders@2" (id INT)"#),
+            ],
+        );
+        let changed = all_object_keys(&both);
+        db.write_project(&both, &changed, &BTreeSet::new(), temp.path())
+            .unwrap();
+
+        let fewer = make_project_with_objects(
+            "mydb",
+            "raw",
+            vec![parse_stmt(r#"CREATE TABLE "orders@1" (id INT)"#)],
+        );
+        let kept = all_object_keys(&fewer);
+        let deleted: BTreeSet<String> = changed.difference(&kept).cloned().collect();
+        db.write_project(&fewer, &kept, &deleted, temp.path())
+            .unwrap();
+
+        let cache =
+            super::super::ProjectCache::open(temp.path(), "default", None, &BTreeMap::new())
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            cache.version_map().entries().collect::<Vec<_>>(),
+            vec![("mydb", "raw", "orders", 1)]
+        );
     }
 }

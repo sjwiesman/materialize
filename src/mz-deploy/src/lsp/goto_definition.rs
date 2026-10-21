@@ -30,6 +30,10 @@
 //! `ObjectId::from_item_name()`, looks up the object in the cache, and
 //! returns the file path from `CachedObject::file_path`.
 //!
+//! A bare reference to a versioned object names no cached object of its own,
+//! since each version is keyed under its physical name. [`resolve_object_id()`]
+//! resolves the bare spelling through the declared versions before the lookup.
+//!
 //! ## Examples
 //!
 //! ```text
@@ -46,6 +50,8 @@
 
 use crate::project::compiler::cache::ProjectCache;
 use crate::project::ir::object_id::ObjectId;
+use crate::project::ir::version::{EnclosingObject, VersionMap};
+use crate::project::syntax::profile_files::parse_file_stem;
 use mz_sql_lexer::lexer::{self, Token};
 use std::path::Path;
 use tower_lsp::lsp_types::{Location, Range, Url};
@@ -150,27 +156,55 @@ fn find_token_at_offset(
     None
 }
 
-/// Resolve identifier parts to an `ObjectId` using the file's path context.
+/// The versioned object declared by the file at `file_uri`, or `None` for a file
+/// whose name declares no version.
+pub(crate) fn enclosing_object(file_uri: &Url, root: &Path) -> Option<EnclosingObject> {
+    let (database, schema) = ObjectId::default_db_schema_from_uri(file_uri, root)?;
+    let path = file_uri.to_file_path().ok()?;
+    let stem = path.file_stem()?.to_string_lossy();
+    let parsed = parse_file_stem(&stem).ok()?;
+    Some(EnclosingObject::new(
+        database,
+        schema,
+        parsed.base.to_string(),
+        parsed.version?,
+    ))
+}
+
+/// Resolve identifier parts to the `ObjectId` a reference names, using the
+/// file's path context and the project's declared versions.
 ///
 /// Derives the default database/schema from the file's path relative to the
-/// project root (expects `models/<database>/<schema>/` structure), then
-/// constructs an `ObjectId` using 1/2/3-part name resolution.
-pub fn resolve_object_id(parts: &[String], file_uri: &Url, root: &Path) -> Option<ObjectId> {
+/// project root (expects `models/<database>/<schema>/` structure), constructs an
+/// `ObjectId` using 1/2/3-part name resolution, then resolves it through
+/// [`VersionMap::resolve_reference`].
+pub(crate) fn resolve_object_id(
+    parts: &[String],
+    file_uri: &Url,
+    root: &Path,
+    versions: &VersionMap,
+) -> Option<ObjectId> {
     let (default_db, default_schema) = ObjectId::default_db_schema_from_uri(file_uri, root)?;
+    let enclosing = enclosing_object(file_uri, root);
 
-    match parts.len() {
-        1 => Some(ObjectId::new(default_db, default_schema, parts[0].clone())),
-        2 => Some(ObjectId::new(
-            default_db,
-            parts[0].clone(),
-            parts[1].clone(),
+    let id = match parts.len() {
+        1 => ObjectId::new(default_db, default_schema, parts[0].clone()),
+        2 => ObjectId::new(default_db, parts[0].clone(), parts[1].clone()),
+        3 => ObjectId::new(parts[0].clone(), parts[1].clone(), parts[2].clone()),
+        _ => return None,
+    };
+
+    // Every branch above builds a database-qualified id, so this is unreachable.
+    let Some(database) = id.database() else {
+        return Some(id);
+    };
+    match versions.resolve_reference(database, id.schema(), id.object(), enclosing.as_ref()) {
+        Some(resolved) => Some(ObjectId::new(
+            database.to_string(),
+            id.schema().to_string(),
+            resolved,
         )),
-        3 => Some(ObjectId::new(
-            parts[0].clone(),
-            parts[1].clone(),
-            parts[2].clone(),
-        )),
-        _ => None,
+        None => Some(id),
     }
 }
 
@@ -189,7 +223,7 @@ pub fn resolve_reference(
     root: &Path,
     project_cache: &ProjectCache,
 ) -> Option<Location> {
-    let id = resolve_object_id(parts, file_uri, root)?;
+    let id = resolve_object_id(parts, file_uri, root, &project_cache.version_map())?;
     let cached_obj = project_cache.get_object(&id)?;
     let file_path = root.join(&cached_obj.file_path);
     let uri = Url::from_file_path(&file_path).ok()?;
@@ -203,6 +237,7 @@ pub fn resolve_reference(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lsp::fixtures;
 
     #[mz_ore::test]
     fn unqualified_identifier() {
@@ -353,6 +388,148 @@ mod tests {
         .unwrap();
         let expected_path = root.path().join("models/mydb/public/foo.sql");
         assert_eq!(location.uri, Url::from_file_path(expected_path).unwrap());
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn bare_reference_lands_on_the_newest_version() {
+        let (root, cache) = fixtures::versioned_project();
+        let file_uri = fixtures::model_uri(root.path(), "mydb/core/report.sql");
+
+        let location = resolve_reference(
+            &["raw".to_string(), "orders".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+        )
+        .unwrap();
+        let expected = fixtures::model_uri(root.path(), "mydb/raw/orders@2.sql");
+        assert_eq!(location.uri, expected);
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn pinned_reference_lands_on_the_version_it_names() {
+        let (root, cache) = fixtures::versioned_project();
+        let file_uri = fixtures::model_uri(root.path(), "mydb/core/pinned.sql");
+
+        let location = resolve_reference(
+            &["raw".to_string(), "orders@1".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+        )
+        .unwrap();
+        let expected = fixtures::model_uri(root.path(), "mydb/raw/orders@1.sql");
+        assert_eq!(location.uri, expected);
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn bare_reference_respects_the_active_profile() {
+        // Version 2 is declared only as a `dev` override, so picking the
+        // globally highest number would land on a version `prod` lacks.
+        let (dev_root, dev_cache) = fixtures::profile_versioned_project("dev");
+        let dev_uri = fixtures::model_uri(dev_root.path(), "mydb/core/report.sql");
+        let dev_location = resolve_reference(
+            &["raw".to_string(), "orders".to_string()],
+            &dev_uri,
+            dev_root.path(),
+            &dev_cache,
+        )
+        .unwrap();
+        assert_eq!(
+            dev_location.uri,
+            fixtures::model_uri(dev_root.path(), "mydb/raw/orders@2#dev.sql")
+        );
+
+        let (prod_root, prod_cache) = fixtures::profile_versioned_project("prod");
+        let prod_uri = fixtures::model_uri(prod_root.path(), "mydb/core/report.sql");
+        let prod_location = resolve_reference(
+            &["raw".to_string(), "orders".to_string()],
+            &prod_uri,
+            prod_root.path(),
+            &prod_cache,
+        )
+        .unwrap();
+        assert_eq!(
+            prod_location.uri,
+            fixtures::model_uri(prod_root.path(), "mydb/raw/orders@1.sql")
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn declaration_inside_a_versioned_file_resolves_to_that_file() {
+        let (root, cache) = fixtures::versioned_project();
+        let file = "mydb/raw/orders@1.sql";
+        let file_uri = fixtures::model_uri(root.path(), file);
+        let text = fixtures::model_text(root.path(), file);
+
+        let offset = text.find("orders FROM SOURCE").unwrap();
+        let parts = find_reference_at_position(&text, offset).unwrap();
+        assert_eq!(parts, vec!["orders"]);
+
+        let location = resolve_reference(&parts, &file_uri, root.path(), &cache).unwrap();
+        assert_eq!(location.uri, fixtures::model_uri(root.path(), file));
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn comment_inside_a_versioned_file_resolves_to_that_file() {
+        let (root, cache) = fixtures::versioned_project();
+        let file = "mydb/raw/orders@1.sql";
+        let file_uri = fixtures::model_uri(root.path(), file);
+        let text = fixtures::model_text(root.path(), file);
+
+        let offset = text.find("orders IS").unwrap();
+        let parts = find_reference_at_position(&text, offset).unwrap();
+        assert_eq!(parts, vec!["orders"]);
+
+        let location = resolve_reference(&parts, &file_uri, root.path(), &cache).unwrap();
+        assert_eq!(location.uri, fixtures::model_uri(root.path(), file));
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn another_object_named_inside_a_versioned_file_still_takes_the_newest() {
+        let (root, cache) = fixtures::versioned_project();
+        let file_uri = fixtures::model_uri(root.path(), "mydb/raw/orders@1.sql");
+
+        let location = resolve_reference(
+            &["raw".to_string(), "customers".to_string()],
+            &file_uri,
+            root.path(),
+            &cache,
+        )
+        .unwrap();
+        assert_eq!(
+            location.uri,
+            fixtures::model_uri(root.path(), "mydb/raw/customers@2.sql")
+        );
+    }
+
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+    #[mz_ore::test]
+    fn editor_resolution_matches_the_compiler_dependency() {
+        let (root, cache) = fixtures::versioned_project();
+
+        for (consumer, reference) in [
+            ("report", vec!["raw".to_string(), "orders".to_string()]),
+            ("pinned", vec!["raw".to_string(), "orders@1".to_string()]),
+        ] {
+            let file = format!("mydb/core/{consumer}.sql");
+            let file_uri = fixtures::model_uri(root.path(), &file);
+            let consumer_id =
+                ObjectId::new("mydb".to_string(), "core".to_string(), consumer.to_string());
+
+            let compiler_answer = cache.get_dependencies(&consumer_id);
+            let editor_answer =
+                resolve_object_id(&reference, &file_uri, root.path(), &cache.version_map())
+                    .unwrap();
+
+            assert_eq!(compiler_answer, vec![editor_answer], "consumer {consumer}");
+        }
     }
 
     fn build_test_project_cache() -> (tempfile::TempDir, ProjectCache) {
