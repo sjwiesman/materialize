@@ -7,23 +7,51 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-//! Converts a keyed collection of signed row diffs into upsert commands, for
-//! the `UpsertStyle::FromDiffs` envelope.
+//! Converts a source's signed row diffs into upsert commands, for the
+//! `UpsertStyle::FromDiffs` envelope.
 //!
 //! The upsert operator requires positive diffs and at most one command per
-//! `(key, time)`. A source that emits signed diffs violates both: an update is
-//! a retraction and an insertion, a transaction may touch a key several times,
-//! and snapshot rewinds emit negated updates at the snapshot's time. This
-//! operator stashes updates until their time is complete, consolidates them
-//! per `(key, row, time)`, and emits one command per `(key, time)`.
+//! `(key, time)`: when a key has several commands at one time it keeps the one
+//! with the greatest order and breaks ties arbitrarily. A source of signed row
+//! diffs violates both. An update is a retraction and an insertion, and every
+//! change in a PostgreSQL transaction carries the same source time (its commit
+//! LSN), so mapping each diff to a command independently can, for example,
+//! keep the retraction half of an update and delete the row.
 //!
-//! The emitted command is the key's state at the end of the time, which is
-//! well defined because the source collection has at most one row per key at
-//! every complete time: the key is an upstream primary key, which holds at
-//! every transaction boundary, and reclocking never splits a transaction
-//! across times. After consolidation a `(key, time)` therefore holds at most
-//! one row with diff `+1` (the new row) and at most one with diff `-1` (the
-//! row it replaces). Anything else is reported as an upsert error for the key.
+//! [`diffs_to_upsert_commands`] stashes updates until their time is complete,
+//! consolidates them per `(key, row, time)`, and emits one command per
+//! `(key, time)`. The command is well defined because the source collection has
+//! at most one row per key at every complete time: the key is an upstream
+//! primary key, which holds at every transaction boundary, and reclocking never
+//! splits a transaction across times. After consolidation a `(key, time)`
+//! therefore holds at most one row with diff `+1` (the key's row at the end of
+//! the time) and at most one with diff `-1` (the row it replaces). Anything
+//! else is reported as an upsert error for the key.
+//!
+//! The initial snapshot bypasses that stash. All snapshot rows share one
+//! source time, so they reclock to a single time, and stashing them would hold
+//! the entire table until that time completes, in addition to the copy the
+//! upsert operator itself stashes. The bypass is sound because snapshot rows
+//! are already valid commands: every diff is `+1` and the primary key allows at
+//! most one row per key. What prevents sending everything at the snapshot's
+//! time straight to upsert is the snapshot's rewinds. Replicated transactions
+//! committed at or before the snapshot LSN are emitted negated at the same
+//! source time as the snapshot, and they can retract or replace snapshot rows.
+//! Those rewinds, like every other change, still go through the stash, and
+//! [`render_commands`] gives stashed commands a greater order than snapshot
+//! rows ([`CHANGE_ORDER`] over [`SNAPSHOT_ORDER`]), so upsert applies a key's
+//! stashed command over its snapshot row.
+//!
+//! The stash's rule still holds without the snapshot rows: for a `(key, time)`
+//! it sees the key's final row minus its snapshot row, which again consolidates
+//! to at most one `+1` (the final row, replacing the snapshot row) and one `-1`
+//! (the snapshot row, when the key no longer exists), or to nothing when the
+//! snapshot row is final. The source must therefore emit the retracted half of
+//! every change, which `REPLICA IDENTITY FULL` provides.
+//!
+//! NOTE: Two snapshot rows with the same key tie at [`SNAPSHOT_ORDER`], and
+//! upsert keeps one arbitrarily rather than reporting the duplicate-key error
+//! the stash would. The upstream primary key rules this out.
 
 use columnar::Index as _;
 use differential_dataflow::hashable::Hashable;
@@ -41,9 +69,24 @@ use mz_timely_util::containers::stack::FueledBuilder;
 use timely::container::{CapacityContainerBuilder, ContainerBuilder, PushInto};
 use timely::dataflow::channels::pact::Exchange;
 use timely::dataflow::operators::Capability;
+use timely::dataflow::operators::OkErr as _;
 use timely::progress::{Antichain, Timestamp as _};
 
+use crate::source::types::DecodeResult;
 use crate::upsert::{UpsertKey, UpsertValue};
+
+/// The upsert order of a snapshot row.
+const SNAPSHOT_ORDER: u64 = 0;
+/// The upsert order of a command emitted by [`diffs_to_upsert_commands`]. It
+/// must exceed [`SNAPSHOT_ORDER`]; see the module docs.
+const CHANGE_ORDER: u64 = 1;
+
+/// The metadata a source attaches to a snapshot row of a `FromDiffs` export, so
+/// that [`render_commands`] can route it around the stash. Rows of any other
+/// origin must not carry it.
+pub(crate) fn snapshot_metadata() -> Row {
+    Row::pack_slice(&[Datum::True])
+}
 
 /// One stashed update: a key, the full row it was computed from, its time,
 /// and its signed diff.
@@ -56,14 +99,55 @@ type OutputHandle = AsyncOutputHandle<
     >,
 >;
 
-/// Converts `input`, whose keys are `UpsertKey::from_value(row, key_indices)`,
-/// into upsert commands. Each command's value is the row with its time appended
-/// as an `mz_timestamp` column, so a later retraction of the stored value
-/// carries the time at which the row version was ingested.
+/// Converts the decoded rows of a `FromDiffs` export into upsert commands
+/// keyed by `key_indices`, ordered by [`SNAPSHOT_ORDER`] and [`CHANGE_ORDER`].
 ///
-/// Every output update has diff `+1`, and each `(key, time)` appears at most
-/// once.
-pub(crate) fn diffs_to_upsert_commands<'scope>(
+/// Each command's value is the row with its time appended as an `mz_timestamp`
+/// column, so a later retraction of the stored value carries the time at which
+/// the row version was ingested. Snapshot rows are recognized by
+/// [`snapshot_metadata`].
+pub(crate) fn render_commands<'scope, FromTime>(
+    input: VecCollection<'scope, Timestamp, DecodeResult<FromTime>, Diff>,
+    key_indices: Vec<usize>,
+) -> (
+    VecCollection<'scope, Timestamp, (UpsertKey, Option<UpsertValue>, u64), Diff>,
+    PressOnDropButton,
+)
+where
+    FromTime: Clone + 'static,
+{
+    let snapshot_marker = snapshot_metadata();
+    let snapshot_key_indices = key_indices.clone();
+    let mut row_buf = Row::default();
+    let (snapshot, changes) = input.inner.ok_err(move |(result, time, diff)| {
+        let Some(Ok(value)) = result.value else {
+            unreachable!("FromDiffs exports have no encoding to fail");
+        };
+        let key = UpsertKey::from_value(Ok(&value), &snapshot_key_indices);
+        if result.metadata == snapshot_marker {
+            let value = stamp(&value, time, &mut row_buf);
+            Ok(((key, Some(Ok(value)), SNAPSHOT_ORDER), time, diff))
+        } else {
+            Err(((key, value), time, diff))
+        }
+    });
+
+    let (changes, button) = diffs_to_upsert_commands(changes.as_collection(), key_indices);
+    let changes = changes.map(|(key, value)| (key, value, CHANGE_ORDER));
+    (snapshot.as_collection().concat(changes), button)
+}
+
+/// Returns `row` with `time` appended as an `mz_timestamp` column.
+fn stamp(row: &Row, time: Timestamp, row_buf: &mut Row) -> Row {
+    let mut packer = row_buf.packer();
+    packer.extend_by_row(row);
+    packer.push(Datum::MzTimestamp(time));
+    row_buf.clone()
+}
+
+/// Consolidates `input`, whose keys are `UpsertKey::from_value(row, key_indices)`,
+/// into one stamped upsert command per `(key, time)`, each with diff `+1`.
+fn diffs_to_upsert_commands<'scope>(
     input: VecCollection<'scope, Timestamp, (UpsertKey, Row), Diff>,
     key_indices: Vec<usize>,
 ) -> (
@@ -215,14 +299,7 @@ async fn emit_group(
             updates.iter().map(|(_, row, diff)| (row, *diff)),
             key_indices,
         )
-        .map(|value| {
-            value.map(|row| {
-                let mut packer = row_buf.packer();
-                packer.extend_by_row(row);
-                packer.push(Datum::MzTimestamp(time));
-                row_buf.clone()
-            })
-        });
+        .map(|value| value.map(|row| stamp(row, time, row_buf)));
         let size = match &value {
             Some(Ok(row)) => row.byte_len(),
             _ => 0,
@@ -450,5 +527,113 @@ mod tests {
     fn incomplete_time_is_held_back() {
         let actual = run(vec![(row(1, 10), 0, 1), (row(2, 20), 5, 1)], 1);
         assert_eq!(actual, vec![upsert(1, 10, 0)]);
+    }
+
+    /// Feeds `(row, time, diff, is_snapshot)` rows through [`render_commands`],
+    /// advances the input to `upper`, and returns what upsert would apply: per
+    /// `(key, time)`, the value of the command with the greatest order.
+    fn resolve(
+        rows: Vec<(Row, u64, i64, bool)>,
+        upper: u64,
+    ) -> std::collections::BTreeMap<(UpsertKey, Timestamp), Option<UpsertValue>> {
+        let commands = timely::execute_directly(move |worker| {
+            let (mut input, output) = worker.dataflow::<Timestamp, _, _>(|scope| {
+                let (handle, stream) = scope.new_input();
+                let (output, button) = render_commands(stream.as_collection(), vec![0]);
+                std::mem::forget(button);
+                (handle, output.inner.capture())
+            });
+            for (value, time, diff, is_snapshot) in rows {
+                let metadata = if is_snapshot {
+                    snapshot_metadata()
+                } else {
+                    Row::default()
+                };
+                let result = DecodeResult {
+                    key: Some(Ok(Row::default())),
+                    value: Some(Ok(value)),
+                    metadata,
+                    from_time: (),
+                };
+                input.send((result, time.into(), diff.into()));
+            }
+            input.advance_to(upper.into());
+            for _ in 0..10 {
+                worker.step();
+            }
+            output
+                .try_iter()
+                .filter_map(|event| match event {
+                    Event::Messages(_time, data) => Some(data),
+                    Event::Progress(_) => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>()
+        });
+
+        let mut winners: std::collections::BTreeMap<_, (u64, Option<UpsertValue>)> =
+            std::collections::BTreeMap::new();
+        for ((key, value, order), time, diff) in commands {
+            assert_eq!(diff, Diff::ONE, "upsert input must have diff +1");
+            if let Some((prev, _)) = winners.get(&(key, time)) {
+                assert_ne!(*prev, order, "tied commands for one (key, time)");
+                if *prev > order {
+                    continue;
+                }
+            }
+            winners.insert((key, time), (order, value));
+        }
+        winners
+            .into_iter()
+            .map(|(key_time, (_order, value))| (key_time, value))
+            .collect()
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)]
+    fn snapshot_bypasses_stash_and_loses_to_changes() {
+        let t0 = Timestamp::from(0);
+        let snapshot = |k, v| (row(k, v), 0, 1, true);
+        let change = |k, v, diff| (row(k, v), 0, diff, false);
+        let actual = resolve(
+            vec![
+                // Only in the snapshot.
+                snapshot(1, 10),
+                // A rewound update: the snapshot has the updated row.
+                snapshot(2, 21),
+                change(2, 21, -1),
+                change(2, 20, 1),
+                // A rewound insert.
+                snapshot(3, 30),
+                change(3, 30, -1),
+                // A rewound delete: the snapshot lacks the row.
+                change(4, 40, 1),
+                // A later transaction at the snapshot's time.
+                snapshot(5, 50),
+                change(5, 50, -1),
+                change(5, 51, 1),
+                // A rewound key change from 6 to 7.
+                snapshot(7, 70),
+                change(7, 70, -1),
+                change(6, 70, 1),
+            ],
+            1,
+        );
+        let expected = [
+            (1, Some((1, 10))),
+            (2, Some((2, 20))),
+            (3, None),
+            (4, Some((4, 40))),
+            (5, Some((5, 51))),
+            (6, Some((6, 70))),
+            (7, None),
+        ]
+        .into_iter()
+        .map(|(k, value)| {
+            let value = value.map(|(k, v)| Ok(stamped(k, v, 0)));
+            ((key(k), t0), value)
+        })
+        .collect();
+        assert_eq!(actual, expected);
     }
 }

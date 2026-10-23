@@ -231,7 +231,8 @@ mod columnar_upsert_key {
 ///
 /// The upsert envelope is rendered for Kafka and the KEY VALUE load generator,
 /// so those source times (`KafkaTimestamp`, `MzOffset`) project to a real order
-/// key. The remaining source times implement the trait only for coherence on
+/// key. `UpsertStyle::FromDiffs` renders upsert with an explicit `u64` order in
+/// place of its source time. The remaining source times implement the trait only for coherence on
 /// the generic render path — their sources never render upsert — so their
 /// projection is a panicking guard rather than a real key.
 pub trait UpsertSourceTime
@@ -271,6 +272,15 @@ impl UpsertSourceTime for MzOffset {
     type Order = u64;
     fn upsert_order(&self) -> u64 {
         self.offset
+    }
+}
+
+/// The explicit order of `UpsertStyle::FromDiffs` commands, which replaces the
+/// source time; see [`from_diffs`].
+impl UpsertSourceTime for u64 {
+    type Order = u64;
+    fn upsert_order(&self) -> u64 {
+        *self
     }
 }
 

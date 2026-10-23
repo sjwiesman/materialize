@@ -171,6 +171,55 @@ reclocking and upsert and performs it.
 Errors from casting and decoding are already split off before this point and
 continue to flow into the table's error collection unchanged.
 
+### The initial snapshot bypasses the stash
+
+All snapshot rows carry the same source time, so they reclock to a single
+Materialize time. Stashing them would hold the whole table in the conversion
+operator until that time completes, and the upsert operator stashes the same
+rows again before applying them. Sealing the stash also loads every sealed
+chunk back into memory at once, so the snapshot would briefly be fully
+resident. A Kafka upsert source facing a large backlog stages it once, in the
+upsert stash. The snapshot path should cost the same.
+
+Snapshot rows are already valid upsert commands: every diff is `+1`, and the
+primary key allows at most one row per key. They are sent straight to upsert.
+What keeps the rest of the snapshot's time from taking the same shortcut is
+rewinds. Replicated transactions committed at or before the snapshot LSN are
+emitted negated at the same source time as the snapshot, and they retract or
+replace snapshot rows. They are indistinguishable from snapshot rows after
+reclocking, and they are not positive. Two changes make the bypass sound.
+
+- **Snapshot rows are tagged.** The PostgreSQL snapshot operator attaches a
+  marker to the metadata of each snapshot row of a `FromDiffs` export. Only
+  tagged rows bypass the stash. Rewinds and replicated changes still go
+  through it. Exports of other envelopes keep empty metadata, because they
+  append metadata to their rows as columns.
+- **Stashed commands win ties.** Upsert keeps, per `(key, time)`, the command
+  with the greatest order. Snapshot rows and rewinds share a source time, so
+  the source time cannot order them. The `FromDiffs` path instead renders
+  upsert with an explicit order: 0 for snapshot rows and 1 for every command
+  from the stash. Upsert therefore applies a key's stashed command over its
+  snapshot row.
+
+The stash's rule still holds without the snapshot rows. For a `(key, time)` it
+now sees the key's final row minus its snapshot row, which again consolidates
+to at most one `+1` (the final row, replacing the snapshot row), at most one
+`-1` (the snapshot row, when the key no longer exists), or nothing (when the
+snapshot row is final). This relies on every change carrying its retracted
+half, which `REPLICA IDENTITY FULL` provides.
+
+| Key at the snapshot's time | Stash sees | Stash emits, order 1 | Upsert applies |
+|---|---|---|---|
+| Only in the snapshot | nothing | nothing | snapshot row |
+| Rewound update | `-r' +r` | upsert `r` | `r` |
+| Rewound insert | `-r'` | delete | deleted |
+| Rewound delete | `+r` | upsert `r` | `r` |
+| Updated later in the same time | `-r' +r2` | upsert `r2` | `r2` |
+
+One guarantee is weaker for snapshot rows. Two snapshot rows with the same key
+tie at order 0, and upsert keeps one arbitrarily instead of reporting the
+duplicate-key error the stash would. A primary key rules this out.
+
 ### Changes by component
 
 - **Parser.** A new `INGESTION` keyword and an
@@ -188,10 +237,13 @@ continue to flow into the table's error collection unchanged.
   plus the ingestion time, and the key is the projection of `key_indices`.
   `SourceExportDataConfig::monotonic` already treats upsert as non-monotonic.
   The catalog reports the envelope as `upsert-from-diffs`.
+- **PostgreSQL source.** The snapshot operator tags the snapshot rows of
+  `FromDiffs` exports.
 - **Rendering** (`render_source_stream`). For `FromDiffs`, use the new
-  conversion operator in place of `upsert_commands`. Rehydration, backpressure,
-  and the choice between upsert implementations are reused unchanged.
-  `UpsertSourceTime` is already implemented for `MzOffset`.
+  conversion operator in place of `upsert_commands`, and render upsert with
+  the explicit `u64` order in place of the source time. Rehydration,
+  backpressure, and the choice between upsert implementations are reused
+  unchanged.
 
 ### Correctness
 
@@ -206,10 +258,10 @@ continue to flow into the table's error collection unchanged.
 
 ### Costs
 
-- The initial snapshot reclocks to a single timestamp, so it is staged once in
-  the conversion operator and again in the upsert stash. Both spill to disk.
-  Folding the conversion into the upsert stash removes the second copy and is
-  a possible optimization.
+- The initial snapshot is staged once, in the upsert stash, like a Kafka
+  backlog. The conversion operator stashes only the changes and rewinds that
+  share the snapshot's time, which grow with the upstream write rate during
+  the snapshot rather than with the table.
 - Upsert state for the table, the same cost as any upsert source of the same
   size.
 
@@ -219,7 +271,8 @@ continue to flow into the table's error collection unchanged.
   `WITH (...)`.
 - Unit tests for the conversion operator covering repeated updates in a
   transaction, insert then delete, a primary key change, a no-op update, the
-  rewind pattern at offset 0, and the duplicate key error.
+  rewind pattern at offset 0, the duplicate key error, and every row of the
+  snapshot bypass table.
 - Testdrive in `test/pg-cdc/` for inserts, updates, and deletes (the
   retraction carries the original ingestion time), multi-statement
   transactions, writes racing the initial snapshot, an upstream primary key
@@ -281,13 +334,17 @@ consolidate and would grow without bound.
 there is no SQL construct that records the time a row first appeared without
 keeping per-key state, which is what upsert already provides.
 
+**Stash the snapshot with everything else.** Routing every update through the
+conversion operator needs no tagging and no explicit order, but stages the
+whole snapshot twice, once fully resident when the stash seals. The bypass
+removes that cost for the price of a tag and an order.
+
 **Fold consolidation into the upsert stash.** The upsert stash would accept
 signed input and consolidate per `(key, row, time)` in place of its
-latest-wins rule. This avoids staging the snapshot twice but changes the stash
-format and both upsert implementations. It remains an option once the feature
-is proven.
+latest-wins rule, removing the conversion operator. It changes the stash
+format and both upsert implementations, for a saving that the snapshot bypass
+already captures for the snapshot.
 
 ## Open questions
 
-- Is staging the initial snapshot twice acceptable for the first version?
 - Is `ingestion_time` the right default column name?
