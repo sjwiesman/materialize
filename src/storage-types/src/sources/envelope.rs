@@ -81,6 +81,11 @@ pub enum UpsertStyle {
         key_envelope: KeyEnvelope,
         error_column: String,
     },
+    /// A source that emits signed diffs of whole rows, keyed by columns of the
+    /// row itself (`WITH INGESTION TIME` on PostgreSQL tables). Updates are
+    /// consolidated per key and time and turned into upsert commands, and the
+    /// reclocked timestamp is appended to each value.
+    FromDiffs,
 }
 
 /// Computes the indices of the value's relation description that appear in the key.
@@ -224,6 +229,17 @@ impl UnplannedSourceEnvelope {
                 };
                 (
                     self.into_source_envelope(key, key_arity, Some(desc.arity())),
+                    desc,
+                )
+            }
+            UnplannedSourceEnvelope::Upsert {
+                style: UpsertStyle::FromDiffs,
+            } => {
+                let key_desc = key_desc.ok_or_else(|| anyhow!("FromDiffs requires a key"))?;
+                let key = match_key_indices(&key_desc, &value_desc)?;
+                let desc = value_desc.with_key(key.clone()).concat(metadata_desc);
+                (
+                    self.into_source_envelope(Some(key), None, Some(desc.arity())),
                     desc,
                 )
             }

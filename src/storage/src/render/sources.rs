@@ -225,7 +225,27 @@ where
     // render envelopes
     let (envelope_ok, envelope_health) = match &envelope {
         SourceEnvelope::Upsert(upsert_envelope) => {
-            let upsert_input = upsert_commands(decoded_stream, upsert_envelope.clone());
+            let upsert_input = match upsert_envelope.style {
+                UpsertStyle::FromDiffs => {
+                    let key_indices = upsert_envelope.key_indices.clone();
+                    let keyed = decoded_stream.map(move |result| {
+                        let Some(Ok(value)) = result.value else {
+                            unreachable!("FromDiffs exports have no encoding to fail");
+                        };
+                        let key = UpsertKey::from_value(Ok(&value), &key_indices);
+                        (key, value)
+                    });
+                    let (commands, token) = crate::upsert::from_diffs::diffs_to_upsert_commands(
+                        keyed,
+                        upsert_envelope.key_indices.clone(),
+                    );
+                    needed_tokens.push(token);
+                    // NOTE: Each `(key, time)` carries at most one command, so
+                    // the source time orders nothing downstream.
+                    commands.map(|(key, value)| (key, value, FromTime::minimum()))
+                }
+                _ => upsert_commands(decoded_stream, upsert_envelope.clone()),
+            };
 
             let persist_clients = Arc::clone(&storage_state.persist_clients);
             // TODO: Get this to work with the as_of.
@@ -579,6 +599,7 @@ fn upsert_commands<'scope, T: Timestamp, FromTime: Timestamp>(
                 key_envelope: KeyEnvelope::None,
                 error_column: _,
             } => unreachable!(),
+            UpsertStyle::FromDiffs => unreachable!("FromDiffs does not render upsert_commands"),
         };
 
         let key = UpsertKey::from_key(Ok(&key_row));
@@ -603,6 +624,9 @@ fn upsert_commands<'scope, T: Timestamp, FromTime: Timestamp>(
                     packer.extend_by_row(row);
                     packer.extend_by_row(&metadata);
                     Some(Ok(row_buf.clone()))
+                }
+                UpsertStyle::FromDiffs => {
+                    unreachable!("FromDiffs does not render upsert_commands")
                 }
                 UpsertStyle::ValueErrInline { .. } => {
                     let mut packer = row_buf.packer();

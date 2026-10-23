@@ -152,17 +152,19 @@ PostgreSQL violates the second requirement in three ways.
 Each case is only meaningful after consolidation. A new operator sits between
 reclocking and upsert and performs it.
 
-- It stashes `((key, source time, row), time, diff)` in a spillable columnar
-  merge batcher, and seals a time once the input frontier passes it.
-- For each `(key, time)` it walks the source-time groups from newest to
-  oldest. The first group that is non-empty after consolidation determines the
-  command. A single row with diff `+1` becomes an upsert of that row. Only
-  negative rows become a delete. Anything else (more than one positive row, or
-  a multiplicity other than one) can only result from a violated upstream
-  constraint and becomes an upsert error value, which surfaces as a definite
-  error.
+- It stashes `((key, row), time, diff)` in a spillable columnar merge
+  batcher, and seals a time once the input frontier passes it.
+- The collection has at most one row per key at every complete time, because
+  the primary key holds at every transaction boundary and reclocking never
+  splits a transaction across times. After consolidating per
+  `(key, row, time)`, each `(key, time)` therefore holds at most one row with
+  diff `+1` (the key's new row) and at most one with diff `-1` (the row it
+  replaces). A `+1` row becomes an upsert of that row. Only a `-1` row becomes
+  a delete. Anything else can only result from a violated upstream constraint
+  and becomes an upsert error value for the key, which surfaces as a definite
+  error and is replaced by the key's next valid row.
 - It emits at most one command per `(key, time)`, always with diff `+1`, so
-  both upsert invariants hold.
+  both upsert invariants hold. Source times are not needed to order commands.
 - It appends `mz_timestamp(time)` to the value. A no-op `UPDATE`
   (`-r +r`) consolidates away, so it does not change the row's ingestion time.
 
@@ -177,9 +179,10 @@ continue to flow into the table's error collection unchanged.
   `WITH (...)` options. One token of lookahead distinguishes `WITH INGESTION`
   from `WITH (`.
 - **Planning** (`plan_create_table_from_source`). Accept the clause only for
-  PostgreSQL exports and behind a feature flag. Resolve the primary key as
-  above, append the `mz_timestamp` column (default name `ingestion_time`), and
-  declare the primary key as a relation key.
+  PostgreSQL exports and behind the `enable_postgres_ingestion_time` feature
+  flag, off by default. Resolve the primary key as above, append the
+  `mz_timestamp` column (default name `ingestion_time`), and declare the
+  primary key as a relation key.
 - **Envelope.** A new `UpsertStyle::FromDiffs` reusing
   `UpsertEnvelope { key_indices, source_arity }`. The value is the full row
   plus the ingestion time, and the key is the projection of `key_indices`.
@@ -279,13 +282,12 @@ there is no SQL construct that records the time a row first appeared without
 keeping per-key state, which is what upsert already provides.
 
 **Fold consolidation into the upsert stash.** The upsert stash would accept
-signed input and consolidate per `(key, time, source time)` before applying its
+signed input and consolidate per `(key, row, time)` in place of its
 latest-wins rule. This avoids staging the snapshot twice but changes the stash
 format and both upsert implementations. It remains an option once the feature
 is proven.
 
 ## Open questions
 
-- What is the production default of the feature flag?
 - Is staging the initial snapshot twice acceptable for the first version?
 - Is `ingestion_time` the right default column name?

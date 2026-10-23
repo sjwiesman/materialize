@@ -31,6 +31,7 @@ use mz_ore::collections::{CollectionExt, HashSet};
 use mz_ore::num::NonNeg;
 use mz_ore::str::StrExt;
 use mz_ore::{soft_assert_or_log, soft_panic_or_log};
+use mz_postgres_util::desc::PostgresTableDesc;
 use mz_proto::RustType;
 use mz_repr::adt::interval::Interval;
 use mz_repr::adt::mz_acl_item::{MzAclItem, PrivilegeMap};
@@ -171,8 +172,8 @@ use crate::plan::{
 use crate::session::vars::{
     self, ENABLE_AUTO_SCALING_STRATEGY, ENABLE_CLUSTER_SCHEDULE_REFRESH,
     ENABLE_COLLECTION_PARTITION_BY, ENABLE_CREATE_TABLE_FROM_SOURCE, ENABLE_KAFKA_SINK_HEADERS,
-    ENABLE_METRIC_SINK, ENABLE_REFRESH_EVERY_MVS, ENABLE_REPLICA_TARGETED_MATERIALIZED_VIEWS,
-    VarInput,
+    ENABLE_METRIC_SINK, ENABLE_POSTGRES_INGESTION_TIME, ENABLE_REFRESH_EVERY_MVS,
+    ENABLE_REPLICA_TARGETED_MATERIALIZED_VIEWS, VarInput,
 };
 use crate::{names, parse};
 
@@ -1295,6 +1296,66 @@ fn plan_kafka_source_connection(
     })
 }
 
+/// Plans the `UpsertStyle::FromDiffs` envelope of a PostgreSQL table created
+/// `WITH INGESTION TIME`, keyed by the upstream primary key.
+///
+/// `table` must be the purified desc, from which excluded constraints are
+/// already removed. Schema-change detection compares against that same desc,
+/// so a key found here is re-verified upstream for the life of the table.
+fn plan_ingestion_time_envelope(
+    table: &PostgresTableDesc,
+    value_desc: RelationDesc,
+    ingestion_time: &ast::IngestionTime,
+) -> Result<(RelationDesc, SourceEnvelope), PlanError> {
+    let Some(primary_key) = table.keys.iter().find(|k| k.is_primary) else {
+        sql_bail!(
+            "WITH INGESTION TIME requires the upstream table {}.{} to have a PRIMARY KEY \
+             that is not excluded",
+            Ident::new_unchecked(&table.namespace).to_ast_string_simple(),
+            Ident::new_unchecked(&table.name).to_ast_string_simple(),
+        );
+    };
+    let key_names = primary_key
+        .cols
+        .iter()
+        .map(|col_num| {
+            table
+                .columns
+                .iter()
+                .find(|c| c.col_num == *col_num)
+                .map(|c| ColumnName::from(c.name.as_str()))
+                .ok_or_else(|| {
+                    internal_err!("primary key column {col_num} missing from {}", table.name)
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let key_desc = RelationDesc::from_names_and_types(
+        key_names
+            .into_iter()
+            .map(|name| {
+                let (_, typ) = value_desc
+                    .get_by_name(&name)
+                    .ok_or_else(|| internal_err!("primary key column {name} missing"))?;
+                Ok::<_, PlanError>((name, typ.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+
+    let column_name = match &ingestion_time.alias {
+        Some(alias) => normalize::column_name(alias.clone()),
+        None => ColumnName::from("ingestion_time"),
+    };
+    let metadata_desc = RelationDesc::builder()
+        .with_column(column_name, SqlScalarType::MzTimestamp.nullable(false))
+        .finish();
+
+    let (envelope, desc) = UnplannedSourceEnvelope::Upsert {
+        style: UpsertStyle::FromDiffs,
+    }
+    .desc(Some(key_desc), value_desc, metadata_desc)?;
+    Ok((desc, envelope))
+}
+
 fn apply_source_envelope_encoding(
     scx: &StatementContext,
     envelope: &ast::SourceEnvelope,
@@ -1776,8 +1837,16 @@ pub fn plan_create_table_from_source(
         envelope,
         format,
         include_metadata,
+        ingestion_time,
         with_options,
     } = &stmt;
+
+    if ingestion_time.is_some() {
+        scx.require_feature_flag(&ENABLE_POSTGRES_INGESTION_TIME)?;
+        if envelope.is_some() || format.is_some() || !include_metadata.is_empty() {
+            sql_bail!("WITH INGESTION TIME cannot be combined with FORMAT, INCLUDE, or ENVELOPE");
+        }
+    }
 
     let envelope = envelope.clone().unwrap_or(ast::SourceEnvelope::None);
 
@@ -1966,16 +2035,26 @@ pub fn plan_create_table_from_source(
         _ => vec![],
     };
 
-    let (mut desc, envelope, encoding) = apply_source_envelope_encoding(
-        scx,
-        &envelope,
-        format,
-        key_desc,
-        value_desc,
-        include_metadata,
-        metadata_columns_desc,
-        source_connection,
-    )?;
+    let (mut desc, envelope, encoding) = match ingestion_time {
+        Some(ingestion_time) => {
+            let SourceExportDetails::Postgres(PostgresSourceExportDetails { table, .. }) = &details
+            else {
+                bail_unsupported!("WITH INGESTION TIME for non-PostgreSQL source tables");
+            };
+            let (desc, envelope) = plan_ingestion_time_envelope(table, value_desc, ingestion_time)?;
+            (desc, envelope, None)
+        }
+        None => apply_source_envelope_encoding(
+            scx,
+            &envelope,
+            format,
+            key_desc,
+            value_desc,
+            include_metadata,
+            metadata_columns_desc,
+            source_connection,
+        )?,
+    };
     if let TableFromSourceColumns::Named(col_names) = columns {
         plan_utils::maybe_rename_columns(format!("source table {}", name), &mut desc, col_names)?;
     }

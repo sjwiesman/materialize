@@ -1880,6 +1880,7 @@ async fn purify_create_table_from_source(
         format,
         envelope,
         include_metadata: _,
+        ingestion_time: _,
         with_options,
     } = &mut stmt;
 

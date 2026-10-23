@@ -1059,6 +1059,9 @@ impl DataSourceDesc {
                     mz_storage_types::sources::envelope::UpsertStyle::ValueErrInline { .. } => {
                         "upsert-value-err-inline"
                     }
+                    mz_storage_types::sources::envelope::UpsertStyle::FromDiffs => {
+                        "upsert-from-diffs"
+                    }
                 },
                 SourceEnvelope::CdcV2 => {
                     // TODO(aljoscha): Should we even report this? It's
