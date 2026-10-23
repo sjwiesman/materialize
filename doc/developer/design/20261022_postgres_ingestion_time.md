@@ -64,7 +64,7 @@ ingested from a PostgreSQL source.
   time performs a full sync regardless.
 - **Tables without a primary key.** The design keys state by primary key. A
   unique constraint does not qualify.
-- **`REPLICA IDENTITY DEFAULT`.** See Future work.
+- **`REPLICA IDENTITY DEFAULT`.** See Follow-on: `REPLICA IDENTITY DEFAULT`.
 - **Other source types.** Kafka and load generator sources can be extended
   later on the same mechanism. MySQL and SQL Server sources follow the same
   rewind pattern as PostgreSQL and would need the same changes.
@@ -282,20 +282,132 @@ duplicate-key error the stash would. A primary key rules this out.
 - A resumption test and a platform check showing ingestion times survive
   restarts and upgrades.
 
-### Future work: `REPLICA IDENTITY DEFAULT`
+## Follow-on: `REPLICA IDENTITY DEFAULT`
 
-With a primary key, the source could emit upsert commands from the old key and
-the new row alone, which would allow `REPLICA IDENTITY DEFAULT`. Two problems
-need their own design.
+The first version requires `REPLICA IDENTITY FULL`, like every PostgreSQL
+table today. A table created `WITH INGESTION TIME` is keyed by its primary key,
+so in principle it needs only the old key of a change, which is what the
+PostgreSQL default, `REPLICA IDENTITY DEFAULT`, sends. This section describes
+what supporting it takes. It is not part of the first version.
 
-- An `UPDATE` that leaves a TOASTed value unchanged does not send that value,
-  and without the old tuple the only copy is in upsert state. Supporting it
-  needs a patch command in the upsert operator and its stash.
-- Snapshot rewinds need the pre-image of each rewound change, which
-  `REPLICA IDENTITY DEFAULT` does not send.
+### Motivation
 
-Purification would also need to check replica identity per export rather than
-per source.
+`REPLICA IDENTITY FULL` makes PostgreSQL write the entire old row to the WAL
+for every `UPDATE` and `DELETE`. On wide or frequently updated tables this
+multiplies WAL volume, replication bandwidth, and the replica's decoding work.
+Changing a large production table's replica identity also needs an `ALTER
+TABLE` that some operators will not run. The tables a sync engine serves are
+often exactly these: wide, hot, and owned by an application team. Supporting
+the default removes the most common reason a team cannot adopt the feature.
+
+### What PostgreSQL sends
+
+| Change | `FULL` sends | `DEFAULT` sends |
+|---|---|---|
+| `INSERT` | new row | new row |
+| `UPDATE`, key unchanged | old row, new row | new row only |
+| `UPDATE`, key changed | old row, new row | old key, new row |
+| `DELETE` | old row | old key |
+
+In both modes the new row of an `UPDATE` carries a placeholder in place of
+any TOASTed value the update did not change. Under `FULL` the source fills it
+from the old row. Under `DEFAULT` there is no old row to fill it from.
+
+### Keyed commands in place of diffs
+
+Without old rows the source can no longer produce signed row diffs, and the
+consolidation in [Converting diffs to upsert commands](#converting-diffs-to-upsert-commands)
+does not apply. The source would instead emit keyed commands directly:
+
+- `INSERT`, and `UPDATE` with an unchanged key, become an upsert of the new
+  row.
+- `DELETE` becomes a delete of the old key.
+- `UPDATE` with a changed key becomes a delete of the old key and an upsert of
+  the new row.
+
+These commands are already in upsert's shape, so no stash is needed for them.
+What remains is ordering. Upsert keeps one command per `(key, time)`, and all
+changes of a transaction share its commit LSN, so a transaction that touches a
+key twice produces two commands that tie. Two ways to resolve this:
+
+1. The replication operator keeps, per transaction, only the last command for
+   each key it touches, and emits those at the commit LSN. Upsert then orders
+   commands of different transactions in one time by commit LSN. This buffers
+   one transaction's touched keys, which is unbounded for bulk transactions.
+2. Each change message carries its own LSN, which could break ties within a
+   transaction without buffering. Whether pgoutput assigns increasing LSNs to
+   the change messages of one transaction, outside of streamed in-progress
+   transactions, has not been verified.
+
+This would be a new envelope style beside `FromDiffs`, rendered with the commit
+LSN (or the change LSN) as upsert's order. The snapshot bypass carries over as
+long as snapshot rows keep an order below every other command at the
+snapshot's time. Commands at the snapshot's source time, which are rewinds,
+would tie with them, so that order has to come from something other than the
+source time, as it does today.
+
+### Unchanged TOAST values
+
+An upsert must carry the whole row, but the source does not have the unchanged
+TOASTed values of an update. Only the upsert state does. Two options:
+
+- **Restrict to tables without TOASTable columns.** Purification accepts
+  `DEFAULT` only when every column's storage is `plain` (`pg_attribute.attstorage
+  = 'p'`), so no value can be TOASTed, and the replication operator raises a
+  definite error if a placeholder ever arrives. This is cheap and covers
+  narrow tables, but excludes tables with `text`, `jsonb`, or `bytea` columns,
+  which are common.
+- **Patch commands.** The source emits the new row with the unchanged columns
+  marked, and upsert fills them from the stored value. This changes the
+  command type, both upsert implementations, and the stash's diff type. Patches
+  must also compose: the stash keeps one command per `(key, time)`, so a patch
+  that lands in the same time as the full row it applies to must be merged
+  into that row rather than replace it.
+
+The restriction is a reasonable first step. Patch commands are needed for
+general tables.
+
+### Snapshot rewinds
+
+Rewinds are what makes the snapshot definite. PostgreSQL chooses the snapshot
+LSN when the snapshot transaction starts, so a retried snapshot can land at a
+different LSN. The source therefore emits the state at the replication slot's
+LSN, computed as the snapshot minus the changes between the slot and the
+snapshot, which is the same however often the snapshot is retaken.
+
+A rewound insert needs only the key. A rewound update or delete needs the row
+as it was before the change, which `DEFAULT` does not send. Options:
+
+- **Retry until no pre-image is missing.** If a rewound update or delete
+  arrives without its pre-image, discard the snapshot and take a new one. This
+  keeps the current protocol but may never finish on a table under continuous
+  write load.
+- **Emit the snapshot at its own LSN.** Skip rewinds for the export, emit the
+  snapshot at its LSN, and drop replicated changes at or before it. The table
+  reads as empty before the snapshot's time, which breaks transactional
+  consistency with other tables of the source during hydration. Whether the
+  result stays definite, given that each snapshot attempt can choose a
+  different LSN and that persist's compare-and-append decides which attempt's
+  data is committed, needs its own analysis.
+- **Require `FULL` while the table hydrates.** Users set `FULL`, create the
+  table, and switch to `DEFAULT` once the snapshot completes. This needs no
+  engine change beyond accepting the identity change at runtime, but is easy
+  to get wrong and keeps the WAL cost during the snapshot.
+
+This is the main open problem of the follow-on.
+
+### Purification and runtime checks
+
+- Replica identity is checked per export instead of per source. `DEFAULT` is
+  accepted only for tables created `WITH INGESTION TIME`, and only when the
+  replica identity index is the primary key. `USING INDEX` on another index
+  and `NOTHING` are rejected.
+- Replica identity belongs to the upstream table, so a table exported both
+  with and without `WITH INGESTION TIME` still needs `FULL`. The existing check
+  rejects the export without the clause when the table is `DEFAULT`.
+- At runtime, the replication operator accepts missing old rows for these
+  exports and raises a definite error if the identity changes to `NOTHING` or
+  to an index other than the primary key.
 
 ## Minimal Viable Prototype
 
