@@ -54,6 +54,7 @@ use types::{
     upsert_bincode_opts,
 };
 
+pub(crate) mod from_diffs;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod memory;
 pub(crate) mod rocksdb;
@@ -674,6 +675,7 @@ pub(crate) fn upsert_v2<'scope, T, FromTime>(
     source_config: crate::source::SourceExportCreationConfig,
     backpressure_metrics: Option<UpsertBackpressureMetrics>,
     stash_flavor: upsert_continual_feedback_v2::UpsertStashFlavor,
+    mode: upsert_continual_feedback_v2::DrainMode,
 ) -> (
     VecCollection<'scope, T, Result<Row, DataflowError>, Diff>,
     StreamVec<'scope, T, (Option<GlobalId>, HealthStatusUpdate)>,
@@ -706,6 +708,7 @@ where
 
     upsert_continual_feedback_v2::upsert_inner(
         stash_flavor,
+        mode,
         thin_input,
         upsert_envelope.key_indices,
         resume_upper,
