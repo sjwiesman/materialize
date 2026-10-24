@@ -38,6 +38,13 @@
 //! correction. This includes the snapshot's time, so the snapshot and its
 //! rewinds, which are ordinary signed diffs here, need no special handling.
 //!
+//! Snapshot rows get no marker. The export's shard is empty before the
+//! snapshot's time, so their markers would only fill upsert's stash with one
+//! entry per row of the table and then find nothing to correct. The source
+//! marks snapshot rows with [`snapshot_metadata`] so the marker path can skip
+//! them. Rewinds share the snapshot's time and are not marked. Their markers
+//! also find nothing, but they are few.
+//!
 //! The correction cancels the streamed retraction only if the stored row
 //! equals the old row the source sends. That holds as long as the upstream
 //! primary key holds and every change carries its exact old row. Upsert reports
@@ -53,6 +60,13 @@ use timely::dataflow::operators::vec::Map;
 
 use crate::source::types::DecodeResult;
 use crate::upsert::{UpsertKey, UpsertValue};
+
+/// The metadata a source attaches to the snapshot rows of a `FromDiffs`
+/// export, so that [`render`] emits no markers for them. Rows of any other
+/// origin must not carry it.
+pub(crate) fn snapshot_metadata() -> Row {
+    Row::pack_slice(&[Datum::True])
+}
 
 /// Splits the decoded rows of a `FromDiffs` export into the streaming path's
 /// stamped rows and the marker path's upsert input, keyed by `key_indices`.
@@ -78,12 +92,16 @@ where
 
     // Markers carry diff `+1` whatever the change's sign, because upsert input
     // must be positive. Upsert keeps one per key and time.
+    let snapshot_marker = snapshot_metadata();
     let markers = input
         .inner
-        .map(move |(result, time, _diff)| {
+        .flat_map(move |(result, time, _diff)| {
+            if result.metadata == snapshot_marker {
+                return None;
+            }
             let value = decoded_value(result.value);
             let key = UpsertKey::from_value(Ok(&value), &key_indices);
-            ((key, None, result.from_time), time, Diff::ONE)
+            Some(((key, None, result.from_time), time, Diff::ONE))
         })
         .as_collection();
 
@@ -194,6 +212,45 @@ mod tests {
         // `-r' +r` at the snapshot's time.
         let changes = [(row(1, "r'"), 1), (row(1, "r'"), -1), (row(1, "r"), 1)];
         assert_eq!(apply(&[], &changes, 0), vec![stamped(1, "r", 0)]);
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)]
+    fn snapshot_rows_are_stamped_without_markers() {
+        use differential_dataflow::AsCollection;
+        use timely::dataflow::operators::capture::Extract;
+        use timely::dataflow::operators::{Capture, Input};
+
+        use crate::source::types::DecodeResult;
+
+        let (stamped, markers) = timely::execute_directly(|worker| {
+            let (mut input, stamped, markers) = worker.dataflow::<Timestamp, _, _>(|scope| {
+                let (handle, stream) = scope.new_input();
+                let (stamped, markers) = super::render(stream.as_collection(), vec![0]);
+                (handle, stamped.inner.capture(), markers.inner.capture())
+            });
+            let rows = [
+                (row(1, "a"), super::snapshot_metadata(), 1),
+                (row(2, "b"), super::snapshot_metadata(), 1),
+                (row(1, "a"), Row::default(), -1),
+            ];
+            for (value, metadata, diff) in rows {
+                let result = DecodeResult {
+                    key: Some(Ok(Row::default())),
+                    value: Some(Ok(value)),
+                    metadata,
+                    from_time: (),
+                };
+                input.send((result, Timestamp::from(0), Diff::from(diff)));
+            }
+            input.close();
+            while worker.step() {}
+            (stamped, markers)
+        });
+        let stamped: Vec<_> = stamped.extract().into_iter().flat_map(|(_, d)| d).collect();
+        let markers: Vec<_> = markers.extract().into_iter().flat_map(|(_, d)| d).collect();
+        assert_eq!(stamped.len(), 3, "every row is stamped");
+        assert_eq!(markers.len(), 1, "only the non-snapshot change is marked");
     }
 
     #[mz_ore::test]

@@ -360,7 +360,8 @@ fn append_metadata_to_value<'scope, T: Timestamp, FromTime: Timestamp>(
 /// Renders the upsert operator for one export over `upsert_input`, rehydrating
 /// its state from the export's own persist shard.
 ///
-/// [`DrainMode::CorrectStamps`] requires upsert v2, which planning checks.
+/// [`DrainMode::CorrectStamps`] requires upsert v2, which purification checks
+/// when the table is created.
 #[allow(clippy::too_many_arguments)]
 fn render_upsert<'scope, FromTime>(
     scope: Scope<'scope, mz_repr::Timestamp>,

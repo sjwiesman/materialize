@@ -211,15 +211,19 @@ The cases that complicated earlier designs need no special handling.
 | Snapshot and rewinds at the snapshot's time | signed diffs | nothing, no prior rows | the snapshot as of the slot |
 
 Snapshot rewinds are ordinary signed diffs here, so the snapshot needs no
-tagging and no special ordering. A key that does not exist before the
-snapshot's time has nothing to correct.
+special ordering. A key that does not exist before the snapshot's time has
+nothing to correct, and the export's shard is empty before that time, so
+snapshot rows never need a marker. The PostgreSQL snapshot operator marks them
+in their metadata so that the marker path skips them, which keeps the snapshot
+out of upsert's stash entirely. Rewinds are not marked. Their markers find
+nothing either, but they are few.
 
 ### Rendering
 
 - **Streaming map.** Appends `Datum::MzTimestamp(T)` to each decoded row and
   keeps the diff's sign. It holds no state.
 - **Marker map.** Emits `(UpsertKey, value: None)` with diff `+1` for each
-  change. The key is `UpsertKey::from_value(row, key_indices)`, which is the
+  change except snapshot rows. The key is `UpsertKey::from_value(row, key_indices)`, which is the
   key v2's feedback trace uses for the stamped rows, because the stamp is
   appended after the key columns.
 - **Upsert v2 in correction mode.** Markers reuse the stash's existing diff
@@ -228,7 +232,9 @@ snapshot's time has nothing to correct.
   the drain's handling of a `None` value differs: instead of retracting the
   stored value, it emits the stored value restamped with `T` and retracts the
   stored value. Upsert v1 has no correction mode and would treat the markers
-  as deletes, so creating such a table fails unless `enable_upsert_v2` is on.
+  as deletes, so rendering one of these exports with `enable_upsert_v2` off
+  panics instead of corrupting the table. Turning the flag off while such a
+  table exists crash-loops the replica until the flag is turned back on.
 - **Persist sink.** The sink already writes a concatenation of the ok and
   error streams. The streaming path joins that concatenation. The sink mints
   batch descriptions from the frontier of its whole input, so it appends `T`
@@ -283,19 +289,24 @@ It surfaces as the multiplicity mismatch above.
 |---|---|---|
 | Streaming path | nothing | none |
 | Persist sink | the part being written | about `persist_blob_target_size`, the rest in blob storage |
-| v2 stash | one marker per touched key | about 3.2 GB of keys, spillable |
-| v2 feedback trace | the table's current rows | the table's size, as for any upsert source |
+| v2 stash | one marker per touched key, about 55 to 65 bytes each | about 6 to 8 GB |
+| v2 feedback trace | the table's current rows | the table's size, about 23 GB at 200-byte rows |
 
 The stash is bounded by the number of keys a time touches, not by the
-transaction's rows, and it holds 32-byte keys rather than rows. The correction
-drain reads it one chunk at a time with v2's chunked stash.
+transaction's rows, and markers for one key at one time consolidate. The
+initial snapshot adds no markers. Under production defaults
+(`enable_upsert_paged_spill` off) neither the stash nor the feedback trace
+leaves memory, so a transaction that touches enough keys can still exhaust a
+replica, and its replay after a restart fails the same way. Meeting the
+success criterion requires these exports to render v2's chunked stash with
+spilling to the scratch directory, whatever the dyncfgs say. The stash also
+grows with the number of pending times when persist falls behind, because
+markers consolidate per time and not across times.
 
-One buffer outside this design can still hold a transaction. The reclock
-operator keeps updates whose remap binding has not been minted in an in-memory
-stash (`deferred_source_updates` in `src/timely-util/src/reclock.rs`). A large
-transaction that arrives before its binding exists waits there. This applies to
-every PostgreSQL table today. Whether it matters in practice is an open
-question.
+The reclock operator's in-memory stash (`deferred_source_updates` in
+`src/timely-util/src/reclock.rs`) does not hold whole transactions. Remap
+bindings are minted from a probe that keeps running while a transaction is
+read, so the stash holds about one timestamp interval of updates.
 
 ### Changes by component
 
@@ -304,9 +315,14 @@ question.
   `CreateTableFromSourceStatement`, parsed after `ENVELOPE` and before the
   `WITH (...)` options. One token of lookahead distinguishes `WITH INGESTION`
   from `WITH (`. The pretty printer prints the clause.
+- **Purification** (`purify_create_table_from_source`). Reject the clause
+  while `enable_upsert_v2` is off, so new tables follow upsert v2's rollout.
+  The check must not be in planning, which also re-runs for every stored
+  statement when the catalog opens. A planning failure there would stop
+  environmentd from booting after the flag is turned off.
 - **Planning** (`plan_create_table_from_source`). Accept the clause only for
-  PostgreSQL exports, behind the `enable_postgres_ingestion_time` feature
-  flag (off by default), and only while `enable_upsert_v2` is on. Resolve the primary key as above, append the
+  PostgreSQL exports and behind the `enable_postgres_ingestion_time` feature
+  flag (off by default). Resolve the primary key as above, append the
   `mz_timestamp` column (default name `ingestion_time`), and declare the
   primary key as a relation key.
 - **Envelope.** `UpsertStyle::FromDiffs`, reusing
@@ -552,8 +568,6 @@ sink do, can keep stamps across restarts.
 ## Open questions
 
 - Is `ingestion_time` the right default column name?
-- Does the reclock operator's in-memory stash hold large transactions in
-  practice, and should it spill?
 - Is restamping on a no-op update acceptable to sync engine users?
 - Requiring `enable_upsert_v2` ties this feature to upsert v2's rollout.
   Should v1 get a correction mode instead?

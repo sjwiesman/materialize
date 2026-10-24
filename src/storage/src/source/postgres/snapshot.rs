@@ -825,7 +825,7 @@ pub(crate) fn render<'scope>(
                                         Ok(SourceMessage {
                                             key: Row::default(),
                                             value: final_row.clone(),
-                                            metadata: Row::default(),
+                                            metadata: info.snapshot_metadata.clone(),
                                         })
                                     });
                                 session.give((event, time, diff));
