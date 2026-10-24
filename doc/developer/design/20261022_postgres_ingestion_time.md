@@ -315,6 +315,69 @@ The reclock operator's in-memory stash (`deferred_source_updates` in
 bindings are minted from a probe that keeps running while a transaction is
 read, so the stash holds about one timestamp interval of updates.
 
+#### Space complexity
+
+The variables are:
+
+- `N`, the rows (keys) in the table, and `R`, the average row size.
+- `M_t`, the markers emitted at time `t`, one per retraction.
+- `K_t`, the distinct keys retracted at `t`.
+- `D_t`, the keys a transaction at `t` both inserts and deletes, which are
+  never stored.
+- `P`, the number of complete times not yet written to the shard.
+
+**How the stash consolidates.** Each stash entry is
+`(UpsertKey, time, UpsertDiff { from_time, value })`. The stash sorts and
+consolidates by `(key, time)` only. The value travels in the diff, and the
+diff's semigroup keeps the entry with the greatest `from_time`. Entries for
+the same key at the same time therefore collapse to one whatever their
+values, and entries at different times never collapse. Markers all carry
+`value: None`, so any two markers for a key at a time are interchangeable and
+collapse without loss. Consolidation happens in three places, none of which is
+fully eager:
+
+1. `upsert_thinning` keeps one entry per `(key, time)` within each incoming
+   container, but not across containers.
+2. The chunker consolidates each flush of the stash's input into one sorted
+   chunk.
+3. The merge batcher merges chunks into chains geometrically, merging a chain
+   into its predecessor once it is at least half its size. Duplicates in
+   different chains collapse only when their chains merge.
+
+A key retracted many times at `t` can therefore hold one entry in each of
+about `log M_t` unmerged chains. A key retracted once per time, the common
+case for `UPDATE` and `DELETE`, holds one entry.
+
+**Bounds.**
+
+| Component | Space |
+|---|---|
+| Streaming path | `O(1)` |
+| Persist sink | `O(1)` in the data: a fixed number of parts of `persist_blob_target_size` per worker |
+| Reclock stash | `O(write throughput × timestamp interval)` |
+| v2 feedback trace | `O(N · R)` |
+| v2 stash | `O(Σ over pending times t of K_t · log M_t)` |
+| Correction drain | `O(1)`: one probe window of keys |
+
+A key retracted at `t` either existed before `t` or was inserted and deleted
+at `t`, so `K_t ≤ N + D_t`. The total is
+
+`O(N · R + Σ over the P pending times of (N + D_t) · log M_t)`
+
+With persist keeping up (`P = 1`) and one retraction per key, this is
+`O(N · R + D_t)`, which is bounded by the table's size except for `D_t`. A
+transaction that inserts and then deletes many new keys is the only single
+time whose stash is bounded by the transaction rather than the table. When
+persist falls behind, the stash term multiplies by the number of pending
+times, because markers do not consolidate across times.
+
+The rejected consolidation design held
+`O(N · R + Σ over pending times of U_t · R)`, where `U_t` is the number of
+updates at `t`, in two stashes. This design replaces rows with key-only
+entries of about 60 bytes in the per-time term and bounds it by the table's
+keys rather than the transaction's updates. Spilling does not change any of these bounds. It only
+decides whether the bytes are held in memory or on the scratch disk.
+
 ### Changes by component
 
 - **Parser.** A new `INGESTION` keyword and an
