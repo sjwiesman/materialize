@@ -267,14 +267,14 @@ CREATE TABLE t (c int4, d int4) FROM SOURCE foo (REFERENCE bar)
 ----
 CREATE TABLE t (c int4, d int4) FROM SOURCE foo (REFERENCE = bar)
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: Defined([ColumnDef { name: Ident("c"), data_type: Other { name: Name(UnresolvedItemName([Ident("int4")])), typ_mod: [] }, collation: None, options: [] }, ColumnDef { name: Ident("d"), data_type: Other { name: Name(UnresolvedItemName([Ident("int4")])), typ_mod: [] }, collation: None, options: [] }]), constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: Defined([ColumnDef { name: Ident("c"), data_type: Other { name: Name(UnresolvedItemName([Ident("int4")])), typ_mod: [] }, collation: None, options: [] }, ColumnDef { name: Ident("d"), data_type: Other { name: Name(UnresolvedItemName([Ident("int4")])), typ_mod: [] }, collation: None, options: [] }]), constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t (c, d) FROM SOURCE foo (REFERENCE bar)
 ----
 CREATE TABLE t (c, d) FROM SOURCE foo (REFERENCE = bar)
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: Named([Ident("c"), Ident("d")]), constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: Named([Ident("c"), Ident("d")]), constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 
 parse-statement
@@ -290,7 +290,7 @@ CREATE TABLE t (PRIMARY KEY (c)) FROM SOURCE foo (REFERENCE bar)
 ----
 CREATE TABLE t (PRIMARY KEY (c)) FROM SOURCE foo (REFERENCE = bar)
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [Unique { name: None, columns: [Ident("c")], is_primary: true, nulls_not_distinct: false }], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [Unique { name: None, columns: [Ident("c")], is_primary: true, nulls_not_distinct: false }], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 # Columns + constraints together: ensure exactly one comma separates them.
 parse-statement
@@ -298,7 +298,7 @@ CREATE TABLE t (c int4, d int4, PRIMARY KEY (c)) FROM SOURCE foo (REFERENCE bar)
 ----
 CREATE TABLE t (c int4, d int4, PRIMARY KEY (c)) FROM SOURCE foo (REFERENCE = bar)
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: Defined([ColumnDef { name: Ident("c"), data_type: Other { name: Name(UnresolvedItemName([Ident("int4")])), typ_mod: [] }, collation: None, options: [] }, ColumnDef { name: Ident("d"), data_type: Other { name: Name(UnresolvedItemName([Ident("int4")])), typ_mod: [] }, collation: None, options: [] }]), constraints: [Unique { name: None, columns: [Ident("c")], is_primary: true, nulls_not_distinct: false }], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: Defined([ColumnDef { name: Ident("c"), data_type: Other { name: Name(UnresolvedItemName([Ident("int4")])), typ_mod: [] }, collation: None, options: [] }, ColumnDef { name: Ident("d"), data_type: Other { name: Name(UnresolvedItemName([Ident("int4")])), typ_mod: [] }, collation: None, options: [] }]), constraints: [Unique { name: None, columns: [Ident("c")], is_primary: true, nulls_not_distinct: false }], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 # Named columns + constraints together.
 parse-statement
@@ -306,14 +306,42 @@ CREATE TABLE t (c, d, PRIMARY KEY (c)) FROM SOURCE foo (REFERENCE bar)
 ----
 CREATE TABLE t (c, d, PRIMARY KEY (c)) FROM SOURCE foo (REFERENCE = bar)
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: Named([Ident("c"), Ident("d")]), constraints: [Unique { name: None, columns: [Ident("c")], is_primary: true, nulls_not_distinct: false }], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: Named([Ident("c"), Ident("d")]), constraints: [Unique { name: None, columns: [Ident("c")], is_primary: true, nulls_not_distinct: false }], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo
 ----
 CREATE TABLE t FROM SOURCE foo
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: None, with_options: [], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: None, with_options: [], include_metadata: [], format: None, envelope: None, ingestion_time: None })
+
+parse-statement
+CREATE TABLE t FROM SOURCE foo (REFERENCE bar) WITH INGESTION TIME
+----
+CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) WITH INGESTION TIME
+=>
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None, ingestion_time: Some(IngestionTime { alias: None }) })
+
+parse-statement
+CREATE TABLE t FROM SOURCE foo (REFERENCE bar) WITH INGESTION TIME AS ts
+----
+CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) WITH INGESTION TIME AS ts
+=>
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: None, envelope: None, ingestion_time: Some(IngestionTime { alias: Some(Ident("ts")) }) })
+
+parse-statement
+CREATE TABLE t FROM SOURCE foo (REFERENCE bar) WITH INGESTION TIME AS ts WITH (TEXT COLUMNS = (a))
+----
+CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) WITH INGESTION TIME AS ts WITH (TEXT COLUMNS = (a))
+=>
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [TableFromSourceOption { name: TextColumns, value: Some(Sequence([Ident(Ident("a"))])) }], include_metadata: [], format: None, envelope: None, ingestion_time: Some(IngestionTime { alias: Some(Ident("ts")) }) })
+
+parse-statement
+CREATE TABLE t FROM SOURCE foo (REFERENCE bar) WITH INGESTION
+----
+error: Expected left parenthesis, found INGESTION
+CREATE TABLE t FROM SOURCE foo (REFERENCE bar) WITH INGESTION
+                                                    ^
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (OPTION)
@@ -327,42 +355,42 @@ CREATE TABLE t FROM SOURCE foo (REFERENCE = baz)
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz)
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (TEXT COLUMNS (bam))
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (TEXT COLUMNS = (bam))
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: TextColumns, value: Some(Sequence([Ident(Ident("bam"))])) }], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: TextColumns, value: Some(Sequence([Ident(Ident("bam"))])) }], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE CONSTRAINTS ('users_wallet_id_key', 'MixedCase'))
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE CONSTRAINTS = ('users_wallet_id_key', 'MixedCase'))
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeConstraints, value: Some(Sequence([Value(String("users_wallet_id_key")), Value(String("MixedCase"))])) }], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeConstraints, value: Some(Sequence([Value(String("users_wallet_id_key")), Value(String("MixedCase"))])) }], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE CONSTRAINTS = ())
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE CONSTRAINTS = ())
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeConstraints, value: Some(Sequence([])) }], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeConstraints, value: Some(Sequence([])) }], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE ALL CONSTRAINTS)
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE ALL CONSTRAINTS)
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeAllConstraints, value: None }], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeAllConstraints, value: None }], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE COLUMNS (a), EXCLUDE CONSTRAINTS ('k'))
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE COLUMNS = (a), EXCLUDE CONSTRAINTS = ('k'))
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeColumns, value: Some(Sequence([Ident(Ident("a"))])) }, TableFromSourceOption { name: ExcludeConstraints, value: Some(Sequence([Value(String("k"))])) }], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeColumns, value: Some(Sequence([Ident(Ident("a"))])) }, TableFromSourceOption { name: ExcludeConstraints, value: Some(Sequence([Value(String("k"))])) }], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE ALL COLUMNS)
@@ -376,7 +404,7 @@ CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE ALL NOT NULL CONS
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE ALL NOT NULL CONSTRAINTS)
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeAllNotNullConstraints, value: None }], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: ExcludeAllNotNullConstraints, value: None }], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE ALL NOT NULL COLUMNS)
@@ -404,14 +432,14 @@ CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) FORMAT PROTOBUF USING CONFLUENT
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) FORMAT PROTOBUF USING CONFLUENT SCHEMA REGISTRY CONNECTION csr_conn SEED KEY SCHEMA '{"some": "seed"}' MESSAGE 'Batch' VALUE SCHEMA '123' MESSAGE 'M' ENVELOPE UPSERT
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [], include_metadata: [], format: Some(Bare(Protobuf(Csr { csr_connection: CsrConnectionProtobuf { connection: CsrConnection { connection: Name(UnresolvedItemName([Ident("csr_conn")])), options: [] }, seed: Some(CsrSeedProtobuf { key: Some(CsrSeedProtobufSchema { schema: "{\"some\": \"seed\"}", message_name: "Batch" }), value: CsrSeedProtobufSchema { schema: "123", message_name: "M" } }) } }))), envelope: Some(Upsert { value_decode_err_policy: [] }) })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [], include_metadata: [], format: Some(Bare(Protobuf(Csr { csr_connection: CsrConnectionProtobuf { connection: CsrConnection { connection: Name(UnresolvedItemName([Ident("csr_conn")])), options: [] }, seed: Some(CsrSeedProtobuf { key: Some(CsrSeedProtobufSchema { schema: "{\"some\": \"seed\"}", message_name: "Batch" }), value: CsrSeedProtobufSchema { schema: "123", message_name: "M" } }) } }))), envelope: Some(Upsert { value_decode_err_policy: [] }), ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (PARTITION BY (a, b))
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (PARTITION BY = (a, b))
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: PartitionBy, value: Some(Sequence([UnresolvedItemName(UnresolvedItemName([Ident("a")])), UnresolvedItemName(UnresolvedItemName([Ident("b")]))])) }], include_metadata: [], format: None, envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("baz")])), with_options: [TableFromSourceOption { name: PartitionBy, value: Some(Sequence([UnresolvedItemName(UnresolvedItemName([Ident("a")])), UnresolvedItemName(UnresolvedItemName([Ident("b")]))])) }], include_metadata: [], format: None, envelope: None, ingestion_time: None })
 
 
 # TEMP/TEMPORARY TABLE FROM SOURCE is not supported. Verify a clear error.
@@ -3883,7 +3911,7 @@ CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) FORMAT AVRO USING AWS GLUE SCHE
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) FORMAT AVRO USING AWS GLUE SCHEMA REGISTRY CONNECTION glue_conn (SCHEMA NAME = 'my-schema')
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: Some(Bare(Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [GlueAvroOption { name: SchemaName, value: Some(Value(String("my-schema"))) }], seed: None }))), envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: Some(Bare(Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [GlueAvroOption { name: SchemaName, value: Some(Value(String("my-schema"))) }], seed: None }))), envelope: None, ingestion_time: None })
 
 # Round-trip of a purified statement: the `SEED VALUE SCHEMA` clause that
 # purification emits must re-parse so persisted `create_sql` reloads. Parallels
@@ -3893,14 +3921,14 @@ CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) FORMAT AVRO USING AWS GLUE SCHE
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) FORMAT AVRO USING AWS GLUE SCHEMA REGISTRY CONNECTION glue_conn (SCHEMA NAME = 'my-schema') SEED VALUE SCHEMA '{"some": "schema"}'
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: Some(Bare(Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [GlueAvroOption { name: SchemaName, value: Some(Value(String("my-schema"))) }], seed: Some(GlueAvroSeed { value_schema: "{\"some\": \"schema\"}" }) }))), envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: Some(Bare(Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [GlueAvroOption { name: SchemaName, value: Some(Value(String("my-schema"))) }], seed: Some(GlueAvroSeed { value_schema: "{\"some\": \"schema\"}" }) }))), envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) FORMAT AVRO USING AWS GLUE SCHEMA REGISTRY CONNECTION glue_conn
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) FORMAT AVRO USING AWS GLUE SCHEMA REGISTRY CONNECTION glue_conn
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: Some(Bare(Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [], seed: None }))), envelope: None })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: Some(Bare(Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [], seed: None }))), envelope: None, ingestion_time: None })
 
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) FORMAT AVRO USING AWS GLUE SCHEMA REGISTRY
@@ -3925,7 +3953,7 @@ CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) KEY FORMAT AVRO USING AWS GLUE 
 ----
 CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) KEY FORMAT AVRO USING AWS GLUE SCHEMA REGISTRY CONNECTION glue_conn (SCHEMA NAME = 'key-schema') SEED VALUE SCHEMA '{"k": "key"}' VALUE FORMAT AVRO USING AWS GLUE SCHEMA REGISTRY CONNECTION glue_conn (SCHEMA NAME = 'val-schema') SEED VALUE SCHEMA '{"v": "value"}' ENVELOPE UPSERT
 =>
-CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: Some(KeyValue { key: Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [GlueAvroOption { name: SchemaName, value: Some(Value(String("key-schema"))) }], seed: Some(GlueAvroSeed { value_schema: "{\"k\": \"key\"}" }) }), value: Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [GlueAvroOption { name: SchemaName, value: Some(Value(String("val-schema"))) }], seed: Some(GlueAvroSeed { value_schema: "{\"v\": \"value\"}" }) }) }), envelope: Some(Upsert { value_decode_err_policy: [] }) })
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [], include_metadata: [], format: Some(KeyValue { key: Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [GlueAvroOption { name: SchemaName, value: Some(Value(String("key-schema"))) }], seed: Some(GlueAvroSeed { value_schema: "{\"k\": \"key\"}" }) }), value: Avro(Glue { connection: Name(UnresolvedItemName([Ident("glue_conn")])), with_options: [GlueAvroOption { name: SchemaName, value: Some(Value(String("val-schema"))) }], seed: Some(GlueAvroSeed { value_schema: "{\"v\": \"value\"}" }) }) }), envelope: Some(Upsert { value_decode_err_policy: [] }), ingestion_time: None })
 
 # Glue sink clause mirrors the CSR clause: per-side schema names and
 # compatibility levels, all optional.

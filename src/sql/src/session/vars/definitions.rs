@@ -1941,6 +1941,12 @@ feature_flags!(
         enable_for_item_parsing: true,
     },
     {
+        name: enable_postgres_ingestion_time,
+        desc: "WITH INGESTION TIME for PostgreSQL source tables",
+        default: false,
+        enable_for_item_parsing: true,
+    },
+    {
         name: enable_collection_partition_by,
         desc: "PARTITION BY",
         default: true,
