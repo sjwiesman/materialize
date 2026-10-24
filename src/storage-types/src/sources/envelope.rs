@@ -83,8 +83,8 @@ pub enum UpsertStyle {
     },
     /// A source that emits signed diffs of whole rows, keyed by columns of the
     /// row itself (`WITH INGESTION TIME` on PostgreSQL tables). Each row is
-    /// stamped with its reclocked timestamp as its last column, and upsert
-    /// only corrects the stamps of retracted rows.
+    /// stamped with its reclocked timestamp as its last column, and only keys
+    /// of retracted rows go through upsert, to correct their stamps.
     IngestionTime,
 }
 

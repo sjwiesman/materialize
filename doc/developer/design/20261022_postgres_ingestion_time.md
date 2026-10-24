@@ -173,12 +173,14 @@ table's persist sink.
    `+(new, T)`, stamping every row with `T`. Rows flow straight to the persist
    sink, which writes them to blob storage as they arrive.
 2. **Correction path.** A second map turns each retraction into a key-only
-   marker for its key at `T`. Upsert v2's stash consolidates markers per
-   `(key, time)`, leaving one per retracted key. When `T` becomes eligible under
-   v2's existing rule (the shard's upper is `T` and the input has passed `T`),
-   v2 looks up each marked key in its feedback trace. If the key had a row
-   `(pre, s)` before `T`, v2 emits `+(pre, T)` and `-(pre, s)`. If it had none,
-   v2 emits nothing.
+   marker for its key at `T`, which is an ordinary upsert tombstone. Upsert
+   v2's stash consolidates markers per `(key, time)`, leaving one per
+   retracted key. When `T` becomes eligible under v2's existing rule (the
+   shard's upper is `T` and the input has passed `T`), v2 handles each
+   tombstone as it always does: if the key had a row `(pre, s)` before `T`, it
+   emits `-(pre, s)`, and otherwise nothing. A map after upsert adds
+   `+(pre, T)` for each such retraction, so the path emits `+(pre, T)` and
+   `-(pre, s)`.
 
 Within `T`, a key's changes chain: each change's old row is the previous
 change's new row. On the streaming path the intermediate versions cancel,
@@ -227,18 +229,20 @@ snapshot, not by the table.
 - **Streaming map.** Appends `Datum::MzTimestamp(T)` to each decoded row and
   keeps the diff's sign. It holds no state.
 - **Marker map.** Emits `(UpsertKey, value: None)` with diff `+1` for each
-  update with a negative diff. The key is `UpsertKey::from_value(row, key_indices)`, which is the
-  key v2's feedback trace uses for the stamped rows, because the stamp is
-  appended after the key columns.
-- **Upsert v2 in correction mode.** Markers reuse the stash's existing diff
-  type (`UpsertDiff { value: None }`), which consolidates per `(key, time)`
-  and is never dropped. Eligibility and the trace lookup are unchanged. Only
-  the drain's handling of a `None` value differs: instead of retracting the
-  stored value, it emits the stored value restamped with `T` and retracts the
-  stored value. Upsert v1 has no correction mode and would treat the markers
-  as deletes, so rendering one of these exports with `enable_upsert_v2` off
-  panics instead of corrupting the table. Turning the flag off while such a
-  table exists crash-loops the replica until the flag is turned back on.
+  update with a negative diff. The key is
+  `UpsertKey::from_value(row, key_indices)`, which is the key v2's feedback
+  trace uses for the stamped rows, because the stamp is appended after the
+  key columns.
+- **Upsert v2, unchanged.** Markers are tombstones, so v2 retracts each marked
+  key's stored row at `T`. Upsert v2 knows nothing about stamps.
+- **Restamp map.** Passes each of upsert's retractions `-(pre, s)` through and
+  adds `+(pre, T)`, replacing the last column with the retraction's time.
+  Upsert's input is only tombstones, so its output is only retractions, which
+  the map asserts.
+- **Upsert v1.** Ingestion time is built and tested only on upsert v2.
+  Rendering one of these exports with `enable_upsert_v2` off panics.
+  Turning the flag off while such a table exists crash-loops the replica
+  until the flag is turned back on.
 - **Persist sink.** The sink already writes a concatenation of the ok and
   error streams. The streaming path joins that concatenation. The sink mints
   batch descriptions from the frontier of its whole input, so it appends `T`
@@ -270,9 +274,7 @@ snapshot, not by the table.
   differ, which requires a violated primary key or replica identity, the
   streaming path's retraction is not cancelled and the shard is left with a
   negative multiplicity. v2's lookup sums each key's updates and uses only the
-  positive value, so this would otherwise go unnoticed. In correction mode the
-  drain reports a key whose stored updates sum to a negative count with a soft
-  assertion, which panics in tests and logs an error in production.
+  positive value, so nothing reports the violation.
 - **Sync point.** The delta query relies only on the fact that a row version
   becomes visible at exactly its ingestion time, which holds by construction.
 
@@ -357,7 +359,7 @@ case for `UPDATE` and `DELETE`, holds one entry.
 | Reclock stash | `O(write throughput × timestamp interval)` |
 | v2 feedback trace | `O(N · R)` |
 | v2 stash | `O(Σ over pending times t of K_t · log M_t)` |
-| Correction drain | `O(1)`: one probe window of keys |
+| v2 drain and restamp map | `O(1)`: one probe window of keys |
 
 A key retracted at `t` either existed before `t` or was inserted and deleted
 at `t`, so `K_t ≤ N + D_t`. The total is
@@ -402,18 +404,17 @@ decides whether the bytes are held in memory or on the scratch disk.
   envelope as `upsert-ingestion-time`.
 - **Rendering** (`render_source_stream`). For `IngestionTime`, build the
   streaming and marker maps (`upsert::ingestion_time::stamp_and_mark`), feed
-  the markers to upsert v2 in correction mode, and concatenate the stamped
-  rows with its output. Rehydration from the table's shard and backpressure
-  are reused unchanged.
-- **Upsert v2.** A correction mode, threaded from `upsert_v2` to the chunked
-  and paged drains, and the invariant check above.
+  the markers to upsert v2, restamp its output
+  (`upsert::ingestion_time::correct_stamps`), and concatenate the stamped rows
+  with the corrections. Rehydration from the table's shard and backpressure
+  are reused unchanged. Upsert v2 does not change.
 
 ### Testing
 
 - Parser datadriven tests for the clause, its alias, and its combination with
   `WITH (...)`, which the pretty printer's roundtrip test also covers.
-- Unit tests for the cases in the tables above on a modeled shard, for v2's
-  correction mode on stored and new keys, and for the invariant check.
+- Unit tests for the cases in the tables above on a modeled shard, for the
+  marker map, and for the restamp map.
 - Testdrive in `test/pg-cdc/` for inserts, updates, and deletes (the
   retraction carries the original ingestion time), multi-statement
   transactions, writes racing the initial snapshot, an upstream primary key
@@ -454,14 +455,14 @@ The shard as of `T` is the third option, and it is available long before `T`
 is complete. Once `persist_upper` is `T`, the feedback trace holds every time
 before `T`, and the shard cannot advance past `T` while the streaming path and
 the marker input still hold `T`. The current eligibility rule also waits for
-`T < input_upper`, but only `DrainMode::Apply` needs that, to know the command
-with the greatest `from_time`. Markers all carry `value: None`, so the first
-one for a key at `T` suffices. In `DrainMode::CorrectStamps`:
+`T < input_upper`, to know the command with the greatest `from_time`.
+Markers all carry `value: None`, so the first one for a key at `T` suffices.
+Upsert v2 cannot know that in general, so this needs an option telling it
+that its input holds only tombstones. With that option:
 
 - A marker at `T` arriving while the observed `persist_upper` is `T` is
   probed against the trace at once. If the key has a stored row and is not in
-  `corrected_T`, upsert emits the correction and adds the key to
-  `corrected_T`. The marker is not stashed. A miss costs one probe and no
+  `corrected_T`, upsert retracts the row and adds the key to `corrected_T`. The marker is not stashed. A miss costs one probe and no
   memory.
 - A marker for a time beyond `persist_upper` is stashed as today.
 - When `persist_upper` reaches `T`, the stash seals at `T` once and its
@@ -469,9 +470,9 @@ one for a key at `T` suffices. In `DrainMode::CorrectStamps`:
 - When `input_upper` passes `T`, `corrected_T` is dropped.
 
 The existing drains already have the probe-and-emit shape. The change threads
-`corrected_T` into the `CorrectStamps` arms and calls the drain on the
-incoming batch before it reaches the stash. `ingestion_time.rs` and the
-rendering do not change.
+the option and `corrected_T` into their tombstone arms and calls the drain on
+the incoming batch before it reaches the stash. The restamp map does not
+change.
 
 ### Correctness
 
@@ -616,8 +617,8 @@ as it was before the change, which `DEFAULT` does not send. Options:
 ## Minimal Viable Prototype
 
 A prototype implements this design behind the feature flag: the SQL surface,
-planning and rejection cases, the streaming and marker maps, and upsert v2's
-correction mode. It passes the testdrive scenarios above. A spike of the
+planning and rejection cases, and the streaming, marker, and restamp maps
+around an unchanged upsert v2. It passes the testdrive scenarios above. A spike of the
 rejected consolidation design preceded it and shared its SQL and planning
 half. [TODO: unverified](#todo-unverified) lists what it has not been tested
 against.
@@ -725,7 +726,7 @@ sink do, can keep stamps across restarts.
 ## TODO: unverified
 
 The prototype passes the parser tests, the unit tests for the stamping model
-and for v2's correction mode, and `test/pg-cdc/ingestion-time.td`. The
+and the maps, and `test/pg-cdc/ingestion-time.td`. The
 following claims in this document have not been checked.
 
 - **Large transactions.** No test ingests a transaction larger than the
@@ -746,16 +747,15 @@ following claims in this document have not been checked.
   check that the replay produces the same output.
 - **Multiple replicas.** Definiteness, and so agreement between two replicas
   writing the shard, is argued but not tested.
-- **Invariant violations.** A negative stored count is reported by a unit
-  test only. What the table shows after an upstream primary key violation
-  that the source does not catch has not been examined, and the planner is
-  told the primary key is a relation key, which the optimizer may rely on.
+- **Invariant violations.** Nothing reports a negative stored count. What
+  the table shows after an upstream primary key violation that the source
+  does not catch has not been examined, and the planner is told the primary
+  key is a relation key, which the optimizer may rely on.
 - **Disabling upsert v2.** Turning `enable_upsert_v2` off after a table is
   created panics rendering, which crash-loops the replica until it is turned
   back on. This is accepted for the prototype but not tested.
-- **Metrics.** In correction mode the drain counts eligible markers and
-  output updates, but the upsert insert, update, and delete metrics stay at
-  zero, so nothing reports how many stamps were corrected.
+- **Metrics.** Upsert v2 counts each correction as a delete. Nothing
+  distinguishes these from deletes on other upsert sources.
 - **Early resolution.** [Possible enhancement: resolve markers
   early](#possible-enhancement-resolve-markers-early) is unimplemented, and
   its references to the upsert v2 code have not been checked.
@@ -765,4 +765,4 @@ following claims in this document have not been checked.
 - Is `ingestion_time` the right default column name?
 - Is restamping on a no-op update acceptable to sync engine users?
 - Requiring `enable_upsert_v2` ties this feature to upsert v2's rollout.
-  Should v1 get a correction mode instead?
+  Should it be built and tested on upsert v1 too?

@@ -23,9 +23,11 @@
 //! 1. The streaming path stamps every update with its own time `T`, so a change
 //!    becomes `-(old, T) +(new, T)`. It holds no state, and its output goes
 //!    straight to the persist sink.
-//! 2. The correction path emits one key-only marker per retraction for upsert
-//!    v2, which corrects the stored row's stamp as described on
-//!    [`DrainMode::CorrectStamps`](crate::upsert_continual_feedback_v2::DrainMode).
+//! 2. The correction path emits one tombstone, a key-only marker, per
+//!    retraction to upsert v2. Once `T` is eligible, upsert looks up each
+//!    marked key's stored row `(pre, s)` from before `T` and retracts it, and
+//!    [`correct_stamps`] adds `(pre, T)`, so the path emits
+//!    `+(pre, T) -(pre, s)`.
 //!
 //! The streaming path's output is wrong in exactly one place per key and time.
 //! A key's changes at `T` chain, each change's old row being the previous
@@ -46,14 +48,14 @@
 //! The correction cancels the streamed retraction only if the stored row
 //! equals the old row the source sends. That holds as long as the upstream
 //! primary key holds and every change carries its exact old row. A violation
-//! shows as a negative stored count, which upsert reports.
+//! leaves a row with a negative count in the shard.
 //!
 //! NOTE: A key's stamp moves to `T` whenever a change at `T` touches it, even
 //! if its row ends up unchanged, because the correction path sees only keys.
 
 use differential_dataflow::{AsCollection, VecCollection};
 use mz_repr::{Datum, Diff, Row, Timestamp};
-use mz_storage_types::errors::DecodeError;
+use mz_storage_types::errors::{DataflowError, DecodeError};
 use timely::dataflow::operators::vec::Map;
 
 use crate::source::types::DecodeResult;
@@ -106,6 +108,31 @@ fn decoded_value(value: Option<Result<Row, DecodeError>>) -> Row {
     }
 }
 
+/// Adds the restamped copy of each stored row that upsert retracts for the
+/// correction path's markers.
+///
+/// Every update in `retractions` must be a retraction: upsert's input is only
+/// tombstones, for which it emits nothing but retractions of stored rows.
+pub(crate) fn correct_stamps<'scope>(
+    retractions: VecCollection<'scope, Timestamp, Result<Row, DataflowError>, Diff>,
+) -> VecCollection<'scope, Timestamp, Result<Row, DataflowError>, Diff> {
+    let mut row_buf = Row::default();
+    retractions
+        .inner
+        .flat_map(move |(result, time, diff)| {
+            assert!(
+                diff.is_negative(),
+                "upsert emitted {diff} for an ingestion time marker"
+            );
+            let restamped = match &result {
+                Ok(stored) => Some((Ok(restamp(stored, time, &mut row_buf)), time, -diff)),
+                Err(_) => None,
+            };
+            std::iter::once((result, time, diff)).chain(restamped)
+        })
+        .as_collection()
+}
+
 /// Returns `row` with `time` appended as an `mz_timestamp` column.
 fn stamp(row: &Row, time: Timestamp, row_buf: &mut Row) -> Row {
     let mut packer = row_buf.packer();
@@ -114,19 +141,27 @@ fn stamp(row: &Row, time: Timestamp, row_buf: &mut Row) -> Row {
     row_buf.clone()
 }
 
+/// Returns `stamped` with its stamp, the last column, replaced by `time`.
+fn restamp(stamped: &Row, time: Timestamp, row_buf: &mut Row) -> Row {
+    let mut datums: Vec<_> = stamped.iter().collect();
+    *datums.last_mut().expect("stamped rows end in their stamp") = Datum::MzTimestamp(time);
+    row_buf.packer().extend(datums);
+    row_buf.clone()
+}
+
 #[cfg(test)]
 mod tests {
     //! Most of these tests check the design's algebra on a modeled shard:
-    //! `apply` stands in for upsert v2's correction mode, which is tested with
-    //! the operator, and checks that the streamed diffs plus the corrections
-    //! leave the shard as an upsert would.
+    //! `apply` stands in for upsert v2 and `correct_stamps`, and checks that
+    //! the streamed diffs plus the corrections leave the shard as an upsert
+    //! would.
 
     use std::collections::BTreeSet;
 
     use differential_dataflow::consolidation::consolidate;
     use mz_repr::{Datum, Diff, Row, Timestamp};
 
-    use super::stamp;
+    use super::{restamp, stamp};
 
     fn row(k: i64, v: &str) -> Row {
         Row::pack_slice(&[Datum::Int64(k), Datum::String(v)])
@@ -157,9 +192,7 @@ mod tests {
         for (stored, count) in shard {
             assert_eq!(*count, Diff::ONE);
             if touched.contains(&key_of(stored)) {
-                let mut datums: Vec<_> = stored.iter().collect();
-                *datums.last_mut().unwrap() = Datum::MzTimestamp(time);
-                updates.push((Row::pack(datums), Diff::ONE));
+                updates.push((restamp(stored, time, &mut buf), Diff::ONE));
                 updates.push((stored.clone(), Diff::MINUS_ONE));
             }
         }
@@ -257,5 +290,40 @@ mod tests {
         let shard = vec![stamped(1, "a", 100)];
         let changes = [(row(1, "a"), -1), (row(1, "a"), 1)];
         assert_eq!(apply(&shard, &changes, 200), vec![stamped(1, "a", 200)]);
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)]
+    fn correct_stamps_restamps_retracted_rows() {
+        use differential_dataflow::AsCollection;
+        use timely::dataflow::operators::capture::Extract;
+        use timely::dataflow::operators::{Capture, Input};
+
+        let stored = stamped(1, "a", 100).0;
+        let captured = timely::execute_directly({
+            let stored = stored.clone();
+            move |worker| {
+                let (mut input, captured) = worker.dataflow::<Timestamp, _, _>(|scope| {
+                    let (handle, stream) = scope.new_input();
+                    let corrected = super::correct_stamps(stream.as_collection());
+                    (handle, corrected.inner.capture())
+                });
+                input.advance_to(Timestamp::from(200));
+                input.send((Ok(stored), Timestamp::from(200), Diff::MINUS_ONE));
+                input.close();
+                while worker.step() {}
+                captured
+            }
+        });
+        let mut updates: Vec<_> = captured
+            .extract()
+            .into_iter()
+            .flat_map(|(_, d)| d)
+            .map(|(row, _time, diff)| (row.expect("no errors"), diff))
+            .collect();
+        consolidate(&mut updates);
+        let mut expected = vec![(stored, Diff::MINUS_ONE), stamped(1, "a", 200)];
+        consolidate(&mut expected);
+        assert_eq!(updates, expected);
     }
 }

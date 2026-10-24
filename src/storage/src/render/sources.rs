@@ -45,7 +45,6 @@ use crate::healthcheck::{HealthStatusMessage, StatusNamespace};
 use crate::source::types::{DecodeResult, SourceOutput, SourceRender};
 use crate::source::{self, RawSourceCreationConfig, SourceExportCreationConfig};
 use crate::upsert::{UpsertKey, UpsertSourceTime, UpsertValue};
-use crate::upsert_continual_feedback_v2::DrainMode;
 
 /// _Renders_ complete _differential_ collections
 /// that represent the final source and its errors
@@ -226,17 +225,16 @@ where
     // render envelopes
     let (envelope_ok, envelope_health) = match &envelope {
         SourceEnvelope::Upsert(upsert_envelope) => {
-            let (upsert_input, drain_mode, stamped) = match upsert_envelope.style {
+            let (upsert_input, stamped) = match upsert_envelope.style {
                 UpsertStyle::IngestionTime => {
                     let (stamped, markers) = crate::upsert::ingestion_time::stamp_and_mark(
                         decoded_stream,
                         upsert_envelope.key_indices.clone(),
                     );
-                    (markers, DrainMode::CorrectStamps, Some(stamped))
+                    (markers, Some(stamped))
                 }
                 _ => (
                     upsert_commands(decoded_stream, upsert_envelope.clone()),
-                    DrainMode::Apply,
                     None,
                 ),
             };
@@ -380,16 +378,13 @@ where
                                 export_config,
                                 backpressure_metrics,
                                 stash_flavor,
-                                drain_mode,
                             )
                         } else {
-                            // Upsert v1 has no correction mode and would treat
-                            // the markers as deletes, corrupting the table.
-                            // Purification rejects new ingestion time tables
-                            // while upsert v2 is off.
-                            assert_eq!(
-                                drain_mode,
-                                DrainMode::Apply,
+                            // Ingestion time is only built and tested on upsert
+                            // v2, and purification rejects new tables while it
+                            // is off.
+                            assert!(
+                                stamped.is_none(),
                                 "WITH INGESTION TIME tables require enable_upsert_v2",
                             );
                             crate::upsert::upsert(
@@ -450,7 +445,9 @@ where
             );
 
             let upsert = match stamped {
-                Some(stamped) => stamped.map(Ok).concat(upsert),
+                Some(stamped) => stamped
+                    .map(Ok)
+                    .concat(crate::upsert::ingestion_time::correct_stamps(upsert)),
                 None => upsert,
             };
             let (upsert_ok, upsert_err) = upsert.inner.ok_err(split_ok_err);
