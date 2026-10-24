@@ -225,7 +225,19 @@ where
     // render envelopes
     let (envelope_ok, envelope_health) = match &envelope {
         SourceEnvelope::Upsert(upsert_envelope) => {
-            let upsert_input = upsert_commands(decoded_stream, upsert_envelope.clone());
+            let (upsert_input, stamped) = match upsert_envelope.style {
+                UpsertStyle::IngestionTime => {
+                    let (stamped, markers) = crate::upsert::ingestion_time::stamp_and_mark(
+                        decoded_stream,
+                        upsert_envelope.key_indices.clone(),
+                    );
+                    (markers, Some(stamped))
+                }
+                _ => (
+                    upsert_commands(decoded_stream, upsert_envelope.clone()),
+                    None,
+                ),
+            };
 
             let persist_clients = Arc::clone(&storage_state.persist_clients);
             // TODO: Get this to work with the as_of.
@@ -425,6 +437,12 @@ where
                 },
             );
 
+            let upsert = match stamped {
+                Some(stamped) => stamped
+                    .map(Ok)
+                    .concat(crate::upsert::ingestion_time::correct_stamps(upsert)),
+                None => upsert,
+            };
             let (upsert_ok, upsert_err) = upsert.inner.ok_err(split_ok_err);
             error_collections.push(upsert_err.as_collection());
 
@@ -579,6 +597,7 @@ fn upsert_commands<'scope, T: Timestamp, FromTime: Timestamp>(
                 key_envelope: KeyEnvelope::None,
                 error_column: _,
             } => unreachable!(),
+            UpsertStyle::IngestionTime => unreachable!("rendered by `stamp_and_mark`"),
         };
 
         let key = UpsertKey::from_key(Ok(&key_row));
@@ -613,6 +632,7 @@ fn upsert_commands<'scope, T: Timestamp, FromTime: Timestamp>(
                     packer.extend_by_row(&metadata);
                     Some(Ok(row_buf.clone()))
                 }
+                UpsertStyle::IngestionTime => unreachable!("rendered by `stamp_and_mark`"),
             },
             Some(Err(inner)) => {
                 match upsert_envelope.style {
