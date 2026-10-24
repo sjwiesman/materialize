@@ -1880,20 +1880,9 @@ async fn purify_create_table_from_source(
         format,
         envelope,
         include_metadata: _,
-        ingestion_time,
+        ingestion_time: _,
         with_options,
     } = &mut stmt;
-
-    // Only upsert v2 can render ingestion time (see `render_source_stream` in
-    // `mz_storage`). This is checked in purification, not planning, because
-    // planning re-runs for stored statements when the catalog opens, and a
-    // failure there would stop environmentd from booting if the flag were
-    // turned off later.
-    if ingestion_time.is_some()
-        && !mz_storage_types::dyncfgs::ENABLE_UPSERT_V2.get(scx.catalog.system_vars().dyncfgs())
-    {
-        sql_bail!("WITH INGESTION TIME requires enable_upsert_v2");
-    }
 
     // Columns and constraints cannot be specified by the user but will be populated below.
     if matches!(columns, TableFromSourceColumns::Defined(_)) {

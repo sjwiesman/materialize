@@ -103,7 +103,7 @@ client predicate columns serves the query.
 
 The source streams every change straight to the table's persist shard, stamped
 with the time it is ingested at. Only one retraction per key and time can carry
-the wrong stamp, and upsert v2 corrects it from the table's persisted contents.
+the wrong stamp, and upsert corrects it from the table's persisted contents.
 The rows of a transaction are never buffered.
 
 ### Requirements on the upstream table
@@ -134,9 +134,10 @@ Materialize created that stamp, so only Materialize's own record of the table
 has it. That record must be the table's persist shard. During a 0dt deployment
 or a replica resize two replicas can run the same source, and if each trusted
 local state, they could diverge and corrupt the shard with appends computed
-from different states. Upsert v2 avoids this by reading the shard back and
+from different states. Upsert avoids this by reading the shard back and
 computing output only against the persisted state, so that discipline is the
-one to reuse.
+one to reuse. Both upsert implementations do this: v2 always, and v1 in its
+continual feedback form, which is the only form it renders.
 
 ### Why a transaction must not be buffered
 
@@ -233,16 +234,17 @@ snapshot, not by the table.
   `UpsertKey::from_value(row, key_indices)`, which is the key v2's feedback
   trace uses for the stamped rows, because the stamp is appended after the
   key columns.
-- **Upsert v2, unchanged.** Markers are tombstones, so v2 retracts each marked
-  key's stored row at `T`. Upsert v2 knows nothing about stamps.
+- **Upsert, unchanged.** Markers are tombstones, so upsert retracts each
+  marked key's stored row at `T`, and knows nothing about stamps. Either
+  implementation works, as `enable_upsert_v2` selects. v1 may process a time
+  before it completes, keeping provisional values. The first marker for a key
+  at `T` leaves the key provisionally deleted, so later markers for it at `T`
+  emit nothing, and every marker carries `None`, so the order of commands
+  within `T` cannot change the result.
 - **Restamp map.** Passes each of upsert's retractions `-(pre, s)` through and
   adds `+(pre, T)`, replacing the last column with the retraction's time.
   Upsert's input is only tombstones, so its output is only retractions, which
   the map asserts.
-- **Upsert v1.** Ingestion time is built and tested only on upsert v2.
-  Rendering one of these exports with `enable_upsert_v2` off panics.
-  Turning the flag off while such a table exists crash-loops the replica
-  until the flag is turned back on.
 - **Persist sink.** The sink already writes a concatenation of the ok and
   error streams. The streaming path joins that concatenation. The sink mints
   batch descriptions from the frontier of its whole input, so it appends `T`
@@ -389,11 +391,6 @@ decides whether the bytes are held in memory or on the scratch disk.
   `CreateTableFromSourceStatement`, parsed after `ENVELOPE` and before the
   `WITH (...)` options. One token of lookahead distinguishes `WITH INGESTION`
   from `WITH (`. The pretty printer prints the clause.
-- **Purification** (`purify_create_table_from_source`). Reject the clause
-  while `enable_upsert_v2` is off, so new tables follow upsert v2's rollout.
-  The check must not be in planning, which also re-runs for every stored
-  statement when the catalog opens. A planning failure there would stop
-  environmentd from booting after the flag is turned off.
 - **Planning** (`plan_create_table_from_source`). Accept the clause only for
   PostgreSQL exports and behind the `enable_postgres_ingestion_time` feature
   flag (off by default). Resolve the primary key as above, append the
@@ -404,10 +401,10 @@ decides whether the bytes are held in memory or on the scratch disk.
   envelope as `upsert-ingestion-time`.
 - **Rendering** (`render_source_stream`). For `IngestionTime`, build the
   streaming and marker maps (`upsert::ingestion_time::stamp_and_mark`), feed
-  the markers to upsert v2, restamp its output
+  the markers to upsert, restamp its output
   (`upsert::ingestion_time::correct_stamps`), and concatenate the stamped rows
   with the corrections. Rehydration from the table's shard and backpressure
-  are reused unchanged. Upsert v2 does not change.
+  are reused unchanged. Neither upsert implementation changes.
 
 ### Testing
 
@@ -618,8 +615,8 @@ as it was before the change, which `DEFAULT` does not send. Options:
 
 A prototype implements this design behind the feature flag: the SQL surface,
 planning and rejection cases, and the streaming, marker, and restamp maps
-around an unchanged upsert v2. It passes the testdrive scenarios above. A spike of the
-rejected consolidation design preceded it and shared its SQL and planning
+around an unchanged upsert. It passes the testdrive scenarios above. A spike
+of the rejected consolidation design preceded it and shared its SQL and planning
 half. [TODO: unverified](#todo-unverified) lists what it has not been tested
 against.
 
@@ -751,10 +748,14 @@ following claims in this document have not been checked.
   the table shows after an upstream primary key violation that the source
   does not catch has not been examined, and the planner is told the primary
   key is a relation key, which the optimizer may rely on.
-- **Disabling upsert v2.** Turning `enable_upsert_v2` off after a table is
-  created panics rendering, which crash-loops the replica until it is turned
-  back on. This is accepted for the prototype but not tested.
-- **Metrics.** Upsert v2 counts each correction as a delete. Nothing
+- **Upsert v1.** The partial emission argument in [Rendering](#rendering) is
+  read from v1's code, and the memory analysis covers only v2. v1 keeps
+  per-key state in memory or RocksDB, and what its provisional values cost
+  for keys inserted and deleted within a transaction has not been measured.
+- **Switching implementations.** Flipping `enable_upsert_v2` while a table
+  exists switches it on the next render. Both rehydrate from the shard, but
+  no test does this.
+- **Metrics.** Upsert counts each correction as a delete. Nothing
   distinguishes these from deletes on other upsert sources.
 - **Early resolution.** [Possible enhancement: resolve markers
   early](#possible-enhancement-resolve-markers-early) is unimplemented, and
@@ -764,5 +765,3 @@ following claims in this document have not been checked.
 
 - Is `ingestion_time` the right default column name?
 - Is restamping on a no-op update acceptable to sync engine users?
-- Requiring `enable_upsert_v2` ties this feature to upsert v2's rollout.
-  Should it be built and tested on upsert v1 too?

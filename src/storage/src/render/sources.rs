@@ -380,13 +380,6 @@ where
                                 stash_flavor,
                             )
                         } else {
-                            // Ingestion time is only built and tested on upsert
-                            // v2, and purification rejects new tables while it
-                            // is off.
-                            assert!(
-                                stamped.is_none(),
-                                "WITH INGESTION TIME tables require enable_upsert_v2",
-                            );
                             crate::upsert::upsert(
                                 upsert_input.enter(scope),
                                 upsert_envelope.clone(),
