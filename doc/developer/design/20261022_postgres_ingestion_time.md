@@ -369,7 +369,9 @@ With persist keeping up (`P = 1`) and one retraction per key, this is
 transaction that inserts and then deletes many new keys is the only single
 time whose stash is bounded by the transaction rather than the table. When
 persist falls behind, the stash term multiplies by the number of pending
-times, because markers do not consolidate across times.
+times, because markers do not consolidate across times. [Possible
+enhancement: resolve markers early](#possible-enhancement-resolve-markers-early)
+removes the `D_t` term and most of the multiplier.
 
 The rejected consolidation design held
 `O(N · R + Σ over pending times of U_t · R)`, where `U_t` is the number of
@@ -419,6 +421,89 @@ decides whether the bytes are held in memory or on the scratch disk.
 - A test that ingests a transaction larger than the replica's memory.
 - A resumption test and a platform check showing ingestion times survive
   restarts and upgrades.
+
+## Possible enhancement: resolve markers early
+
+The stash holds every marker for `T` until `T` is complete, including the
+`D_t` markers for keys inserted and deleted within `T`, which find nothing. A
+transaction that inserts and deletes many new keys, such as a staging pattern
+in one transaction, therefore holds a marker per key. Its replay after a crash
+holds the same markers, so an out-of-memory failure repeats.
+
+### Why the retraction cannot be classified in the stream
+
+A retraction of key `k` at `T` is either of a row stored before `T`, which
+needs a correction, or of a row written earlier at `T`, which does not.
+Telling them apart needs the change's position in the transaction, the set of
+keys the transaction has inserted so far, or the shard as of `T`. The first is
+lost before upsert: every change in a transaction carries the same commit LSN,
+reclocking sorts by it with an unstable sort, and the replication operator
+spreads rows across workers in blocks. Recovering "the key's first change at
+`T` was an insert" would mean stashing every insert, which trades `D_t` for
+the transaction's inserts. The diff's sign carries no information, because an
+update of a stored key and an insert and delete of a new key both net to zero.
+A Bloom filter of inserted keys is unsafe: a false positive drops a needed
+marker and leaves a wrong row in the shard. A Bloom filter of stored keys is
+safe, but the feedback trace already is an exact record of them.
+
+### Mechanism
+
+The shard as of `T` is the third option, and it is available long before `T`
+is complete. Once `persist_upper` is `T`, the feedback trace holds every time
+before `T`, and the shard cannot advance past `T` while the streaming path and
+the marker input still hold `T`. The current eligibility rule also waits for
+`T < input_upper`, but only `DrainMode::Apply` needs that, to know the command
+with the greatest `from_time`. Markers all carry `value: None`, so the first
+one for a key at `T` suffices. In `DrainMode::CorrectStamps`:
+
+- A marker at `T` arriving while the observed `persist_upper` is `T` is
+  probed against the trace at once. If the key has a stored row and is not in
+  `corrected_T`, upsert emits the correction and adds the key to
+  `corrected_T`. The marker is not stashed. A miss costs one probe and no
+  memory.
+- A marker for a time beyond `persist_upper` is stashed as today.
+- When `persist_upper` reaches `T`, the stash seals at `T` once and its
+  entries for `T` go through the same path.
+- When `input_upper` passes `T`, `corrected_T` is dropped.
+
+The existing drains already have the probe-and-emit shape. The change threads
+`corrected_T` into the `CorrectStamps` arms and calls the drain on the
+incoming batch before it reaches the stash. `from_diffs.rs` and the rendering
+do not change.
+
+### Correctness
+
+The correction for `(k, T)` depends only on the trace as of `T` and on
+whether any marker for `k` arrived at `T`. Neither changes while `T` is
+pending, so the output is still a function of the shard and the markers at
+`T`, whatever order the markers arrive in. Each key is corrected at most once
+per `T`. The sink appends all of `T` as one batch, so the order of
+corrections within `T` does not matter. The observed `persist_upper` lags the
+true one, and data at `T` can arrive only while the true `persist_upper` is
+at most `T`, so an observed `persist_upper` of `T` is exact. A crash part way
+through `T` replays `T` against a shard with nothing at `T`, as today.
+
+### Space
+
+`corrected_T` holds only keys the probe found, at most `min(K_T, N)` keys of
+32 bytes. The stash holds markers only for times beyond `persist_upper`. The
+total becomes
+
+`O(N · R + N + Σ over pending times t > persist_upper of K_t · log M_t)`
+
+With persist keeping up, the `D_t` term is gone: inserting and deleting 10⁹
+new keys costs 10⁹ probe misses and holds nothing. Most of the pending-time
+multiplier goes too, because `persist_upper` reaches `T` as soon as the times
+before it are written, which during a long transaction happens almost at
+once. The remaining stash is the markers for times after the one being
+corrected, for example a second large transaction starting during the first,
+or genuine persist lag. It is bounded by write throughput and lag rather than
+by the table or the transaction, and the chunked stash can spill it.
+Removing it too would need per-time filters of inserted keys fed through
+the exchange, which costs more than spilling.
+
+The cost is one probe per marker at the time being corrected instead of one
+per distinct key, and the extra probes are exactly the `D_t` misses.
 
 ## Follow-on: `REPLICA IDENTITY DEFAULT`
 
