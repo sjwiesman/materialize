@@ -403,11 +403,11 @@ pub(crate) enum DrainMode {
     /// Apply upsert commands: a value replaces the key's stored value, and a
     /// tombstone deletes it.
     Apply,
-    /// Correct ingestion-time stamps for `UpsertStyle::FromDiffs`, where every
-    /// entry is a key-only marker (`value: None`) for a key changed at its
-    /// time. For a key with a stored row, emit that row restamped with the
+    /// Correct ingestion-time stamps for `UpsertStyle::IngestionTime`, where
+    /// every entry is a key-only marker (`value: None`) for a key retracted at
+    /// its time. For a key with a stored row, emit that row restamped with the
     /// entry's time and retract the stored row. The stamp is the row's last
-    /// column. See [`crate::upsert::from_diffs`] for why this is correct.
+    /// column. See [`crate::upsert::ingestion_time`] for why this is correct.
     CorrectStamps,
 }
 
@@ -422,8 +422,8 @@ async fn emit_stamp_correction<T>(
 where
     T: Timestamp + Refines<mz_repr::Timestamp>,
 {
-    // Stamp corrections never write errors, so a stored error came from
-    // somewhere else and is left alone.
+    // Only upsert errors reach the trace, and neither ingestion time path
+    // writes one.
     let Ok(stored) = stored else {
         return 0;
     };
@@ -432,7 +432,7 @@ where
         let mut datums = stored.iter().collect::<Vec<_>>();
         let stamp = datums
             .last_mut()
-            .expect("FromDiffs rows end in their stamp");
+            .expect("IngestionTime rows end in their stamp");
         *stamp = Datum::MzTimestamp(ts.clone().to_outer());
         restamped.packer().extend(datums);
     }
@@ -935,7 +935,7 @@ where
 /// calls through this trait at the few points where the flavors diverge.
 trait UpsertStashArm<T, O>
 where
-    T: Timestamp + Lattice + columnar::Columnar + Default + Refines<mz_repr::Timestamp>,
+    T: Timestamp + Lattice + columnar::Columnar + Default,
     for<'a> columnar::Ref<'a, T>: Copy + Ord,
     O: columnar::Columnar + Default + Ord + Clone + Send + Sync + 'static,
     for<'a> columnar::Ref<'a, O>: Ord + Copy,

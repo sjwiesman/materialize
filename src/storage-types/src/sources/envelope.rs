@@ -85,7 +85,7 @@ pub enum UpsertStyle {
     /// row itself (`WITH INGESTION TIME` on PostgreSQL tables). Each row is
     /// stamped with its reclocked timestamp as its last column, and upsert
     /// only corrects the stamps of retracted rows.
-    FromDiffs,
+    IngestionTime,
 }
 
 /// Computes the indices of the value's relation description that appear in the key.
@@ -233,9 +233,9 @@ impl UnplannedSourceEnvelope {
                 )
             }
             UnplannedSourceEnvelope::Upsert {
-                style: UpsertStyle::FromDiffs,
+                style: UpsertStyle::IngestionTime,
             } => {
-                let key_desc = key_desc.ok_or_else(|| anyhow!("FromDiffs requires a key"))?;
+                let key_desc = key_desc.ok_or_else(|| anyhow!("IngestionTime requires a key"))?;
                 let key = match_key_indices(&key_desc, &value_desc)?;
                 let desc = value_desc.with_key(key.clone()).concat(metadata_desc);
                 (

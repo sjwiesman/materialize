@@ -8,7 +8,7 @@
 // by the Apache License, Version 2.0.
 
 //! Stamps a source's signed row diffs with their ingestion time, for the
-//! `UpsertStyle::FromDiffs` envelope.
+//! `UpsertStyle::IngestionTime` envelope.
 //!
 //! Each row version carries, as its last column, the time `T` at which it was
 //! ingested, and its retraction must carry the same stamp. The source knows the
@@ -18,15 +18,14 @@
 //! completes, and a PostgreSQL transaction always lands on a single time, so an
 //! arbitrarily large transaction would be held whole.
 //!
-//! Instead, [`render`] splits the export into two paths:
+//! Instead, [`stamp_and_mark`] splits the export into two paths:
 //!
 //! 1. The streaming path stamps every update with its own time `T`, so a change
 //!    becomes `-(old, T) +(new, T)`. It holds no state, and its output goes
 //!    straight to the persist sink.
-//! 2. The marker path emits one key-only marker per retraction for upsert v2 in
+//! 2. The correction path emits one key-only marker per retraction for upsert
+//!    v2, which corrects the stored row's stamp as described on
 //!    [`DrainMode::CorrectStamps`](crate::upsert_continual_feedback_v2::DrainMode).
-//!    Once `T` is eligible, upsert looks up each marked key's stored row
-//!    `(pre, s)` from before `T` and emits `+(pre, T) -(pre, s)`.
 //!
 //! The streaming path's output is wrong in exactly one place per key and time.
 //! A key's changes at `T` chain, each change's old row being the previous
@@ -46,11 +45,11 @@
 //!
 //! The correction cancels the streamed retraction only if the stored row
 //! equals the old row the source sends. That holds as long as the upstream
-//! primary key holds and every change carries its exact old row. Upsert reports
-//! a key whose stored count goes negative, which is how a violation shows.
+//! primary key holds and every change carries its exact old row. A violation
+//! shows as a negative stored count, which upsert reports.
 //!
 //! NOTE: A key's stamp moves to `T` whenever a change at `T` touches it, even
-//! if its row ends up unchanged, because the marker path sees only keys.
+//! if its row ends up unchanged, because the correction path sees only keys.
 
 use differential_dataflow::{AsCollection, VecCollection};
 use mz_repr::{Datum, Diff, Row, Timestamp};
@@ -60,9 +59,10 @@ use timely::dataflow::operators::vec::Map;
 use crate::source::types::DecodeResult;
 use crate::upsert::{UpsertKey, UpsertValue};
 
-/// Splits the decoded rows of a `FromDiffs` export into the streaming path's
-/// stamped rows and the marker path's upsert input, keyed by `key_indices`.
-pub(crate) fn render<'scope, FromTime>(
+/// Splits the decoded rows of an `IngestionTime` export into the streaming
+/// path's stamped rows and the correction path's markers, keyed by
+/// `key_indices`.
+pub(crate) fn stamp_and_mark<'scope, FromTime>(
     input: VecCollection<'scope, Timestamp, DecodeResult<FromTime>, Diff>,
     key_indices: Vec<usize>,
 ) -> (
@@ -102,7 +102,7 @@ where
 fn decoded_value(value: Option<Result<Row, DecodeError>>) -> Row {
     match value {
         Some(Ok(value)) => value,
-        _ => unreachable!("FromDiffs exports have no encoding to fail"),
+        _ => unreachable!("IngestionTime exports have no encoding to fail"),
     }
 }
 
@@ -116,9 +116,10 @@ fn stamp(row: &Row, time: Timestamp, row_buf: &mut Row) -> Row {
 
 #[cfg(test)]
 mod tests {
-    //! These tests apply both paths' output to a modeled shard, checking that
-    //! the streamed diffs plus the stamp corrections leave the shard as an
-    //! upsert would. Upsert v2's correction mode is tested with the operator.
+    //! Most of these tests check the design's algebra on a modeled shard:
+    //! `apply` stands in for upsert v2's correction mode, which is tested with
+    //! the operator, and checks that the streamed diffs plus the corrections
+    //! leave the shard as an upsert would.
 
     use std::collections::BTreeSet;
 
@@ -219,7 +220,7 @@ mod tests {
         let (stamped, markers) = timely::execute_directly(|worker| {
             let (mut input, stamped, markers) = worker.dataflow::<Timestamp, _, _>(|scope| {
                 let (handle, stream) = scope.new_input();
-                let (stamped, markers) = super::render(stream.as_collection(), vec![0]);
+                let (stamped, markers) = super::stamp_and_mark(stream.as_collection(), vec![0]);
                 (handle, stamped.inner.capture(), markers.inner.capture())
             });
             let rows = [(row(1, "a"), 1), (row(2, "b"), 1), (row(1, "a"), -1)];

@@ -54,7 +54,7 @@ use types::{
     upsert_bincode_opts,
 };
 
-pub(crate) mod from_diffs;
+pub(crate) mod ingestion_time;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod memory;
 pub(crate) mod rocksdb;

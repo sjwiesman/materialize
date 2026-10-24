@@ -1059,8 +1059,8 @@ impl DataSourceDesc {
                     mz_storage_types::sources::envelope::UpsertStyle::ValueErrInline { .. } => {
                         "upsert-value-err-inline"
                     }
-                    mz_storage_types::sources::envelope::UpsertStyle::FromDiffs => {
-                        "upsert-from-diffs"
+                    mz_storage_types::sources::envelope::UpsertStyle::IngestionTime => {
+                        "upsert-ingestion-time"
                     }
                 },
                 SourceEnvelope::CdcV2 => {

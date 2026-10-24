@@ -1296,7 +1296,7 @@ fn plan_kafka_source_connection(
     })
 }
 
-/// Plans the `UpsertStyle::FromDiffs` envelope of a PostgreSQL table created
+/// Plans the `UpsertStyle::IngestionTime` envelope of a PostgreSQL table created
 /// `WITH INGESTION TIME`, keyed by the upstream primary key.
 ///
 /// `table` must be the purified desc, from which excluded constraints are
@@ -1350,7 +1350,7 @@ fn plan_ingestion_time_envelope(
         .finish();
 
     let (envelope, desc) = UnplannedSourceEnvelope::Upsert {
-        style: UpsertStyle::FromDiffs,
+        style: UpsertStyle::IngestionTime,
     }
     .desc(Some(key_desc), value_desc, metadata_desc)?;
     Ok((desc, envelope))

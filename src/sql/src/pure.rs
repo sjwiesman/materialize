@@ -1884,12 +1884,11 @@ async fn purify_create_table_from_source(
         with_options,
     } = &mut stmt;
 
-    // Only upsert v2 can render ingestion time (see `render_upsert` in
-    // `mz_storage`), so new tables are created only while `enable_upsert_v2`
-    // is on. The check lives in
-    // purification, which runs only for new statements: planning also re-runs
-    // for every stored statement when the catalog opens, where a failure would
-    // stop environmentd from booting if the flag were turned off later.
+    // Only upsert v2 can render ingestion time (see `render_source_stream` in
+    // `mz_storage`). This is checked in purification, not planning, because
+    // planning re-runs for stored statements when the catalog opens, and a
+    // failure there would stop environmentd from booting if the flag were
+    // turned off later.
     if ingestion_time.is_some()
         && !mz_storage_types::dyncfgs::ENABLE_UPSERT_V2.get(scx.catalog.system_vars().dyncfgs())
     {

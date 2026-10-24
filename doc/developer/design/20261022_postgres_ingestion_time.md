@@ -397,12 +397,14 @@ decides whether the bytes are held in memory or on the scratch disk.
   flag (off by default). Resolve the primary key as above, append the
   `mz_timestamp` column (default name `ingestion_time`), and declare the
   primary key as a relation key.
-- **Envelope.** `UpsertStyle::FromDiffs`, reusing
+- **Envelope.** `UpsertStyle::IngestionTime`, reusing
   `UpsertEnvelope { key_indices, source_arity }`. The catalog reports the
-  envelope as `upsert-from-diffs`.
-- **Rendering** (`render_source_stream`). For `FromDiffs`, build the streaming
-  and marker maps and render upsert v2 in correction mode. Rehydration from
-  the table's shard and backpressure are reused unchanged.
+  envelope as `upsert-ingestion-time`.
+- **Rendering** (`render_source_stream`). For `IngestionTime`, build the
+  streaming and marker maps (`upsert::ingestion_time::stamp_and_mark`), feed
+  the markers to upsert v2 in correction mode, and concatenate the stamped
+  rows with its output. Rehydration from the table's shard and backpressure
+  are reused unchanged.
 - **Upsert v2.** A correction mode, threaded from `upsert_v2` to the chunked
   and paged drains, and the invariant check above.
 
@@ -410,8 +412,8 @@ decides whether the bytes are held in memory or on the scratch disk.
 
 - Parser datadriven tests for the clause, its alias, and its combination with
   `WITH (...)`, which the pretty printer's roundtrip test also covers.
-- Unit tests for v2's correction mode over the cases in the tables above, and
-  for the invariant check.
+- Unit tests for the cases in the tables above on a modeled shard, for v2's
+  correction mode on stored and new keys, and for the invariant check.
 - Testdrive in `test/pg-cdc/` for inserts, updates, and deletes (the
   retraction carries the original ingestion time), multi-statement
   transactions, writes racing the initial snapshot, an upstream primary key
@@ -468,8 +470,8 @@ one for a key at `T` suffices. In `DrainMode::CorrectStamps`:
 
 The existing drains already have the probe-and-emit shape. The change threads
 `corrected_T` into the `CorrectStamps` arms and calls the drain on the
-incoming batch before it reaches the stash. `from_diffs.rs` and the rendering
-do not change.
+incoming batch before it reaches the stash. `ingestion_time.rs` and the
+rendering do not change.
 
 ### Correctness
 
