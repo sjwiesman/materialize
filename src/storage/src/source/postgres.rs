@@ -97,7 +97,6 @@ use mz_postgres_util::{Client, PostgresError, Sql, query_opt, simple_query_opt, 
 use mz_repr::{Datum, GlobalId, Row};
 use mz_storage_types::errors::{DataflowError, SourceError, SourceErrorDetails};
 use mz_storage_types::sources::casts::StorageScalarExpr;
-use mz_storage_types::sources::envelope::{SourceEnvelope, UpsertEnvelope, UpsertStyle};
 use mz_storage_types::sources::postgres::CastType;
 use mz_storage_types::sources::{
     MzOffset, PostgresSourceConnection, SourceExport, SourceExportDetails, SourceTimestamp,
@@ -146,7 +145,7 @@ impl SourceRender for PostgresSourceConnection {
             let SourceExport {
                 details,
                 storage_metadata: _,
-                data_config,
+                data_config: _,
             } = export;
             let details = match details {
                 SourceExportDetails::Postgres(details) => details,
@@ -164,18 +163,10 @@ impl SourceRender for PostgresSourceConnection {
                     .iter()
                     .map(MzOffset::decode_row),
             );
-            let snapshot_metadata = match &data_config.envelope {
-                SourceEnvelope::Upsert(UpsertEnvelope {
-                    style: UpsertStyle::FromDiffs,
-                    ..
-                }) => crate::upsert::from_diffs::snapshot_metadata(),
-                _ => Row::default(),
-            };
             let output = SourceOutputInfo {
                 desc,
                 projection: None,
                 casts,
-                snapshot_metadata,
                 resume_upper,
                 export_id: id.clone(),
                 initial_lsn: details.initial_lsn.unwrap_or_else(MzOffset::minimum),
@@ -284,11 +275,6 @@ struct SourceOutputInfo {
     /// this field is None since we haven't yet observed any schemas.
     projection: Option<Vec<usize>>,
     casts: Vec<(CastType, StorageScalarExpr)>,
-    /// The metadata of every snapshot row. Only `UpsertStyle::FromDiffs` exports
-    /// mark their snapshot rows, with `upsert::from_diffs::snapshot_metadata`.
-    /// Any other export appends metadata to its rows as columns, so this must
-    /// stay empty for them.
-    snapshot_metadata: Row,
     resume_upper: Antichain<MzOffset>,
     export_id: GlobalId,
     /// An upper bound on the LSN whose upstream schema `desc` describes, read during purification

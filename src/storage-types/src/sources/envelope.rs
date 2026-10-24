@@ -82,9 +82,9 @@ pub enum UpsertStyle {
         error_column: String,
     },
     /// A source that emits signed diffs of whole rows, keyed by columns of the
-    /// row itself (`WITH INGESTION TIME` on PostgreSQL tables). Updates are
-    /// consolidated per key and time and turned into upsert commands, and the
-    /// reclocked timestamp is appended to each value.
+    /// row itself (`WITH INGESTION TIME` on PostgreSQL tables). Each row is
+    /// stamped with its reclocked timestamp as its last column, and upsert
+    /// only corrects the stamps of retracted rows.
     FromDiffs,
 }
 

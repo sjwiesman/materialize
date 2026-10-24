@@ -45,6 +45,7 @@ use crate::healthcheck::{HealthStatusMessage, StatusNamespace};
 use crate::source::types::{DecodeResult, SourceOutput, SourceRender};
 use crate::source::{self, RawSourceCreationConfig, SourceExportCreationConfig};
 use crate::upsert::{UpsertKey, UpsertSourceTime, UpsertValue};
+use crate::upsert_continual_feedback_v2::DrainMode;
 
 /// _Renders_ complete _differential_ collections
 /// that represent the final source and its errors
@@ -227,22 +228,23 @@ where
         SourceEnvelope::Upsert(upsert_envelope) => {
             let (upsert, health_update) = match upsert_envelope.style {
                 UpsertStyle::FromDiffs => {
-                    let (commands, token) = crate::upsert::from_diffs::render_commands(
+                    let (stamped, markers) = crate::upsert::from_diffs::render(
                         decoded_stream,
                         upsert_envelope.key_indices.clone(),
                     );
-                    needed_tokens.push(token);
-                    render_upsert(
+                    let (corrections, health_update) = render_upsert(
                         scope,
                         export_id,
-                        commands,
+                        markers,
                         upsert_envelope,
                         description,
                         storage_state,
                         base_source_config,
                         rehydrated_token,
+                        DrainMode::CorrectStamps,
                         &mut needed_tokens,
-                    )
+                    );
+                    (stamped.map(Ok).concat(corrections), health_update)
                 }
                 _ => render_upsert(
                     scope,
@@ -253,6 +255,7 @@ where
                     storage_state,
                     base_source_config,
                     rehydrated_token,
+                    DrainMode::Apply,
                     &mut needed_tokens,
                 ),
             };
@@ -357,16 +360,16 @@ fn append_metadata_to_value<'scope, T: Timestamp, FromTime: Timestamp>(
 /// Renders the upsert operator for one export over `upsert_input`, rehydrating
 /// its state from the export's own persist shard.
 ///
-/// Of the commands for one key at one time, upsert applies the one with the
-/// greatest `Order`.
+/// [`DrainMode::CorrectStamps`] always renders upsert v2, the only
+/// implementation with that mode, whatever `enable_upsert_v2` is set to.
 #[allow(clippy::too_many_arguments)]
-fn render_upsert<'scope, Order>(
+fn render_upsert<'scope, FromTime>(
     scope: Scope<'scope, mz_repr::Timestamp>,
     export_id: GlobalId,
     upsert_input: VecCollection<
         'scope,
         mz_repr::Timestamp,
-        (UpsertKey, Option<UpsertValue>, Order),
+        (UpsertKey, Option<UpsertValue>, FromTime),
         Diff,
     >,
     upsert_envelope: &UpsertEnvelope,
@@ -374,14 +377,15 @@ fn render_upsert<'scope, Order>(
     storage_state: &crate::storage_state::StorageState,
     base_source_config: &RawSourceCreationConfig,
     rehydrated_token: impl std::any::Any + 'static,
+    drain_mode: DrainMode,
     needed_tokens: &mut Vec<PressOnDropButton>,
 ) -> (
     VecCollection<'scope, mz_repr::Timestamp, Result<Row, DataflowError>, Diff>,
     StreamVec<'scope, mz_repr::Timestamp, HealthStatusMessage>,
 )
 where
-    Order: Timestamp + Sync,
-    Order: UpsertSourceTime,
+    FromTime: Timestamp + Sync,
+    FromTime: UpsertSourceTime,
 {
     let persist_clients = Arc::clone(&storage_state.persist_clients);
     // TODO: Get this to work with the as_of.
@@ -502,8 +506,9 @@ where
                 source_statistics: export_statistics,
             };
             let (upsert, health_update, snapshot_progress, upsert_token) =
-                if dyncfgs::ENABLE_UPSERT_V2
-                    .get(storage_state.storage_configuration.config_set())
+                if drain_mode == DrainMode::CorrectStamps
+                    || dyncfgs::ENABLE_UPSERT_V2
+                        .get(storage_state.storage_configuration.config_set())
                 {
                     // Resolved here, at operator construction, so the
                     // dataflow keeps one stash flavor for its whole
@@ -522,6 +527,7 @@ where
                         export_config,
                         backpressure_metrics,
                         stash_flavor,
+                        drain_mode,
                     )
                 } else {
                     crate::upsert::upsert(

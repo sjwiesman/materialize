@@ -260,9 +260,9 @@ snapshot's time has nothing to correct.
   differ, which requires a violated primary key or replica identity, the
   streaming path's retraction is not cancelled and the shard is left with a
   negative multiplicity. v2's lookup sums each key's updates and uses only the
-  positive value, so this would otherwise go unnoticed. The drain counts keys
-  whose stored updates do not sum to exactly one row and reports them through
-  a metric and a soft assertion.
+  positive value, so this would otherwise go unnoticed. In correction mode the
+  drain reports a key whose stored updates sum to a negative count with a soft
+  assertion, which panics in tests and logs an error in production.
 - **Sync point.** The delta query relies only on the fact that a row version
   becomes visible at exactly its ingestion time, which holds by construction.
 
@@ -442,12 +442,12 @@ as it was before the change, which `DEFAULT` does not send. Options:
 
 ## Minimal Viable Prototype
 
-A spike of the rejected consolidation design exists, behind the feature flag,
-and passes the testdrive scenarios above. It demonstrates the SQL surface,
-planning, rejection cases, and sync semantics, which this design keeps. The
-prototype for this design replaces its storage half: the streaming and marker
-maps, upsert v2's correction mode, and a test with a transaction larger than
-the replica's memory.
+A prototype implements this design behind the feature flag: the SQL surface,
+planning and rejection cases, the streaming and marker maps, and upsert v2's
+correction mode. It passes the testdrive scenarios above. A spike of the
+rejected consolidation design preceded it and shared its SQL and planning
+half. Still missing is a test with a transaction larger than the replica's
+memory.
 
 ## Alternatives
 

@@ -397,6 +397,66 @@ fn decode_upsert_value<'a>(mut iter: impl Iterator<Item = Datum<'a>>) -> UpsertV
     }
 }
 
+/// How the drain turns an eligible stash entry into output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DrainMode {
+    /// Apply upsert commands: a value replaces the key's stored value, and a
+    /// tombstone deletes it.
+    Apply,
+    /// Correct ingestion-time stamps for `UpsertStyle::FromDiffs`, where every
+    /// entry is a key-only marker (`value: None`) for a key changed at its
+    /// time. For a key with a stored row, emit that row restamped with the
+    /// entry's time and retract the stored row. The stamp is the row's last
+    /// column. See [`crate::upsert::from_diffs`] for why this is correct.
+    CorrectStamps,
+}
+
+/// Emits the stamp correction for `stored`, the value a key held before `ts`,
+/// and returns the number of updates emitted.
+async fn emit_stamp_correction<T>(
+    stored: UpsertValue,
+    ts: T,
+    output_handle: &UpsertOutputHandle<T>,
+    output_cap: &Capability<T>,
+) -> u64
+where
+    T: Timestamp + Refines<mz_repr::Timestamp>,
+{
+    // Stamp corrections never write errors, so a stored error came from
+    // somewhere else and is left alone.
+    let Ok(stored) = stored else {
+        return 0;
+    };
+    let mut restamped = Row::default();
+    {
+        let mut datums = stored.iter().collect::<Vec<_>>();
+        let stamp = datums
+            .last_mut()
+            .expect("FromDiffs rows end in their stamp");
+        *stamp = Datum::MzTimestamp(ts.clone().to_outer());
+        restamped.packer().extend(datums);
+    }
+    let size = stored.byte_len();
+    output_handle
+        .give_fueled(output_cap, (Ok(restamped), ts.clone(), Diff::ONE), size)
+        .await;
+    output_handle
+        .give_fueled(output_cap, (Ok(stored), ts, Diff::MINUS_ONE), size)
+        .await;
+    2
+}
+
+/// Reports a key whose stored updates sum to a negative count. Under
+/// [`DrainMode::CorrectStamps`] this means a streamed retraction did not match
+/// the stored row, which requires a violated upstream primary key or replica
+/// identity.
+fn report_negative_stored_count(key: &UpsertKey, count: Diff, source_id: GlobalId) {
+    mz_ore::soft_panic_or_log!(
+        "negative count {count} for key {key:?} in the persist trace of {source_id}; \
+         the upstream primary key or replica identity may have been violated"
+    );
+}
+
 /// Transforms a stream of upserts (key-value updates) into a differential
 /// collection.
 ///
@@ -414,6 +474,7 @@ fn decode_upsert_value<'a>(mut iter: impl Iterator<Item = Datum<'a>>) -> UpsertV
 #[allow(clippy::disallowed_methods)]
 pub fn upsert_inner<'scope, T, FromTime>(
     flavor: UpsertStashFlavor,
+    mode: DrainMode,
     input: VecCollection<'scope, T, (UpsertKey, Option<UpsertValue>, FromTime), Diff>,
     key_indices: Vec<usize>,
     resume_upper: Antichain<T>,
@@ -460,6 +521,7 @@ where
                 FeedbackSpine<T>,
             >(encoded, Pipeline, "Persist feedback");
             build_upsert_operator::<ChunkedArm, _, _>(
+                mode,
                 input,
                 resume_upper,
                 persist_arranged,
@@ -483,6 +545,7 @@ where
                 FundedValRowSpine<UpsertKey, T, Diff>,
             >(encoded, Pipeline, "Persist feedback");
             build_upsert_operator::<PagedArm, _, _>(
+                mode,
                 input,
                 resume_upper,
                 persist_arranged,
@@ -553,6 +616,7 @@ where
 /// the few points where the flavors diverge.
 #[allow(clippy::disallowed_methods)]
 fn build_upsert_operator<'scope, A, T, FromTime>(
+    mode: DrainMode,
     input: VecCollection<'scope, T, (UpsertKey, Option<UpsertValue>, FromTime), Diff>,
     resume_upper: Antichain<T>,
     persist_arranged: Arranged<'scope, TraceAgent<A::Spine>>,
@@ -795,6 +859,7 @@ where
                 // `output_handle` (fueled), so there is no intermediate
                 // output buffer to drain afterward.
                 let drain_stats = A::drain(
+                    mode,
                     sealed,
                     &mut ineligible,
                     &output_handle,
@@ -870,7 +935,7 @@ where
 /// calls through this trait at the few points where the flavors diverge.
 trait UpsertStashArm<T, O>
 where
-    T: Timestamp + Lattice + columnar::Columnar + Default,
+    T: Timestamp + Lattice + columnar::Columnar + Default + Refines<mz_repr::Timestamp>,
     for<'a> columnar::Ref<'a, T>: Copy + Ord,
     O: columnar::Columnar + Default + Ord + Clone + Send + Sync + 'static,
     for<'a> columnar::Ref<'a, O>: Ord + Copy,
@@ -915,6 +980,7 @@ where
     /// Classify one sealed stash against `persist_upper` and emit eligible
     /// output; see [`DrainStats`].
     async fn drain(
+        mode: DrainMode,
         sealed: Vec<<Self::Batcher as Batcher>::Output>,
         ineligible: &mut Vec<UpsertUpdate<T, O>>,
         output_handle: &UpsertOutputHandle<T>,
@@ -941,7 +1007,7 @@ struct ChunkedArm;
 
 impl<T, O> UpsertStashArm<T, O> for ChunkedArm
 where
-    T: Timestamp + TotalOrder + Lattice + Sync,
+    T: Timestamp + TotalOrder + Lattice + Sync + Refines<mz_repr::Timestamp>,
     T: columnation::Columnation + columnar::Columnar + Default,
     for<'a> columnar::Ref<'a, T>: Copy + Ord,
     O: columnar::Columnar + Default + Ord + Clone + Send + Sync + 'static,
@@ -959,6 +1025,7 @@ where
     }
 
     async fn drain(
+        mode: DrainMode,
         sealed: Vec<UpsertChunk<T, O>>,
         ineligible: &mut Vec<UpsertUpdate<T, O>>,
         output_handle: &UpsertOutputHandle<T>,
@@ -969,6 +1036,7 @@ where
         source_id: GlobalId,
     ) -> DrainStats {
         drain_sealed_input_chunked(
+            mode,
             sealed.into_iter().map(ColumnChunk::into_body),
             ineligible,
             output_handle,
@@ -989,7 +1057,7 @@ struct PagedArm;
 
 impl<T, O> UpsertStashArm<T, O> for PagedArm
 where
-    T: Timestamp + TotalOrder + Lattice + Sync,
+    T: Timestamp + TotalOrder + Lattice + Sync + Refines<mz_repr::Timestamp>,
     T: columnation::Columnation + columnar::Columnar + Default,
     for<'a> columnar::Ref<'a, T>: Copy + Ord,
     O: columnar::Columnar + Default + Ord + Clone + Send + Sync + 'static,
@@ -1010,6 +1078,7 @@ where
     }
 
     async fn drain(
+        mode: DrainMode,
         sealed: Vec<Column<UpsertUpdate<T, O>>>,
         ineligible: &mut Vec<UpsertUpdate<T, O>>,
         output_handle: &UpsertOutputHandle<T>,
@@ -1020,6 +1089,7 @@ where
         source_id: GlobalId,
     ) -> DrainStats {
         drain_sealed_input_paged(
+            mode,
             sealed,
             ineligible,
             output_handle,
@@ -1102,6 +1172,7 @@ struct DrainStats {
 /// probe hits for its keys) is resident regardless of drain size. Only the
 /// re-stashed ineligible set is materialized.
 async fn drain_sealed_input_chunked<T, O>(
+    mode: DrainMode,
     sealed: impl Iterator<Item = ColumnBody<UpsertUpdate<T, O>>>,
     ineligible: &mut Vec<UpsertUpdate<T, O>>,
     output_handle: &UpsertOutputHandle<T>,
@@ -1112,7 +1183,7 @@ async fn drain_sealed_input_chunked<T, O>(
     source_id: GlobalId,
 ) -> DrainStats
 where
-    T: Timestamp + TotalOrder + Lattice + Sync,
+    T: Timestamp + TotalOrder + Lattice + Sync + Refines<mz_repr::Timestamp>,
     T: columnation::Columnation + columnar::Columnar + Default,
     for<'a> columnar::Ref<'a, T>: Copy + Ord,
     O: columnar::Columnar,
@@ -1211,6 +1282,8 @@ where
                             prev.is_none(),
                             "unexpected multiple values for the same key in persist trace"
                         );
+                    } else if count.is_negative() && mode == DrainMode::CorrectStamps {
+                        report_negative_stored_count(key, count, source_id);
                     }
                     i = j;
                 }
@@ -1267,6 +1340,12 @@ where
                             .await;
                         output_count += 1;
                     }
+                    None if mode == DrainMode::CorrectStamps => {
+                        if let Some(stored) = old_value {
+                            output_count +=
+                                emit_stamp_correction(stored, ts, output_handle, output_cap).await;
+                        }
+                    }
                     None => {
                         if let Some(old_val) = old_value {
                             let size = upsert_value_byte_len(&old_val);
@@ -1312,6 +1391,7 @@ where
 /// straight from the column's `RowRef` with no owned `UpsertDiff` copy. Only
 /// the re-stashed ineligible set is materialized.
 async fn drain_sealed_input_paged<T, O>(
+    mode: DrainMode,
     sealed: Vec<Column<UpsertUpdate<T, O>>>,
     ineligible: &mut Vec<UpsertUpdate<T, O>>,
     output_handle: &UpsertOutputHandle<T>,
@@ -1322,7 +1402,7 @@ async fn drain_sealed_input_paged<T, O>(
     source_id: GlobalId,
 ) -> DrainStats
 where
-    T: Timestamp + TotalOrder + Lattice + Sync,
+    T: Timestamp + TotalOrder + Lattice + Sync + Refines<mz_repr::Timestamp>,
     T: columnation::Columnation + columnar::Columnar,
     O: columnar::Columnar,
 {
@@ -1392,6 +1472,8 @@ where
                                 "unexpected multiple values for the same key in persist trace"
                             );
                             result = Some(decode_upsert_value(val));
+                        } else if count.is_negative() && mode == DrainMode::CorrectStamps {
+                            report_negative_stored_count(key, count, source_id);
                         }
                         cursor.step_val(&storage);
                     }
@@ -1422,6 +1504,12 @@ where
                         .give_fueled(output_cap, (new_val, ts, Diff::ONE), size)
                         .await;
                     output_count += 1;
+                }
+                None if mode == DrainMode::CorrectStamps => {
+                    if let Some(stored) = old_value {
+                        output_count +=
+                            emit_stamp_correction(stored, ts, output_handle, output_cap).await;
+                    }
                 }
                 None => {
                     if let Some(old_val) = old_value {
@@ -1505,7 +1593,10 @@ mod test {
     // operator arms. Returns one flavor's output for the caller's own
     // expected-value assertion.
     macro_rules! upsert_test {
-        (|$input:ident, $persist:ident, $worker:ident| $body:block) => {{
+        (|$input:ident, $persist:ident, $worker:ident| $body:block) => {
+            upsert_test!(mode = DrainMode::Apply, |$input, $persist, $worker| $body)
+        };
+        (mode = $mode:expr, |$input:ident, $persist:ident, $worker:ident| $body:block) => {{
             let run = |flavor: UpsertStashFlavor| {
                 let output_handle = timely::execute_directly(move |$worker| {
                     let (mut $input, mut $persist, output_handle) = $worker
@@ -1545,6 +1636,7 @@ mod test {
 
                                 let (output, _, _, button) = upsert_inner(
                                     flavor,
+                                    $mode,
                                     input.as_collection(),
                                     vec![0],
                                     Antichain::from_elem(Timestamp::minimum()),
@@ -1709,6 +1801,57 @@ mod test {
             (Ok(new_val), new_ts(1), Diff::ONE),
         ];
         assert_eq!(actual, expected);
+    }
+
+    fn stamped_row(k: i64, v: i64, stamp: u64) -> Row {
+        Row::pack_slice(&[
+            Datum::Int64(k),
+            Datum::Int64(v),
+            Datum::MzTimestamp(MzTimestamp::new(stamp)),
+        ])
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)]
+    fn correct_stamps_restamps_stored_rows() {
+        let actual = upsert_test!(mode = DrainMode::CorrectStamps, |input, persist, worker| {
+            persist.send((stamped_row(1, 10, 100), new_ts(0), Diff::ONE));
+            persist.advance_to(new_ts(1));
+            worker.step();
+
+            // Key 1 has a stored row and is marked twice. Key 2 is new.
+            input.send(((key(1), None, 1), new_ts(1), Diff::ONE));
+            input.send(((key(1), None, 2), new_ts(1), Diff::ONE));
+            input.send(((key(2), None, 1), new_ts(1), Diff::ONE));
+            input.advance_to(new_ts(2));
+            worker.step();
+            persist.advance_to(new_ts(2));
+            worker.step();
+        });
+
+        let mut expected: Vec<(Result<Row, DataflowError>, _, _)> = vec![
+            (Ok(stamped_row(1, 10, 1)), new_ts(1), Diff::ONE),
+            (Ok(stamped_row(1, 10, 100)), new_ts(1), Diff::MINUS_ONE),
+        ];
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "negative count")]
+    fn correct_stamps_reports_negative_stored_counts() {
+        upsert_test!(mode = DrainMode::CorrectStamps, |input, persist, worker| {
+            persist.send((stamped_row(1, 10, 100), new_ts(0), Diff::MINUS_ONE));
+            persist.advance_to(new_ts(1));
+            worker.step();
+
+            input.send(((key(1), None, 1), new_ts(1), Diff::ONE));
+            input.advance_to(new_ts(2));
+            worker.step();
+            persist.advance_to(new_ts(2));
+            worker.step();
+        });
     }
 
     #[mz_ore::test]
@@ -2036,6 +2179,7 @@ mod test {
 
                         let (output, _, _, button) = upsert_inner(
                             flavor,
+                            DrainMode::Apply,
                             input.as_collection(),
                             vec![0],
                             Antichain::from_elem(Timestamp::minimum()),

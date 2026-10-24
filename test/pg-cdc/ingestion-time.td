@@ -141,19 +141,24 @@ COMMIT;
 5 five
 
 #
-# A no-op update does not change the ingestion time.
+# A no-op update still moves the ingestion time, because the row was touched.
 #
 
 $ set-from-sql var=doc-1-time
 SELECT ingestion_time::text FROM docs WHERE id = 1
 
 $ postgres-execute connection=postgres://postgres:postgres@postgres
+BEGIN;
 UPDATE docs SET body = body WHERE id = 1;
 INSERT INTO docs VALUES (7, 'a', 'seven');
+COMMIT;
 
-> SELECT id, ingestion_time = ${doc-1-time}::mz_timestamp FROM docs WHERE id IN (1, 7);
-1 true
-7 false
+> SELECT id, body, ingestion_time > ${doc-1-time}::mz_timestamp FROM docs WHERE id IN (1, 7);
+1 ONE true
+7 seven true
+
+> SELECT count(DISTINCT ingestion_time) FROM docs WHERE id IN (1, 7);
+1
 
 #
 # Changing the primary key retracts the old key and inserts the new one.
