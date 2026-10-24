@@ -1843,6 +1843,12 @@ pub fn plan_create_table_from_source(
 
     if ingestion_time.is_some() {
         scx.require_feature_flag(&ENABLE_POSTGRES_INGESTION_TIME)?;
+        // Only upsert v2 can correct the stamps of retracted rows (see
+        // `mz_storage::upsert::from_diffs`). Upsert v1 would treat the
+        // correction markers as deletes.
+        if !mz_storage_types::dyncfgs::ENABLE_UPSERT_V2.get(scx.catalog.system_vars().dyncfgs()) {
+            sql_bail!("WITH INGESTION TIME requires enable_upsert_v2");
+        }
         if envelope.is_some() || format.is_some() || !include_metadata.is_empty() {
             sql_bail!("WITH INGESTION TIME cannot be combined with FORMAT, INCLUDE, or ENVELOPE");
         }

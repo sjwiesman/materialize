@@ -360,8 +360,7 @@ fn append_metadata_to_value<'scope, T: Timestamp, FromTime: Timestamp>(
 /// Renders the upsert operator for one export over `upsert_input`, rehydrating
 /// its state from the export's own persist shard.
 ///
-/// [`DrainMode::CorrectStamps`] always renders upsert v2, the only
-/// implementation with that mode, whatever `enable_upsert_v2` is set to.
+/// [`DrainMode::CorrectStamps`] requires upsert v2, which planning checks.
 #[allow(clippy::too_many_arguments)]
 fn render_upsert<'scope, FromTime>(
     scope: Scope<'scope, mz_repr::Timestamp>,
@@ -506,10 +505,7 @@ where
                 source_statistics: export_statistics,
             };
             let (upsert, health_update, snapshot_progress, upsert_token) =
-                if drain_mode == DrainMode::CorrectStamps
-                    || dyncfgs::ENABLE_UPSERT_V2
-                        .get(storage_state.storage_configuration.config_set())
-                {
+                if dyncfgs::ENABLE_UPSERT_V2.get(storage_state.storage_configuration.config_set()) {
                     // Resolved here, at operator construction, so the
                     // dataflow keeps one stash flavor for its whole
                     // life even if the flag flips underneath it.
@@ -530,6 +526,13 @@ where
                         drain_mode,
                     )
                 } else {
+                    // Upsert v1 has no correction mode and would treat the
+                    // markers as deletes, corrupting the table.
+                    assert_eq!(
+                        drain_mode,
+                        DrainMode::Apply,
+                        "WITH INGESTION TIME tables require enable_upsert_v2",
+                    );
                     crate::upsert::upsert(
                         upsert_input.enter(scope),
                         upsert_envelope.clone(),

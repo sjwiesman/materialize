@@ -227,8 +227,8 @@ snapshot's time has nothing to correct.
   and is never dropped. Eligibility and the trace lookup are unchanged. Only
   the drain's handling of a `None` value differs: instead of retracting the
   stored value, it emits the stored value restamped with `T` and retracts the
-  stored value. These exports always render upsert v2, whatever
-  `enable_upsert_v2` is set to, so v1 needs no correction mode.
+  stored value. Upsert v1 has no correction mode and would treat the markers
+  as deletes, so creating such a table fails unless `enable_upsert_v2` is on.
 - **Persist sink.** The sink already writes a concatenation of the ok and
   error streams. The streaming path joins that concatenation. The sink mints
   batch descriptions from the frontier of its whole input, so it appends `T`
@@ -305,8 +305,8 @@ question.
   `WITH (...)` options. One token of lookahead distinguishes `WITH INGESTION`
   from `WITH (`. The pretty printer prints the clause.
 - **Planning** (`plan_create_table_from_source`). Accept the clause only for
-  PostgreSQL exports and behind the `enable_postgres_ingestion_time` feature
-  flag, off by default. Resolve the primary key as above, append the
+  PostgreSQL exports, behind the `enable_postgres_ingestion_time` feature
+  flag (off by default), and only while `enable_upsert_v2` is on. Resolve the primary key as above, append the
   `mz_timestamp` column (default name `ingestion_time`), and declare the
   primary key as a relation key.
 - **Envelope.** `UpsertStyle::FromDiffs`, reusing
@@ -555,5 +555,5 @@ sink do, can keep stamps across restarts.
 - Does the reclock operator's in-memory stash hold large transactions in
   practice, and should it spill?
 - Is restamping on a no-op update acceptable to sync engine users?
-- Should these exports force upsert v2 while `enable_upsert_v2` defaults off,
-  or should the feature wait for v2 to become the default?
+- Requiring `enable_upsert_v2` ties this feature to upsert v2's rollout.
+  Should v1 get a correction mode instead?

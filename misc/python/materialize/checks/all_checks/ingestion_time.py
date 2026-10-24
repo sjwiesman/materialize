@@ -27,6 +27,7 @@ class IngestionTime(Check):
         return Testdrive(dedent("""
             $ postgres-execute connection=postgres://mz_system:materialize@${testdrive.materialize-internal-sql-addr}
             ALTER SYSTEM SET enable_postgres_ingestion_time = true
+            ALTER SYSTEM SET enable_upsert_v2 = true
 
             $ postgres-execute connection=postgres://postgres:postgres@postgres
             CREATE USER postgres_ing_time WITH SUPERUSER PASSWORD 'postgres';

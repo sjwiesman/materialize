@@ -17,6 +17,7 @@ $ set-sql-timeout duration=60s
 
 $ postgres-execute connection=postgres://mz_system:materialize@${testdrive.materialize-internal-sql-addr}
 ALTER SYSTEM SET enable_postgres_ingestion_time = true
+ALTER SYSTEM SET enable_upsert_v2 = true
 ALTER SYSTEM SET enable_exclude_constraints_option = true
 ALTER SYSTEM SET pg_schema_validation_interval = '2s'
 
@@ -262,5 +263,12 @@ contains:not available
 
 $ postgres-execute connection=postgres://mz_system:materialize@${testdrive.materialize-internal-sql-addr}
 ALTER SYSTEM SET enable_postgres_ingestion_time = true
+ALTER SYSTEM SET enable_upsert_v2 = false
+
+! CREATE TABLE docs_v1 FROM SOURCE mz_source (REFERENCE public.docs) WITH INGESTION TIME;
+contains:WITH INGESTION TIME requires enable_upsert_v2
+
+$ postgres-execute connection=postgres://mz_system:materialize@${testdrive.materialize-internal-sql-addr}
+ALTER SYSTEM SET enable_upsert_v2 = true
 
 > DROP SOURCE mz_source CASCADE;
