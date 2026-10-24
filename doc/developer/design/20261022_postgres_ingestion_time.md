@@ -617,8 +617,8 @@ A prototype implements this design behind the feature flag: the SQL surface,
 planning and rejection cases, the streaming and marker maps, and upsert v2's
 correction mode. It passes the testdrive scenarios above. A spike of the
 rejected consolidation design preceded it and shared its SQL and planning
-half. Still missing is a test with a transaction larger than the replica's
-memory.
+half. [TODO: unverified](#todo-unverified) lists what it has not been tested
+against.
 
 ## Alternatives
 
@@ -719,6 +719,44 @@ data loses the original times on restart, because the input is read at its
 compaction frontier and every earlier update appears at that time. Only a
 writer that reads its own output back, as upsert and the materialized view
 sink do, can keep stamps across restarts.
+
+## TODO: unverified
+
+The prototype passes the parser tests, the unit tests for the stamping model
+and for v2's correction mode, and `test/pg-cdc/ingestion-time.td`. The
+following claims in this document have not been checked.
+
+- **Large transactions.** No test ingests a transaction larger than the
+  replica's memory. The prototype renders whatever stash the dyncfgs select,
+  and under production defaults nothing spills, so the success criterion is
+  not met until these exports force the chunked stash with spilling.
+- **Memory figures.** The per-marker size (55 to 65 bytes) and the table in
+  [Memory](#memory) are estimates from type sizes, not measurements.
+- **Persist lag.** The growth of the stash with pending times is derived from
+  the code, not observed.
+- **Writes racing the snapshot.** The argument that rewinds need no
+  correction is covered by a model unit test only. No testdrive writes to a
+  key while its snapshot is in progress, and no test updates a key during the
+  snapshot and again at a later time.
+- **Restarts.** The platform check
+  (`misc/python/materialize/checks/all_checks/ingestion_time.py`) has never
+  run. No test restarts the replica part way through a large transaction to
+  check that the replay produces the same output.
+- **Multiple replicas.** Definiteness, and so agreement between two replicas
+  writing the shard, is argued but not tested.
+- **Invariant violations.** A negative stored count is reported by a unit
+  test only. What the table shows after an upstream primary key violation
+  that the source does not catch has not been examined, and the planner is
+  told the primary key is a relation key, which the optimizer may rely on.
+- **Disabling upsert v2.** Turning `enable_upsert_v2` off after a table is
+  created panics rendering, which crash-loops the replica until it is turned
+  back on. This is accepted for the prototype but not tested.
+- **Metrics.** In correction mode the drain counts eligible markers and
+  output updates, but the upsert insert, update, and delete metrics stay at
+  zero, so nothing reports how many stamps were corrected.
+- **Early resolution.** [Possible enhancement: resolve markers
+  early](#possible-enhancement-resolve-markers-early) is unimplemented, and
+  its references to the upsert v2 code have not been checked.
 
 ## Open questions
 
