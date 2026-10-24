@@ -237,7 +237,10 @@ snapshot, not by the table.
 - **Upsert, unchanged.** Markers are tombstones, so upsert retracts each
   marked key's stored row at `T`, and knows nothing about stamps. Either
   implementation works, as `enable_upsert_v2` selects. v1 may process a time
-  before it completes, keeping provisional values. The first marker for a key
+  before it completes, keeping provisional values, but only when the shard's
+  upper is already `T` as the markers arrive (see
+  [Pathological upstream workloads](#pathological-upstream-workloads)). The
+  first marker for a key
   at `T` leaves the key provisionally deleted, so later markers for it at `T`
   emit nothing, and every marker carries `None`, so the order of commands
   within `T` cannot change the result.
@@ -292,6 +295,10 @@ A duplicated primary key upstream is no longer reported as an upsert error.
 It surfaces as the multiplicity mismatch above.
 
 ### Memory
+
+This section and [Space complexity](#space-complexity) describe upsert v2.
+[Pathological upstream workloads](#pathological-upstream-workloads) covers
+v1, which behaves worse for large transactions.
 
 | Component | Holds | For a 100 million row `UPDATE` |
 |---|---|---|
@@ -357,9 +364,9 @@ case for `UPDATE` and `DELETE`, holds one entry.
 | Component | Space |
 |---|---|
 | Streaming path | `O(1)` |
-| Persist sink | `O(1)` in the data: a fixed number of parts of `persist_blob_target_size` per worker |
+| Persist sink | `O(1)` in the data per pending time: a fixed number of parts of `persist_blob_target_size` per worker |
 | Reclock stash | `O(write throughput × timestamp interval)` |
-| v2 feedback trace | `O(N · R)` |
+| v2 feedback trace | `O(N · R)`, plus a transient of up to `4 · K_t · R` while a time is read back |
 | v2 stash | `O(Σ over pending times t of K_t · log M_t)` |
 | v2 drain and restamp map | `O(1)`: one probe window of keys |
 
@@ -381,8 +388,100 @@ The rejected consolidation design held
 `O(N · R + Σ over pending times of U_t · R)`, where `U_t` is the number of
 updates at `t`, in two stashes. This design replaces rows with key-only
 entries of about 60 bytes in the per-time term and bounds it by the table's
-keys rather than the transaction's updates. Spilling does not change any of these bounds. It only
-decides whether the bytes are held in memory or on the scratch disk.
+keys rather than the transaction's updates. Spilling does not change any of
+these bounds. It only decides whether the bytes are held in memory or on the
+scratch disk.
+
+#### Pathological upstream workloads
+
+An adversarial review of the pipeline from replication to the persist sink
+found the workloads below by reading the code. Each repeats on replay after a crash, so one
+that exhausts memory crash-loops the replica.
+
+**A large transaction under upsert v1.** A bulk `UPDATE` or `DELETE` of
+10⁸ rows, or a hot key changed 10⁷ times. The replication operator holds its
+capability at the LSN of its last yield for the whole transaction
+(`replication.rs`). If a remap binding falls inside the transaction, which on
+a quiet system is roughly as likely as not, the reclocked frontier stays
+below `T` until the commit, so the shard's upper cannot reach `T` and v1
+cannot process `T` early. v1 then holds, transiently and all at once:
+
+- every marker in an unconsolidated `Vec` (`upsert_continual_feedback.rs`,
+  `stage_input`), one per retraction rather than per key, about 90 bytes
+  each,
+- a second copy of all of `T`'s markers, extracted into `eligible_updates` by
+  one drain,
+- the stored row of every touched key, read by one `multi_get` into
+  `commands_state`,
+- every output retraction in `output_updates` before any is emitted.
+
+The peak is about `M_t` markers plus twice the touched rows, around 50 GB for
+a rewrite of a 20 GB table, on top of v1's state. Hot keys make it worse,
+because v1's stash grows with `M_t` rather than `K_t`.
+
+Upsert v2 behaves better for the same transaction. Its chunker consolidates
+markers per `(key, time)`, so the stash grows with `K_t` rather than `M_t`.
+Its drain probes the trace 1024 keys at a time (`PROBE_WINDOW`) and emits
+each window with `give_fueled` before reading the next, so the drain holds
+one window of rows and output, and the stored rows are read from the trace
+that v2 keeps anyway. v2's memory is dominated by the table it already holds
+(`O(N · R)`), not by the transaction. Under production defaults that trace and
+the stash are still resident, so v2 bounds a large transaction by the table
+but does not make it free.
+
+Mitigations: render these exports with upsert v2 whatever
+`enable_upsert_v2` says, or drain a tombstone-only time in v1 in chunks by
+key range. The latter is safe because a tombstone-only drain writes no
+state, which is what v1's rule against repeated drains of a time protects.
+
+**Catch-up after a backlog.** After a long transaction, a persist slowdown,
+or a slow replica, upstream keeps committing and the backlog spreads over many
+times. Both upsert implementations process one time per round trip through
+persist, while the streaming path runs ahead to the input frontier. The
+persist sink keeps one batch builder per pending time and spills a builder
+only at `persist_blob_target_size` (128 MiB), and a second of writes is far
+below that, so the streaming path's whole backlog stays resident. Plain
+PostgreSQL tables write one batch across all pending times and do not hit
+this. v2 also re-seals its whole stash once per drained time, which costs
+quadratic CPU over the backlog. Mitigation: backpressure the source on the
+number of pending builders. Grouping times into one batch description does
+not work, because upsert needs the shard's upper at each time to drain it.
+
+**Downtime.** No probes run while Materialize is down, so on restart the
+whole backlog in the replication slot reclocks to one time. Every single-time
+bound above then covers the whole outage, and v1 hits the large transaction
+case every time. This is likely the first shape operators meet after an
+incident. The mitigations are those of the two cases above.
+
+**Read-back amplification.** At `T` the shard holds `-(pre, T) +(final, T)`
+from the streaming path and `+(pre, T) -(pre, s)` from the correction. The
+replication operator spreads rows over workers in blocks while upsert's
+output is keyed, so the cancelling pair `-(pre, T) +(pre, T)` usually lands
+in different parts and stays in the shard until compaction. After hydration
+the feedback `persist_source` has no flow control, so v2's feedback
+arrangement can transiently hold up to `4 · K_t · R` on top of the trace, up
+to five times the table for a full-table update. v1 copies every key and
+time it reads back before consolidating. Indexes and materialized views on
+the table ingest the doubled updates too. Mitigation: exchange the streaming
+path by key before the sink so the pair meets in one builder, at the cost of
+a full-row exchange.
+
+**Writes during a long snapshot.** Every update or delete between the
+slot's LSN and the snapshot's LSN is rewound to the snapshot's time, and its
+retraction becomes a marker that finds nothing. This is bounded by the write
+rate times the snapshot's duration, and is held in v2's in-memory stash or as
+provisional tombstones in v1's state.
+
+**Leftover v1 state.** A marker for a key that has no stored row, from the
+`D_t` keys or from rewinds, makes v1 write a provisional tombstone. The
+feedback's `+1` and `-1` for the key merge without deleting the entry, so
+each such key leaves a zeroed entry in v1's state, on disk with a scratch
+directory and in memory without one. Deleted keys of other upsert sources
+behave the same, but staging-table patterns make it frequent here.
+
+The replication operator, reclocking (beyond one probe interval), the
+snapshot operator, and the stamp and restamp maps were checked and hold no
+transaction-sized state.
 
 ### Changes by component
 
@@ -752,6 +851,9 @@ following claims in this document have not been checked.
   read from v1's code, and the memory analysis covers only v2. v1 keeps
   per-key state in memory or RocksDB, and what its provisional values cost
   for keys inserted and deleted within a transaction has not been measured.
+- **Pathological workloads.** The cases in [Pathological upstream
+  workloads](#pathological-upstream-workloads) come from reading the code.
+  None has been reproduced.
 - **Switching implementations.** Flipping `enable_upsert_v2` while a table
   exists switches it on the next render. Both rehydrate from the shard, but
   no test does this.
