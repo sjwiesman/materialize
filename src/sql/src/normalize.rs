@@ -324,6 +324,7 @@ pub fn create_statement(
             format: _,
             include_metadata: _,
             envelope: _,
+            ingestion_time: _,
             with_options: _,
         }) => {
             *name = allocate_name(name)?;

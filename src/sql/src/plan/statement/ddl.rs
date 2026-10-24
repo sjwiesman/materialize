@@ -1776,8 +1776,13 @@ pub fn plan_create_table_from_source(
         envelope,
         format,
         include_metadata,
+        ingestion_time,
         with_options,
     } = &stmt;
+
+    if ingestion_time.is_some() {
+        bail_unsupported!("WITH INGESTION TIME");
+    }
 
     let envelope = envelope.clone().unwrap_or(ast::SourceEnvelope::None);
 
