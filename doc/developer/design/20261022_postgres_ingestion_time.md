@@ -172,9 +172,9 @@ table's persist sink.
 1. **Streaming path.** A stateless map turns each change into `-(old, T)` and
    `+(new, T)`, stamping every row with `T`. Rows flow straight to the persist
    sink, which writes them to blob storage as they arrive.
-2. **Correction path.** A second map turns each change into a key-only marker
-   for its key at `T`. Upsert v2's stash consolidates markers per
-   `(key, time)`, leaving one per touched key. When `T` becomes eligible under
+2. **Correction path.** A second map turns each retraction into a key-only
+   marker for its key at `T`. Upsert v2's stash consolidates markers per
+   `(key, time)`, leaving one per retracted key. When `T` becomes eligible under
    v2's existing rule (the shard's upper is `T` and the input has passed `T`),
    v2 looks up each marked key in its feedback trace. If the key had a row
    `(pre, s)` before `T`, v2 emits `+(pre, T)` and `-(pre, s)`. If it had none,
@@ -210,20 +210,24 @@ The cases that complicated earlier designs need no special handling.
 | Key change `k1 → k2` | `-(r1,T)` on `k1`, `+(r2,T)` on `k2` | on `k1` only | `-(r1,s1) +(r2,T)` |
 | Snapshot and rewinds at the snapshot's time | signed diffs | nothing, no prior rows | the snapshot as of the slot |
 
-Snapshot rewinds are ordinary signed diffs here, so the snapshot needs no
-special ordering. A key that does not exist before the snapshot's time has
-nothing to correct, and the export's shard is empty before that time, so
-snapshot rows never need a marker. The PostgreSQL snapshot operator marks them
-in their metadata so that the marker path skips them, which keeps the snapshot
-out of upsert's stash entirely. Rewinds are not marked. Their markers find
-nothing either, but they are few.
+Only retractions need markers. A key needs a correction only if it had a
+stored row before `T`, and the first change at `T` to such a key retracts that
+row, because every change carries its exact old row. A key with only
+insertions at `T` had no stored row, so a marker would find nothing. Bulk
+inserts therefore add nothing to upsert's stash.
+
+The snapshot needs no special handling. Its rows are insertions, so they get
+no markers, and its rewinds are ordinary signed diffs. The negative halves of
+rewinds get markers, which find nothing because the export's shard is empty
+before the snapshot's time. They are bounded by the writes during the
+snapshot, not by the table.
 
 ### Rendering
 
 - **Streaming map.** Appends `Datum::MzTimestamp(T)` to each decoded row and
   keeps the diff's sign. It holds no state.
 - **Marker map.** Emits `(UpsertKey, value: None)` with diff `+1` for each
-  change except snapshot rows. The key is `UpsertKey::from_value(row, key_indices)`, which is the
+  update with a negative diff. The key is `UpsertKey::from_value(row, key_indices)`, which is the
   key v2's feedback trace uses for the stamped rows, because the stamp is
   appended after the key columns.
 - **Upsert v2 in correction mode.** Markers reuse the stash's existing diff
@@ -289,12 +293,15 @@ It surfaces as the multiplicity mismatch above.
 |---|---|---|
 | Streaming path | nothing | none |
 | Persist sink | the part being written | about `persist_blob_target_size`, the rest in blob storage |
-| v2 stash | one marker per touched key, about 55 to 65 bytes each | about 6 to 8 GB |
+| v2 stash | one marker per retracted key, about 55 to 65 bytes each | about 6 to 8 GB |
 | v2 feedback trace | the table's current rows | the table's size, about 23 GB at 200-byte rows |
 
-The stash is bounded by the number of keys a time touches, not by the
-transaction's rows, and markers for one key at one time consolidate. The
-initial snapshot adds no markers. Under production defaults
+The stash is bounded by the number of keys a time retracts, not by the
+transaction's rows, and markers for one key at one time consolidate. A
+transaction can only retract keys that existed before it or that it inserted
+itself, so for a single time the stash is bounded by the table's keys plus the
+keys the transaction both inserts and deletes. Inserts and the initial
+snapshot add no markers. Under production defaults
 (`enable_upsert_paged_spill` off) neither the stash nor the feedback trace
 leaves memory, so a transaction that touches enough keys can still exhaust a
 replica, and its replay after a restart fails the same way. Meeting the
