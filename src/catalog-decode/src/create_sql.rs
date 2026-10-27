@@ -493,6 +493,7 @@ pub fn item_details(a: &str) -> Result<serde_json::Value, String> {
                         let envelope_type = match mode {
                             IcebergSinkMode::Upsert => "upsert",
                             IcebergSinkMode::Append => "append",
+                            IcebergSinkMode::ScdType2 { .. } => "scd type 2",
                         };
                         info.insert("envelope_type", json!(envelope_type));
                     }
@@ -1786,6 +1787,13 @@ mod tests {
         let out = super::item_details(&sql).expect("ok");
         // `append` is reachable only through an iceberg sink's MODE.
         assert_eq!(out["envelope_type"], json!("append"));
+    }
+
+    #[mz_ore::test]
+    fn sink_iceberg_scd_type_2_mode() {
+        let sql = iceberg_sink_sql("SCD TYPE 2 (TIMESTAMP COLUMN = effective_at)");
+        let out = super::item_details(&sql).expect("ok");
+        assert_eq!(out["envelope_type"], json!("scd type 2"));
     }
 
     #[mz_ore::test]

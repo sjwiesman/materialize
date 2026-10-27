@@ -204,6 +204,16 @@ def workflow_mode_append(c: Composition) -> None:
     )
 
 
+def workflow_mode_scd_type_2(c: Composition) -> None:
+    key = _setup(c)
+
+    c.run_testdrive_files(
+        f"--var=s3-access-key={key}",
+        "--var=aws-endpoint=minio:9000",
+        "scd-type-2.td",
+    )
+
+
 def workflow_idle_gap(c: Composition) -> None:
     """A caught-up Iceberg sink whose input goes quiet and then receives a
     write must stay healthy. Differential's arrange leaves a gap in the emitted

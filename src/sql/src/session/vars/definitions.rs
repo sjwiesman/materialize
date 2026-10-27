@@ -2247,6 +2247,12 @@ feature_flags!(
         enable_for_item_parsing: true,
     },
     {
+        name: enable_iceberg_scd_type_2,
+        desc: "MODE SCD TYPE 2 for Iceberg sinks",
+        default: false,
+        enable_for_item_parsing: true,
+    },
+    {
         name: enable_metric_sink,
         desc: "CREATE METRIC SINK",
         default: true,

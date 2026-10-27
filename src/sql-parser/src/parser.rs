@@ -2647,8 +2647,27 @@ impl<'a> Parser<'a> {
             Ok(IcebergSinkMode::Upsert)
         } else if self.parse_keyword(APPEND) {
             Ok(IcebergSinkMode::Append)
+        } else if self.parse_keywords(&[SCD, TYPE]) {
+            match self.next_token() {
+                Some(Token::Number(n)) if n == "2" => {}
+                other => return self.expected(self.peek_prev_pos(), "2", other),
+            }
+            let timestamp_column = if self.consume_token(&Token::LParen) {
+                self.expect_keywords(&[TIMESTAMP, COLUMN])?;
+                self.expect_token(&Token::Eq)?;
+                let column = self.parse_identifier()?;
+                self.expect_token(&Token::RParen)?;
+                Some(column)
+            } else {
+                None
+            };
+            Ok(IcebergSinkMode::ScdType2 { timestamp_column })
         } else {
-            self.expected(self.peek_pos(), "UPSERT, APPEND", self.peek_token())
+            self.expected(
+                self.peek_pos(),
+                "UPSERT, APPEND, or SCD TYPE 2",
+                self.peek_token(),
+            )
         }
     }
 

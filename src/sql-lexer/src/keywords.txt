@@ -434,6 +434,7 @@ Rules
 Sasl
 Scale
 Scaling
+Scd
 Schedule
 Schema
 Schemas

@@ -802,6 +802,10 @@ impl_display!(SinkEnvelope);
 pub enum IcebergSinkMode {
     Upsert,
     Append,
+    ScdType2 {
+        /// Overrides the name of the column holding each version's start timestamp.
+        timestamp_column: Option<Ident>,
+    },
 }
 
 impl AstDisplay for IcebergSinkMode {
@@ -812,6 +816,14 @@ impl AstDisplay for IcebergSinkMode {
             }
             Self::Append => {
                 f.write_str("APPEND");
+            }
+            Self::ScdType2 { timestamp_column } => {
+                f.write_str("SCD TYPE 2");
+                if let Some(column) = timestamp_column {
+                    f.write_str(" (TIMESTAMP COLUMN = ");
+                    f.write_node(column);
+                    f.write_str(")");
+                }
             }
         }
     }

@@ -131,6 +131,8 @@ pub enum SinkEnvelope {
     Upsert,
     /// Only used for Iceberg.
     Append,
+    /// Only used for Iceberg.
+    ScdType2,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -665,6 +667,9 @@ pub const MAX_S3_SINK_FILE_SIZE: ByteSize = ByteSize::gb(4);
 pub const ICEBERG_APPEND_DIFF_COLUMN: &str = "_mz_diff";
 /// Column name appended by MODE APPEND Iceberg sinks to record the logical timestamp.
 pub const ICEBERG_APPEND_TIMESTAMP_COLUMN: &str = "_mz_timestamp";
+/// Default name of the column MODE SCD TYPE 2 Iceberg sinks append to record each version's
+/// start timestamp.
+pub const ICEBERG_SCD_TYPE2_DEFAULT_TIMESTAMP_COLUMN: &str = "valid_from";
 
 /// The precision needed to store all UInt64 values in a Decimal128.
 /// UInt64 max value is 18,446,744,073,709,551,615 which has 20 digits.
@@ -731,6 +736,7 @@ pub struct IcebergSinkConnection<C: ConnectionAccess = InlinedConnection> {
     pub key_desc_and_indices: Option<(RelationDesc, Vec<usize>)>,
     pub namespace: String,
     pub table: String,
+    pub scd_timestamp_column: Option<String>,
 }
 
 impl<C: ConnectionAccess> IcebergSinkConnection<C> {
@@ -751,6 +757,7 @@ impl<C: ConnectionAccess> IcebergSinkConnection<C> {
             key_desc_and_indices,
             namespace,
             table,
+            scd_timestamp_column,
         } = self;
 
         let compatibility_checks = [
@@ -793,6 +800,10 @@ impl<C: ConnectionAccess> IcebergSinkConnection<C> {
             ),
             (namespace == &other.namespace, "namespace"),
             (table == &other.table, "table"),
+            (
+                scd_timestamp_column == &other.scd_timestamp_column,
+                "scd_timestamp_column",
+            ),
         ];
         for (compatible, field) in compatibility_checks {
             if !compatible {
@@ -823,6 +834,7 @@ impl<R: ConnectionResolver> IntoInlineConnection<IcebergSinkConnection, R>
             key_desc_and_indices,
             namespace,
             table,
+            scd_timestamp_column,
         } = self;
         IcebergSinkConnection {
             catalog_connection_id,
@@ -835,6 +847,7 @@ impl<R: ConnectionResolver> IntoInlineConnection<IcebergSinkConnection, R>
             key_desc_and_indices,
             namespace,
             table,
+            scd_timestamp_column,
         }
     }
 }

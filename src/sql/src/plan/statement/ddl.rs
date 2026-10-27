@@ -170,9 +170,9 @@ use crate::plan::{
 };
 use crate::session::vars::{
     self, ENABLE_AUTO_SCALING_STRATEGY, ENABLE_CLUSTER_SCHEDULE_REFRESH,
-    ENABLE_COLLECTION_PARTITION_BY, ENABLE_CREATE_TABLE_FROM_SOURCE, ENABLE_KAFKA_SINK_HEADERS,
-    ENABLE_METRIC_SINK, ENABLE_REFRESH_EVERY_MVS, ENABLE_REPLICA_TARGETED_MATERIALIZED_VIEWS,
-    VarInput,
+    ENABLE_COLLECTION_PARTITION_BY, ENABLE_CREATE_TABLE_FROM_SOURCE, ENABLE_ICEBERG_SCD_TYPE_2,
+    ENABLE_KAFKA_SINK_HEADERS, ENABLE_METRIC_SINK, ENABLE_REFRESH_EVERY_MVS,
+    ENABLE_REPLICA_TARGETED_MATERIALIZED_VIEWS, VarInput,
 };
 use crate::{names, parse};
 
@@ -3282,6 +3282,18 @@ fn plan_sink(
     };
     let name = scx.allocate_qualified_name(normalize::unresolved_item_name(name)?)?;
 
+    let scd_timestamp_column = match &mode {
+        Some(ast::IcebergSinkMode::ScdType2 { timestamp_column }) => Some(
+            timestamp_column
+                .as_ref()
+                .map(|c| normalize::column_name(c.clone()).as_str().to_owned())
+                .unwrap_or_else(|| {
+                    mz_storage_types::sinks::ICEBERG_SCD_TYPE2_DEFAULT_TIMESTAMP_COLUMN.into()
+                }),
+        ),
+        _ => None,
+    };
+
     let envelope = match (&connection, envelope, mode) {
         // Kafka sinks use ENVELOPE
         (CreateSinkConnection::Kafka { .. }, Some(ast::SinkEnvelope::Upsert), None) => {
@@ -3302,6 +3314,14 @@ fn plan_sink(
         }
         (CreateSinkConnection::Iceberg { .. }, None, Some(ast::IcebergSinkMode::Append)) => {
             SinkEnvelope::Append
+        }
+        (
+            CreateSinkConnection::Iceberg { .. },
+            None,
+            Some(ast::IcebergSinkMode::ScdType2 { .. }),
+        ) => {
+            scx.require_feature_flag(&ENABLE_ICEBERG_SCD_TYPE_2)?;
+            SinkEnvelope::ScdType2
         }
         (CreateSinkConnection::Iceberg { .. }, None, None) => {
             sql_bail!("MODE clause is required")
@@ -3375,8 +3395,11 @@ fn plan_sink(
                 .collect::<Result<Vec<_>, _>>()?;
 
             // Iceberg equality deletes require primitive, non-float key columns.
-            // Use an allow-list so that new types are rejected by default.
-            if matches!(&connection, CreateSinkConnection::Iceberg { .. }) {
+            // Use an allow-list so that new types are rejected by default. MODE SCD TYPE 2
+            // never writes equality deletes, so its keys are unrestricted.
+            if matches!(&connection, CreateSinkConnection::Iceberg { .. })
+                && envelope == SinkEnvelope::Upsert
+            {
                 let cols: Vec<_> = desc.iter().collect();
                 for &idx in &indices {
                     let (col_name, col_type) = cols[idx];
@@ -3433,7 +3456,7 @@ fn plan_sink(
                 .iter()
                 .any(|key_columns| key_columns.iter().all(|column| indices.contains(column)));
 
-            if !is_valid_key && envelope == SinkEnvelope::Upsert {
+            if !is_valid_key && matches!(envelope, SinkEnvelope::Upsert | SinkEnvelope::ScdType2) {
                 if key.not_enforced {
                     scx.catalog
                         .add_notice(PlanNotice::UpsertSinkKeyNotEnforced {
@@ -3487,6 +3510,17 @@ fn plan_sink(
         }
     }
 
+    // Reject input columns that clash with the column MODE SCD TYPE 2 adds to the Iceberg table.
+    if let Some(timestamp_column) = &scd_timestamp_column {
+        if desc.iter_names().any(|c| c.as_str() == timestamp_column) {
+            sql_bail!(
+                "column {} conflicts with the timestamp column that MODE SCD TYPE 2 \
+                 adds to the Iceberg table; choose another name with TIMESTAMP COLUMN",
+                timestamp_column.quoted()
+            );
+        }
+    }
+
     let headers_index = match &connection {
         CreateSinkConnection::Kafka {
             headers: Some(headers),
@@ -3495,7 +3529,7 @@ fn plan_sink(
             scx.require_feature_flag(&ENABLE_KAFKA_SINK_HEADERS)?;
 
             match envelope {
-                SinkEnvelope::Upsert | SinkEnvelope::Append => (),
+                SinkEnvelope::Upsert | SinkEnvelope::Append | SinkEnvelope::ScdType2 => (),
                 SinkEnvelope::Debezium => {
                     sql_bail!("HEADERS option is not supported with ENVELOPE DEBEZIUM")
                 }
@@ -3537,8 +3571,14 @@ fn plan_sink(
         (RelationDesc::new(typ, names), key_indices)
     });
 
-    if key_desc_and_indices.is_none() && envelope == SinkEnvelope::Upsert {
-        return Err(PlanError::UpsertSinkWithoutKey);
+    if key_desc_and_indices.is_none() {
+        match envelope {
+            SinkEnvelope::Upsert => return Err(PlanError::UpsertSinkWithoutKey),
+            SinkEnvelope::ScdType2 => {
+                sql_bail!("MODE SCD TYPE 2 Iceberg sinks must specify a KEY")
+            }
+            SinkEnvelope::Debezium | SinkEnvelope::Append => {}
+        }
     }
 
     let CreateSinkOptionExtracted {
@@ -3581,6 +3621,7 @@ fn plan_sink(
             key_desc_and_indices,
             commit_interval,
             &desc,
+            scd_timestamp_column,
         )?,
     };
 
@@ -3752,6 +3793,7 @@ fn iceberg_sink_builder(
     key_desc_and_indices: Option<(RelationDesc, Vec<usize>)>,
     commit_interval: Option<Duration>,
     desc: &RelationDesc,
+    scd_timestamp_column: Option<String>,
 ) -> Result<StorageSinkConnection<ReferencedConnection>, PlanError> {
     // Reject types that arrow-rs's parquet writer cannot handle, before
     // sink creation. Pass the iceberg overrides so types iceberg remaps
@@ -3821,6 +3863,7 @@ fn iceberg_sink_builder(
         namespace,
         relation_key_indices,
         key_desc_and_indices,
+        scd_timestamp_column,
     }))
 }
 
@@ -4147,7 +4190,7 @@ fn kafka_sink_builder(
             let mut scope = Scope::from_source(None, value_desc.iter_names());
 
             match envelope {
-                SinkEnvelope::Upsert | SinkEnvelope::Append => (),
+                SinkEnvelope::Upsert | SinkEnvelope::Append | SinkEnvelope::ScdType2 => (),
                 SinkEnvelope::Debezium => {
                     let key_indices: HashSet<_> = key_desc_and_indices
                         .as_ref()

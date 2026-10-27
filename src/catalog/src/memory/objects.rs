@@ -1335,6 +1335,7 @@ impl Sink {
             SinkEnvelope::Debezium => Some("debezium"),
             SinkEnvelope::Upsert => Some("upsert"),
             SinkEnvelope::Append => Some("append"),
+            SinkEnvelope::ScdType2 => Some("scd type 2"),
         }
     }
 

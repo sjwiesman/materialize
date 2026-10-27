@@ -1672,8 +1672,8 @@ fn encode_collection<'scope>(
                                     dbz_format(&mut row_buf.packer(), value);
                                     Some(row_buf.clone())
                                 }
-                                SinkEnvelope::Append => {
-                                    unreachable!("Append envelope is not valid for Kafka sinks")
+                                SinkEnvelope::Append | SinkEnvelope::ScdType2 => {
+                                    unreachable!("{envelope:?} envelope is not valid for Kafka sinks")
                                 }
                             };
                             let value = value.map(|value| value_encoder.encode_unchecked(value));

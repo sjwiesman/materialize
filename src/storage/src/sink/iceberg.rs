@@ -135,7 +135,7 @@ use mz_ore::retry::{Retry, RetryResult};
 use mz_persist_client::Diagnostics;
 use mz_persist_client::write::WriteHandle;
 use mz_persist_types::codec_impls::UnitSchema;
-use mz_repr::{Diff, GlobalId, Row, Timestamp};
+use mz_repr::{Datum, Diff, GlobalId, Row, Timestamp};
 use mz_row_spine::ArcBatch;
 use mz_storage_types::StorageDiff;
 use mz_storage_types::configuration::StorageConfiguration;
@@ -485,6 +485,92 @@ impl EnvelopeHandler for AppendEnvelopeHandler {
 
         RecordBatch::try_new(Arc::clone(&self.ctx.arrow_schema), columns)
             .context("Failed to create append record batch")
+    }
+}
+
+struct ScdType2EnvelopeHandler {
+    ctx: WriterContext,
+    /// Arrow schema with only user columns (no timestamp column), used by [`ArrowBuilder`] to
+    /// serialize row data before the timestamp column is appended.
+    user_schema: Arc<ArrowSchema>,
+    /// `is_key[i]` is true when column `i` is part of the sink key. Tombstones keep these
+    /// columns and null out the rest.
+    is_key: Vec<bool>,
+}
+
+impl EnvelopeHandler for ScdType2EnvelopeHandler {
+    fn new(
+        ctx: WriterContext,
+        connection: &IcebergSinkConnection,
+        _materialize_arrow_schema: &Arc<ArrowSchema>,
+    ) -> anyhow::Result<Self> {
+        let (_, key_indices) = connection
+            .key_desc_and_indices
+            .as_ref()
+            .context("MODE SCD TYPE 2 requires a sink key")?;
+
+        // arrow_schema already includes the timestamp column (added in render_sink); strip it
+        // so ArrowBuilder only processes the user columns.
+        let n = ctx.arrow_schema.fields().len().saturating_sub(1);
+        let user_schema = Arc::new(ArrowSchema::new(ctx.arrow_schema.fields()[..n].to_vec()));
+
+        let mut is_key = vec![false; n];
+        for &i in key_indices {
+            is_key[i] = true;
+        }
+
+        Ok(Self {
+            ctx,
+            user_schema,
+            is_key,
+        })
+    }
+
+    async fn create_writer(&self, _is_snapshot: bool) -> anyhow::Result<Box<dyn IcebergWriter>> {
+        create_data_file_writer(&self.ctx).await
+    }
+
+    fn row_to_batch(&self, diff_pair: DiffPair<Row>, ts: Timestamp) -> anyhow::Result<RecordBatch> {
+        let mut builder = ArrowBuilder::new_with_schema(
+            Arc::clone(&self.user_schema),
+            DEFAULT_ARRAY_BUILDER_ITEM_CAPACITY,
+            DEFAULT_ARRAY_BUILDER_DATA_CAPACITY,
+        )
+        .context("Failed to create builder")?;
+
+        let row = scd_type2_version(diff_pair, &self.is_key);
+        let n = usize::from(row.is_some());
+        if let Some(row) = row {
+            builder
+                .add_row(&row)
+                .context("Failed to add row to builder")?;
+        }
+
+        let batch = builder
+            .to_record_batch()
+            .context("Failed to create record batch")?;
+
+        let ts_i64 = i64::try_from(u64::from(ts)).unwrap_or(i64::MAX);
+        let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+        columns.push(Arc::new(Int64Array::from(vec![ts_i64; n])));
+
+        RecordBatch::try_new(Arc::clone(&self.ctx.arrow_schema), columns)
+            .context("Failed to create SCD type 2 record batch")
+    }
+}
+
+/// The row MODE SCD TYPE 2 writes for one `(key, timestamp)` update: the new version, or for
+/// a delete a tombstone holding the key columns of the old version with every other column
+/// null.
+fn scd_type2_version(diff_pair: DiffPair<Row>, is_key: &[bool]) -> Option<Row> {
+    match (diff_pair.after, diff_pair.before) {
+        (Some(after), _) => Some(after),
+        (None, Some(before)) => {
+            Some(Row::pack(before.iter().zip_eq(is_key).map(
+                |(datum, is_key)| if *is_key { datum } else { Datum::Null },
+            )))
+        }
+        (None, None) => None,
     }
 }
 
@@ -1210,6 +1296,35 @@ fn build_schema_with_append_columns(schema: &ArrowSchema) -> ArrowSchema {
     )));
     fields.push(Arc::new(Field::new(
         ICEBERG_APPEND_TIMESTAMP_COLUMN,
+        DataType::Int64,
+        false,
+    )));
+
+    add_field_ids_to_arrow_schema(ArrowSchema::new(fields).with_metadata(schema.metadata().clone()))
+}
+
+/// Build the Arrow schema for MODE SCD TYPE 2: every non-key column becomes nullable, so
+/// tombstones can null them out, and an Int64 timestamp column is appended. Parquet field IDs
+/// are reassigned as in [`build_schema_with_append_columns`].
+fn build_schema_for_scd_type2(
+    schema: &ArrowSchema,
+    key_indices: &[usize],
+    timestamp_column: &str,
+) -> ArrowSchema {
+    let mut fields: Vec<Arc<Field>> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            if key_indices.contains(&i) {
+                Arc::clone(field)
+            } else {
+                Arc::new(field.as_ref().clone().with_nullable(true))
+            }
+        })
+        .collect();
+    fields.push(Arc::new(Field::new(
+        timestamp_column,
         DataType::Int64,
         false,
     )));
@@ -2159,6 +2274,64 @@ mod tests {
         assert_eq!(
             data_file_location(None, "s3://bucket/metadata/tbl"),
             "s3://bucket/metadata/tbl/data"
+        );
+    }
+
+    #[mz_ore::test]
+    fn test_scd_type2_schema_nulls_non_key_columns() {
+        let desc = mz_repr::RelationDesc::builder()
+            .with_column("id", SqlScalarType::Int32.nullable(false))
+            .with_column("name", SqlScalarType::String.nullable(false))
+            .with_column("score", SqlScalarType::Int64.nullable(false))
+            .finish();
+        let (arrow_schema, _) =
+            relation_desc_to_iceberg_schema(&desc).expect("schema conversion should succeed");
+
+        let schema = build_schema_for_scd_type2(&arrow_schema, &[0], "effective_at");
+
+        let fields: Vec<_> = schema
+            .fields()
+            .iter()
+            .map(|f| (f.name().as_str(), f.is_nullable()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("id", false),
+                ("name", true),
+                ("score", true),
+                ("effective_at", false),
+            ]
+        );
+        arrow_schema_to_schema(&schema).expect("schema should carry valid field IDs");
+    }
+
+    #[mz_ore::test]
+    fn test_scd_type2_version() {
+        let is_key = [true, false];
+        let old = Row::pack_slice(&[Datum::Int32(1), Datum::String("alice")]);
+        let new = Row::pack_slice(&[Datum::Int32(1), Datum::String("alicia")]);
+
+        let insert = DiffPair {
+            before: None,
+            after: Some(old.clone()),
+        };
+        assert_eq!(scd_type2_version(insert, &is_key), Some(old.clone()));
+
+        let update = DiffPair {
+            before: Some(old.clone()),
+            after: Some(new.clone()),
+        };
+        assert_eq!(scd_type2_version(update, &is_key), Some(new));
+
+        let delete = DiffPair {
+            before: Some(old),
+            after: None,
+        };
+        assert_eq!(
+            scd_type2_version(delete, &is_key),
+            Some(Row::pack_slice(&[Datum::Int32(1), Datum::Null])),
+            "a delete writes a tombstone that keeps only the key columns"
         );
     }
 
@@ -3251,6 +3424,26 @@ impl<'scope> SinkRender<'scope> for IcebergSinkConnection {
                     );
 
                     (extended_arrow, extended_iceberg)
+                } else if sink.envelope == SinkEnvelope::ScdType2 {
+                    let (_, key_indices) = self
+                        .key_desc_and_indices
+                        .as_ref()
+                        .context("MODE SCD TYPE 2 requires a sink key")?;
+                    let timestamp_column = self
+                        .scd_timestamp_column
+                        .as_deref()
+                        .context("MODE SCD TYPE 2 requires a timestamp column")?;
+                    let extended_arrow = build_schema_for_scd_type2(
+                        &arrow_schema_with_ids,
+                        key_indices,
+                        timestamp_column,
+                    );
+                    let extended_iceberg = Arc::new(
+                        arrow_schema_to_schema_auto_assign_ids(&extended_arrow)
+                            .context("Failed to build Iceberg schema for SCD type 2")?,
+                    );
+
+                    (extended_arrow, extended_iceberg)
                 } else {
                     (arrow_schema_with_ids, iceberg_schema)
                 })
@@ -3325,8 +3518,23 @@ impl<'scope> SinkRender<'scope> for IcebergSinkConnection {
                 Arc::clone(&metrics),
                 statistics.clone(),
             ),
+            SinkEnvelope::ScdType2 => write_data_files::<ScdType2EnvelopeHandler>(
+                format!("{sink_id}-write-data-files"),
+                batches,
+                batch_descriptions.clone(),
+                table_ready.clone(),
+                sink_id,
+                sink.from,
+                key_is_synthetic,
+                sink.as_of.clone(),
+                connection_for_writer,
+                storage_state.storage_configuration.clone(),
+                Arc::new(arrow_schema_with_ids.clone()),
+                Arc::clone(&metrics),
+                statistics.clone(),
+            ),
             SinkEnvelope::Debezium => {
-                unreachable!("Iceberg sink only supports Upsert and Append envelopes")
+                unreachable!("Iceberg sink only supports Upsert, Append, and ScdType2 envelopes")
             }
         };
 
