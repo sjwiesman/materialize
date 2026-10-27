@@ -395,6 +395,30 @@ impl EnvelopeHandler for UpsertEnvelopeHandler {
     }
 }
 
+/// Creates a writer that only produces data files, never delete files, so every commit
+/// of its output is a pure append to the table.
+async fn create_data_file_writer(ctx: &WriterContext) -> anyhow::Result<Box<dyn IcebergWriter>> {
+    let data_parquet_writer = ParquetWriterBuilder::new(
+        ctx.writer_properties.clone(),
+        Arc::clone(&ctx.current_schema),
+    )
+    .with_arrow_schema(Arc::clone(&ctx.arrow_schema))
+    .context("Arrow schema validation failed")?;
+    let data_rolling_writer = RollingFileWriterBuilder::new_with_default_file_size(
+        data_parquet_writer,
+        Arc::clone(&ctx.current_schema),
+        ctx.file_io.clone(),
+        ctx.location_generator.clone(),
+        ctx.file_name_generator.clone(),
+    );
+    Ok(Box::new(
+        DataFileWriterBuilder::new(data_rolling_writer)
+            .build(None)
+            .await
+            .context("Failed to create DataFileWriter")?,
+    ))
+}
+
 struct AppendEnvelopeHandler {
     ctx: WriterContext,
     /// Arrow schema with only user columns (no `_mz_diff`/`_mz_timestamp`), used by
@@ -421,25 +445,7 @@ impl EnvelopeHandler for AppendEnvelopeHandler {
     }
 
     async fn create_writer(&self, _is_snapshot: bool) -> anyhow::Result<Box<dyn IcebergWriter>> {
-        let data_parquet_writer = ParquetWriterBuilder::new(
-            self.ctx.writer_properties.clone(),
-            Arc::clone(&self.ctx.current_schema),
-        )
-        .with_arrow_schema(Arc::clone(&self.ctx.arrow_schema))
-        .context("Arrow schema validation failed")?;
-        let data_rolling_writer = RollingFileWriterBuilder::new_with_default_file_size(
-            data_parquet_writer,
-            Arc::clone(&self.ctx.current_schema),
-            self.ctx.file_io.clone(),
-            self.ctx.location_generator.clone(),
-            self.ctx.file_name_generator.clone(),
-        );
-        Ok(Box::new(
-            DataFileWriterBuilder::new(data_rolling_writer)
-                .build(None)
-                .await
-                .context("Failed to create DataFileWriter")?,
-        ))
+        create_data_file_writer(&self.ctx).await
     }
 
     /// Every change is written as a plain data row: the `before` half (if present) gets
