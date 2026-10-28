@@ -15,7 +15,7 @@
 
 #![recursion_limit = "256"]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -4576,4 +4576,493 @@ fn test_grant_all_on_view_suppresses_non_applicable_notice() {
             msg.message(),
         );
     }
+}
+
+/// One sync of a client against `mv`: in a single read transaction, the rows
+/// whose stamp is above `last_sync`, and the new sync point.
+fn sync_mz_updated_at(
+    client: &mut postgres::Client,
+    last_sync: u64,
+) -> (BTreeMap<i32, (String, u64)>, u64) {
+    let mut txn = client.transaction().unwrap();
+    let rows = txn
+        .query(
+            &format!(
+                "SELECT k, v, mz_updated_at(d)::text FROM mv d \
+                 WHERE mz_updated_at(d) > '{last_sync}'::mz_timestamp"
+            ),
+            &[],
+        )
+        .unwrap();
+    let now: String = txn.query_one("SELECT mz_now()::text", &[]).unwrap().get(0);
+    txn.commit().unwrap();
+    let changed = rows
+        .into_iter()
+        .map(|row| {
+            let stamp: String = row.get(2);
+            (row.get(0), (row.get(1), stamp.parse().unwrap()))
+        })
+        .collect();
+    (changed, now.parse().unwrap())
+}
+
+/// All rows of `mv` with their stamps.
+fn stamps_mz_updated_at(client: &mut postgres::Client) -> BTreeMap<i32, (String, u64)> {
+    client
+        .query("SELECT k, v, mz_updated_at(mv)::text FROM mv", &[])
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            let stamp: String = row.get(2);
+            (row.get(0), (row.get(1), stamp.parse().unwrap()))
+        })
+        .collect()
+}
+
+/// The sync query against a materialized view `WITH (PRESERVE UPDATE TIMES
+/// FOR KEY (...))` returns exactly the rows that changed since the last sync, and stamps
+/// survive compaction and an environmentd restart.
+#[mz_ore::test]
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `TLS_client_method`
+fn test_mz_updated_at_sync() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let harness = test_util::TestHarness::default()
+        .data_directory(data_dir.path())
+        .with_system_parameter_default("enable_preserve_update_times".into(), "true".into());
+
+    let stamps_before_restart = {
+        let server = harness.clone().start_blocking();
+        let mut client = server.connect(postgres::NoTls).unwrap();
+        for sql in [
+            "CREATE TABLE t (k int, v text)",
+            "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')",
+            "CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS \
+             SELECT k, max(v) AS v FROM t GROUP BY k",
+        ] {
+            client.batch_execute(sql).unwrap();
+        }
+
+        let (changed, t0) = sync_mz_updated_at(&mut client, 0);
+        assert_eq!(
+            changed.keys().copied().collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+
+        // An update, a delete, a no-op update, and an insert.
+        for sql in [
+            "UPDATE t SET v = 'b2' WHERE k = 2",
+            "DELETE FROM t WHERE k = 3",
+            "UPDATE t SET v = 'd' WHERE k = 4",
+            "INSERT INTO t VALUES (5, 'e')",
+        ] {
+            client.batch_execute(sql).unwrap();
+        }
+        let (changed, t1) = sync_mz_updated_at(&mut client, t0);
+        assert_eq!(
+            changed
+                .iter()
+                .map(|(k, (v, _))| (*k, v.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(2, "b2"), (5, "e")]
+        );
+        assert!(
+            changed
+                .values()
+                .all(|(_, stamp)| t0 < *stamp && *stamp <= t1)
+        );
+
+        // A delete and a reinsert of the identical row restamp it.
+        client.batch_execute("DELETE FROM t WHERE k = 1").unwrap();
+        client
+            .batch_execute("INSERT INTO t VALUES (1, 'a')")
+            .unwrap();
+        let (changed, t2) = sync_mz_updated_at(&mut client, t1);
+        assert_eq!(
+            changed
+                .iter()
+                .map(|(k, (v, _))| (*k, v.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "a")]
+        );
+
+        let (changed, _) = sync_mz_updated_at(&mut client, t2);
+        assert!(changed.is_empty(), "{changed:?}");
+
+        // The unchanged row keeps its original stamp.
+        let stamps = stamps_mz_updated_at(&mut client);
+        assert!(stamps[&4].1 <= t0, "{stamps:?}");
+
+        // Stamps do not move as the shard's since advances and compaction
+        // folds its batches.
+        for _ in 0..5 {
+            client
+                .batch_execute("INSERT INTO t VALUES (6, 'f')")
+                .unwrap();
+            client.batch_execute("DELETE FROM t WHERE k = 6").unwrap();
+        }
+        std::thread::sleep(Duration::from_secs(3));
+        let mut after = stamps_mz_updated_at(&mut client);
+        assert_eq!(after.remove(&6), None);
+        assert_eq!(after, stamps);
+        stamps
+    };
+
+    // Unchanged rows keep their stamps across a restart.
+    let server = harness.start_blocking();
+    let mut client = server.connect(postgres::NoTls).unwrap();
+    assert_eq!(stamps_mz_updated_at(&mut client), stamps_before_restart);
+}
+
+/// `mz_updated_at` is rejected wherever a stamped read cannot serve it, and
+/// the stamp column is invisible to every other reference to the object.
+#[mz_ore::test]
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `TLS_client_method`
+fn test_mz_updated_at_errors() {
+    let server = test_util::TestHarness::default()
+        .with_system_parameter_default("enable_preserve_update_times".into(), "true".into())
+        .start_blocking();
+    let mut client = server.connect(postgres::NoTls).unwrap();
+    client
+        .batch_execute("SET statement_timeout = '30s'")
+        .unwrap();
+    for sql in [
+        "CREATE TABLE t (k int, v text)",
+        "INSERT INTO t VALUES (1, 'a')",
+        "CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS \
+             SELECT k, max(v) AS v FROM t GROUP BY k",
+        "CREATE MATERIALIZED VIEW plain AS SELECT k, v FROM t",
+    ] {
+        client.batch_execute(sql).unwrap();
+    }
+
+    let err = |client: &mut postgres::Client, sql: &str| -> String {
+        client
+            .batch_execute(sql)
+            .expect_err(sql)
+            .as_db_error()
+            .map(|e| e.message().to_string())
+            .unwrap_or_default()
+    };
+
+    // The stamp column is not part of the object's rows.
+    let row = client.query_one("SELECT * FROM mv", &[]).unwrap();
+    assert_eq!(row.len(), 2);
+    let row = client.query_one("SELECT mv.* FROM mv", &[]).unwrap();
+    assert_eq!(row.len(), 2);
+    let row = client.query_one("SELECT mv::text FROM mv", &[]).unwrap();
+    assert_eq!(row.get::<_, String>(0), "(1,a)");
+    let row = client
+        .query_one("SELECT count(*) FROM mv NATURAL JOIN mv AS m2", &[])
+        .unwrap();
+    assert_eq!(row.get::<_, i64>(0), 1);
+
+    assert_contains!(
+        err(&mut client, "SELECT mz_updated_at(plain) FROM plain"),
+        "not a table or materialized view created WITH (PRESERVE UPDATE TIMES)"
+    );
+    assert_contains!(
+        err(&mut client, "SELECT mz_updated_at(t) FROM t"),
+        "not a table or materialized view created WITH (PRESERVE UPDATE TIMES)"
+    );
+    assert_contains!(
+        err(&mut client, "SELECT mz_updated_at(x) FROM mv"),
+        "does not name a FROM item"
+    );
+    assert_contains!(
+        err(&mut client, "SELECT mz_updated_at(mv.k) FROM mv"),
+        "expects the name or alias of a FROM item"
+    );
+    assert_contains!(
+        err(&mut client, "SELECT mz_updated_at(ROW(1)) FROM mv"),
+        "expects the name or alias of a FROM item"
+    );
+    for sql in [
+        "CREATE VIEW v AS SELECT mz_updated_at(mv) FROM mv",
+        "CREATE MATERIALIZED VIEW v AS SELECT mz_updated_at(mv) FROM mv",
+        "SUBSCRIBE (SELECT mz_updated_at(mv) FROM mv)",
+    ] {
+        assert_contains!(err(&mut client, sql), "only supported in one-shot SELECT");
+    }
+    for sql in [
+        "SELECT mz_updated_at(mv) FROM mv JOIN t USING (k)",
+        "SELECT max(mz_updated_at(mv)) FROM mv",
+        "SELECT k FROM mv WHERE mz_updated_at(mv) > (SELECT min(mz_updated_at(m2)) FROM mv m2)",
+    ] {
+        assert_contains!(err(&mut client, sql), "cannot call mz_updated_at");
+    }
+    // A filter and projection of the object alone is served, whatever the
+    // filter.
+    let row = client
+        .query_one(
+            "SELECT k FROM mv WHERE mz_updated_at(mv) > '0'::mz_timestamp AND v LIKE 'a%'",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(row.get::<_, i32>(0), 1);
+
+    // Shapes the optimizer could rewrite give each row its own stamp.
+    client
+        .batch_execute("INSERT INTO t VALUES (2, 'b')")
+        .unwrap();
+    let stamps = stamps_mz_updated_at(&mut client);
+    let (s1, s2) = (stamps[&1].1, stamps[&2].1);
+    assert!(s1 < s2, "{stamps:?}");
+    let query = |client: &mut postgres::Client, sql: &str| -> Vec<(i32, String)> {
+        client
+            .query(sql, &[])
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+    assert_eq!(
+        query(
+            &mut client,
+            "SELECT k, mz_updated_at(mv)::text || '|' || mz_updated_at(mv)::text FROM mv"
+        ),
+        vec![(1, format!("{s1}|{s1}")), (2, format!("{s2}|{s2}"))],
+    );
+    assert_eq!(
+        query(
+            &mut client,
+            &format!(
+                "SELECT k, mz_updated_at(mv)::text FROM mv \
+                 WHERE mz_updated_at(mv) > '{s1}'::mz_timestamp"
+            )
+        ),
+        vec![(2, s2.to_string())],
+    );
+    assert_eq!(
+        query(
+            &mut client,
+            "SELECT k, mz_updated_at(mv)::text FROM mv WHERE k = 2 AND v = 'b'"
+        ),
+        vec![(2, s2.to_string())],
+    );
+    assert_eq!(
+        query(
+            &mut client,
+            "SELECT k, (mz_updated_at(mv)::text::numeric + 1)::text FROM mv \
+             WHERE mz_updated_at(mv)::text::numeric + 1 > mz_updated_at(mv)::text::numeric"
+        ),
+        vec![(1, (s1 + 1).to_string()), (2, (s2 + 1).to_string())],
+    );
+
+    // The option is behind a feature flag.
+    let mut system = server.connect_internal(postgres::NoTls).unwrap();
+    system
+        .batch_execute("ALTER SYSTEM SET enable_preserve_update_times = false")
+        .unwrap();
+    assert_contains!(
+        err(
+            &mut client,
+            "CREATE MATERIALIZED VIEW mv2 WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS \
+             SELECT DISTINCT k FROM t"
+        ),
+        "PRESERVE UPDATE TIMES"
+    );
+}
+
+/// Index peeks serve the same stamps as persist peeks: for an index created
+/// after the data was written and compacted, as the index's trace merges more
+/// writes, for literal lookups, for a second index on the object, and after
+/// the index's replica restarts and rehydrates.
+#[mz_ore::test]
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `TLS_client_method`
+fn test_mz_updated_at_index() {
+    let server = test_util::TestHarness::default()
+        .with_system_parameter_default("enable_preserve_update_times".into(), "true".into())
+        .start_blocking();
+    let mut client = server.connect(postgres::NoTls).unwrap();
+    for sql in [
+        "CREATE TABLE t (k int, v text)",
+        "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')",
+        "CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS \
+             SELECT k, max(v) AS v FROM t GROUP BY k",
+        "CREATE CLUSTER idx (SIZE 'scale=1,workers=1')",
+    ] {
+        client.batch_execute(sql).unwrap();
+    }
+
+    // Writes, each followed by a sync whose point later syncs replay.
+    let mut sync_points = vec![0];
+    let write = |client: &mut postgres::Client, sync_points: &mut Vec<u64>, sql: &str| {
+        client.batch_execute(sql).unwrap();
+        let (_, now) = sync_mz_updated_at(client, 0);
+        sync_points.push(now);
+    };
+    for sql in [
+        "UPDATE t SET v = 'b2' WHERE k = 2",
+        "DELETE FROM t WHERE k = 3",
+        "UPDATE t SET v = 'd' WHERE k = 4",
+        "INSERT INTO t VALUES (5, 'e')",
+        "DELETE FROM t WHERE k = 1",
+        "INSERT INTO t VALUES (1, 'a')",
+    ] {
+        write(&mut client, &mut sync_points, sql);
+    }
+    // Let compaction fold the shard before any index exists.
+    std::thread::sleep(Duration::from_secs(3));
+
+    let uses_index = |client: &mut postgres::Client, index: &str| -> bool {
+        let plan: String = client
+            .query_one(
+                "EXPLAIN SELECT k, mz_updated_at(mv) FROM mv \
+                 WHERE mz_updated_at(mv) > '0'::mz_timestamp",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        plan.contains(index)
+    };
+    // Every sync from every recorded point, the full stamp map, and a literal
+    // lookup, on `cluster`.
+    let answers = |client: &mut postgres::Client, cluster: &str, sync_points: &[u64]| {
+        client
+            .batch_execute(&format!("SET cluster = {cluster}"))
+            .unwrap();
+        let syncs: Vec<_> = sync_points
+            .iter()
+            .map(|point| sync_mz_updated_at(client, *point).0)
+            .collect();
+        let lookup: Vec<String> = client
+            .query("SELECT mz_updated_at(mv)::text FROM mv WHERE k = 2", &[])
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        (stamps_mz_updated_at(client), syncs, lookup)
+    };
+
+    assert!(!uses_index(&mut client, "i1"));
+    let persist = answers(&mut client, "quickstart", &sync_points);
+    assert_eq!(persist.0.len(), 4, "{persist:?}");
+
+    client
+        .batch_execute("CREATE INDEX i1 IN CLUSTER idx ON mv (k)")
+        .unwrap();
+    client.batch_execute("SET cluster = idx").unwrap();
+    assert!(uses_index(&mut client, "i1"));
+    assert_eq!(answers(&mut client, "idx", &sync_points), persist);
+
+    // More writes after the index exists, so that its trace merges fold them.
+    for _ in 0..5 {
+        write(
+            &mut client,
+            &mut sync_points,
+            "INSERT INTO t VALUES (6, 'f')",
+        );
+        write(&mut client, &mut sync_points, "DELETE FROM t WHERE k = 6");
+    }
+    write(
+        &mut client,
+        &mut sync_points,
+        "UPDATE t SET v = 'e2' WHERE k = 5",
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    let persist = answers(&mut client, "quickstart", &sync_points);
+    assert_eq!(answers(&mut client, "idx", &sync_points), persist);
+
+    // A second index hydrates from the shard, not from the first.
+    client
+        .batch_execute("CREATE INDEX i2 IN CLUSTER idx ON mv (v)")
+        .unwrap();
+    client.batch_execute("DROP INDEX i1").unwrap();
+    client.batch_execute("SET cluster = idx").unwrap();
+    assert!(uses_index(&mut client, "i2"));
+    assert_eq!(answers(&mut client, "idx", &sync_points), persist);
+
+    // The replica restarts and rehydrates the index from the compacted shard.
+    for sql in [
+        "ALTER CLUSTER idx SET (REPLICATION FACTOR 0)",
+        "ALTER CLUSTER idx SET (REPLICATION FACTOR 1)",
+    ] {
+        client.batch_execute(sql).unwrap();
+    }
+    assert_eq!(answers(&mut client, "idx", &sync_points), persist);
+}
+
+/// A keyed view whose rows churn keeps identical stamps in its index, whose
+/// merges pair inserts with deletes, and in its shard, whose compaction does
+/// the same, across updates, deletes, identical reinserts, and a replica
+/// restart.
+#[mz_ore::test]
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `TLS_client_method`
+fn test_mz_updated_at_index_churn() {
+    let server = test_util::TestHarness::default()
+        .with_system_parameter_default("enable_preserve_update_times".into(), "true".into())
+        .start_blocking();
+    let mut client = server.connect(postgres::NoTls).unwrap();
+    for sql in [
+        "CREATE TABLE t (k int, v text)",
+        "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')",
+        "CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS \
+             SELECT k, max(v) AS v FROM t GROUP BY k",
+        "CREATE CLUSTER idx (SIZE 'scale=1,workers=1')",
+        "CREATE INDEX i IN CLUSTER idx ON mv (k)",
+    ] {
+        client.batch_execute(sql).unwrap();
+    }
+
+    let mut sync_points = vec![0];
+    for i in 0..30 {
+        let statements = match i % 5 {
+            // A value that returns: `d` goes to `d2` and back.
+            3 => vec![format!(
+                "UPDATE t SET v = '{}' WHERE k = 4",
+                ["d2", "d"][i / 5 % 2]
+            )],
+            // An identical reinsert in a later transaction.
+            4 => vec![
+                "DELETE FROM t WHERE k = 3".to_owned(),
+                "INSERT INTO t VALUES (3, 'c')".to_owned(),
+            ],
+            k => vec![format!("UPDATE t SET v = 'v{i}' WHERE k = {}", k + 1)],
+        };
+        for sql in statements {
+            client.batch_execute(&sql).unwrap();
+            let (_, now) = sync_mz_updated_at(&mut client, 0);
+            sync_points.push(now);
+        }
+    }
+    // After the index's merges fold the churn above, every row's value leaves
+    // and returns in consecutive writes.
+    std::thread::sleep(Duration::from_secs(3));
+    for k in 1..=4 {
+        let (v, _) = stamps_mz_updated_at(&mut client)[&k].clone();
+        for sql in [
+            format!("UPDATE t SET v = 'away' WHERE k = {k}"),
+            format!("UPDATE t SET v = '{v}' WHERE k = {k}"),
+        ] {
+            client.batch_execute(&sql).unwrap();
+            let (_, now) = sync_mz_updated_at(&mut client, 0);
+            sync_points.push(now);
+        }
+    }
+    // Let compaction and the index's merges run.
+    std::thread::sleep(Duration::from_secs(3));
+
+    let answers = |client: &mut postgres::Client, cluster: &str| {
+        client
+            .batch_execute(&format!("SET cluster = {cluster}"))
+            .unwrap();
+        let syncs: Vec<_> = sync_points
+            .iter()
+            .map(|point| sync_mz_updated_at(client, *point).0)
+            .collect();
+        (stamps_mz_updated_at(client), syncs)
+    };
+    let persist = answers(&mut client, "quickstart");
+    assert_eq!(persist.0.len(), 4, "{persist:?}");
+    assert_eq!(answers(&mut client, "idx"), persist);
+
+    for sql in [
+        "ALTER CLUSTER idx SET (REPLICATION FACTOR 0)",
+        "ALTER CLUSTER idx SET (REPLICATION FACTOR 1)",
+    ] {
+        client.batch_execute(sql).unwrap();
+    }
+    assert_eq!(answers(&mut client, "idx"), persist);
 }
