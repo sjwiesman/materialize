@@ -173,3 +173,29 @@ simple
 CREATE TABLE plain_t (k int) WITH (PRESERVE UPDATE TIMES FOR KEY (k))
 ----
 db error: ERROR: Expected one of PARTITION or RETAIN, found PRESERVE
+
+# Column aliases name only visible columns. The stamp column keeps its place
+# behind them and follows the alias.
+
+statement ok
+INSERT INTO t VALUES (1, 'one')
+
+query ITI colnames
+SELECT a, b, c FROM (by_k CROSS JOIN (VALUES (99)) AS r(z)) AS j(a, b, c)
+----
+a  b  c
+1  one  99
+
+query IT colnames
+SELECT * FROM by_k AS x(a, b)
+----
+a  b
+1  one
+
+statement error x has 2 columns available but 3 columns specified
+SELECT * FROM by_k AS x(a, b, c)
+
+query B
+SELECT mz_updated_at(x) > 0 FROM by_k AS x(a, b)
+----
+true

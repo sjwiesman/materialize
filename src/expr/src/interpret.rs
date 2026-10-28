@@ -1108,6 +1108,13 @@ impl<'a> Interpreter for ColumnSpecs<'a> {
     }
 
     fn variadic(&self, func: &VariadicFunc, args: Vec<Self::Summary>) -> Self::Summary {
+        if let VariadicFunc::MzUpdatedAt(_) = func {
+            // Pruning sees the call unbound, where evaluating it errors. Where
+            // it is evaluated, it is a column holding any stamp.
+            let col_type = func.output_type(args.into_iter().map(|s| s.col_type).collect());
+            let range = ResultSpec::has_type(&col_type, false);
+            return ColumnSpec { col_type, range };
+        }
         let fallible = func.could_error() || args.iter().any(|s| s.range.fallible);
         let inputs_multivalued = args.iter().any(|s| !s.range.is_single_value());
         if func.is_associative() && args.len() > 2 {
@@ -2678,6 +2685,57 @@ mod tests {
         let interpreter = ColumnSpecs::new(&relation, &arena);
         let spec = interpreter.expr(&expr);
         assert!(spec.range.may_contain(Datum::String("blab")));
+    }
+
+    /// Pruning on a row's own columns is unaffected by an `mz_updated_at`
+    /// predicate beside it, and the call alone prunes nothing.
+    #[mz_ore::test]
+    fn test_mz_updated_at_pruning() {
+        let updated_at = MirScalarExpr::call_variadic(
+            crate::func::variadic::MzUpdatedAt {
+                id: mz_repr::GlobalId::User(1),
+            },
+            vec![MirScalarExpr::column(0), MirScalarExpr::column(1)],
+        );
+        let since_sync = MirScalarExpr::CallBinary {
+            func: Gt.into(),
+            expr1: Box::new(updated_at),
+            expr2: Box::new(MirScalarExpr::literal_ok(
+                Datum::MzTimestamp(10.into()),
+                ReprScalarType::MzTimestamp,
+            )),
+        };
+        let key_is_5 = MirScalarExpr::CallBinary {
+            func: Eq.into(),
+            expr1: Box::new(MirScalarExpr::column(0)),
+            expr2: Box::new(MirScalarExpr::literal_ok(
+                Datum::Int32(5),
+                ReprScalarType::Int32,
+            )),
+        };
+        let relation = ReprRelationType::new(vec![
+            ReprScalarType::Int32.nullable(false),
+            ReprScalarType::String.nullable(false),
+        ]);
+        let arena = RowArena::new();
+        let filter_true = |mfp: &MapFilterProject, k_min: i32, k_max: i32| {
+            let mut interpreter = ColumnSpecs::new(&relation, &arena);
+            interpreter.push_column(
+                0,
+                ResultSpec::value_between(Datum::Int32(k_min), Datum::Int32(k_max)),
+            );
+            let spec = interpreter.mfp_filter(mfp);
+            spec.range.may_contain(Datum::True) || spec.range.may_fail()
+        };
+
+        let both = MapFilterProject::new(2).filter([key_is_5, since_sync.clone()]);
+        assert!(
+            !filter_true(&both, 10, 20),
+            "a part without k = 5 is pruned"
+        );
+        assert!(filter_true(&both, 0, 20), "a part with k = 5 is kept");
+        let stamp_only = MapFilterProject::new(2).filter([since_sync]);
+        assert!(filter_true(&stamp_only, 10, 20), "the stamp is any value");
     }
 
     #[mz_ore::test]

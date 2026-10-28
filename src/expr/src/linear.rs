@@ -209,6 +209,28 @@ impl<E: OptimizableExpr> MapFilterProject<E> {
 
 // Methods that are specific to MirScalarExpr (use MirRelationExpr or as_literal).
 impl MapFilterProject<MirScalarExpr> {
+    /// The collections whose stamps the expressions and predicates read
+    /// through `mz_updated_at`.
+    pub fn updated_at_ids(&self) -> BTreeSet<mz_repr::GlobalId> {
+        let mut ids = BTreeSet::new();
+        let exprs = self
+            .expressions
+            .iter()
+            .chain(self.predicates.iter().map(|(_, p)| p));
+        for expr in exprs {
+            expr.visit_pre(|e| {
+                if let MirScalarExpr::CallVariadic {
+                    func: crate::VariadicFunc::MzUpdatedAt(f),
+                    ..
+                } = e
+                {
+                    ids.insert(f.id);
+                }
+            });
+        }
+        ids
+    }
+
     /// Determines if a scalar expression must be equal to a literal datum.
     pub fn literal_constraint(&self, expr: &MirScalarExpr) -> Option<Datum<'_>> {
         for (_pos, predicate) in self.predicates.iter() {
@@ -1635,6 +1657,53 @@ pub mod plan {
         /// Returns true when `Self` is the identity.
         pub fn is_identity(&self) -> bool {
             self.mfp.is_identity()
+        }
+    }
+
+    impl SafeMfpPlan<MirScalarExpr> {
+        /// See [`MapFilterProject::updated_at_ids`].
+        pub fn updated_at_ids(&self) -> BTreeSet<mz_repr::GlobalId> {
+            self.mfp.updated_at_ids()
+        }
+
+        /// Replaces every `mz_updated_at` call with a reference to a new input
+        /// column appended after the existing ones, so that the caller
+        /// supplies each row's stamp as the last input datum. Returns the
+        /// collection the calls read, which the caller must be reading the
+        /// stamps of, or `None` if there are no calls.
+        ///
+        /// Errors, leaving `self` unchanged, if the calls read more than one
+        /// collection, since a stamped read has the stamps of only one.
+        pub fn bind_updated_at_to_input(&mut self) -> Result<Option<mz_repr::GlobalId>, String> {
+            let ids = self.updated_at_ids();
+            if ids.len() > 1 {
+                return Err(format!(
+                    "mz_updated_at reads {ids:?}, but a stamped read serves one collection"
+                ));
+            }
+            let bound = self.mfp.input_arity;
+            self.mfp.permute_fn(|c| c, bound + 1);
+            let mut bind = |expr: &mut MirScalarExpr| {
+                crate::visit::Visit::visit_mut_post(expr, &mut |e: &mut MirScalarExpr| {
+                    if matches!(
+                        e,
+                        MirScalarExpr::CallVariadic {
+                            func: crate::VariadicFunc::MzUpdatedAt(_),
+                            ..
+                        }
+                    ) {
+                        *e = MirScalarExpr::column(bound);
+                    }
+                });
+            };
+            let (mut map, mut filter, project) = self.mfp.as_map_filter_project();
+            map.iter_mut().for_each(&mut bind);
+            filter.iter_mut().for_each(&mut bind);
+            self.mfp = MapFilterProject::new(bound + 1)
+                .map(map)
+                .filter(filter)
+                .project(project);
+            Ok(ids.into_iter().next())
         }
     }
 

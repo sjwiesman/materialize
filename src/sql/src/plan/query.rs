@@ -48,7 +48,7 @@ use std::{iter, mem};
 use itertools::Itertools;
 use mz_expr::func::variadic::{
     ArrayCreate, ArrayIndex, Coalesce, Greatest, Least, ListCreate, ListIndex, ListSliceLinear,
-    MapBuild, RecordCreate,
+    MapBuild, MzUpdatedAt, RecordCreate,
 };
 use mz_expr::virtual_syntax::AlgExcept;
 use mz_expr::{
@@ -3245,6 +3245,65 @@ fn plan_rows_from(
     Ok((expr, scope))
 }
 
+fn is_mz_updated_at(f: &Function<Aug>) -> bool {
+    f.name.full_name_str().as_str() == format!("{}.mz_updated_at", MZ_CATALOG_SCHEMA)
+}
+
+/// Plans `mz_updated_at(t)` for the `FROM` item `t`. The argument is resolved
+/// by name, not planned as an expression, because a whole-row reference plans
+/// to a record that no longer identifies `t`.
+fn plan_mz_updated_at(
+    ecx: &ExprContext,
+    args: &FunctionArgs<Aug>,
+) -> Result<HirScalarExpr, PlanError> {
+    let table = match args {
+        FunctionArgs::Args { args, order_by } if order_by.is_empty() => match args.as_slice() {
+            [Expr::Identifier(names)] if names.len() == 1 => {
+                Some(normalize::ident(names[0].clone()))
+            }
+            _ => None,
+        },
+        FunctionArgs::Args { .. } | FunctionArgs::Star => None,
+    };
+    let Some(table) = table else {
+        sql_bail!("mz_updated_at expects the name or alias of a FROM item, as in mz_updated_at(t)");
+    };
+    let table = PartialItemName {
+        database: None,
+        schema: None,
+        item: table,
+    };
+    let items = ecx.scope.items_from_table(&ecx.qcx.outer_scopes, &table)?;
+    if items.is_empty() {
+        sql_bail!(
+            "mz_updated_at: {} does not name a FROM item",
+            table.item.quoted()
+        );
+    }
+    let Some(id) = items.iter().find_map(|(_, item)| item.updated_at_of) else {
+        if !ecx.qcx.lifetime.is_one_shot() {
+            sql_bail!("mz_updated_at is only supported in one-shot SELECT queries")
+        }
+        sql_bail!(
+            "mz_updated_at: {} is not a table or materialized view created WITH (PRESERVE UPDATE TIMES)",
+            table.item.quoted()
+        )
+    };
+    // The row's columns are the call's arguments so that the optimizer sees a
+    // value that varies with the row, see `MzUpdatedAt`.
+    let row = items
+        .into_iter()
+        .filter(|(_, item)| !item.is_updated_at_column())
+        .map(|(column, item)| {
+            HirScalarExpr::named_column(
+                column,
+                ecx.qcx.name_manager.borrow_mut().intern_scope_item(item),
+            )
+        })
+        .collect();
+    Ok(HirScalarExpr::call_variadic(MzUpdatedAt { id }, row))
+}
+
 fn is_repeat_row(f: &Function<Aug>) -> bool {
     f.name.full_name_str().as_str() == format!("{}.{}", MZ_CATALOG_SCHEMA, REPEAT_ROW_NAME)
 }
@@ -3552,18 +3611,27 @@ fn plan_table_alias(mut scope: Scope, alias: Option<&TableAlias>) -> Result<Scop
         strict,
     }) = alias
     {
-        if (columns.len() > scope.items.len()) || (*strict && columns.len() != scope.items.len()) {
+        // The stamp column of a time-preserving `FROM` item cannot be renamed.
+        let available = scope
+            .items
+            .iter()
+            .filter(|item| !item.is_updated_at_column())
+            .count();
+        if (columns.len() > available) || (*strict && columns.len() != available) {
             sql_bail!(
                 "{} has {} columns available but {} columns specified",
                 name,
-                scope.items.len(),
+                available,
                 columns.len()
             );
         }
 
         let table_name = normalize::ident(name.to_owned());
-        for (i, item) in scope.items.iter_mut().enumerate() {
-            item.table_name = if item.allow_unqualified_references {
+        let mut aliases = columns.iter();
+        for item in scope.items.iter_mut() {
+            // The stamp column keeps following its `FROM` item under the
+            // alias, so that `mz_updated_at(alias)` resolves.
+            item.table_name = if item.allow_unqualified_references || item.is_updated_at_column() {
                 Some(PartialItemName {
                     database: None,
                     schema: None,
@@ -3605,10 +3673,11 @@ fn plan_table_alias(mut scope: Scope, alias: Option<&TableAlias>) -> Result<Scop
                 // [0]: https://github.com/MaterializeInc/database-issues/issues/4887
                 None
             };
-            item.column_name = columns
-                .get(i)
-                .map(|a| normalize::column_name(a.clone()))
-                .unwrap_or_else(|| item.column_name.clone());
+            if !item.is_updated_at_column() {
+                if let Some(alias) = aliases.next() {
+                    item.column_name = normalize::column_name(alias.clone());
+                }
+            }
         }
     }
     Ok(scope)
@@ -3770,7 +3839,9 @@ fn expand_select_item<'a>(
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(_i, item)| item.is_from_table(&table_name))
+                .filter(|(_i, item)| {
+                    item.is_from_table(&table_name) && !item.is_updated_at_column()
+                })
                 .map(|(i, item)| {
                     let name = item.column_name.clone();
                     (ExpandedSelectItem::InputOrdinal(i), name)
@@ -3941,7 +4012,11 @@ fn plan_join(
             // have the same scx. However, it doesn't hurt to be safe.
             *left_qcx.scx.ambiguous_columns.borrow_mut() = true;
             *right_qcx.scx.ambiguous_columns.borrow_mut() = true;
-            let left_column_names = left_scope.column_names();
+            let left_column_names = left_scope
+                .items
+                .iter()
+                .filter(|item| !item.is_updated_at_column())
+                .map(|item| &item.column_name);
             let right_column_names: BTreeSet<_> = right_scope.column_names().collect();
             let column_names: Vec<_> = left_column_names
                 .filter(|col| right_column_names.contains(col))
@@ -5535,6 +5610,8 @@ fn plan_identifier(ecx: &ExprContext, names: &[Ident]) -> Result<HirScalarExpr, 
                     if item.is_exists_column_for_a_table_function_that_was_in_the_target_list {
                         has_exists_column = Some(column);
                         None
+                    } else if item.is_updated_at_column() {
+                        None
                     } else {
                         let expr = HirScalarExpr::named_column(
                             column,
@@ -5589,6 +5666,12 @@ fn plan_function<'a>(
         distinct,
     }: &'a Function<Aug>,
 ) -> Result<HirScalarExpr, PlanError> {
+    if is_mz_updated_at(f) {
+        if filter.is_some() || over.is_some() || *distinct {
+            sql_bail!("mz_updated_at does not accept FILTER, OVER, or DISTINCT");
+        }
+        return plan_mz_updated_at(ecx, args);
+    }
     let impls = match resolve_func(ecx, name, args)? {
         Func::Table(_) => {
             sql_bail!(
@@ -6930,13 +7013,27 @@ impl<'a> QueryContext<'a> {
                         });
                     }
                 };
-                let expr = HirRelationExpr::Get {
+                let mut expr = HirRelationExpr::Get {
                     id: Id::Global(item.global_id()),
                     typ: desc.typ().clone(),
                 };
 
-                let name = full_name.into();
-                let scope = Scope::from_source(Some(name), desc.iter_names().cloned());
+                let name: PartialItemName = full_name.into();
+                let mut scope = Scope::from_source(Some(name.clone()), desc.iter_names().cloned());
+
+                // The hidden item marks `t` as a time-preserving `FROM` item for
+                // `mz_updated_at(t)`, including under an alias. Its column is a
+                // placeholder that projection pushdown removes:
+                // `plan_mz_updated_at` plans the call itself, so that the
+                // expression contains the call exactly when the query uses it.
+                if self.lifetime.is_one_shot() && item.preserve_update_times_key().is_some() {
+                    expr = expr.map(vec![HirScalarExpr::literal_null(
+                        SqlScalarType::MzTimestamp,
+                    )]);
+                    scope
+                        .items
+                        .push(ScopeItem::updated_at(Some(name), item.global_id()));
+                }
 
                 Ok((expr, scope))
             }

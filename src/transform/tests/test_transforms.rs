@@ -348,6 +348,142 @@ fn parse_explain_config(mut flags: BTreeSet<String>) -> Result<ExplainConfig, St
     }
 }
 
+/// `mz_updated_at` calls stay per row through the full optimizer. Each case
+/// is a query shape whose plan must keep every call, unevaluated, on the rows
+/// of the relation it was planned over.
+///
+/// The first case is the query that returned a wrong answer when the call took
+/// no arguments: the optimizer took the call to be the same value in every
+/// row, equated the stamp of `mv`'s row with the minimum over `mv`, and folded
+/// the comparison into a filter over `mv` alone.
+#[mz_ore::test]
+#[cfg_attr(miri, ignore)] // can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+fn mz_updated_at_stays_per_row() {
+    use mz_expr::func::variadic::MzUpdatedAt;
+    use mz_expr::{
+        AggregateExpr, AggregateFunc, BinaryFunc, MapFilterProject, MirRelationExpr, MirScalarExpr,
+        VariadicFunc, func,
+    };
+    use mz_repr::{Datum, ReprRelationType, ReprScalarType};
+
+    let id = GlobalId::User(1);
+    let typ = ReprRelationType::new(vec![
+        ReprScalarType::Int32.nullable(false),
+        ReprScalarType::String.nullable(false),
+    ]);
+    let mv = || MirRelationExpr::global_get(id, typ.clone());
+    let stamp = || {
+        MirScalarExpr::call_variadic(
+            MzUpdatedAt { id },
+            vec![MirScalarExpr::column(0), MirScalarExpr::column(1)],
+        )
+    };
+    let sync_point =
+        || MirScalarExpr::literal_ok(Datum::MzTimestamp(10.into()), ReprScalarType::MzTimestamp);
+    let gt = |a: MirScalarExpr, b: MirScalarExpr| a.call_binary(b, BinaryFunc::Gt(func::Gt));
+    let eq = |a: MirScalarExpr, b: MirScalarExpr| a.call_binary(b, BinaryFunc::Eq(func::Eq));
+
+    let optimize = |mut relation: MirRelationExpr| {
+        let features = OptimizerFeatures::default();
+        let typecheck_ctx = mz_transform::typecheck::empty_typechecking_context();
+        let mut df_meta = DataflowMetainfo::default();
+        let mut ctx = TransformCtx::local(
+            &features,
+            &typecheck_ctx,
+            &mut df_meta,
+            None,
+            Some(TEST_GLOBAL_ID),
+        );
+        for transform in full_transform_list() {
+            transform.transform(&mut relation, &mut ctx).unwrap();
+        }
+        relation
+    };
+    // Every call in `plan`, which must all be on `id`.
+    let calls = |plan: &mut MirRelationExpr| {
+        let mut calls = vec![];
+        plan.try_visit_scalars_mut(&mut |s: &mut MirScalarExpr| {
+            s.visit_pre(|e| {
+                if let MirScalarExpr::CallVariadic {
+                    func: VariadicFunc::MzUpdatedAt(f),
+                    exprs,
+                } = e
+                {
+                    assert_eq!(f.id, id);
+                    calls.push(exprs.clone());
+                }
+            });
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        calls
+    };
+    let is_linear_over_mv = |plan: &MirRelationExpr| {
+        let (_, input) = MapFilterProject::extract_non_errors_from_expr(plan);
+        matches!(input, MirRelationExpr::Get { id: mz_expr::Id::Global(get), .. } if *get == id)
+    };
+
+    // SELECT k FROM mv WHERE mz_updated_at(mv) > (SELECT min(mz_updated_at(m2)) FROM mv m2)
+    let min = mv().reduce(
+        vec![],
+        vec![AggregateExpr {
+            func: AggregateFunc::MinMzTimestamp,
+            expr: stamp(),
+            distinct: false,
+        }],
+        None,
+    );
+    let mut plan = optimize(
+        mv().product(min)
+            .filter([gt(stamp(), MirScalarExpr::column(2))])
+            .project(vec![0]),
+    );
+    assert!(!is_linear_over_mv(&plan), "{plan:#?}");
+    assert_eq!(calls(&mut plan).len(), 2, "{plan:#?}");
+
+    // A call in the projection and in the filter, twice over the same row,
+    // and under an expression a CSE pass can share.
+    let mut plan = optimize(
+        mv().map(vec![
+            stamp(),
+            stamp(),
+            stamp().call_unary(mz_expr::UnaryFunc::CastMzTimestampToString(
+                func::CastMzTimestampToString,
+            )),
+        ])
+        .filter([gt(stamp(), sync_point())])
+        .project(vec![0, 2, 3, 4]),
+    );
+    assert!(is_linear_over_mv(&plan), "{plan:#?}");
+    let found = calls(&mut plan);
+    assert!(!found.is_empty(), "{plan:#?}");
+    for args in found {
+        assert!(
+            args.iter().all(|a| matches!(a, MirScalarExpr::Column(..))),
+            "{plan:#?}"
+        );
+    }
+
+    // A filter that fixes every column to a literal. The call may see literal
+    // arguments, but it must not be evaluated.
+    let mut plan = optimize(
+        mv().filter([
+            eq(
+                MirScalarExpr::column(0),
+                MirScalarExpr::literal_ok(Datum::Int32(5), ReprScalarType::Int32),
+            ),
+            eq(
+                MirScalarExpr::column(1),
+                MirScalarExpr::literal_ok(Datum::String("a"), ReprScalarType::String),
+            ),
+        ])
+        .map(vec![stamp()])
+        .project(vec![2]),
+    );
+    assert!(is_linear_over_mv(&plan), "{plan:#?}");
+    assert_eq!(calls(&mut plan).len(), 1, "{plan:#?}");
+}
+
 #[derive(Debug, Default)]
 struct Identity;
 

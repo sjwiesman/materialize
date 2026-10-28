@@ -42,6 +42,13 @@ pub(super) fn reduce_call_variadic(
         return;
     }
 
+    // A stamped read binds the call to a per-row column, so its value is not a
+    // function of literal arguments. Folding it would replace the stamp with
+    // the unbound call's evaluation error.
+    if matches!(func, VariadicFunc::MzUpdatedAt(_)) {
+        return;
+    }
+
     // Generic folds: constant-fold, null-propagate, error-propagate.
     if exprs.iter().all(|x| x.is_literal()) {
         *e = MirScalarExpr::literal(e.eval(&[], temp_storage), e.typ(column_types).scalar_type);
@@ -402,7 +409,32 @@ mod tests {
     use mz_repr::{Datum, ReprScalarType};
 
     use crate::MirScalarExpr;
-    use crate::scalar::func::variadic::{Greatest, Least, Substr};
+    use crate::scalar::func::variadic::{Greatest, Least, MzUpdatedAt, Substr};
+
+    #[mz_ore::test]
+    fn mz_updated_at_is_never_folded() {
+        let types = [ReprScalarType::Int32.nullable(true)];
+        let call = |args| {
+            MirScalarExpr::call_variadic(
+                MzUpdatedAt {
+                    id: mz_repr::GlobalId::User(1),
+                },
+                args,
+            )
+        };
+        for args in [
+            vec![MirScalarExpr::literal_ok(
+                Datum::Int32(5),
+                ReprScalarType::Int32,
+            )],
+            vec![MirScalarExpr::literal_null(ReprScalarType::Int32)],
+            vec![],
+        ] {
+            let mut e = call(args.clone());
+            e.reduce(&types);
+            assert_eq!(e, call(args));
+        }
+    }
 
     #[mz_ore::test]
     fn greatest_least_null_operand_drop() {

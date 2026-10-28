@@ -151,6 +151,7 @@ func_name! {
     variadic::Coalesce => "coalesce",
     variadic::Greatest => "greatest",
     variadic::Least => "least",
+    variadic::MzUpdatedAt => "mz_updated_at",
     variadic::Or => "or",
 }
 

@@ -742,6 +742,67 @@ impl LazyVariadicFunc for ErrorIfNull {
     }
 }
 
+/// `mz_updated_at(t)`: the stamp of the current row of the collection `id`, as
+/// served by a stamped read of that collection in time-preserving mode.
+///
+/// The stamp is not a function of the arguments. They are every column of the
+/// row, so that the call depends on the row and on `id` the way the stamp
+/// does: within one collection at one read time, equal rows have equal stamps.
+/// That makes it sound for the optimizer to equate two calls only where they
+/// carry the same `id` and equal arguments, and it cannot treat the call as
+/// constant across rows. The reader serving the peek replaces the call with a
+/// column it appends to each row (`SafeMfpPlan::bind_updated_at_to_input`).
+///
+/// NOTE: `reduce` must not constant-fold a call whose arguments are all
+/// literals, since evaluating it errors while the bound call does not. See
+/// `reduce_call_variadic`.
+#[derive(
+    Ord,
+    PartialOrd,
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    Hash
+)]
+pub struct MzUpdatedAt {
+    pub id: mz_repr::GlobalId,
+}
+
+impl fmt::Display for MzUpdatedAt {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "mz_updated_at[{}]", self.id)
+    }
+}
+
+impl LazyVariadicFunc for MzUpdatedAt {
+    fn eval<'a>(
+        &'a self,
+        _datums: &[Datum<'a>],
+        _temp_storage: &'a RowArena,
+        _exprs: &'a [impl Eval],
+    ) -> Result<Datum<'a>, EvalError> {
+        Err(EvalError::Unsupported {
+            feature: "mz_updated_at outside a stamped read of its object".into(),
+            discussion_no: None,
+        })
+    }
+
+    fn output_type(&self, _input_types: &[SqlColumnType]) -> SqlColumnType {
+        SqlScalarType::MzTimestamp.nullable(false)
+    }
+
+    fn propagates_nulls(&self) -> bool {
+        false
+    }
+
+    fn introduces_nulls(&self) -> bool {
+        false
+    }
+}
+
 #[derive(
     Ord,
     PartialOrd,
@@ -1870,6 +1931,7 @@ derive_variadic! {
     HmacString(HmacString),
     HmacBytes(HmacBytes),
     ErrorIfNull(ErrorIfNull),
+    MzUpdatedAt(MzUpdatedAt),
     DateBinTimestamp(DateBinTimestamp),
     DateBinTimestampTz(DateBinTimestampTz),
     DateDiffTimestamp(DateDiffTimestamp),
