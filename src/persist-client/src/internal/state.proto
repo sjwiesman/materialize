@@ -234,6 +234,7 @@ message ProtoRollup {
   uint64 last_gc_req = 10;
   optional ProtoActiveRollup active_rollup = 19;
   optional ProtoActiveGC active_gc = 20;
+  bool preserve_update_times = 21;
   map<uint64, ProtoHollowRollup> rollups = 16;
 
   ProtoTrace trace = 7;

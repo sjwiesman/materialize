@@ -233,6 +233,14 @@ where
             })
     }
 
+    /// Whether the shard is in time-preserving compaction mode.
+    pub(crate) fn preserve_update_times(&self) -> bool {
+        self.state
+            .read_lock(&self.metrics.locks.applier_read_cacheable, |state| {
+                state.collections.preserve_update_times
+            })
+    }
+
     /// Whether the shard is a tombstone, which has no readers or writers.
     pub(crate) fn is_tombstone(&self) -> bool {
         self.state

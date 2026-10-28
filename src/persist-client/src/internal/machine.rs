@@ -301,6 +301,17 @@ where
         (state, maintenance)
     }
 
+    /// See [crate::PersistClient::enable_preserve_update_times].
+    pub async fn enable_preserve_update_times(&self) -> (bool, RoutineMaintenance) {
+        let metrics = Arc::clone(&self.applier.metrics);
+        let (_seqno, enabled, maintenance) = self
+            .apply_unbatched_idempotent_cmd(&metrics.cmds.register, |_seqno, _cfg, state| {
+                state.enable_preserve_update_times()
+            })
+            .await;
+        (enabled, maintenance)
+    }
+
     pub async fn spine_exert(&self, fuel: usize) -> (Vec<CompactReq<T>>, RoutineMaintenance) {
         // Performance special case for no-ops, to avoid the State clones.
         if fuel == 0 || self.applier.all_batches().len() < 2 {

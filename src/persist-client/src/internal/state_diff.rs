@@ -85,6 +85,7 @@ pub struct StateDiff<T> {
     pub(crate) critical_readers: Vec<StateFieldDiff<CriticalReaderId, CriticalReaderState<T>>>,
     pub(crate) writers: Vec<StateFieldDiff<WriterId, WriterState<T>>>,
     pub(crate) schemas: Vec<StateFieldDiff<SchemaId, EncodedSchemas>>,
+    pub(crate) preserve_update_times: Vec<StateFieldDiff<(), bool>>,
     pub(crate) since: Vec<StateFieldDiff<(), Antichain<T>>>,
     pub(crate) legacy_batches: Vec<StateFieldDiff<HollowBatch<T>, ()>>,
     pub(crate) hollow_batches: Vec<StateFieldDiff<SpineId, Arc<HollowBatch<T>>>>,
@@ -115,6 +116,7 @@ impl<T: Timestamp + Codec64> StateDiff<T> {
             critical_readers: Vec::default(),
             writers: Vec::default(),
             schemas: Vec::default(),
+            preserve_update_times: Vec::default(),
             since: Vec::default(),
             legacy_batches: Vec::default(),
             hollow_batches: Vec::default(),
@@ -161,6 +163,7 @@ impl<T: Timestamp + Lattice + Codec64> StateDiff<T> {
                     critical_readers: from_critical_readers,
                     writers: from_writers,
                     schemas: from_schemas,
+                    preserve_update_times: from_preserve_update_times,
                     trace: from_trace,
                 },
         } = from;
@@ -180,6 +183,7 @@ impl<T: Timestamp + Lattice + Codec64> StateDiff<T> {
                     critical_readers: to_critical_readers,
                     writers: to_writers,
                     schemas: to_schemas,
+                    preserve_update_times: to_preserve_update_times,
                     trace: to_trace,
                 },
         } = to;
@@ -195,6 +199,11 @@ impl<T: Timestamp + Lattice + Codec64> StateDiff<T> {
         );
         diff_field_single(from_hostname, to_hostname, &mut diffs.hostname);
         diff_field_single(from_last_gc_req, to_last_gc_req, &mut diffs.last_gc_req);
+        diff_field_single(
+            from_preserve_update_times,
+            to_preserve_update_times,
+            &mut diffs.preserve_update_times,
+        );
         diff_field_sorted_iter(
             from_active_rollup.iter().map(|r| (&(), r)),
             to_active_rollup.iter().map(|r| (&(), r)),
@@ -428,6 +437,7 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
             critical_readers: diff_critical_readers,
             writers: diff_writers,
             schemas: diff_schemas,
+            preserve_update_times: diff_preserve_update_times,
             since: diff_since,
             legacy_batches: diff_legacy_batches,
             hollow_batches: diff_hollow_batches,
@@ -466,6 +476,7 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
             critical_readers,
             writers,
             schemas,
+            preserve_update_times,
             trace,
         } = &mut self.collections;
 
@@ -478,6 +489,11 @@ impl<T: Timestamp + Lattice + Codec64> State<T> {
         apply_diffs_map("critical_readers", diff_critical_readers, critical_readers)?;
         apply_diffs_map("writers", diff_writers, writers)?;
         apply_diffs_map("schemas", diff_schemas, schemas)?;
+        apply_diffs_single(
+            "preserve_update_times",
+            diff_preserve_update_times,
+            preserve_update_times,
+        )?;
 
         let structure_unchanged = diff_hollow_batches.is_empty()
             && diff_spine_batches.is_empty()
