@@ -434,6 +434,10 @@ impl CatalogItem for LocalItem {
         None
     }
 
+    fn preserve_update_times_key(&self) -> Option<&[usize]> {
+        None
+    }
+
     fn type_details(&self) -> Option<&CatalogTypeDetails<IdReference>> {
         self.type_details.as_ref()
     }

@@ -29,7 +29,7 @@ use mz_interchange::avro::{AvroSchemaGenerator, DocTarget};
 use mz_ore::cast::{CastFrom, TryCastFrom};
 use mz_ore::collections::{CollectionExt, HashSet};
 use mz_ore::num::NonNeg;
-use mz_ore::str::StrExt;
+use mz_ore::str::{StrExt, separated};
 use mz_ore::{soft_assert_or_log, soft_panic_or_log};
 use mz_proto::RustType;
 use mz_repr::adt::interval::Interval;
@@ -147,7 +147,7 @@ use crate::plan::scope::Scope;
 use crate::plan::statement::ddl::connection::{INALTERABLE_OPTIONS, MUTUALLY_EXCLUSIVE_SETS};
 use crate::plan::statement::{StatementContext, StatementDesc, scl};
 use crate::plan::typeconv::CastContext;
-use crate::plan::with_options::{OptionalDuration, OptionalString, TryFromValue};
+use crate::plan::with_options::{ForKey, OptionalDuration, OptionalString, TryFromValue};
 use crate::plan::{
     AlterClusterPlan, AlterClusterPlanStrategy, AlterClusterRenamePlan,
     AlterClusterReplicaRenamePlan, AlterClusterSwapPlan, AlterConnectionPlan, AlterItemRenamePlan,
@@ -171,8 +171,8 @@ use crate::plan::{
 use crate::session::vars::{
     self, ENABLE_AUTO_SCALING_STRATEGY, ENABLE_CLUSTER_SCHEDULE_REFRESH,
     ENABLE_COLLECTION_PARTITION_BY, ENABLE_CREATE_TABLE_FROM_SOURCE, ENABLE_KAFKA_SINK_HEADERS,
-    ENABLE_METRIC_SINK, ENABLE_REFRESH_EVERY_MVS, ENABLE_REPLICA_TARGETED_MATERIALIZED_VIEWS,
-    VarInput,
+    ENABLE_METRIC_SINK, ENABLE_PRESERVE_UPDATE_TIMES, ENABLE_REFRESH_EVERY_MVS,
+    ENABLE_REPLICA_TARGETED_MATERIALIZED_VIEWS, VarInput,
 };
 use crate::{names, parse};
 
@@ -218,6 +218,63 @@ fn check_partition_by(desc: &RelationDesc, mut partition_by: Vec<Ident>) -> Resu
         }
     }
     Ok(())
+}
+
+/// Resolves the columns of `PRESERVE UPDATE TIMES FOR KEY (...)` in `desc`.
+fn plan_preserve_update_times_key(
+    desc: &RelationDesc,
+    ForKey(columns): ForKey,
+) -> Result<Vec<usize>, PlanError> {
+    let mut seen = BTreeSet::new();
+    columns
+        .into_iter()
+        .map(|column| {
+            let column = normalize::column_name(column);
+            let Some((idx, _)) = desc.get_by_name(&column) else {
+                sql_bail!(
+                    "column referenced in PRESERVE UPDATE TIMES key does not exist: {column}"
+                );
+            };
+            if desc.get_unambiguous_name(idx).is_none() {
+                sql_bail!("column referenced in PRESERVE UPDATE TIMES key is ambiguous: {column}");
+            }
+            if !seen.insert(idx) {
+                sql_bail!("duplicate column referenced in PRESERVE UPDATE TIMES key: {column}");
+            }
+            Ok(idx)
+        })
+        .collect()
+}
+
+/// Checks that `key` contains one of `valid_keys`, the column sets of `desc`
+/// proven unique for the collection `name`, which makes it a valid
+/// `PRESERVE UPDATE TIMES` key.
+pub fn validate_preserve_update_times_key(
+    name: &str,
+    desc: &RelationDesc,
+    valid_keys: &[Vec<usize>],
+    key: &[usize],
+) -> Result<(), PlanError> {
+    if valid_keys
+        .iter()
+        .any(|unique| unique.iter().all(|column| key.contains(column)))
+    {
+        return Ok(());
+    }
+    let column_names = |columns: &[usize]| -> Vec<String> {
+        columns
+            .iter()
+            .map(|column| desc.get_name(*column).to_string())
+            .collect()
+    };
+    Err(PlanError::PreserveUpdateTimesWithInvalidKey {
+        name: name.to_string(),
+        desired_key: column_names(key),
+        valid_keys: valid_keys
+            .iter()
+            .map(|unique| column_names(unique))
+            .collect(),
+    })
 }
 
 pub fn describe_create_database(
@@ -498,6 +555,7 @@ pub fn plan_create_table(
         temporary,
         compaction_window,
         data_source: TableDataSource::TableWrites { defaults },
+        preserve_update_times_key: None,
     };
     Ok(Plan::CreateTable(CreateTablePlan {
         name,
@@ -726,6 +784,7 @@ pub fn plan_create_webhook_source(
                 temporary: false,
                 compaction_window: None,
                 data_source,
+                preserve_update_times_key: None,
             },
         })
     } else {
@@ -1755,7 +1814,8 @@ generate_extracted_config!(
     (ExcludeAllNotNullConstraints, bool, Default(false)),
     (PartitionBy, Vec<Ident>),
     (RetainHistory, OptionalDuration),
-    (Details, String)
+    (Details, String),
+    (PreserveUpdateTimes, ForKey)
 );
 
 pub fn plan_create_table_from_source(
@@ -1790,8 +1850,13 @@ pub fn plan_create_table_from_source(
         retain_history,
         partition_by,
         details,
+        preserve_update_times,
         seen: _,
     } = with_options.clone().try_into()?;
+
+    if preserve_update_times.is_some() {
+        scx.require_feature_flag(&ENABLE_PRESERVE_UPDATE_TIMES)?;
+    }
 
     let source_item = scx.get_item_by_resolved_name(source)?;
     let ingestion_id = source_item.id();
@@ -2001,6 +2066,46 @@ pub fn plan_create_table_from_source(
         check_partition_by(&desc, partition_by)?;
     }
 
+    let preserve_update_times_key = match preserve_update_times {
+        Some(key) => {
+            let key = plan_preserve_update_times_key(&desc, key)?;
+            // Persisted statements are re-planned at boot and must not fail,
+            // so only new statements are validated, as for upsert sink keys.
+            if scx.pcx.is_some() {
+                let full_name = scx.catalog.resolve_full_name(&name).to_string();
+                // Only an upstream primary key counts. Purification drops
+                // constraints named by EXCLUDE CONSTRAINTS or EXCLUDE ALL
+                // CONSTRAINTS from the statement, so an excluded primary key
+                // is absent here.
+                let primary_key = constraints.iter().find_map(|constraint| match constraint {
+                    TableConstraint::Unique {
+                        columns,
+                        is_primary: true,
+                        ..
+                    } => Some(columns),
+                    _ => None,
+                });
+                let Some(primary_key) = primary_key else {
+                    return Err(PlanError::PreserveUpdateTimesWithoutPrimaryKey {
+                        name: full_name,
+                    });
+                };
+                let primary_key = primary_key
+                    .iter()
+                    .map(|column| {
+                        let column = normalize::column_name(column.clone());
+                        desc.get_by_name(&column)
+                            .map(|(i, _)| i)
+                            .ok_or_else(|| sql_err!("unknown column in constraint: {column}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                validate_preserve_update_times_key(&full_name, &desc, &[primary_key], &key)?;
+            }
+            Some(key)
+        }
+        None => None,
+    };
+
     let data_source = DataSourceDesc::IngestionExport {
         ingestion_id,
         // Populated during purification.
@@ -2026,6 +2131,7 @@ pub fn plan_create_table_from_source(
             desc: data_source,
             timeline,
         },
+        preserve_update_times_key,
     };
 
     Ok(Plan::CreateTable(CreateTablePlan {
@@ -2909,8 +3015,19 @@ pub fn plan_create_materialized_view(
         partition_by,
         retain_history,
         refresh,
+        preserve_update_times,
         seen: _,
     }: MaterializedViewOptionExtracted = stmt.with_options.try_into()?;
+
+    // The view's keys are known only after optimization, so the adapter
+    // validates the key of a new view.
+    let preserve_update_times_key = match preserve_update_times {
+        Some(key) => {
+            scx.require_feature_flag(&ENABLE_PRESERVE_UPDATE_TIMES)?;
+            Some(plan_preserve_update_times_key(&desc, key)?)
+        }
+        None => None,
+    };
 
     if let Some(partition_by) = partition_by {
         scx.require_feature_flag(&ENABLE_COLLECTION_PARTITION_BY)?;
@@ -3172,6 +3289,35 @@ pub fn plan_create_materialized_view(
             }
         }
 
+        // A replacement writes the target's shard, whose compaction mode was
+        // fixed when the target was created.
+        let as_set =
+            |key: Option<&[usize]>| key.map(|k| k.iter().copied().collect::<BTreeSet<_>>());
+        if as_set(target.preserve_update_times_key())
+            != as_set(preserve_update_times_key.as_deref())
+        {
+            let target_desc = target
+                .relation_desc()
+                .ok_or_else(|| sql_err!("replacement target has no relation description"))?;
+            let key_sql = |desc: &RelationDesc, key: Option<&[usize]>| match key {
+                Some(key) => format!(
+                    "PRESERVE UPDATE TIMES FOR KEY ({})",
+                    separated(
+                        ", ",
+                        key.iter().map(|i| desc.get_name(*i).as_str().quoted())
+                    )
+                ),
+                None => "no PRESERVE UPDATE TIMES".to_string(),
+            };
+            sql_bail!(
+                "replacement must have the same PRESERVE UPDATE TIMES key as {}: \
+                 target has {}, replacement has {}",
+                scx.catalog.minimal_qualification(target.name()),
+                key_sql(&target_desc, target.preserve_update_times_key()),
+                key_sql(&desc, preserve_update_times_key.as_deref()),
+            );
+        }
+
         replacement_target = Some(target.id());
     }
 
@@ -3205,6 +3351,7 @@ pub fn plan_create_materialized_view(
             compaction_window,
             refresh_schedule,
             as_of,
+            preserve_update_times_key,
         },
         replace,
         drop_ids,
@@ -3218,6 +3365,7 @@ generate_extracted_config!(
     (AssertNotNull, Ident, AllowMultiple),
     (PartitionBy, Vec<Ident>),
     (RetainHistory, OptionalDuration),
+    (PreserveUpdateTimes, ForKey),
     (Refresh, RefreshOptionValue<Aug>, AllowMultiple)
 );
 

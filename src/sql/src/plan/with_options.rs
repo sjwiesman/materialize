@@ -754,6 +754,7 @@ impl<V: TryFromValue<Value>, T: AstInfo + std::fmt::Debug> TryFromValue<WithOpti
             WithOptionValue::Ident(v) => V::try_from_value(Value::String(v.into_string())),
             WithOptionValue::RetainHistoryFor(v) => V::try_from_value(v),
             WithOptionValue::Sequence(_)
+            | WithOptionValue::ForKey(_)
             | WithOptionValue::Map(_)
             | WithOptionValue::Item(_)
             | WithOptionValue::UnresolvedItemName(_)
@@ -776,6 +777,7 @@ impl<V: TryFromValue<Value>, T: AstInfo + std::fmt::Debug> TryFromValue<WithOpti
                     WithOptionValue::RetainHistoryFor(_) => unreachable!(),
                     WithOptionValue::ClusterAlterStrategy(_) => "cluster alter strategy",
                     WithOptionValue::Sequence(_) => "sequences",
+                    WithOptionValue::ForKey(_) => "keys",
                     WithOptionValue::Map(_) => "maps",
                     WithOptionValue::Item(_) => "object references",
                     WithOptionValue::UnresolvedItemName(_) => "object names",
@@ -880,6 +882,33 @@ impl TryFromValue<WithOptionValue<Aug>> for Vec<KafkaBroker<Aug>> {
 impl ImpliedValue for Vec<KafkaBroker<Aug>> {
     fn implied_value() -> Result<Self, PlanError> {
         sql_bail!("must provide a kafka broker")
+    }
+}
+
+/// The columns of a `FOR KEY (<ident>, ...)` option value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForKey(pub Vec<Ident>);
+
+impl TryFromValue<WithOptionValue<Aug>> for ForKey {
+    fn try_from_value(v: WithOptionValue<Aug>) -> Result<Self, PlanError> {
+        match v {
+            WithOptionValue::ForKey(columns) => Ok(ForKey(columns)),
+            _ => sql_bail!("expected FOR KEY (column, ...), found {}", v),
+        }
+    }
+
+    fn try_into_value(self, _catalog: &dyn SessionCatalog) -> Option<WithOptionValue<Aug>> {
+        Some(WithOptionValue::ForKey(self.0))
+    }
+
+    fn name() -> String {
+        "key".to_string()
+    }
+}
+
+impl ImpliedValue for ForKey {
+    fn implied_value() -> Result<Self, PlanError> {
+        sql_bail!("must name a key with FOR KEY (column, ...)")
     }
 }
 

@@ -1791,6 +1791,8 @@ pub enum TableFromSourceOptionName {
     PartitionBy,
     // The `RETAIN HISTORY` option
     RetainHistory,
+    /// The `PRESERVE UPDATE TIMES` option.
+    PreserveUpdateTimes,
 }
 
 impl AstDisplay for TableFromSourceOptionName {
@@ -1806,6 +1808,7 @@ impl AstDisplay for TableFromSourceOptionName {
             TableFromSourceOptionName::Details => "DETAILS",
             TableFromSourceOptionName::PartitionBy => "PARTITION BY",
             TableFromSourceOptionName::RetainHistory => "RETAIN HISTORY",
+            TableFromSourceOptionName::PreserveUpdateTimes => "PRESERVE UPDATE TIMES",
         })
     }
 }
@@ -1825,7 +1828,8 @@ impl WithOptionName for TableFromSourceOptionName {
             | TableFromSourceOptionName::ExcludeConstraints
             | TableFromSourceOptionName::ExcludeAllConstraints
             | TableFromSourceOptionName::ExcludeAllNotNullConstraints
-            | TableFromSourceOptionName::RetainHistory => false,
+            | TableFromSourceOptionName::RetainHistory
+            | TableFromSourceOptionName::PreserveUpdateTimes => false,
             // The value is an arbitrary user expression/literal that may embed
             // sensitive data, so redact it (mirrors `KafkaSinkConfigOptionName`).
             TableFromSourceOptionName::PartitionBy => true,
@@ -4593,6 +4597,8 @@ pub enum WithOptionValue<T: AstInfo> {
     ConnectionAwsPrivatelink(ConnectionDefaultAwsPrivatelink<T>),
     KafkaMatchingBrokerRule(KafkaMatchingBrokerRule<T>),
     RetainHistoryFor(Value),
+    /// `FOR KEY (<ident>, ...)`.
+    ForKey(Vec<Ident>),
     Refresh(RefreshOptionValue<T>),
     ClusterScheduleOptionValue(ClusterScheduleOptionValue),
     ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue),
@@ -4628,6 +4634,7 @@ impl<T: AstInfo> AstDisplay for WithOptionValue<T> {
                 | WithOptionValue::Item(_)
                 | WithOptionValue::UnresolvedItemName(_)
                 | WithOptionValue::Ident(_)
+                | WithOptionValue::ForKey(_)
                 | WithOptionValue::ConnectionAwsPrivatelink(_)
                 | WithOptionValue::KafkaMatchingBrokerRule(_)
                 | WithOptionValue::ClusterReplicas(_)
@@ -4691,6 +4698,11 @@ impl<T: AstInfo> AstDisplay for WithOptionValue<T> {
             WithOptionValue::RetainHistoryFor(value) => {
                 f.write_str("FOR ");
                 f.write_node(value);
+            }
+            WithOptionValue::ForKey(columns) => {
+                f.write_str("FOR KEY (");
+                f.write_node(&display::comma_separated(columns));
+                f.write_str(")");
             }
             WithOptionValue::Refresh(opt) => f.write_node(opt),
             WithOptionValue::ClusterScheduleOptionValue(value) => f.write_node(value),

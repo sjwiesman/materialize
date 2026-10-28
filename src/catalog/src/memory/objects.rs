@@ -779,6 +779,10 @@ impl mz_sql::catalog::CatalogItem for CatalogCollectionEntry {
         self.entry.replacement_target()
     }
 
+    fn preserve_update_times_key(&self) -> Option<&[usize]> {
+        mz_sql::catalog::CatalogItem::preserve_update_times_key(&self.entry)
+    }
+
     fn type_details(&self) -> Option<&CatalogTypeDetails<IdReference>> {
         self.entry.type_details()
     }
@@ -890,6 +894,9 @@ pub struct Table {
     pub is_retained_metrics_object: bool,
     /// Where data for this table comes from, e.g. `INSERT` statements or an upstream source.
     pub data_source: TableDataSource,
+    /// The key columns of `WITH (PRESERVE UPDATE TIMES FOR KEY (...))`. When
+    /// set, the table's shard is in time-preserving compaction mode.
+    pub preserve_update_times_key: Option<Vec<usize>>,
 }
 
 impl Table {
@@ -1445,6 +1452,9 @@ pub struct MaterializedView {
     /// Note: This doesn't change upon restarts.
     /// (The dataflow's initial `as_of` can be different.)
     pub initial_as_of: Option<Antichain<mz_repr::Timestamp>>,
+    /// The key columns of `WITH (PRESERVE UPDATE TIMES FOR KEY (...))`. When
+    /// set, the view's shard is in time-preserving compaction mode.
+    pub preserve_update_times_key: Option<Vec<usize>>,
     // The catalog `dump` method uses serde to serialize catalog state, e.g., Testdrive catalog
     // consistency checks do two dumps and compare them. One of these states comes from the durable
     // catalog, but the following fields are not restored when the consistency check loads the
@@ -1559,6 +1569,9 @@ impl MaterializedView {
             custom_logical_compaction_window: replacement.custom_logical_compaction_window,
             refresh_schedule: replacement.refresh_schedule,
             initial_as_of: replacement.initial_as_of,
+            // Planning requires the replacement to declare the target's key,
+            // so the shard's compaction mode is unchanged.
+            preserve_update_times_key: replacement.preserve_update_times_key,
             optimized_plan: replacement.optimized_plan,
             physical_plan: replacement.physical_plan,
             dataflow_metainfo: replacement.dataflow_metainfo,
@@ -4211,6 +4224,14 @@ impl mz_sql::catalog::CatalogItem for CatalogEntry {
             mv.replacement_target
         } else {
             None
+        }
+    }
+
+    fn preserve_update_times_key(&self) -> Option<&[usize]> {
+        match self.item() {
+            CatalogItem::MaterializedView(mv) => mv.preserve_update_times_key.as_deref(),
+            CatalogItem::Table(table) => table.preserve_update_times_key.as_deref(),
+            _ => None,
         }
     }
 

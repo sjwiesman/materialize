@@ -1390,6 +1390,7 @@ impl CatalogState {
                     custom_logical_compaction_window: custom_logical_compaction_window
                         .or(table.compaction_window),
                     is_retained_metrics_object,
+                    preserve_update_times_key: table.preserve_update_times_key,
                     data_source: match table.data_source {
                         mz_sql::plan::TableDataSource::TableWrites { defaults } => {
                             TableDataSource::TableWrites { defaults }
@@ -1669,6 +1670,7 @@ impl CatalogState {
                     custom_logical_compaction_window: materialized_view.compaction_window,
                     refresh_schedule: materialized_view.refresh_schedule,
                     initial_as_of,
+                    preserve_update_times_key: materialized_view.preserve_update_times_key,
                     optimized_plan: None,
                     physical_plan: None,
                     dataflow_metainfo: None,

@@ -4287,7 +4287,8 @@ impl<'a> Parser<'a> {
     fn parse_materialized_view_option_name(
         &mut self,
     ) -> Result<MaterializedViewOptionName, ParserError> {
-        let option = self.expect_one_of_keywords(&[ASSERT, PARTITION, RETAIN, REFRESH])?;
+        let option =
+            self.expect_one_of_keywords(&[ASSERT, PARTITION, RETAIN, REFRESH, PRESERVE])?;
         let name = match option {
             ASSERT => {
                 self.expect_keywords(&[NOT, NULL])?;
@@ -4302,6 +4303,10 @@ impl<'a> Parser<'a> {
                 MaterializedViewOptionName::RetainHistory
             }
             REFRESH => MaterializedViewOptionName::Refresh,
+            PRESERVE => {
+                self.expect_keywords(&[UPDATE, TIMES])?;
+                MaterializedViewOptionName::PreserveUpdateTimes
+            }
             _ => unreachable!(),
         };
         Ok(name)
@@ -4316,9 +4321,25 @@ impl<'a> Parser<'a> {
             MaterializedViewOptionName::Refresh => {
                 Some(self.parse_materialized_view_refresh_option_value()?)
             }
+            MaterializedViewOptionName::PreserveUpdateTimes => {
+                self.parse_optional_for_key_option_value()?
+            }
             _ => self.parse_optional_option_value()?,
         };
         Ok(MaterializedViewOption { name, value })
+    }
+
+    /// Parses `[=] FOR KEY (<ident>, ...)`. Without a following `=` or `FOR`,
+    /// the option has no value.
+    fn parse_optional_for_key_option_value(
+        &mut self,
+    ) -> Result<Option<WithOptionValue<Raw>>, ParserError> {
+        if !self.consume_token(&Token::Eq) && !self.peek_keyword(FOR) {
+            return Ok(None);
+        }
+        self.expect_keywords(&[FOR, KEY])?;
+        let columns = self.parse_parenthesized_column_list(Mandatory)?;
+        Ok(Some(WithOptionValue::ForKey(columns)))
     }
 
     fn parse_option_retain_history(&mut self) -> Result<Option<WithOptionValue<Raw>>, ParserError> {
@@ -5393,9 +5414,9 @@ impl<'a> Parser<'a> {
     fn parse_table_from_source_option(
         &mut self,
     ) -> Result<TableFromSourceOption<Raw>, ParserError> {
-        let option = match self
-            .expect_one_of_keywords(&[TEXT, EXCLUDE, IGNORE, DETAILS, PARTITION, RETAIN])?
-        {
+        let option = match self.expect_one_of_keywords(&[
+            TEXT, EXCLUDE, IGNORE, DETAILS, PARTITION, RETAIN, PRESERVE,
+        ])? {
             TEXT => {
                 self.expect_keyword(COLUMNS)?;
 
@@ -5499,6 +5520,13 @@ impl<'a> Parser<'a> {
                 TableFromSourceOption {
                     name: TableFromSourceOptionName::RetainHistory,
                     value: self.parse_option_retain_history()?,
+                }
+            }
+            PRESERVE => {
+                self.expect_keywords(&[UPDATE, TIMES])?;
+                TableFromSourceOption {
+                    name: TableFromSourceOptionName::PreserveUpdateTimes,
+                    value: self.parse_optional_for_key_option_value()?,
                 }
             }
             _ => unreachable!(),

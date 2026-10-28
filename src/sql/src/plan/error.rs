@@ -120,6 +120,14 @@ pub enum PlanError {
         desired_key: Vec<String>,
         valid_keys: Vec<Vec<String>>,
     },
+    PreserveUpdateTimesWithInvalidKey {
+        name: String,
+        desired_key: Vec<String>,
+        valid_keys: Vec<Vec<String>>,
+    },
+    PreserveUpdateTimesWithoutPrimaryKey {
+        name: String,
+    },
     IcebergSinkUnsupportedKeyType {
         column: String,
         column_type: String,
@@ -336,6 +344,21 @@ pub enum PlanError {
     Unstructured(String),
 }
 
+/// Lists `valid_keys`, the unique keys known for `relation`, for an error detail.
+fn known_unique_keys(relation: &str, valid_keys: &[Vec<String>]) -> String {
+    if valid_keys.is_empty() {
+        format!("There are no known valid unique keys for {relation}.")
+    } else {
+        format!(
+            "The following keys are known to be unique for {relation}:\n{}",
+            valid_keys
+                .iter()
+                .map(|k| format!("  ({})", k.iter().map(|c| c.as_str().quoted()).join(", ")))
+                .join("\n"),
+        )
+    }
+}
+
 impl PlanError {
     pub(crate) fn ungrouped_column(item: &ScopeItem) -> PlanError {
         PlanError::UngroupedColumn {
@@ -361,22 +384,23 @@ impl PlanError {
                 desired_key,
                 valid_keys,
             } => {
-                let valid_keys = if valid_keys.is_empty() {
-                    "There are no known valid unique keys for the underlying relation.".into()
-                } else {
-                    format!(
-                        "The following keys are known to be unique for the underlying relation:\n{}",
-                        valid_keys
-                            .iter()
-                            .map(|k|
-                                format!("  ({})", k.iter().map(|c| c.as_str().quoted()).join(", "))
-                            )
-                            .join("\n"),
-                    )
-                };
+                let valid_keys = known_unique_keys("the underlying relation", valid_keys);
                 Some(format!(
                     "Materialize could not prove that the specified upsert envelope key ({}) \
                     was a unique key of the underlying relation {}. {valid_keys}",
+                    separated(", ", desired_key.iter().map(|c| c.as_str().quoted())),
+                    name.quoted()
+                ))
+            }
+            Self::PreserveUpdateTimesWithInvalidKey {
+                name,
+                desired_key,
+                valid_keys,
+            } => {
+                let valid_keys = known_unique_keys(&name.quoted().to_string(), valid_keys);
+                Some(format!(
+                    "Materialize could not prove that the specified key ({}) contains a \
+                    unique key of {}. {valid_keys}",
                     separated(", ", desired_key.iter().map(|c| c.as_str().quoted())),
                     name.quoted()
                 ))
@@ -419,6 +443,11 @@ impl PlanError {
 
     pub fn hint(&self) -> Option<String> {
         match self {
+            Self::PreserveUpdateTimesWithoutPrimaryKey { .. } => Some(
+                "A primary key removed with EXCLUDE CONSTRAINTS or EXCLUDE ALL CONSTRAINTS \
+                does not count."
+                    .into(),
+            ),
             Self::DropViewOnMaterializedView(_) => {
                 Some("Use DROP MATERIALIZED VIEW to remove a materialized view.".into())
             }
@@ -646,6 +675,14 @@ impl fmt::Display for PlanError {
             Self::UpsertSinkWithInvalidKey { .. } => {
                 write!(f, "upsert key could not be validated as unique")
             }
+            Self::PreserveUpdateTimesWithInvalidKey { .. } => {
+                write!(f, "PRESERVE UPDATE TIMES key could not be validated as unique")
+            }
+            Self::PreserveUpdateTimesWithoutPrimaryKey { name } => write!(
+                f,
+                "PRESERVE UPDATE TIMES requires source table {} to have an upstream primary key",
+                name.quoted()
+            ),
             Self::IcebergSinkUnsupportedKeyType { column, column_type } => {
                 write!(f, "column {column} has type {column_type} which cannot be used as an Iceberg equality delete key")
             }

@@ -1919,6 +1919,7 @@ async fn purify_create_table_from_source(
         retain_history: _,
         details,
         partition_by: _,
+        preserve_update_times: _,
         seen: _,
     } = with_options.clone().try_into()?;
     if details.is_some() {

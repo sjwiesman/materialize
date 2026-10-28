@@ -122,7 +122,8 @@ pub use statement::ddl::{
     AlterSourceAddSubsourceOptionExtracted, METRIC_SINK_CURATED_PREFIX_MARKER,
     MySqlConfigOptionExtracted, PgConfigOptionExtracted, PlannedAlterRoleOption,
     PlannedRoleAttributes, PlannedRoleVariable, SqlServerConfigOptionExtracted,
-    validate_metric_sink_desc, validate_metric_sink_prefix, validate_user_metric_sink_prefix,
+    validate_metric_sink_desc, validate_metric_sink_prefix, validate_preserve_update_times_key,
+    validate_user_metric_sink_prefix,
 };
 pub use statement::{
     StatementClassification, StatementContext, StatementDesc, describe, plan, plan_copy_from,
@@ -1580,6 +1581,9 @@ pub struct Table {
     pub temporary: bool,
     pub compaction_window: Option<CompactionWindow>,
     pub data_source: TableDataSource,
+    /// The key columns of `WITH (PRESERVE UPDATE TIMES FOR KEY (...))`, if
+    /// given. Only tables fed by a source accept the option.
+    pub preserve_update_times_key: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1983,6 +1987,11 @@ pub struct MaterializedView {
     pub compaction_window: Option<CompactionWindow>,
     pub refresh_schedule: Option<RefreshSchedule>,
     pub as_of: Option<Timestamp>,
+    /// The key columns of `WITH (PRESERVE UPDATE TIMES FOR KEY (...))`, if
+    /// given. Planning does not prove the key, because the view's unique keys
+    /// are known only after optimization. See
+    /// [`validate_preserve_update_times_key`].
+    pub preserve_update_times_key: Option<Vec<usize>>,
 }
 
 #[derive(Clone, Debug)]

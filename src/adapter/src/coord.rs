@@ -3258,6 +3258,7 @@ impl Coordinator {
                 since: None,
                 timeline: Some(timeline.clone()),
                 primary: None,
+                preserve_update_times: false,
             }
         };
 
@@ -3303,15 +3304,16 @@ impl Coordinator {
                             soft_assert_eq_or_log!(table.collections.len(), 1);
                             let collection_descs =
                                 table.collection_descs().map(|(gid, _version, desc)| {
-                                    (
-                                        gid,
-                                        source_desc(
-                                            entry.latest_global_id(),
-                                            data_source_desc,
-                                            &desc,
-                                            timeline,
-                                        ),
-                                    )
+                                    let mut collection_desc = source_desc(
+                                        entry.latest_global_id(),
+                                        data_source_desc,
+                                        &desc,
+                                        timeline,
+                                    );
+                                    collection_desc.preserve_update_times = table
+                                        .preserve_update_times_key
+.is_some();
+                                    (gid, collection_desc)
                                 });
                             collections.extend(collection_descs);
                         }
@@ -3332,6 +3334,9 @@ impl Coordinator {
                         let mut collection_desc =
                             CollectionDescription::for_other(desc, mv.initial_as_of.clone());
                         collection_desc.primary = primary;
+                        collection_desc.preserve_update_times = mv
+                            .preserve_update_times_key
+.is_some();
                         primary = Some(gid);
                         (gid, collection_desc)
                     });
@@ -3371,6 +3376,7 @@ impl Coordinator {
                         since: None,
                         timeline: None,
                         primary: None,
+                        preserve_update_times: false,
                     };
                     collections.push((sink.global_id, collection_desc));
                 }

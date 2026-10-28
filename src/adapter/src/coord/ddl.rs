@@ -1167,6 +1167,7 @@ impl Coordinator {
             since: None,
             timeline: None,
             primary: None,
+            preserve_update_times: false,
         };
         let collections = vec![(id, collection_desc)];
 

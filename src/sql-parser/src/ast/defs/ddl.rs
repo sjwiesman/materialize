@@ -36,6 +36,8 @@ pub enum MaterializedViewOptionName {
     RetainHistory,
     /// The `REFRESH [=] ...` option.
     Refresh,
+    /// The `PRESERVE UPDATE TIMES` option.
+    PreserveUpdateTimes,
 }
 
 impl AstDisplay for MaterializedViewOptionName {
@@ -45,6 +47,7 @@ impl AstDisplay for MaterializedViewOptionName {
             MaterializedViewOptionName::PartitionBy => f.write_str("PARTITION BY"),
             MaterializedViewOptionName::RetainHistory => f.write_str("RETAIN HISTORY"),
             MaterializedViewOptionName::Refresh => f.write_str("REFRESH"),
+            MaterializedViewOptionName::PreserveUpdateTimes => f.write_str("PRESERVE UPDATE TIMES"),
         }
     }
 }
@@ -59,7 +62,8 @@ impl WithOptionName for MaterializedViewOptionName {
         match self {
             MaterializedViewOptionName::AssertNotNull
             | MaterializedViewOptionName::RetainHistory
-            | MaterializedViewOptionName::Refresh => false,
+            | MaterializedViewOptionName::Refresh
+            | MaterializedViewOptionName::PreserveUpdateTimes => false,
             // The value is an arbitrary user expression/literal that may embed
             // sensitive data, so redact it (mirrors `KafkaSinkConfigOptionName`).
             MaterializedViewOptionName::PartitionBy => true,

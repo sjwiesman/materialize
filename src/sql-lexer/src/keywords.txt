@@ -372,6 +372,7 @@ Preceding
 Precision
 Prefix
 Prepare
+Preserve
 Primary
 Prioritize
 Privatelink
@@ -495,6 +496,7 @@ Tick
 Ties
 Time
 Timeout
+Times
 Timestamp
 TimestampTz
 Timing

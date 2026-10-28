@@ -892,6 +892,7 @@ impl CatalogState {
                         data_source: TableDataSource::TableWrites {
                             defaults: vec![Expr::null(); table.desc.arity()],
                         },
+                        preserve_update_times_key: None,
                     }),
                     MZ_SYSTEM_ROLE_ID,
                     PrivilegeMap::from_mz_acl_items(acl_items),
