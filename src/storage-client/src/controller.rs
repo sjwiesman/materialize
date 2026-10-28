@@ -162,6 +162,11 @@ pub struct CollectionDescription {
     /// of the involved collections as the primary, who "owns" the persist
     /// shard. All other involved collections have a dependency on the primary.
     pub primary: Option<GlobalId>,
+    /// Whether the collection's shard is put in time-preserving compaction
+    /// mode when it is created. Requires a proven key, which makes every full
+    /// row unique. See
+    /// [mz_persist_client::PersistClient::enable_preserve_update_times].
+    pub preserve_update_times: bool,
 }
 
 impl CollectionDescription {
@@ -173,6 +178,7 @@ impl CollectionDescription {
             since,
             timeline: None,
             primary: None,
+            preserve_update_times: false,
         }
     }
 
@@ -184,6 +190,7 @@ impl CollectionDescription {
             since: None,
             timeline: Some(Timeline::EpochMilliseconds),
             primary: None,
+            preserve_update_times: false,
         }
     }
 }
