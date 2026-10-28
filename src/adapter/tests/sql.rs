@@ -105,6 +105,7 @@ async fn datadriven() {
                                             resolved_ids: ResolvedIds::empty(),
                                             custom_logical_compaction_window: None,
                                             is_retained_metrics_object: false,
+                                            preserve_update_times_key: None,
                                             data_source: TableDataSource::TableWrites {
                                                 defaults: vec![],
                                             },

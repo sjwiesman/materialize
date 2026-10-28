@@ -28,7 +28,7 @@ use mz_controller::Controller;
 use mz_expr::visit::Visit;
 use mz_expr::{
     CollectionPlan, Id, MapFilterProject, MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr,
-    RECURSION_LIMIT, UnmaterializableFunc,
+    RECURSION_LIMIT, UnmaterializableFunc, VariadicFunc,
 };
 use mz_ore::cast::ReinterpretCast;
 use mz_ore::stack::{CheckedRecursion, RecursionGuard, RecursionLimitError, maybe_grow};
@@ -182,11 +182,22 @@ impl ExprPrep for ExprPrepMaintained {
     fn prep_scalar_expr(&self, expr: &mut MirScalarExpr) -> Result<(), OptimizerError> {
         // Reject the query if it contains any unmaterializable function calls.
         let mut last_observed_unmaterializable_func = None;
-        expr.visit_mut_post(&mut |e| {
-            if let MirScalarExpr::CallUnmaterializable(f) = e {
+        let mut calls_updated_at = false;
+        expr.visit_mut_post(&mut |e| match e {
+            MirScalarExpr::CallUnmaterializable(f) => {
                 last_observed_unmaterializable_func = Some(f.clone());
             }
+            MirScalarExpr::CallVariadic {
+                func: VariadicFunc::MzUpdatedAt(_),
+                ..
+            } => calls_updated_at = true,
+            _ => {}
         });
+        // A dataflow's imports advance every time to its `as_of`, so it has no
+        // stamps to bind the call to.
+        if calls_updated_at {
+            return Err(OptimizerError::UncallableUpdatedAt("a maintained dataflow"));
+        }
 
         if let Some(f) = last_observed_unmaterializable_func {
             Err(OptimizerError::UnmaterializableFunction(f))
@@ -381,6 +392,45 @@ impl<'a> DataflowBuilder<'a> {
             }
             Ok(())
         })
+    }
+
+    /// Imports `id`, a table or materialized view in time-preserving mode,
+    /// for the dataflow of an index on it, with its snapshot at stored times.
+    ///
+    /// Always imports the shard. Importing an existing index on `id` instead,
+    /// as [`Self::import_into_dataflow`] prefers, would advance every time to
+    /// this dataflow's `as_of` (`import_frontier_core`) and stamp every row
+    /// at it.
+    pub fn import_preserving_into_dataflow(
+        &mut self,
+        id: &GlobalId,
+        dataflow: &mut MirDataflowDescription,
+        features: &OptimizerFeatures,
+    ) -> Result<(), OptimizerError> {
+        let entry = self.catalog.get_entry(id);
+        let typ = match entry.item() {
+            CatalogItem::Table(table) if table.preserve_update_times_key.is_some() => {
+                table.desc_for(id).into_typ()
+            }
+            // A replacement cannot be read, so its index computes the view's
+            // definition, which has no preserved times to keep. Stamped peeks
+            // of that index fail on the replica, which checks the trace.
+            CatalogItem::MaterializedView(mview) if mview.replacement_target.is_some() => {
+                return self.import_into_dataflow(id, dataflow, features);
+            }
+            CatalogItem::MaterializedView(mview) if mview.preserve_update_times_key.is_some() => {
+                mview.desc_for(id).into_typ()
+            }
+            _ => {
+                return Err(OptimizerError::Internal(format!(
+                    "{id} is not a readable collection in time-preserving mode"
+                )));
+            }
+        };
+        // The key was proven when the object was created, and makes every
+        // full row unique, which the import's pairing merges require.
+        dataflow.import_source_preserving(*id, typ);
+        Ok(())
     }
 
     /// Imports the view with the specified ID and expression into the provided

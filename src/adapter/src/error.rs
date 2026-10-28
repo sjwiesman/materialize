@@ -1047,6 +1047,7 @@ impl AdapterError {
                 OptimizerError::TransformError(_) => SqlState::INTERNAL_ERROR,
                 OptimizerError::UnmaterializableFunction(_) => SqlState::FEATURE_NOT_SUPPORTED,
                 OptimizerError::UncallableFunction { .. } => SqlState::FEATURE_NOT_SUPPORTED,
+                OptimizerError::UncallableUpdatedAt(_) => SqlState::FEATURE_NOT_SUPPORTED,
                 OptimizerError::UnsupportedTemporalExpression(_) => SqlState::FEATURE_NOT_SUPPORTED,
                 OptimizerError::RestrictedFunction(_) => SqlState::INSUFFICIENT_PRIVILEGE,
                 // This should be handled by peek optimization, so it's an internal error if it
