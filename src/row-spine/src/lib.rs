@@ -26,6 +26,7 @@ pub use self::spines::{
 };
 
 mod arc_batch;
+pub mod preserving;
 
 use differential_dataflow::trace::implementations::OffsetList;
 
@@ -58,7 +59,9 @@ mod spines {
 
     pub type RowRowSpine<T, R> = Spine<ArcBatch<OrdValBatch<RowRowLayout<((Row, Row), T, R)>>>>;
     pub type RowRowBatcher<T, R> = KeyValBatcher<Row, Row, T, R>;
-    pub type RowRowBuilder<T, R> = ArcBuilder<crate::dictionary::builders::RowRowBuilder<T, R>>;
+    /// `M` selects how the batches it builds merge, see [`crate::preserving`].
+    pub type RowRowBuilder<T, R, M = crate::preserving::Advance> =
+        ArcBuilder<crate::dictionary::builders::RowRowBuilder<T, R>, M>;
 
     /// `RowRowBuilder` variant that consumes [`ColumnBody`] chunks. Pairs with
     /// any batcher whose chains are bodies, spillable ([`AccountedChunkBatcher`]
@@ -72,8 +75,10 @@ mod spines {
     /// [`Col2ValColBatcher`]: mz_timely_util::columnar::Col2ValColBatcher
     /// [`ColumnBody`]: mz_timely_util::columnar::body::ColumnBody
     /// [`UnchunkBuilder`]: mz_timely_util::columnar::chunk::UnchunkBuilder
-    pub type RowRowColPagedBuilder<T, R> =
-        ArcBuilder<crate::dictionary::builders::RowRowColPagedBuilder<T, R>>;
+    ///
+    /// `M` is as for [`RowRowBuilder`].
+    pub type RowRowColPagedBuilder<T, R, M = crate::preserving::Advance> =
+        ArcBuilder<crate::dictionary::builders::RowRowColPagedBuilder<T, R>, M>;
 
     pub type RowValSpine<V, T, R> = Spine<ArcBatch<OrdValBatch<RowValLayout<((Row, V), T, R)>>>>;
     pub type RowValBatcher<V, T, R> = KeyValBatcher<Row, V, T, R>;

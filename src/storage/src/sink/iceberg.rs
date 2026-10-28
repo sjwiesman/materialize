@@ -2698,7 +2698,7 @@ mod tests {
         /// only looks at bounds, so the batch holds no data.
         fn input(lower: u64, upper: Option<u64>) -> ArcBatch<TestBatch> {
             let (lower, upper) = span(lower, upper);
-            ArcBatch(Arc::new(TestBatch::empty(lower, upper)))
+            ArcBatch::new(TestBatch::empty(lower, upper))
         }
 
         #[derive(Debug, PartialEq)]
