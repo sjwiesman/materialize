@@ -144,7 +144,10 @@ pub(crate) fn index_peek(
         .with_column("value", SqlScalarType::UInt64.nullable(false))
         .finish();
     Peek {
-        target: PeekTarget::Index { id: TARGET_ID },
+        target: PeekTarget::Index {
+            id: TARGET_ID,
+            stamped: false,
+        },
         result_desc,
         literal_constraints,
         uuid: Uuid::nil(),
@@ -299,6 +302,8 @@ fn index_peek_over(peek: Peek, keys: &[Row], errors: ErrorUpdates) -> IndexPeek 
     IndexPeek {
         peek,
         trace_bundle: trace_bundle(keys, errors),
+        stamped: false,
+        setup_error: None,
         span: tracing::Span::none(),
     }
 }

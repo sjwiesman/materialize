@@ -1079,6 +1079,7 @@ mod tests {
                         monotonic: Default::default(),
                         with_snapshot: true,
                         upper: Default::default(),
+                        preserve_update_times: false,
                     },
                 )
             })

@@ -168,8 +168,24 @@ impl DataflowDescription<OptimizedMirRelationExpr, ()> {
                 monotonic,
                 with_snapshot: true,
                 upper: Antichain::new(),
+                preserve_update_times: false,
             },
         );
+    }
+
+    /// Imports the shard of a collection in time-preserving mode for the
+    /// dataflow of an index on it, so that the index's trace holds each row at
+    /// the times it was written. The importing dataflow must arrange the
+    /// import directly, with no other operator reading it: the snapshot
+    /// carries times below the dataflow's `as_of`, which only a
+    /// time-preserving arrangement keeps correctly.
+    ///
+    /// The collection must have a count of 0 or 1 for every full row at every
+    /// time, since the arrangement's merges pair inserts with deletes.
+    pub fn import_source_preserving(&mut self, id: GlobalId, typ: SqlRelationType) {
+        self.import_source(id, typ, false);
+        let import = self.source_imports.get_mut(&id).expect("just imported");
+        import.preserve_update_times = true;
     }
 
     /// Binds to `id` the relation expression `plan`.
@@ -292,6 +308,7 @@ impl<P, S, O> DataflowDescription<P, S, O> {
                     monotonic,
                     with_snapshot,
                     upper,
+                    preserve_update_times,
                 } = import;
                 let desc = SourceInstanceDesc {
                     arguments: SourceInstanceArguments {
@@ -305,6 +322,7 @@ impl<P, S, O> DataflowDescription<P, S, O> {
                     monotonic,
                     with_snapshot,
                     upper,
+                    preserve_update_times,
                 };
                 Ok((id, import))
             })
@@ -725,6 +743,11 @@ pub struct SourceImport<S: 'static = (), O = MapFilterProject> {
     pub with_snapshot: bool,
     /// The initial known upper frontier for the source.
     pub upper: Antichain<Timestamp>,
+    /// Whether the snapshot is read with each update at its stored time and
+    /// arrangements formed directly from the import keep those times, see
+    /// [`DataflowDescription::import_source_preserving`]. Set only for the
+    /// index dataflow of a collection in time-preserving mode.
+    pub preserve_update_times: bool,
 }
 
 /// An association of a global identifier to an expression.
@@ -769,6 +792,7 @@ mod tests {
             monotonic: false,
             with_snapshot: true,
             upper: Antichain::from_elem(Timestamp::MIN),
+            preserve_update_times: false,
         };
 
         let mut df = MirDataflowDescription::new("test".to_string());

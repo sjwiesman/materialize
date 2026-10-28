@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use differential_dataflow::Hashable;
 use differential_dataflow::lattice::Lattice;
-use differential_dataflow::trace::TraceReader;
+use differential_dataflow::trace::{BatchReader, TraceReader};
 use mz_compute_client::logging::LoggingConfig;
 use mz_compute_client::protocol::command::{
     ComputeCommand, ComputeParameters, InstanceConfig, Peek, PeekTarget,
@@ -46,7 +46,7 @@ use mz_persist_client::cfg::USE_CRITICAL_SINCE_SNAPSHOT;
 use mz_persist_client::read::ReadHandle;
 use mz_persist_types::PersistLocation;
 use mz_persist_types::codec_impls::UnitSchema;
-use mz_repr::{DatumVec, GlobalId, Row, RowArena, Timestamp};
+use mz_repr::{Datum, DatumVec, GlobalId, Row, RowArena, Timestamp};
 use mz_storage_operators::persist::SharedBatches;
 use mz_storage_operators::stats::StatsCursor;
 use mz_storage_types::StorageDiff;
@@ -916,17 +916,21 @@ impl<'a> ActiveComputeState<'a> {
     #[mz_ore::instrument(level = "debug")]
     fn handle_peek(&mut self, peek: Peek) {
         let pending = match &peek.target {
-            PeekTarget::Index { id } => {
+            PeekTarget::Index { id, .. } => {
                 // Acquire a copy of the trace suitable for fulfilling the peek.
                 let trace_bundle = self.compute_state.traces.get(id).unwrap().clone();
                 PendingPeek::index(peek, trace_bundle)
             }
-            PeekTarget::Persist { metadata, .. } => {
+            PeekTarget::Persist {
+                metadata, stamped, ..
+            } => {
                 let metadata = metadata.clone();
+                let stamped = *stamped;
                 PendingPeek::persist(
                     peek,
                     Arc::clone(&self.compute_state.persist_clients),
                     metadata,
+                    stamped,
                     usize::cast_from(self.compute_state.max_result_size),
                     self.timely_worker,
                     PeekRowIterationConfig::new(&self.compute_state.worker_config),
@@ -1576,7 +1580,7 @@ impl PendingPeek {
     pub fn as_log_event(&self, installed: bool) -> ComputeEvent {
         let peek = self.peek();
         let (id, peek_type) = match &peek.target {
-            PeekTarget::Index { id } => (*id, logging::compute::PeekType::Index),
+            PeekTarget::Index { id, .. } => (*id, logging::compute::PeekType::Index),
             PeekTarget::Persist { id, .. } => (*id, logging::compute::PeekType::Persist),
         };
         let uuid = peek.uuid.into_bytes();
@@ -1589,7 +1593,7 @@ impl PendingPeek {
         })
     }
 
-    fn index(peek: Peek, mut trace_bundle: TraceBundle) -> Self {
+    fn index(mut peek: Peek, mut trace_bundle: TraceBundle) -> Self {
         let empty_frontier = Antichain::new();
         let timestamp_frontier = Antichain::from_elem(peek.timestamp);
         trace_bundle
@@ -1605,9 +1609,24 @@ impl PendingPeek {
             .errs_mut()
             .set_physical_compaction(empty_frontier.borrow());
 
+        // The calls name the index's collection, which the adapter checks and
+        // the trace does not record. `IndexPeek::seek_fulfillment` checks that
+        // the trace holds preserved times.
+        let stamped = matches!(peek.target, PeekTarget::Index { stamped: true, .. });
+        let setup_error = if stamped {
+            peek.map_filter_project
+                .bind_updated_at_to_input()
+                .err()
+                .map(PeekError::unstructured)
+        } else {
+            None
+        };
+
         PendingPeek::Index(IndexPeek {
             peek,
             trace_bundle,
+            stamped,
+            setup_error,
             span: tracing::Span::current(),
         })
     }
@@ -1616,6 +1635,7 @@ impl PendingPeek {
         peek: Peek,
         persist_clients: Arc<PersistClientCache>,
         metadata: CollectionMetadata,
+        stamped: bool,
         max_result_size: usize,
         timely_worker: &TimelyWorker,
         row_iteration_config: PeekRowIterationConfig,
@@ -1631,6 +1651,7 @@ impl PendingPeek {
         let (result_tx, result_rx) = oneshot::channel();
         let timestamp = peek.timestamp;
         let mfp_plan = peek.map_filter_project.clone();
+        let stamped = stamped.then(|| peek.target.id());
         let max_results_needed = peek
             .finishing
             .limit
@@ -1651,6 +1672,7 @@ impl PendingPeek {
                 PersistPeek::do_peek(
                     &persist_clients,
                     metadata,
+                    stamped,
                     timestamp,
                     literal_constraint,
                     mfp_plan,
@@ -1723,6 +1745,9 @@ impl PersistPeek {
     async fn do_peek(
         persist_clients: &PersistClientCache,
         metadata: CollectionMetadata,
+        // The collection to read each row's stamp of, see
+        // `PeekTarget::Persist::stamped`.
+        stamped: Option<GlobalId>,
         as_of: Timestamp,
         literal_constraint: Option<Row>,
         mfp_plan: SafeMfpPlan,
@@ -1753,6 +1778,11 @@ impl PersistPeek {
         // use in here (instead of opening a new TxnsCache) to save a persist
         // reader registration and some txns shard read traffic.
         let mut txns_read = if let Some(txns_id) = metadata.txns_shard {
+            if stamped.is_some() {
+                return Err(PeekError::unstructured(
+                    "mz_updated_at is not supported on tables written through txn-wal",
+                ));
+            }
             Some(TxnsCache::open(&client, txns_id, Some(metadata.data_shard)).await)
         } else {
             None
@@ -1767,6 +1797,7 @@ impl PersistPeek {
             &mfp_plan,
             &metadata.relation_desc,
             Antichain::from_elem(as_of),
+            stamped.is_some(),
         )
         .await
         .map_err(|since| {
@@ -1774,6 +1805,26 @@ impl PersistPeek {
                 "attempted to peek at {as_of}, but the since has advanced to {since:?}"
             ))
         })?;
+
+        // Stats pruning above used the MFP with `mz_updated_at` unbound, which
+        // the pushdown interpreter treats as any value of its type. Evaluation
+        // needs the stamp, which is supplied as one more input datum.
+        let mfp_plan = if let Some(id) = stamped {
+            let mut bound = mfp_plan;
+            match bound.bind_updated_at_to_input() {
+                Ok(None) => {}
+                Ok(Some(bound_id)) if bound_id == id => {}
+                Ok(Some(bound_id)) => {
+                    return Err(PeekError::unstructured(format!(
+                        "mz_updated_at reads {bound_id}, but the stamped read is of {id}"
+                    )));
+                }
+                Err(e) => return Err(PeekError::unstructured(e)),
+            }
+            bound
+        } else {
+            mfp_plan
+        };
 
         // Re-used state for processing and building rows.
         let mut result = vec![];
@@ -1792,7 +1843,7 @@ impl PersistPeek {
             let Some(batch) = cursor.next().await else {
                 break;
             };
-            for (data, _, d) in batch {
+            for (data, t, d) in batch {
                 // Count before literal and MFP filtering because the Persist row
                 // has already been read and must still be examined.
                 row_iteration_tracker.set_limit(row_iteration_config.current_limit());
@@ -1823,6 +1874,9 @@ impl PersistPeek {
                     continue;
                 };
                 let mut datum_local = datum_vec.borrow_with(&row);
+                if stamped.is_some() {
+                    datum_local.push(Datum::MzTimestamp(t));
+                }
                 let eval_result = mfp_plan
                     .evaluate_into(&mut datum_local, &arena, &mut row_builder)
                     .map(|row| row.cloned())
@@ -1850,6 +1904,10 @@ pub struct IndexPeek {
     peek: Peek,
     /// The data from which the trace derives.
     trace_bundle: TraceBundle,
+    /// Whether the peek reads each row's stamp, see `PeekTarget::Index`.
+    stamped: bool,
+    /// An error that answers the peek once its frontiers admit the read.
+    setup_error: Option<PeekError>,
     /// The `tracing::Span` tracking this peek's operation
     span: tracing::Span,
 }
@@ -1897,6 +1955,26 @@ impl IndexPeek {
                 "Arrangement compaction frontier ({:?}) is beyond the time of the attempted read ({})",
                 read_frontier.elements(),
                 self.peek.timestamp,
+            );
+            return PeekStatus::Ready(PeekResponse::Error(PeekError::unstructured(error)));
+        }
+
+        if let Some(error) = self.setup_error.take() {
+            return PeekStatus::Ready(PeekResponse::Error(error));
+        }
+        // An index built from a sibling index, or before its collection's
+        // import preserved times, holds times advanced to its `as_of`. Its
+        // stamps would be wrong rather than missing, so the peek fails.
+        let mut preserves_times = true;
+        if self.stamped {
+            self.trace_bundle.oks_mut().map_batches(|batch| {
+                preserves_times &= batch.is_empty() || batch.preserves_times();
+            });
+        }
+        if !preserves_times {
+            let error = format!(
+                "index {} does not hold preserved update times, recreate it to serve mz_updated_at",
+                self.peek.target.id(),
             );
             return PeekStatus::Ready(PeekResponse::Error(PeekError::unstructured(error)));
         }

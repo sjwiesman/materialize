@@ -14,7 +14,7 @@ use differential_dataflow::trace::implementations::BatchContainer;
 use differential_dataflow::trace::{Cursor, Navigable, TraceReader};
 use mz_compute_client::protocol::response::PeekError;
 use mz_repr::fixed_length::ExtendDatums;
-use mz_repr::{DatumVec, Diff, GlobalId, Row, RowArena};
+use mz_repr::{Datum, DatumVec, Diff, GlobalId, Row, RowArena};
 use timely::order::PartialOrder;
 
 use crate::compute_state::PeekRowIterationTracker;
@@ -35,6 +35,11 @@ where
     storage: TraceStorage<Tr>,
     map_filter_project: mz_expr::SafeMfpPlan,
     peek_timestamp: mz_repr::Timestamp,
+    /// Whether the MFP takes each row's stamp as one more input datum, after
+    /// the key, value, and literal datums. See `PeekTarget::Index::stamped`.
+    stamped: bool,
+    /// Scratch space for a stamped row's `(time, diff)` pairs.
+    stamp_times: Vec<(mz_repr::Timestamp, Diff)>,
     row_builder: Row,
     datum_vec: DatumVec,
     literals: Option<Literals<Tr>>,
@@ -180,6 +185,7 @@ where
             Key<'a>: ExtendDatums + Eq,
             KeyContainer: BatchContainer<Owned = Row>,
             Val<'a>: ExtendDatums,
+            Time = mz_repr::Timestamp,
             TimeGat<'a>: PartialOrder<mz_repr::Timestamp>,
             DiffGat<'a> = &'a Diff,
         >,
@@ -188,6 +194,7 @@ where
         target_id: GlobalId,
         map_filter_project: mz_expr::SafeMfpPlan,
         peek_timestamp: mz_repr::Timestamp,
+        stamped: bool,
         literal_constraints: Option<&mut [Row]>,
         trace_reader: &mut Tr,
         row_iteration_limit: Option<usize>,
@@ -198,6 +205,7 @@ where
             target_id,
             map_filter_project,
             peek_timestamp,
+            stamped,
             literal_constraints,
             cursor,
             storage,
@@ -211,6 +219,7 @@ where
         target_id: GlobalId,
         map_filter_project: mz_expr::SafeMfpPlan,
         peek_timestamp: mz_repr::Timestamp,
+        stamped: bool,
         literal_constraints: Option<&mut [Row]>,
         cursor: TraceCursor<Tr>,
         storage: TraceStorage<Tr>,
@@ -225,6 +234,8 @@ where
             storage,
             map_filter_project,
             peek_timestamp,
+            stamped,
+            stamp_times: Vec::new(),
             row_builder: Row::default(),
             datum_vec: DatumVec::new(),
             literals,
@@ -264,6 +275,7 @@ where
             Key<'a>: ExtendDatums + Eq,
             KeyContainer: BatchContainer<Owned = Row>,
             Val<'a>: ExtendDatums,
+            Time = mz_repr::Timestamp,
             TimeGat<'a>: PartialOrder<mz_repr::Timestamp>,
             DiffGat<'a> = &'a Diff,
         >,
@@ -277,6 +289,7 @@ where
             Key<'a>: ExtendDatums + Eq,
             KeyContainer: BatchContainer<Owned = Row>,
             Val<'a>: ExtendDatums,
+            Time = mz_repr::Timestamp,
             TimeGat<'a>: PartialOrder<mz_repr::Timestamp>,
             DiffGat<'a> = &'a Diff,
         >,
@@ -331,6 +344,7 @@ where
             Key<'a>: ExtendDatums + Eq,
             KeyContainer: BatchContainer<Owned = Row>,
             Val<'a>: ExtendDatums,
+            Time = mz_repr::Timestamp,
             TimeGat<'a>: PartialOrder<mz_repr::Timestamp>,
             DiffGat<'a> = &'a Diff,
         >,
@@ -438,6 +452,17 @@ where
         // from a performance perspective.
         let arena = RowArena::new();
 
+        // A stamped row is folded before the MFP runs, since the MFP reads the
+        // stamp. Other rows are counted only if the MFP keeps them.
+        let folded = if self.stamped {
+            let Some(folded) = self.fold_current() else {
+                return Ok(None);
+            };
+            Some(folded)
+        } else {
+            None
+        };
+
         let key_item = self.cursor.key(&self.storage);
         let row_item = self.cursor.val(&self.storage);
 
@@ -460,18 +485,27 @@ where
                 .expect("literal position must be at a matching literal during row extraction");
             maybe_literal.extend_datums(&arena, &mut borrow, None);
         }
+        if let Some((_, stamp)) = folded {
+            borrow.push(Datum::MzTimestamp(stamp));
+        }
         if let Some(result) = self
             .map_filter_project
             .evaluate_into(&mut borrow, &arena, &mut self.row_builder)
             .map(|row| row.cloned())
             .map_err(PeekError::from)?
         {
-            let mut copies = Diff::ZERO;
-            self.cursor.map_times(&self.storage, |time, diff| {
-                if time.less_equal(&self.peek_timestamp) {
-                    copies += diff;
+            let copies = match folded {
+                Some((copies, _)) => copies,
+                None => {
+                    let mut copies = Diff::ZERO;
+                    self.cursor.map_times(&self.storage, |time, diff| {
+                        if time.less_equal(&self.peek_timestamp) {
+                            copies += diff;
+                        }
+                    });
+                    copies
                 }
-            });
+            };
             let copies: i64 = if copies.is_negative() {
                 let row = &*borrow;
                 tracing::error!(
@@ -495,6 +529,32 @@ where
         } else {
             Ok(None)
         }
+    }
+
+    /// The current row's count at the peek timestamp and its stamp: the
+    /// greatest time at or below the peek timestamp at which the row's net
+    /// diff is nonzero. `None` if there is no such time, in which case the
+    /// count is zero too.
+    ///
+    /// The fold over the trace's pairs agrees with the stamp fold that trace
+    /// merges and persist compaction apply, since it composes with them: every
+    /// time they folded is at or below the trace's compaction frontier, which
+    /// is at or below the peek timestamp.
+    fn fold_current(&mut self) -> Option<(Diff, mz_repr::Timestamp)> {
+        self.stamp_times.clear();
+        let peek_timestamp = self.peek_timestamp;
+        let stamp_times = &mut self.stamp_times;
+        self.cursor.map_times(&self.storage, |time, diff| {
+            let time = TraceCursor::<Tr>::owned_time(time);
+            if time <= peek_timestamp {
+                stamp_times.push((time, *diff));
+            }
+        });
+        // Sorts by time and drops times whose net diff is zero.
+        differential_dataflow::consolidation::consolidate(&mut self.stamp_times);
+        let (stamp, _) = self.stamp_times.last()?;
+        let copies = self.stamp_times.iter().map(|(_, diff)| *diff).sum();
+        Some((copies, *stamp))
     }
 
     /// Steps the key forward, respecting literal constraints and charging `fuel` for the

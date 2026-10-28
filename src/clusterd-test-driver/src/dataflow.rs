@@ -648,6 +648,7 @@ fn augment(
                 monotonic: import.monotonic,
                 with_snapshot: import.with_snapshot,
                 upper: Antichain::from_elem(source.upper),
+                preserve_update_times: import.preserve_update_times,
             },
         );
     }
