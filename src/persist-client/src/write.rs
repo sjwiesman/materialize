@@ -870,7 +870,9 @@ where
     pub fn builder(&self, lower: Antichain<T>) -> BatchBuilder<K, V, T, D> {
         Self::builder_inner(
             &self.cfg,
-            CompactConfig::new(&self.cfg, self.shard_id()),
+            // A builder compacts only its own runs, under a `since` of the
+            // minimum, so it consolidates at exact times in either mode.
+            CompactConfig::new(&self.cfg, self.shard_id(), false),
             Arc::clone(&self.metrics),
             Arc::clone(&self.machine.applier.shard_metrics),
             &self.metrics.user,

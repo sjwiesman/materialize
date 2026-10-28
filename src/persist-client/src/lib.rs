@@ -568,7 +568,8 @@ impl PersistClient {
         T: Timestamp + Lattice + Codec64 + TotalOrder + Sync,
         D: Monoid + Ord + Codec64 + Send + Sync,
     {
-        let mut compact_cfg = CompactConfig::new(&self.cfg, shard_id);
+        // See `WriteHandle::builder`.
+        let mut compact_cfg = CompactConfig::new(&self.cfg, shard_id, false);
         if let Some(max_runs) = max_runs {
             compact_cfg.batch.max_runs = Some(max_runs);
         }

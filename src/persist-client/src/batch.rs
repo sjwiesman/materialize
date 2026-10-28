@@ -992,6 +992,7 @@ impl<T: Timestamp + Codec64> BatchParts<T> {
                             &cfg,
                             &shard_id,
                             &compact_desc,
+                            false,
                             run_refs,
                             blob,
                             metrics,

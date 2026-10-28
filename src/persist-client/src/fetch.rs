@@ -435,11 +435,85 @@ pub(crate) enum FetchBatchFilter<T> {
     Compaction {
         since: Antichain<T>,
     },
+    /// Compaction of a shard in time-preserving mode. Times are never advanced.
+    /// The consolidator pairs inserts with deletes in records at or below
+    /// `since`, falling back to the stamp fold for a row whose updates do not
+    /// alternate, and passes records above `since` through.
+    CompactionPreserving {
+        since: Antichain<T>,
+        /// Whether the inputs include the shard's oldest batch, whose lower is
+        /// the minimum timestamp. Only then is a row's whole history at or
+        /// below `since` in the merge, so a group that sums to zero can be
+        /// dropped instead of kept as a `(first, last)` pair. Applies only to
+        /// the stamp fold fallback, not to pairing.
+        covers_minimum: bool,
+    },
+    /// Compaction of part of one batch of a shard in time-preserving mode.
+    /// Times are never advanced, and the consolidator sums only records with
+    /// equal `(key, value, time)`, which is lossless. See `compact_runs` for
+    /// why such a chunk is not folded.
+    CompactionExactTimes,
+    /// A snapshot of a time-preserving shard that yields each live row once,
+    /// at its stamp: the greatest time at or below `as_of` with a nonzero net
+    /// diff. See [crate::iter::StampFold].
+    SnapshotStamping {
+        as_of: Antichain<T>,
+    },
+    /// A snapshot of a time-preserving shard that drops records above `as_of`
+    /// and leaves the remaining times unadvanced, so a downstream arrangement
+    /// sees each update at the time it was written.
+    SnapshotPreserving {
+        as_of: Antichain<T>,
+    },
+}
+
+/// How a consolidator folds the records of each `(key, value)`, see
+/// [crate::iter::StampFold].
+#[derive(Debug)]
+pub(crate) struct StampFoldConfig<'a, T> {
+    /// Records at or below this frontier are folded, later ones are summed
+    /// per `(key, value, time)`.
+    pub since: &'a Antichain<T>,
+    /// Whether a fold that sums to zero is dropped instead of kept as a pair.
+    pub drop_zero_sum: bool,
+    /// Whether inserts are paired with deletes before falling back to the fold.
+    pub pair: bool,
 }
 
 impl<T: Timestamp + Lattice> FetchBatchFilter<T> {
+    /// How the consolidator folds records, or `None` for the standard
+    /// consolidation that sums equal `(key, value, time)` records.
+    pub(crate) fn stamp_fold(&self) -> Option<StampFoldConfig<'_, T>> {
+        match self {
+            FetchBatchFilter::CompactionPreserving {
+                since,
+                covers_minimum,
+            } => Some(StampFoldConfig {
+                since,
+                drop_zero_sum: *covers_minimum,
+                pair: true,
+            }),
+            // A read folds a row's whole history, which the stamp fold alone
+            // answers exactly.
+            FetchBatchFilter::SnapshotStamping { as_of } => Some(StampFoldConfig {
+                since: as_of,
+                drop_zero_sum: true,
+                pair: false,
+            }),
+            FetchBatchFilter::Snapshot { .. }
+            | FetchBatchFilter::Listen { .. }
+            | FetchBatchFilter::Compaction { .. }
+            | FetchBatchFilter::CompactionExactTimes
+            | FetchBatchFilter::SnapshotPreserving { .. } => None,
+        }
+    }
+
     pub(crate) fn filter_ts(&self, t: &mut T) -> bool {
         match self {
+            FetchBatchFilter::CompactionPreserving { .. }
+            | FetchBatchFilter::CompactionExactTimes => true,
+            FetchBatchFilter::SnapshotStamping { as_of }
+            | FetchBatchFilter::SnapshotPreserving { as_of } => !as_of.less_than(t),
             FetchBatchFilter::Snapshot { as_of } => {
                 // This time is covered by a listen
                 if as_of.less_than(t) {
@@ -783,7 +857,14 @@ where
         assert_eq!(val.len(), 1, "expect a single-row val array");
         let as_of = match &self.filter {
             FetchBatchFilter::Snapshot { as_of } => as_of,
-            FetchBatchFilter::Listen { .. } | FetchBatchFilter::Compaction { .. } => return,
+            // A preserving snapshot must emit each update at its own time, which
+            // a single `diffs_sum` update cannot represent.
+            FetchBatchFilter::Listen { .. }
+            | FetchBatchFilter::Compaction { .. }
+            | FetchBatchFilter::CompactionPreserving { .. }
+            | FetchBatchFilter::CompactionExactTimes
+            | FetchBatchFilter::SnapshotStamping { .. }
+            | FetchBatchFilter::SnapshotPreserving { .. } => return,
         };
         if !OPTIMIZE_IGNORED_DATA_FETCH.get(cfg) {
             return;

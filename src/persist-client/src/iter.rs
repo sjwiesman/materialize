@@ -39,7 +39,7 @@ use timely::progress::Timestamp;
 use tracing::{Instrument, debug_span};
 
 use crate::ShardId;
-use crate::fetch::{EncodedPart, FetchBatchFilter, FetchConfig};
+use crate::fetch::{EncodedPart, FetchBatchFilter, FetchConfig, StampFoldConfig};
 use crate::internal::encoding::Schemas;
 use crate::internal::metrics::{ReadMetrics, ShardMetrics};
 use crate::internal::state::{HollowRun, RunMeta, RunOrder, RunPart};
@@ -692,18 +692,25 @@ where
         // Note that we can't use take_while here - that method drops the first non-matching
         // element, but we want to leave any data that we don't return in state for future
         // calls to `next`/`next_chunk`.
+        // Two records a fold emits together, such as a `(first, last)` pair
+        // of the stamp fold, are never split across chunks, so a chunk
+        // boundary is a valid resume bound for a later consolidator: resuming
+        // after only the first would refold the rest of the row without it
+        // and change the sum.
         let mut budget = max_bytes;
+        let mut remaining_len = max_len;
         let iter = std::iter::from_fn(move || {
-            if budget == 0 {
+            if (budget == 0 || remaining_len == 0) && !iter.has_pending() {
                 return None;
             }
             let update @ (_, kv, _, _) = iter.next()?;
             // Budget for the K/V size plus two 8-byte Codec64 values.
             budget = budget.saturating_sub(kv_size(kv) + 16);
+            remaining_len = remaining_len.saturating_sub(1);
             Some(update)
         });
 
-        let updates = StructuredUpdates::interleave_updates(&parts, iter.take(max_len));
+        let updates = StructuredUpdates::interleave_updates(&parts, iter);
         let updates = self.sort.updates_to_blob(updates);
         Some(updates)
     }
@@ -880,7 +887,7 @@ impl<'a, T: Timestamp + Codec64 + Lattice, D: Codec64 + Monoid> PartRef<'a, T, D
 pub(crate) struct ConsolidatingIter<'a, T, D>
 where
     T: Timestamp + Codec64,
-    D: Codec64,
+    D: Codec64 + Monoid,
 {
     context: &'a str,
     filter: &'a FetchBatchFilter<T>,
@@ -889,7 +896,216 @@ where
     upper_bound: Option<(SortKV<'a>, T)>,
     lower_bound: Option<(SortKV<'a>, T)>,
     state: Option<(Indices, SortKV<'a>, T, D)>,
+    /// The in-progress stamp fold of one `(key, value)`, when the filter
+    /// selects the fold. Mutually exclusive with `state`.
+    fold: Option<StampFold<'a, T, D>>,
+    /// The second of two records a fold emits together, returned by the next
+    /// call to `next`.
+    pending: Option<(Indices, SortKV<'a>, T, D)>,
     drop_stash: &'a mut Option<StructuredUpdates>,
+}
+
+/// The stamp fold of one `(key, value)`'s records at or below a frontier.
+///
+/// The stamp of a row is the greatest time whose net diff, the sum of its
+/// diffs at exactly that time, is nonzero. The fold reduces a time-ordered
+/// range of a row's records to at most two records that preserve both the
+/// total diff and the stamp:
+///
+/// - nothing, if no time has a nonzero net diff,
+/// - `(last, sum)`, if the sum is nonzero,
+/// - `(first, sum_before_last), (last, net_last)`, if the sum is zero.
+///
+/// `first` is a time of the range below `last` with a nonzero net in what
+/// this fold saw. When a fold is stashed and resumed, a committed prefix with
+/// a nonzero sum is stashed as one record at its `last`, so `first` can be
+/// later than the range's least nonzero time. Every read is at or above the
+/// `since` the fold ran under, so no read observes which time below `last`
+/// carries the pair's first half.
+///
+/// The zero-sum pair keeps `last` in the output when the range does not hold
+/// the row's whole history, because older records outside the range may make
+/// the row live again. The result composes: folding it together with records
+/// all strictly older, or all strictly newer, gives the same stamp and sum as
+/// folding the concatenated history. It does not compose with records whose
+/// times interleave with the range's, so every fold must cover a contiguous
+/// time range of the row's history.
+///
+/// With pairing, which time-preserving compaction uses, the output is what
+/// remains after [Pairing] instead, unless the row's nets break its
+/// assumption.
+#[derive(Debug)]
+pub(crate) struct StampFold<'a, T, D> {
+    idx: Indices,
+    kv: SortKV<'a>,
+    first: Option<T>,
+    /// The sum of the committed net diffs at times before `last`.
+    sum_before_last: D,
+    last: Option<(T, D)>,
+    /// The time being accumulated and its net diff so far. More records at
+    /// this time may follow, so it is not yet known whether its net is zero.
+    current: (T, D),
+    /// `None` when pairing is off, or once the committed nets broke its
+    /// assumption, in which case the row falls back to the fold.
+    pairing: Option<Pairing<T, D>>,
+}
+
+/// The pairing rule over one row's nonzero nets, in time order: each delete
+/// (`-1`) is paired with the most recent unpaired insert (`+1`) before it,
+/// and both are dropped.
+///
+/// It assumes the full row's count is 0 or 1 at every time, so its nets
+/// alternate between `+1` and `-1`. What remains is then at most a leading
+/// `-1`, whose insert sits in an older batch, and a trailing `+1`, for a
+/// version that is still live. Each dropped pair sums to zero, so counts are
+/// unchanged, and a paired `+1` proves the row was absent just before it, so
+/// the dropped records interact with nothing outside the merge. A live row's
+/// last `+1` is never paired, so its stamp survives.
+///
+/// [Pairing::push] reports the first net that cannot occur under the
+/// assumption, after which the caller must fall back to the stamp fold.
+#[derive(Debug, Clone)]
+struct Pairing<T, D> {
+    /// The first nonzero net, when it is a `-1`.
+    leading: Option<(T, D)>,
+    /// The most recent `+1` not yet paired.
+    open: Option<(T, D)>,
+    /// Whether any nonzero net was pushed. After one, a `-1` with no open
+    /// `+1` means the count went below zero.
+    seen: bool,
+}
+
+impl<T: Clone, D: Codec64 + Clone> Pairing<T, D> {
+    fn new() -> Self {
+        Pairing {
+            leading: None,
+            open: None,
+            seen: false,
+        }
+    }
+
+    /// Adds the next nonzero net. Returns false if it breaks the assumption.
+    fn push(&mut self, t: &T, d: &D) -> bool {
+        // Parts store every diff as an `i64`, see `StructuredUpdates`.
+        let ok = match i64::from_le_bytes(D::encode(d)) {
+            1 if self.open.is_none() => {
+                self.open = Some((t.clone(), d.clone()));
+                true
+            }
+            -1 if self.open.is_some() => {
+                self.open = None;
+                true
+            }
+            -1 if !self.seen => {
+                self.leading = Some((t.clone(), d.clone()));
+                true
+            }
+            _ => false,
+        };
+        self.seen = true;
+        ok
+    }
+
+    /// The unpaired records, in time order.
+    fn remainder(&self) -> [Option<(T, D)>; 2] {
+        [self.leading.clone(), self.open.clone()]
+    }
+}
+
+impl<'a, T: Timestamp, D: Monoid + Codec64> StampFold<'a, T, D> {
+    fn new(idx: Indices, kv: SortKV<'a>, t: T, d: D, pair: bool) -> Self {
+        StampFold {
+            idx,
+            kv,
+            first: None,
+            sum_before_last: D::zero(),
+            last: None,
+            current: (t, d),
+            pairing: pair.then(Pairing::new),
+        }
+    }
+
+    /// Adds a record. Records must arrive in ascending time order.
+    fn push(&mut self, idx: Indices, t: T, d: D) {
+        self.idx = idx;
+        if t == self.current.0 {
+            self.current.1.plus_equals(&d);
+        } else {
+            assert!(self.current.0 < t, "stamp fold records out of time order");
+            let current = mem::replace(&mut self.current, (t, d));
+            self.commit(current);
+        }
+    }
+
+    fn commit(&mut self, (t, d): (T, D)) {
+        if d.is_zero() {
+            return;
+        }
+        if let Some(pairing) = &mut self.pairing {
+            if !pairing.push(&t, &d) {
+                self.pairing = None;
+            }
+        }
+        if self.first.is_none() {
+            self.first = Some(t.clone());
+        }
+        if let Some((_, net)) = self.last.take() {
+            self.sum_before_last.plus_equals(&net);
+        }
+        self.last = Some((t, d));
+    }
+
+    /// The output for the committed times, excluding `current`.
+    /// `drop_zero_sum` applies only to the fold: a pairing remainder that
+    /// sums to zero is a leading `-1` and a live `+1`.
+    fn committed(&self, drop_zero_sum: bool) -> [Option<(T, D)>; 2] {
+        if let Some(pairing) = &self.pairing {
+            return pairing.remainder();
+        }
+        let Some((last, net)) = &self.last else {
+            return [None, None];
+        };
+        let mut sum = self.sum_before_last.clone();
+        sum.plus_equals(net);
+        if !sum.is_zero() {
+            [Some((last.clone(), sum)), None]
+        } else if drop_zero_sum {
+            [None, None]
+        } else {
+            let first = self.first.clone().expect("first is set with last");
+            [
+                Some((first, self.sum_before_last.clone())),
+                Some((last.clone(), net.clone())),
+            ]
+        }
+    }
+
+    fn finish(mut self, drop_zero_sum: bool) -> [Option<(Indices, SortKV<'a>, T, D)>; 2] {
+        let current = mem::replace(&mut self.current, (T::minimum(), D::zero()));
+        self.commit(current);
+        let (idx, kv) = (self.idx, self.kv);
+        self.committed(drop_zero_sum)
+            .map(|r| r.map(|(t, d)| (idx, kv, t, d)))
+    }
+
+    /// The records that, refolded with the row's remaining records, give the
+    /// same result as continuing this fold. `current` is kept separate from
+    /// the committed fold because more records at its time may follow, and
+    /// its net is only meaningful once they are summed in.
+    ///
+    /// With pairing, the committed part is the pairing remainder, which pairs
+    /// the same way when refolded. Pairs already dropped are not stashed, so
+    /// a later `-1` that breaks the assumption can read as a leading `-1`
+    /// after resuming. That changes which records a broken assumption keeps,
+    /// never the sum.
+    fn stash_records(&self) -> impl Iterator<Item = (Indices, SortKV<'a>, T, D)> + '_ {
+        let current = (!self.current.1.is_zero()).then(|| self.current.clone());
+        self.committed(false)
+            .into_iter()
+            .chain([current])
+            .flatten()
+            .map(|(t, d)| (self.idx, self.kv, t, d))
+    }
 }
 
 impl<'a, T, D> ConsolidatingIter<'a, T, D>
@@ -910,6 +1126,8 @@ where
             heap: BinaryHeap::new(),
             upper_bound: None,
             state: None,
+            fold: None,
+            pending: None,
             drop_stash,
             lower_bound,
         }
@@ -1006,6 +1224,142 @@ where
 
         self.state.take()
     }
+
+    /// Whether a record of `kv` at or below `since` may still sit in a part
+    /// that has not been fetched, so a fold of `kv` cannot be finished yet.
+    fn fold_blocked_by_upper(&self, kv: &SortKV<'a>) -> bool {
+        // An unfetched part's bound has no value, which sorts below every
+        // value of the same key, so a bound on `kv`'s key blocks the fold.
+        self.upper_bound
+            .as_ref()
+            .map_or(false, |(upper_kv, _)| upper_kv <= kv)
+    }
+
+    /// The fold counterpart of [Self::consolidate]. Records at or below
+    /// `since` are folded per `(key, value)`, records above it are summed per
+    /// `(key, value, time)` as in standard consolidation. Returns `None` when
+    /// the input is exhausted or the next output may depend on unfetched data,
+    /// leaving any in-progress work for `Drop` to stash.
+    fn consolidate_fold(
+        &mut self,
+        config: &StampFoldConfig<'_, T>,
+    ) -> Option<(Indices, SortKV<'a>, T, D)> {
+        let since = config.since;
+        loop {
+            if let Some(pending) = self.pending.take() {
+                return Some(pending);
+            }
+            let next = match self.heap.peek_mut() {
+                None => None,
+                Some(part) => match part.next_kvt.0.as_ref() {
+                    Some((kv1, t1, _)) => Some((*kv1, t1.clone())),
+                    None => {
+                        if part.last_in_run {
+                            PeekMut::pop(part);
+                            continue;
+                        }
+                        // More records of this run may follow in a later part.
+                        return None;
+                    }
+                },
+            };
+
+            if let Some(fold) = &self.fold {
+                let extends = next
+                    .as_ref()
+                    .map_or(false, |(kv1, t1)| *kv1 == fold.kv && !since.less_than(t1));
+                if extends {
+                    let (kv1, t1) = next.expect("checked above");
+                    if t1 != fold.current.0 {
+                        if let Some(upper) = &self.upper_bound {
+                            if *upper <= (kv1, t1) {
+                                return None;
+                            }
+                        }
+                    }
+                    let mut part = self.heap.peek_mut().expect("peeked above");
+                    let (idx, _, t, d) = part
+                        .pop(&self.parts, self.filter)
+                        .expect("popping from a non-empty iterator");
+                    drop(part);
+                    self.fold.as_mut().expect("checked above").push(idx, t, d);
+                    continue;
+                }
+                if self.fold_blocked_by_upper(&fold.kv) {
+                    return None;
+                }
+                let fold = self.fold.take().expect("checked above");
+                let [first, second] = fold.finish(config.drop_zero_sum);
+                self.pending = second;
+                match first {
+                    Some(first) => return Some(first),
+                    None => continue,
+                }
+            }
+
+            let Some((kv1, t1)) = next else {
+                return self.state.take().filter(|(_, _, _, d)| !d.is_zero());
+            };
+
+            if let Some((_, kv0, t0, _)) = &self.state {
+                match (*kv0, &*t0).cmp(&(kv1, &t1)) {
+                    Ordering::Less => {
+                        let state = self.state.take().expect("checked above");
+                        if state.3.is_zero() {
+                            continue;
+                        }
+                        return Some(state);
+                    }
+                    Ordering::Equal => {
+                        let mut part = self.heap.peek_mut().expect("peeked above");
+                        let (idx1, _, _, d1) = part
+                            .pop(&self.parts, self.filter)
+                            .expect("popping from a non-empty iterator");
+                        drop(part);
+                        let state = self.state.as_mut().expect("checked above");
+                        state.3.plus_equals(&d1);
+                        state.0 = idx1;
+                        continue;
+                    }
+                    Ordering::Greater => panic!(
+                        "data arrived at the consolidator out of order ({}, kvs equal? {}, {t0:?}, {t1:?})",
+                        self.context,
+                        (*kv0) == kv1
+                    ),
+                }
+            }
+
+            // Don't start a new row past the upper bound, since its data may
+            // also live in some unfetched part.
+            if let Some(upper) = &self.upper_bound {
+                if *upper <= (kv1, t1.clone()) {
+                    return None;
+                }
+            }
+            let mut part = self.heap.peek_mut().expect("peeked above");
+            if let Some(lower) = &self.lower_bound {
+                if *lower >= (kv1, t1.clone()) {
+                    let _ = part.pop(&self.parts, self.filter);
+                    continue;
+                }
+            }
+            let (idx, kv, t, d) = part
+                .pop(&self.parts, self.filter)
+                .expect("popping from a non-empty iterator");
+            drop(part);
+            if since.less_than(&t) {
+                self.state = Some((idx, kv, t, d));
+            } else {
+                self.fold = Some(StampFold::new(idx, kv, t, d, config.pair));
+            }
+        }
+    }
+
+    /// Whether the next item is the second of two records a fold emits
+    /// together, which must be emitted in the same chunk as the first.
+    fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
 }
 
 impl<'a, T, D> Iterator for ConsolidatingIter<'a, T, D>
@@ -1016,6 +1370,10 @@ where
     type Item = (Indices, SortKV<'a>, T, D);
 
     fn next(&mut self) -> Option<Self::Item> {
+        let filter = self.filter;
+        if let Some(config) = filter.stamp_fold() {
+            return self.consolidate_fold(&config);
+        }
         loop {
             match self.consolidate() {
                 Some((_, _, _, d)) if d.is_zero() => continue,
@@ -1028,17 +1386,27 @@ where
 impl<'a, T, D> Drop for ConsolidatingIter<'a, T, D>
 where
     T: Timestamp + Codec64,
-    D: Codec64,
+    D: Codec64 + Monoid,
 {
     fn drop(&mut self) {
         // Make sure to stash any incomplete state in a place where we'll pick it up on the next run.
         // See the comment on `Consolidator` for more on why this is necessary.
-        if let Some(update) = self.state.take() {
-            let part = StructuredUpdates::interleave_updates(&self.parts, [update]);
+        // At most one of `pending`, `fold`, and `state` is set, and each sorts
+        // after everything already returned.
+        let mut stash: Vec<_> = self.pending.take().into_iter().collect();
+        if let Some(fold) = self.fold.take() {
+            stash.extend(fold.stash_records());
+        }
+        stash.extend(self.state.take());
+        if !stash.is_empty() {
+            let part = StructuredUpdates::interleave_updates(&self.parts, stash);
             *self.drop_stash = Some(part);
         }
     }
 }
+
+#[cfg(test)]
+mod stamp_fold_tests;
 
 #[cfg(test)]
 mod tests {

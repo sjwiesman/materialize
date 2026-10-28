@@ -1945,7 +1945,11 @@ pub mod datadriven {
         );
         let new_spine_id = SpineId(spine_lower, spine_upper);
         let res = Compactor::<String, (), u64, i64>::compact(
-            CompactConfig::new(&cfg, datadriven.shard_id),
+            CompactConfig::new(
+                &cfg,
+                datadriven.shard_id,
+                datadriven.machine.applier.preserve_update_times(),
+            ),
             Arc::clone(&datadriven.client.blob),
             Arc::clone(&datadriven.client.metrics),
             Arc::clone(&datadriven.machine.applier.shard_metrics),
