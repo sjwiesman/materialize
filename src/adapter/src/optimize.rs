@@ -298,6 +298,8 @@ pub enum OptimizerError {
         func: UnmaterializableFunc,
         context: &'static str,
     },
+    #[error("cannot call mz_updated_at in {0}")]
+    UncallableUpdatedAt(&'static str),
     #[error("access to function {0} is restricted")]
     RestrictedFunction(UnmaterializableFunc),
     #[error("{0}")]

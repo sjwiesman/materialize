@@ -150,7 +150,10 @@ impl Subtime {
 ///
 /// Returns the shard's rows in `CB`'s containers and its errors in a stream of their own.
 ///
-/// All times emitted will have been [advanced by] the given `as_of` frontier.
+/// All times emitted will have been [advanced by] the given `as_of` frontier,
+/// except under [`SnapshotMode::IncludePreservingTimes`], where snapshot updates
+/// keep their stored times, below `as_of`, as data under the `as_of`
+/// capability.
 /// All updates at times greater or equal to `until` will be suppressed.
 /// The `map_filter_project` argument, if supplied, may be partially applied,
 /// and any un-applied part of the argument will be left behind in the argument.
@@ -321,7 +324,8 @@ type RefinedScope<'scope, T> = Scope<'scope, (T, Subtime)>;
 ///
 /// Returns the ok and error sides separately, both carrying the refined time.
 ///
-/// All times emitted will have been [advanced by] the given `as_of` frontier.
+/// All times emitted will have been [advanced by] the given `as_of` frontier,
+/// except as [`persist_source`] describes for preserved snapshot times.
 ///
 /// [advanced by]: differential_dataflow::lattice::Lattice::advance_by
 pub fn persist_source_core<'g, 'outer, E>(

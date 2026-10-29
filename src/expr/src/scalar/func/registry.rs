@@ -48,7 +48,7 @@ use serde::Serialize;
 use crate::func::format::DateTimeFormat;
 use crate::func::variadic::{
     And, ArrayCreate, ArrayFill, ArrayIndex, ArrayToString, Coalesce, ErrorIfNull, Greatest, Least,
-    ListCreate, MapBuild, Or, RangeCreate, RecordCreate,
+    ListCreate, MapBuild, MzUpdatedAt, Or, RangeCreate, RecordCreate,
 };
 use crate::func::*;
 use crate::{BinaryFunc, MirScalarExpr, UnaryFunc, VariadicFunc, like_pattern};
@@ -1068,6 +1068,12 @@ fn variadic_samples() -> Vec<Sample<VariadicFunc>> {
         variadic(Least, vec![SqlScalarType::Int32, SqlScalarType::Int32]),
         variadic(
             ErrorIfNull,
+            vec![SqlScalarType::Int32, SqlScalarType::String],
+        ),
+        variadic(
+            MzUpdatedAt {
+                id: mz_repr::GlobalId::User(1),
+            },
             vec![SqlScalarType::Int32, SqlScalarType::String],
         ),
     ]

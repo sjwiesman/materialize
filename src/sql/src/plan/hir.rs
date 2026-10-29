@@ -2563,6 +2563,61 @@ impl HirRelationExpr {
     }
 }
 
+impl HirRelationExpr {
+    /// Whether the expression calls `mz_updated_at`, including inside
+    /// subqueries.
+    pub fn contains_updated_at(&self) -> bool {
+        let mut found = false;
+        self.visit_children(|s: &HirScalarExpr| {
+            s.visit_post(&mut |e| {
+                found |= matches!(
+                    e,
+                    HirScalarExpr::CallVariadic {
+                        func: VariadicFunc::MzUpdatedAt(_),
+                        ..
+                    }
+                );
+            })
+        });
+        self.visit_children(|r: &HirRelationExpr| found |= r.contains_updated_at());
+        found
+    }
+
+    /// Whether the expression is projections, maps, and filters over one
+    /// global `Get`, with no subqueries in its scalars.
+    ///
+    /// This is the only shape that may call `mz_updated_at`, since a stamped
+    /// read serves exactly one object. The check runs before optimization so
+    /// that a query reading anything else is rejected whatever plan the
+    /// optimizer would find for it.
+    pub fn is_linear_over_global_get(&self) -> bool {
+        fn no_subquery(s: &HirScalarExpr) -> bool {
+            let mut found = false;
+            s.visit_post(&mut |e| {
+                found |= matches!(
+                    e,
+                    HirScalarExpr::Exists(..)
+                        | HirScalarExpr::Select(..)
+                        | HirScalarExpr::Windowing(..)
+                );
+            });
+            !found
+        }
+        match self {
+            HirRelationExpr::Get {
+                id: Id::Global(_), ..
+            } => true,
+            HirRelationExpr::Project { input, .. } => input.is_linear_over_global_get(),
+            HirRelationExpr::Map { input, scalars }
+            | HirRelationExpr::Filter {
+                input,
+                predicates: scalars,
+            } => scalars.iter().all(no_subquery) && input.is_linear_over_global_get(),
+            _ => false,
+        }
+    }
+}
+
 impl CollectionPlan for HirRelationExpr {
     /// Collects the global collections that this HIR expression directly depends on, i.e., that it
     /// has a `Get` for. (It does _not_ traverse view definitions transitively.)

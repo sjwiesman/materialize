@@ -1174,6 +1174,7 @@ fn humanize_sql_for_show_create(
                 TableFromSourceOptionName::Details => false,
                 TableFromSourceOptionName::PartitionBy => true,
                 TableFromSourceOptionName::RetainHistory => true,
+                TableFromSourceOptionName::PreserveUpdateTimes => true,
             });
             // The `Defined` column list and constraints are populated during
             // purification (from the upstream schema), and `CREATE TABLE ... FROM

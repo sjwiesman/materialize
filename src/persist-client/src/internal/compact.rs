@@ -91,11 +91,20 @@ pub struct CompactConfig {
     pub(crate) batch: BatchBuilderConfig,
     pub(crate) fetch_config: FetchConfig,
     pub(crate) now: NowFn,
+    /// Whether the shard is in time-preserving compaction mode. See
+    /// [crate::PersistClient::enable_preserve_update_times].
+    pub(crate) preserve_update_times: bool,
 }
 
 impl CompactConfig {
     /// Initialize the compaction config from Persist configuration.
-    pub fn new(value: &PersistConfig, shard_id: ShardId) -> Self {
+    ///
+    /// `preserve_update_times` must be the shard state's flag whenever the
+    /// config compacts a request with a `since` above the minimum. Compacting
+    /// a time-preserving shard without it drops paired inserts and deletes as
+    /// ordinary consolidation does, and a surviving row reads stamped with an
+    /// older insert's time.
+    pub fn new(value: &PersistConfig, shard_id: ShardId, preserve_update_times: bool) -> Self {
         CompactConfig {
             compaction_memory_bound_bytes: COMPACTION_MEMORY_BOUND_BYTES.get(value),
             compaction_yield_after_n_updates: value.compaction_yield_after_n_updates,
@@ -103,6 +112,7 @@ impl CompactConfig {
             batch: BatchBuilderConfig::new(value, shard_id),
             fetch_config: FetchConfig::from_persist_config(value),
             now: value.now.clone(),
+            preserve_update_times,
         }
     }
 }
@@ -406,8 +416,11 @@ where
                         .iter()
                         .all(|x| x.batch.runs().all(|(meta, _)| meta.len.is_some()));
 
-                    let compact_cfg =
-                        CompactConfig::new(&machine_clone.applier.cfg, machine_clone.shard_id());
+                    let compact_cfg = CompactConfig::new(
+                        &machine_clone.applier.cfg,
+                        machine_clone.shard_id(),
+                        machine_clone.applier.preserve_update_times(),
+                    );
                     let incremental_enabled = compact_cfg.batch.enable_incremental_compaction
                         && all_runs_have_uuids
                         && all_runs_have_len;
@@ -688,11 +701,28 @@ where
                 let runs = runs.iter()
                     .map(|(desc, meta, run)| (*desc, *meta, *run))
                     .collect::<Vec<_>>();
+                let subset_of_batch = match &input {
+                    CompactionInput::PartialBatch(id, _) => {
+                        let batch = req
+                            .inputs
+                            .iter()
+                            .find(|b| b.id == *id)
+                            .expect("a partial chunk is of a requested batch");
+                        // The chunk's runs borrow the batch's `RunMeta`s, so
+                        // identity says which runs it holds. Run ids cannot:
+                        // they are optional.
+                        !batch.batch.run_meta.iter().all(|batch_meta| {
+                            runs.iter().any(|(_, meta, _)| std::ptr::eq(*meta, batch_meta))
+                        })
+                    }
+                    CompactionInput::IdRange(_) | CompactionInput::Legacy => false,
+                };
 
                 let batch = Self::compact_runs(
                     &run_cfg,
                     &req.shard_id,
                     &desc,
+                    subset_of_batch,
                     runs,
                     Arc::clone(&blob),
                     Arc::clone(&metrics),
@@ -949,11 +979,15 @@ where
 
     /// Compacts runs together. If the input runs are sorted, a single run will be created as output.
     ///
+    /// `subset_of_batch` says that `runs` are some but not all of one batch's runs. A
+    /// [CompactionInput::PartialBatch] that holds every run of its batch is not a subset.
+    ///
     /// Maximum possible memory usage is `(# runs + 2) * [crate::PersistConfig::blob_target_size]`
     pub(crate) async fn compact_runs(
         cfg: &CompactConfig,
         shard_id: &ShardId,
         desc: &Description<T>,
+        subset_of_batch: bool,
         runs: Vec<(&Description<T>, &RunMeta, &[RunPart<T>])>,
         blob: Arc<dyn Blob>,
         metrics: Arc<Metrics>,
@@ -1014,8 +1048,42 @@ where
             Arc::clone(&metrics),
             shard_metrics,
             metrics.read.compaction.clone(),
-            FetchBatchFilter::Compaction {
-                since: desc.since().clone(),
+            match (cfg.preserve_update_times, subset_of_batch) {
+                (false, _) => FetchBatchFilter::Compaction {
+                    since: desc.since().clone(),
+                },
+                // Pairing and its stamp fold fallback consume a row's nets in
+                // time order, so they compose only across disjoint time ranges,
+                // and the runs of one batch share a time range. Merging a
+                // subset of them can lose a stamp: with
+                // `(t1, +1), (t3, -1), (t3, +1)` split as `{(t1, +1), (t3, +1)}`
+                // and `{(t3, -1)}`, the outputs read as stamped `t3` where the
+                // whole reads `t1`. Summing equal `(key, value, time)` records
+                // loses nothing, however the runs are grouped, so a chunk of
+                // some of a batch's runs is consolidated at exact times and
+                // pairing waits for a chunk that holds all of them. Stamped
+                // reads fold at read time, so they see the same stamps either
+                // way. A chunk with every run of its batch, even one split off
+                // as a `PartialBatch` because the batch exceeds the memory
+                // bound, covers the batch's whole time range and is paired.
+                // Treating it as a subset would leave a batch of one or two runs
+                // unpaired for as long as it follows another chunk in
+                // `chunk_runs`, which can be every merge.
+                (true, true) => FetchBatchFilter::CompactionExactTimes,
+                (true, false) => {
+                    // The stamp fold fallback may drop a zero-sum group only when nothing older
+                    // than these inputs exists. The output `desc` does not say
+                    // that: without incremental compaction every chunk gets the
+                    // request's description, whose lower may belong to a batch in
+                    // a different chunk.
+                    let covers_minimum = runs
+                        .iter()
+                        .any(|(desc, _, _)| desc.lower() == &Antichain::from_elem(T::minimum()));
+                    FetchBatchFilter::CompactionPreserving {
+                        since: desc.since().clone(),
+                        covers_minimum,
+                    }
+                }
             },
             None,
             prefetch_budget_bytes,
@@ -1144,6 +1212,8 @@ impl Timings {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use mz_dyncfg::ConfigUpdates;
     use mz_ore::{assert_contains, assert_err};
     use mz_persist_types::codec_impls::StringSchema;
@@ -1151,6 +1221,8 @@ mod tests {
 
     use crate::PersistLocation;
     use crate::batch::BLOB_TARGET_SIZE;
+    use crate::internal::machine::CompareAndAppendRes;
+    use crate::internal::state::HandleDebugState;
     use crate::internal::trace::SpineId;
     use crate::tests::{all_ok, expect_fetch_part, new_test_client_cache};
 
@@ -1209,7 +1281,7 @@ mod tests {
             val: Arc::new(StringSchema),
         };
         let res = Compactor::<String, String, u64, i64>::compact(
-            CompactConfig::new(&write.cfg, write.shard_id()),
+            CompactConfig::new(&write.cfg, write.shard_id(), false),
             Arc::clone(&write.blob),
             Arc::clone(&write.metrics),
             write.metrics.shards.shard(&write.machine.shard_id(), ""),
@@ -1345,5 +1417,483 @@ mod tests {
             .await
             .expect("channel closed")
             .expect("compaction success");
+    }
+
+    /// Drives a time-preserving shard through the real compaction path,
+    /// merging until the spine has nothing left to do, and checks the stamped
+    /// snapshot against the history after every applied merge.
+    #[mz_persist_proc::test(tokio::test)]
+    #[cfg_attr(miri, ignore)] // unsupported operation: returning ready events from epoll_wait is not yet implemented
+    async fn preserve_update_times(dyncfgs: ConfigUpdates) {
+        let mut cache = new_test_client_cache(&dyncfgs);
+        cache.cfg.compaction_enabled = false;
+        let client = cache
+            .open(PersistLocation::new_in_mem())
+            .await
+            .expect("client construction failed");
+
+        let shard_id = ShardId::new();
+        let enabled = client
+            .enable_preserve_update_times::<String, String, u64, i64>(
+                shard_id,
+                crate::Diagnostics::for_tests(),
+            )
+            .await
+            .expect("valid usage");
+        assert!(enabled);
+        let (mut write, mut read) = client
+            .expect_open::<String, String, u64, i64>(shard_id)
+            .await;
+
+        let u = |k: &str, t: u64, d: i64| ((k.to_owned(), String::new()), t, d);
+        // `r` is inserted, deleted, and reinserted. `d` is inserted and later
+        // deleted. `a` gets a no-op update at 25.
+        let batches = [
+            (vec![u("a", 1, 1), u("r", 5, 1)], 0, 10),
+            (vec![u("d", 12, 1), u("r", 15, -1)], 10, 20),
+            (
+                vec![u("a", 25, -1), u("a", 25, 1), u("d", 21, -1), u("r", 22, 1)],
+                20,
+                30,
+            ),
+        ];
+        // A spine merge is planned with the since current when its inputs are
+        // inserted, so downgrade first to have every merge compact at 29.
+        read.downgrade_since(&Antichain::from_elem(29)).await;
+        for (updates, lower, upper) in &batches {
+            write
+                .expect_compare_and_append(updates, *lower, *upper)
+                .await;
+        }
+
+        let expected = vec![
+            (("a".to_owned(), String::new()), 1, 1),
+            (("r".to_owned(), String::new()), 22, 1),
+        ];
+        async fn read_stamps(
+            read: &mut crate::read::ReadHandle<String, String, u64, i64>,
+        ) -> Vec<((String, String), u64, i64)> {
+            let mut cursor = read
+                .snapshot_cursor_stamped(Antichain::from_elem(29), |_| true)
+                .await
+                .expect("as_of is readable");
+            let mut out = vec![];
+            while let Some(updates) = cursor.next().await {
+                out.extend(updates);
+            }
+            out.sort();
+            out
+        }
+        assert_eq!(read_stamps(&mut read).await, expected);
+
+        let mut merges = 0;
+        loop {
+            let (reqs, _) = write.machine.spine_exert(usize::MAX).await;
+            if reqs.is_empty() {
+                break;
+            }
+            for req in reqs {
+                let _maintenance =
+                    Compactor::<String, String, u64, i64>::compact_and_apply(&write.machine, req)
+                        .await
+                        .expect("compaction succeeds");
+                merges += 1;
+                assert_eq!(read_stamps(&mut read).await, expected);
+            }
+        }
+        assert!(merges > 0, "expected the spine to merge");
+        // Merging everything leaves one record per live row: paired inserts
+        // and deletes are gone, and so is `a`'s zero net at 25.
+        let batches = write.machine.applier.all_batches();
+        let lens: Vec<_> = batches.iter().map(|b| b.len).collect();
+        assert_eq!(lens.iter().sum::<usize>(), expected.len(), "{lens:?}");
+
+        // The contents at 29 match a standard snapshot.
+        let mut contents = read.expect_snapshot_and_fetch(29).await;
+        contents.sort();
+        let at_since: Vec<_> = expected
+            .iter()
+            .map(|(kv, _, d)| (kv.clone(), 29, *d))
+            .collect();
+        assert_eq!(contents, at_since);
+
+        // A shard that has been written cannot enter the mode.
+        let written = ShardId::new();
+        let (mut other, _) = client
+            .expect_open::<String, String, u64, i64>(written)
+            .await;
+        other.expect_compare_and_append(&[u("x", 0, 1)], 0, 1).await;
+        let enabled = client
+            .enable_preserve_update_times::<String, String, u64, i64>(
+                written,
+                crate::Diagnostics::for_tests(),
+            )
+            .await
+            .expect("valid usage");
+        assert!(!enabled);
+
+        // Enabling an enabled shard, which has since been written, succeeds.
+        let enabled = client
+            .enable_preserve_update_times::<String, String, u64, i64>(
+                shard_id,
+                crate::Diagnostics::for_tests(),
+            )
+            .await
+            .expect("valid usage");
+        assert!(enabled);
+        assert!(write.machine.applier.preserve_update_times());
+    }
+
+    /// The outcome of [churn].
+    #[derive(Debug)]
+    struct Churn {
+        /// Records in the shard once the spine settles.
+        records: usize,
+        /// Live rows at the end.
+        live: usize,
+        /// Records in the oldest batch, which no applied merge touched.
+        oldest: usize,
+    }
+
+    /// Writes a keyed table whose few hot rows are updated many times, with
+    /// some no-op updates, and applies every merge the spine asks for except
+    /// those that include the oldest batch. Checks the stamps against the
+    /// history every ten rounds.
+    async fn churn(dyncfgs: &ConfigUpdates) -> Churn {
+        const COLD: usize = 200;
+        const HOT: usize = 10;
+        const ROUNDS: u64 = 60;
+
+        let mut cache = new_test_client_cache(dyncfgs);
+        cache.cfg.compaction_enabled = false;
+        let client = cache
+            .open(PersistLocation::new_in_mem())
+            .await
+            .expect("client construction failed");
+        let shard_id = ShardId::new();
+        let enabled = client
+            .enable_preserve_update_times::<String, String, u64, i64>(
+                shard_id,
+                crate::Diagnostics::for_tests(),
+            )
+            .await
+            .expect("valid usage");
+        assert!(enabled);
+        let (mut write, mut read) = client
+            .expect_open::<String, String, u64, i64>(shard_id)
+            .await;
+
+        // The current value and stamp of every row.
+        let mut rows: BTreeMap<String, (String, u64)> = BTreeMap::new();
+        let mut snapshot = vec![];
+        for i in 0..COLD + HOT {
+            let key = format!("k{i:03}");
+            snapshot.push(((key.clone(), "v0".to_owned()), 0, 1));
+            rows.insert(key, ("v0".to_owned(), 0));
+        }
+        write.expect_compare_and_append(&snapshot, 0, 1).await;
+
+        let mut next_hot = 0;
+        for t in 1..=ROUNDS {
+            // A merge is planned with the since current when its inputs are
+            // inserted, so downgrade first to have it compact everything.
+            read.downgrade_since(&Antichain::from_elem(t)).await;
+            let mut updates = vec![];
+            for _ in 0..3 {
+                let key = format!("k{:03}", COLD + next_hot % HOT);
+                next_hot += 1;
+                let (old, _) = rows.get(&key).expect("row exists").clone();
+                let new = format!("v{t}");
+                updates.push(((key.clone(), old), t, -1));
+                updates.push(((key.clone(), new.clone()), t, 1));
+                rows.insert(key, (new, t));
+            }
+            if t % 4 == 0 {
+                let key = format!("k{:03}", t % 5);
+                let (value, _) = rows.get(&key).expect("row exists").clone();
+                updates.push(((key.clone(), value.clone()), t, -1));
+                updates.push(((key, value), t, 1));
+            }
+            let mut batch = write.expect_batch(&updates, t, t + 1).await;
+            batch
+                .flush_to_blob(
+                    &BatchBuilderConfig::new(&client.cfg, shard_id),
+                    &client.metrics.user,
+                    &client.isolated_runtime,
+                    &write.write_schemas,
+                )
+                .await;
+            let CompareAndAppendRes::Success(_, maintenance) = write
+                .machine
+                .compare_and_append(
+                    &batch.into_hollow_batch(),
+                    &write.writer_id,
+                    &HandleDebugState::default(),
+                )
+                .await
+            else {
+                panic!("append failed");
+            };
+            for req in maintenance.compaction {
+                if req
+                    .inputs
+                    .iter()
+                    .any(|b| b.batch.desc.lower() == &Antichain::from_elem(0))
+                {
+                    continue;
+                }
+                let _maintenance =
+                    Compactor::<String, String, u64, i64>::compact_and_apply(&write.machine, req)
+                        .await
+                        .expect("compaction succeeds");
+            }
+
+            if t % 10 != 0 {
+                continue;
+            }
+            let mut cursor = read
+                .snapshot_cursor_stamped(Antichain::from_elem(t), |_| true)
+                .await
+                .expect("as_of is readable");
+            let mut stamps = vec![];
+            while let Some(updates) = cursor.next().await {
+                stamps.extend(updates);
+            }
+            stamps.sort();
+            let expected: Vec<_> = rows
+                .iter()
+                .map(|(k, (v, stamp))| ((k.clone(), v.clone()), *stamp, 1))
+                .collect();
+            assert_eq!(stamps, expected, "round {t}");
+        }
+
+        let batches = write.machine.applier.all_batches();
+        assert_eq!(batches[0].desc.lower(), &Antichain::from_elem(0));
+        Churn {
+            records: batches.iter().map(|b| b.len).sum(),
+            live: rows.len(),
+            oldest: batches[0].len,
+        }
+    }
+
+    /// Pairing drops dead row versions in merges that never reach the oldest
+    /// batch, so a churning keyed shard stays close to its live row count.
+    #[mz_persist_proc::test(tokio::test)]
+    #[cfg_attr(miri, ignore)] // unsupported operation: returning ready events from epoll_wait is not yet implemented
+    async fn preserve_update_times_churn(dyncfgs: ConfigUpdates) {
+        let churn = churn(&dyncfgs).await;
+        assert_eq!(churn.oldest, churn.live, "the oldest batch never merged");
+        // Observed: 296 records for 210 live rows. What pairing leaves beyond
+        // the live rows is a leading `-1` and a live `+1` per hot row, and the
+        // dead versions in recent batches that no merge has combined yet.
+        assert!(churn.records < churn.live * 3 / 2, "{churn:?}");
+    }
+
+    /// Each live row's stamp at 29, the since of the preserving tests.
+    async fn read_stamps_at_29(
+        read: &mut crate::read::ReadHandle<String, String, u64, i64>,
+    ) -> Vec<((String, String), u64, i64)> {
+        let mut cursor = read
+            .snapshot_cursor_stamped(Antichain::from_elem(29), |_| true)
+            .await
+            .expect("as_of is readable");
+        let mut out = vec![];
+        while let Some(updates) = cursor.next().await {
+            out.extend(updates);
+        }
+        out.sort();
+        out
+    }
+
+    /// Runs the spine's merges until it requests none, returning how many ran.
+    async fn exert_until_settled(machine: &Machine<String, String, u64, i64>) -> usize {
+        let mut merges = 0;
+        for _ in 0..20 {
+            // `usize::MAX` overflows the spine's fuel accounting once a merge is
+            // in progress.
+            let (reqs, _) = machine.spine_exert(1 << 20).await;
+            if reqs.is_empty() {
+                return merges;
+            }
+            for req in reqs {
+                let _maintenance =
+                    Compactor::<String, String, u64, i64>::compact_and_apply(machine, req)
+                        .await
+                        .expect("compaction succeeds");
+                merges += 1;
+            }
+        }
+        panic!("spine did not settle");
+    }
+
+    /// A batch too large for the compaction memory bound is compacted in
+    /// partial chunks of its runs, which consolidate at exact times, and is
+    /// paired once a later merge covers it whole. Stamps are exact after
+    /// every applied chunk.
+    #[mz_persist_proc::test(tokio::test)]
+    #[cfg_attr(miri, ignore)] // unsupported operation: returning ready events from epoll_wait is not yet implemented
+    async fn preserve_update_times_partial_batch(dyncfgs: ConfigUpdates) {
+        let mut cache = new_test_client_cache(&dyncfgs);
+        cache.cfg.compaction_enabled = false;
+        let client = cache
+            .open(PersistLocation::new_in_mem())
+            .await
+            .expect("client construction failed");
+
+        let shard_id = ShardId::new();
+        let enabled = client
+            .enable_preserve_update_times::<String, String, u64, i64>(
+                shard_id,
+                crate::Diagnostics::for_tests(),
+            )
+            .await
+            .expect("valid usage");
+        assert!(enabled);
+        let (mut write, mut read) = client
+            .expect_open::<String, String, u64, i64>(shard_id)
+            .await;
+        read.downgrade_since(&Antichain::from_elem(29)).await;
+
+        let u = |k: &str, t: u64, d: i64| ((k.to_owned(), String::new()), t, d);
+        // One batch of four runs. `r` reads as stamped 1, since its net at 3
+        // is zero, but a merge of the first run alone would stamp it 3.
+        let runs = [
+            vec![u("r", 1, 1), u("r", 3, 1)],
+            vec![u("x", 2, 1)],
+            vec![u("r", 3, -1)],
+            vec![u("y", 4, 1)],
+        ];
+        let mut batches = Vec::new();
+        for updates in &runs {
+            batches.push(write.expect_batch(updates, 0, 10).await);
+        }
+        let mut batch_refs: Vec<_> = batches.iter_mut().collect();
+        write
+            .expect_compare_and_append_batch(&mut batch_refs, 0, 10)
+            .await;
+        let multi_run = write.machine.applier.all_batches();
+        assert_eq!(multi_run.len(), 1);
+        assert!(
+            multi_run[0].runs().count() >= 3,
+            "{:?}",
+            multi_run[0].run_meta
+        );
+        write
+            .expect_compare_and_append(&[u("x", 12, -1)], 10, 30)
+            .await;
+
+        let expected = vec![
+            (("r".to_owned(), String::new()), 1, 1),
+            (("y".to_owned(), String::new()), 4, 1),
+        ];
+        assert_eq!(read_stamps_at_29(&mut read).await, expected);
+
+        // No batch fits, so a batch of more than two runs is split into
+        // chunks of two runs.
+        write
+            .machine
+            .applier
+            .cfg
+            .set_config(&COMPACTION_MEMORY_BOUND_BYTES, 1);
+        let chunks_before = write.metrics.compaction.chunks_compacted.get();
+        let violations_before = write.metrics.compaction.memory_violations.get();
+        let merges = exert_until_settled(&write.machine).await;
+        assert!(merges > 0, "expected the spine to merge");
+        assert_eq!(read_stamps_at_29(&mut read).await, expected);
+        // The four-run batch went through two partial chunks, which count as
+        // memory violations because each holds two runs over the bound.
+        assert!(
+            write.metrics.compaction.chunks_compacted.get() - chunks_before >= 3,
+            "expected the multi-run batch to be split"
+        );
+        assert!(write.metrics.compaction.memory_violations.get() > violations_before);
+
+        // Under the same bound, later merges shrink the batch to at most two
+        // runs, pair it, and pair it with the batches around it, which drops
+        // `x`'s insert and delete: one record per live row remains.
+        for (k, lower) in [("z", 30), ("w", 31), ("v", 32)] {
+            write
+                .expect_compare_and_append(&[u(k, lower, 1), u(k, lower, -1)], lower, lower + 1)
+                .await;
+            exert_until_settled(&write.machine).await;
+            assert_eq!(read_stamps_at_29(&mut read).await, expected);
+        }
+        let batches = write.machine.applier.all_batches();
+        let lens: Vec<_> = batches.iter().map(|b| b.len).collect();
+        assert_eq!(lens.iter().sum::<usize>(), expected.len(), "{lens:?}");
+    }
+
+    /// An oversized batch of two runs that follows another chunk in
+    /// `chunk_runs` is split off as a `PartialBatch` holding all of its runs,
+    /// which covers its whole time range and is merged with pairing, here
+    /// through the stamp fold fallback.
+    #[mz_persist_proc::test(tokio::test)]
+    #[cfg_attr(miri, ignore)] // unsupported operation: returning ready events from epoll_wait is not yet implemented
+    async fn preserve_update_times_whole_partial_batch(dyncfgs: ConfigUpdates) {
+        let mut cache = new_test_client_cache(&dyncfgs);
+        cache.cfg.compaction_enabled = false;
+        let client = cache
+            .open(PersistLocation::new_in_mem())
+            .await
+            .expect("client construction failed");
+        let shard_id = ShardId::new();
+        let enabled = client
+            .enable_preserve_update_times::<String, String, u64, i64>(
+                shard_id,
+                crate::Diagnostics::for_tests(),
+            )
+            .await
+            .expect("valid usage");
+        assert!(enabled);
+        let (mut write, mut read) = client
+            .expect_open::<String, String, u64, i64>(shard_id)
+            .await;
+        read.downgrade_since(&Antichain::from_elem(29)).await;
+
+        let u = |k: &str, t: u64, d: i64| ((k.to_owned(), String::new()), t, d);
+        // A one-run batch opens a chunk, and the two-run batch after it does
+        // not fit beside it.
+        write
+            .expect_compare_and_append(&[u("a", 1, 1)], 0, 10)
+            .await;
+        // Two runs of one record each. `r`'s two inserts break alternation, so
+        // pairing falls back to the stamp fold, which leaves one record.
+        // Consolidated at exact times, it stays two.
+        let runs = [vec![u("r", 11, 1)], vec![u("r", 12, 1)]];
+        let mut batches = Vec::new();
+        for updates in &runs {
+            batches.push(write.expect_batch(updates, 10, 30).await);
+        }
+        let mut batch_refs: Vec<_> = batches.iter_mut().collect();
+        write
+            .expect_compare_and_append_batch(&mut batch_refs, 10, 30)
+            .await;
+
+        let expected = vec![
+            (("a".to_owned(), String::new()), 1, 1),
+            (("r".to_owned(), String::new()), 12, 2),
+        ];
+        assert_eq!(read_stamps_at_29(&mut read).await, expected);
+
+        write
+            .machine
+            .applier
+            .cfg
+            .set_config(&COMPACTION_MEMORY_BOUND_BYTES, 1);
+        let violations_before = write.metrics.compaction.memory_violations.get();
+        let merges = exert_until_settled(&write.machine).await;
+        assert!(merges > 0, "expected the spine to merge");
+        assert_eq!(read_stamps_at_29(&mut read).await, expected);
+        // The split path records a violation for the chunk's first run.
+        assert!(write.metrics.compaction.memory_violations.get() > violations_before);
+        // `r` falls back to the fold as one record, and `a` is one record.
+        let lens: Vec<_> = write
+            .machine
+            .applier
+            .all_batches()
+            .iter()
+            .map(|b| b.len)
+            .collect();
+        assert_eq!(lens.iter().sum::<usize>(), expected.len(), "{lens:?}");
     }
 }

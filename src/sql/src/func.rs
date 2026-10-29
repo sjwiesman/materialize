@@ -4776,6 +4776,16 @@ pub static MZ_CATALOG_BUILTINS: LazyLock<BTreeMap<&'static str, Func>> = LazyLoc
                 sql_bail!("mz_logical_timestamp() has been renamed to mz_now()")
             }) => MzTimestamp, oid::FUNC_MZ_LOGICAL_TIMESTAMP_OID;
         },
+        // Calls naming a `FROM` item are planned by `plan_mz_updated_at`
+        // before overload resolution. This entry makes the name resolve and
+        // rejects every other argument.
+        "mz_updated_at" => Scalar {
+            params!(RecordAny) => Operation::unary(|_ecx, _e| {
+                sql_bail!(
+                    "mz_updated_at expects the name or alias of a FROM item, as in mz_updated_at(t)"
+                )
+            }) => MzTimestamp, oid::FUNC_MZ_UPDATED_AT_OID;
+        },
         "mz_now" => Scalar {
             params!() => UnmaterializableFunc::MzNow => MzTimestamp, oid::FUNC_MZ_NOW_OID;
         },

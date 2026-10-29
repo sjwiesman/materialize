@@ -388,7 +388,7 @@ CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (EXCLUDE ALL NOT NULL COLU
 parse-statement
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (ALL COLUMNS NULLABLE)
 ----
-error: Expected one of TEXT or EXCLUDE or IGNORE or DETAILS or PARTITION or RETAIN, found ALL
+error: Expected one of TEXT or EXCLUDE or IGNORE or DETAILS or PARTITION or RETAIN or PRESERVE, found ALL
 CREATE TABLE t FROM SOURCE foo (REFERENCE = baz) WITH (ALL COLUMNS NULLABLE)
                                                        ^
 
@@ -619,6 +619,46 @@ parse-statement roundtrip
 CREATE OR REPLACE MATERIALIZED VIEW v WITH (ASSERT NOT NULL a, ASSERT NOT NULL = b, RETAIN HISTORY = FOR '1s') AS SELECT 1
 ----
 CREATE OR REPLACE MATERIALIZED VIEW v WITH (ASSERT NOT NULL = a, ASSERT NOT NULL = b, RETAIN HISTORY = FOR '1s') AS SELECT 1
+
+parse-statement
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES FOR KEY (a, "B")) AS SELECT 1
+----
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES = FOR KEY (a, "B")) AS SELECT 1
+=>
+CreateMaterializedView(CreateMaterializedViewStatement { if_exists: Error, name: UnresolvedItemName([Ident("v")]), columns: [], replacement_for: None, in_cluster: None, in_cluster_replica: None, query: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Expr { expr: Value(Number("1")), alias: None }], from: [], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None }, as_of: None, with_options: [MaterializedViewOption { name: PreserveUpdateTimes, value: Some(ForKey([Ident("a"), Ident("B")])) }] })
+
+parse-statement roundtrip
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES = FOR KEY (a), RETAIN HISTORY FOR '1s') AS SELECT 1
+----
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES = FOR KEY (a), RETAIN HISTORY = FOR '1s') AS SELECT 1
+
+parse-statement
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES) AS SELECT 1
+----
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES) AS SELECT 1
+=>
+CreateMaterializedView(CreateMaterializedViewStatement { if_exists: Error, name: UnresolvedItemName([Ident("v")]), columns: [], replacement_for: None, in_cluster: None, in_cluster_replica: None, query: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Expr { expr: Value(Number("1")), alias: None }], from: [], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None }, as_of: None, with_options: [MaterializedViewOption { name: PreserveUpdateTimes, value: None }] })
+
+parse-statement
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES FOR KEY ()) AS SELECT 1
+----
+error: Expected identifier, found right parenthesis
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES FOR KEY ()) AS SELECT 1
+                                                                ^
+
+parse-statement
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES = true) AS SELECT 1
+----
+error: Expected FOR, found TRUE
+CREATE MATERIALIZED VIEW v WITH (PRESERVE UPDATE TIMES = true) AS SELECT 1
+                                                         ^
+
+parse-statement
+CREATE TABLE t FROM SOURCE foo (REFERENCE bar) WITH (PRESERVE UPDATE TIMES FOR KEY (id))
+----
+CREATE TABLE t FROM SOURCE foo (REFERENCE = bar) WITH (PRESERVE UPDATE TIMES = FOR KEY (id))
+=>
+CreateTableFromSource(CreateTableFromSourceStatement { name: UnresolvedItemName([Ident("t")]), columns: NotSpecified, constraints: [], if_not_exists: false, source: Name(UnresolvedItemName([Ident("foo")])), external_reference: Some(UnresolvedItemName([Ident("bar")])), with_options: [TableFromSourceOption { name: PreserveUpdateTimes, value: Some(ForKey([Ident("id")])) }], include_metadata: [], format: None, envelope: None })
 
 parse-statement
 CREATE CONNECTION awsconn TO AWS (ACCESS KEY ID 'id', ENDPOINT 'endpoint', REGION 'region', SECRET ACCESS KEY 'key', SESSION TOKEN 'token')

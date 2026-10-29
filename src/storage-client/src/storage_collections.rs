@@ -27,7 +27,7 @@ use mz_ore::collections::CollectionExt;
 use mz_ore::metrics::MetricsRegistry;
 use mz_ore::now::NowFn;
 use mz_ore::task::AbortOnDropHandle;
-use mz_ore::{assert_none, instrument, soft_assert_or_log};
+use mz_ore::{assert_none, instrument, soft_assert_or_log, soft_panic_or_log};
 use mz_persist_client::cache::PersistClientCache;
 use mz_persist_client::cfg::USE_CRITICAL_SINCE_SNAPSHOT;
 use mz_persist_client::critical::{Opaque, SinceHandle};
@@ -1837,6 +1837,31 @@ impl StorageCollections for StorageCollectionsImpl {
                     } else {
                         description.since.as_ref()
                     };
+
+                    // Must run before anything writes the shard: persist only
+                    // enables the mode on a shard that has never been written.
+                    // It is idempotent, so it also runs on every bootstrap.
+                    if description.preserve_update_times {
+                        let enabled = persist_client
+                            .enable_preserve_update_times::<SourceData, (), Timestamp, StorageDiff>(
+                                metadata.data_shard,
+                                Diagnostics {
+                                    shard_name: id.to_string(),
+                                    handle_purpose: format!(
+                                        "enable preserve update times for {id}"
+                                    ),
+                                },
+                            )
+                            .await
+                            .expect("invalid persist usage");
+                        if !enabled {
+                            soft_panic_or_log!(
+                                "collection {id} requested time-preserving compaction, \
+                                 but its shard {} was already written",
+                                metadata.data_shard
+                            );
+                        }
+                    }
 
                     let (write, mut since_handle) = this
                         .open_data_handles(

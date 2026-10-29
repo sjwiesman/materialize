@@ -16,7 +16,9 @@ use std::time::{Duration, Instant};
 use mz_compute_types::ComputeInstanceId;
 use mz_compute_types::dataflows::IndexDesc;
 use mz_compute_types::plan::LirRelationExpr;
-use mz_expr::{MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr, RowSetFinishing};
+use mz_expr::{
+    MirRelationExpr, MirScalarExpr, OptimizedMirRelationExpr, RowSetFinishing, VariadicFunc,
+};
 use mz_ore::soft_assert_or_log;
 use mz_repr::explain::trace_plan;
 use mz_repr::{GlobalId, ReprRelationType, SqlRelationType, Timestamp};
@@ -173,6 +175,12 @@ impl Optimize<HirRelationExpr> for Optimizer {
 
         // Trace the pipeline input under `optimize/raw`.
         trace_plan!(at: "raw", &expr);
+
+        if expr.contains_updated_at() && !expr.is_linear_over_global_get() {
+            return Err(OptimizerError::UncallableUpdatedAt(
+                "a query that reads anything other than a filter and projection of one object",
+            ));
+        }
 
         // HIR ⇒ MIR lowering and decorrelation
         let mir_expr = expr.clone().lower(&self.config, Some(&self.metrics))?;
@@ -401,6 +409,15 @@ impl<'s> Optimize<LocalMirPlan<Resolved<'s>>> for Optimizer {
                 PeekPlan::FastPath(plan)
             }
             _ => {
+                // A dataflow has no stamps to bind `mz_updated_at` to: its
+                // imports advance every time to the dataflow's `as_of`.
+                if calls_updated_at(&df_desc) {
+                    return Err(OptimizerError::UncallableUpdatedAt(
+                        "a query that reads anything other than a filter and projection \
+                         of one object with no index",
+                    ));
+                }
+
                 soft_assert_or_log!(
                     !use_fast_path_optimizer || self.config.no_fast_path,
                     "The fast_path_optimizer shouldn't make a fast path plan slow path."
@@ -454,4 +471,23 @@ impl GlobalLirPlan {
     pub fn unapply(self) -> (PeekPlan, DataflowMetainfo, SqlRelationType) {
         (self.peek_plan, self.df_meta, self.typ)
     }
+}
+
+/// Whether any object the dataflow builds calls `mz_updated_at`.
+fn calls_updated_at(df_desc: &MirDataflowDescription) -> bool {
+    let mut found = false;
+    for build in &df_desc.objects_to_build {
+        let _ = build.plan.0.visit_scalars(&mut |s: &MirScalarExpr| {
+            s.visit_pre(|e| {
+                found |= matches!(
+                    e,
+                    MirScalarExpr::CallVariadic {
+                        func: VariadicFunc::MzUpdatedAt(_),
+                        ..
+                    }
+                );
+            });
+        });
+    }
+    found
 }

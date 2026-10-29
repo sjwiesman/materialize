@@ -568,7 +568,8 @@ impl PersistClient {
         T: Timestamp + Lattice + Codec64 + TotalOrder + Sync,
         D: Monoid + Ord + Codec64 + Send + Sync,
     {
-        let mut compact_cfg = CompactConfig::new(&self.cfg, shard_id);
+        // See `WriteHandle::builder`.
+        let mut compact_cfg = CompactConfig::new(&self.cfg, shard_id, false);
         if let Some(max_runs) = max_runs {
             compact_cfg.batch.max_runs = Some(max_runs);
         }
@@ -778,6 +779,43 @@ impl PersistClient {
         maintenance.start_performing(&machine, &gc);
 
         Ok(schema_id)
+    }
+
+    /// Puts the shard in time-preserving compaction mode, where compaction
+    /// keeps the original time of each surviving update instead of advancing
+    /// it to the shard's `since`. Compaction pairs each delete with the most
+    /// recent unpaired insert of the same row and drops both, falling back to
+    /// the stamp fold ([crate::iter::StampFold]) for a row whose updates do
+    /// not alternate between inserts and deletes.
+    ///
+    /// The caller must guarantee that every full row has a count of 0 or 1 at
+    /// every time. If that does not hold, counts stay correct, but a row's
+    /// stamp can move earlier than the time it last changed.
+    ///
+    /// Returns whether the shard is in the mode afterwards. Enabling succeeds
+    /// only while the shard's upper is the minimum timestamp, so that no
+    /// update was ever compacted without it. Enabling an already enabled shard
+    /// returns true. The mode cannot be disabled.
+    pub async fn enable_preserve_update_times<K, V, T, D>(
+        &self,
+        shard_id: ShardId,
+        diagnostics: Diagnostics,
+    ) -> Result<bool, InvalidUsage<T>>
+    where
+        K: Debug + Codec,
+        V: Debug + Codec,
+        T: Timestamp + Lattice + Codec64 + Sync,
+        D: Monoid + Codec64 + Send + Sync,
+    {
+        let machine = self
+            .make_machine::<K, V, T, D>(shard_id, diagnostics)
+            .await?;
+        let gc = GarbageCollector::new(machine.clone(), Arc::clone(&self.isolated_runtime));
+
+        let (enabled, maintenance) = machine.enable_preserve_update_times().await;
+        maintenance.start_performing(&machine, &gc);
+
+        Ok(enabled)
     }
 
     /// Registers a new latest schema for the given shard.

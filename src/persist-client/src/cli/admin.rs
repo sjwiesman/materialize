@@ -468,7 +468,7 @@ where
             };
 
             let res = Compactor::<K, V, T, D>::compact(
-                CompactConfig::new(&cfg, shard_id),
+                CompactConfig::new(&cfg, shard_id, machine.applier.preserve_update_times()),
                 Arc::clone(&blob),
                 Arc::clone(&metrics),
                 Arc::clone(&machine.applier.shard_metrics),

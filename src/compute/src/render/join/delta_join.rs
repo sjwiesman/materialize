@@ -291,6 +291,7 @@ fn prune_bundle<'scope, T: RenderTimestamp>(
             .filter(|(key, _)| keys.contains(*key))
             .map(|(key, flavor)| (key.clone(), flavor.clone()))
             .collect(),
+        preserve_update_times: bundle.preserve_update_times,
     }
 }
 

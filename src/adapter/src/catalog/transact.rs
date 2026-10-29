@@ -4139,6 +4139,7 @@ mod tests {
                     custom_logical_compaction_window: None,
                     is_retained_metrics_object: false,
                     data_source: TableDataSource::TableWrites { defaults: vec![] },
+                    preserve_update_times_key: None,
                 }),
                 owner_id: MZ_SYSTEM_ROLE_ID,
             };

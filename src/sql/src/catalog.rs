@@ -903,6 +903,11 @@ pub trait CatalogItem {
     /// The item this catalog item replaces, if any.
     fn replacement_target(&self) -> Option<CatalogItemId>;
 
+    /// The key columns of the item's `PRESERVE UPDATE TIMES FOR KEY (...)`
+    /// option. When set, the item's shard is in time-preserving compaction
+    /// mode, so that one-shot reads can serve `mz_updated_at`.
+    fn preserve_update_times_key(&self) -> Option<&[usize]>;
+
     /// Returns the type information associated with the catalog item, if the
     /// catalog item is a type.
     fn type_details(&self) -> Option<&CatalogTypeDetails<IdReference>>;

@@ -414,6 +414,11 @@ pub enum PeekTarget {
     Index {
         /// The id of the (possibly transient) index.
         id: GlobalId,
+        /// Whether to supply each row's stamp to the peek's MFP, as for
+        /// `Persist`. The stamp is folded from the trace's `(time, diff)`
+        /// pairs, which hold write times only for an index built from a
+        /// time-preserving import. The replica refuses the peek otherwise.
+        stamped: bool,
     },
     /// This peek is against a Persist collection.
     Persist {
@@ -421,6 +426,11 @@ pub enum PeekTarget {
         id: GlobalId,
         /// The identifying metadata of the Persist shard.
         metadata: CollectionMetadata,
+        /// Whether to read each row at its stamp and supply the stamp to the
+        /// peek's MFP. The MFP then calls `mz_updated_at`, which the replica
+        /// binds to an input column appended after the row's columns. The
+        /// stamp is a write time only for a shard in time-preserving mode.
+        stamped: bool,
     },
 }
 
@@ -428,7 +438,7 @@ impl PeekTarget {
     /// Returns the ID of the peeked collection.
     pub fn id(&self) -> GlobalId {
         match self {
-            Self::Index { id } => *id,
+            Self::Index { id, .. } => *id,
             Self::Persist { id, .. } => *id,
         }
     }

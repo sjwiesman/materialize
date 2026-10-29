@@ -917,13 +917,38 @@ where
         &mut self,
         as_of: Antichain<T>,
     ) -> Result<Vec<LeasedBatchPart<T>>, Since<T>> {
+        let filter = FetchBatchFilter::Snapshot {
+            as_of: as_of.clone(),
+        };
+        self.snapshot_with_filter(as_of, filter).await
+    }
+
+    /// Like [Self::snapshot], but the parts yield each update at its stored
+    /// time rather than advanced to `as_of`. Updates above `as_of` are still
+    /// dropped. Only meaningful for a shard in time-preserving mode, whose
+    /// compaction keeps the time each row last changed.
+    #[instrument(level = "trace", fields(shard = %self.machine.shard_id()))]
+    pub async fn snapshot_preserving(
+        &mut self,
+        as_of: Antichain<T>,
+    ) -> Result<Vec<LeasedBatchPart<T>>, Since<T>> {
+        let filter = FetchBatchFilter::SnapshotPreserving {
+            as_of: as_of.clone(),
+        };
+        self.snapshot_with_filter(as_of, filter).await
+    }
+
+    async fn snapshot_with_filter(
+        &mut self,
+        as_of: Antichain<T>,
+        filter: FetchBatchFilter<T>,
+    ) -> Result<Vec<LeasedBatchPart<T>>, Since<T>> {
         let (lease, batches) = self.snapshot_batches(as_of.clone()).await?;
 
         if !PartialOrder::less_equal(self.since(), &as_of) {
             return Err(Since(self.since().clone()));
         }
 
-        let filter = FetchBatchFilter::Snapshot { as_of };
         let mut leased_parts = Vec::new();
         for batch in batches {
             // Flatten the HollowBatch into one LeasedBatchPart per key. Each key
@@ -1225,6 +1250,47 @@ where
         )
     }
 
+    /// Like [Self::snapshot_cursor], but yields each live row once, at its
+    /// stamp instead of at `as_of`.
+    ///
+    /// The stamp of a row is the greatest time at or below `as_of` at which
+    /// its net diff is nonzero, which is the time its current multiplicity was
+    /// written. It is the time the update was written only for a shard in
+    /// time-preserving mode (see [crate::PersistClient::enable_preserve_update_times]).
+    /// On any other shard, compaction has advanced times to the `since` it ran
+    /// at, and a row's stamp is at most that `since`.
+    pub async fn snapshot_cursor_stamped(
+        &mut self,
+        as_of: Antichain<T>,
+        should_fetch_part: impl for<'a> Fn(Option<&'a LazyPartStats>) -> bool,
+    ) -> Result<Cursor<K, V, T, D>, Since<T>> {
+        let (lease, batches) = self.snapshot_batches(as_of.clone()).await?;
+
+        let filter = FetchBatchFilter::SnapshotStamping {
+            as_of: as_of.clone(),
+        };
+        Self::read_batches_with_filter(
+            &self.cfg,
+            Arc::clone(&self.metrics),
+            Arc::clone(&self.machine.applier.shard_metrics),
+            self.metrics.read.snapshot.clone(),
+            Arc::clone(&self.blob),
+            self.shard_id(),
+            filter,
+            self.read_schemas.clone(),
+            &batches,
+            lease,
+            should_fetch_part,
+            COMPACTION_MEMORY_BOUND_BYTES.get(&self.cfg),
+        )
+    }
+
+    /// Whether the shard is in time-preserving compaction mode, as of the most
+    /// recent state this handle has seen.
+    pub fn preserves_update_times(&self) -> bool {
+        self.machine.applier.preserve_update_times()
+    }
+
     pub(crate) fn read_batches_consolidated<L>(
         persist_cfg: &PersistConfig,
         metrics: Arc<Metrics>,
@@ -1239,10 +1305,38 @@ where
         should_fetch_part: impl for<'a> Fn(Option<&'a LazyPartStats>) -> bool,
         memory_budget_bytes: usize,
     ) -> Result<Cursor<K, V, T, D, L>, Since<T>> {
-        let context = format!("{}[as_of={:?}]", shard_id, as_of.elements());
-        let filter = FetchBatchFilter::Snapshot {
-            as_of: as_of.clone(),
-        };
+        let filter = FetchBatchFilter::Snapshot { as_of };
+        Self::read_batches_with_filter(
+            persist_cfg,
+            metrics,
+            shard_metrics,
+            read_metrics,
+            blob,
+            shard_id,
+            filter,
+            schemas,
+            batches,
+            lease,
+            should_fetch_part,
+            memory_budget_bytes,
+        )
+    }
+
+    fn read_batches_with_filter<L>(
+        persist_cfg: &PersistConfig,
+        metrics: Arc<Metrics>,
+        shard_metrics: Arc<ShardMetrics>,
+        read_metrics: ReadMetrics,
+        blob: Arc<dyn Blob>,
+        shard_id: ShardId,
+        filter: FetchBatchFilter<T>,
+        schemas: Schemas<K, V>,
+        batches: &[HollowBatch<T>],
+        lease: L,
+        should_fetch_part: impl for<'a> Fn(Option<&'a LazyPartStats>) -> bool,
+        memory_budget_bytes: usize,
+    ) -> Result<Cursor<K, V, T, D, L>, Since<T>> {
+        let context = format!("{}[{:?}]", shard_id, filter);
 
         let mut consolidator = Consolidator::new(
             context,

@@ -46,7 +46,7 @@ use std::iter;
 use std::sync::Arc;
 
 use mz_ore::iter::IteratorExt;
-use mz_repr::{ColumnName, UNKNOWN_COLUMN_NAME};
+use mz_repr::{ColumnName, GlobalId, UNKNOWN_COLUMN_NAME};
 
 use crate::ast::Expr;
 use crate::names::{Aug, PartialItemName};
@@ -96,6 +96,11 @@ pub struct ScopeItem {
     /// `*` expansion should yield a single `NULL` instead of a record with various
     /// datums.
     pub is_exists_column_for_a_table_function_that_was_in_the_target_list: bool,
+    /// Set on the hidden column that marks a `FROM` item `t` as the
+    /// time-preserving collection with this id, so that `mz_updated_at(t)`
+    /// resolves. Its value is a placeholder. It is excluded from `*`, `t.*`,
+    /// whole-row `t`, and `NATURAL` joins, and cannot be referenced by name.
+    pub updated_at_of: Option<GlobalId>,
     // Force use of the constructor methods.
     _private: (),
 }
@@ -153,8 +158,28 @@ impl ScopeItem {
             allow_unqualified_references: true,
             error_if_referenced: None,
             is_exists_column_for_a_table_function_that_was_in_the_target_list: false,
+            updated_at_of: None,
             _private: (),
         }
+    }
+
+    /// Constructs the hidden column that marks the `FROM` item named
+    /// `table_name` as the time-preserving collection `id`.
+    pub fn updated_at(table_name: Option<PartialItemName>, id: GlobalId) -> ScopeItem {
+        let mut item = ScopeItem::from_name(table_name, "?mz_updated_at?");
+        item.allow_unqualified_references = false;
+        item.error_if_referenced = Some(|table, column| PlanError::UnknownColumn {
+            table: table.cloned(),
+            column: column.clone(),
+            similar: Box::new([]),
+        });
+        item.updated_at_of = Some(id);
+        item
+    }
+
+    /// Whether this is the hidden column of [`ScopeItem::updated_at`].
+    pub fn is_updated_at_column(&self) -> bool {
+        self.updated_at_of.is_some()
     }
 
     /// Constructs a new scope item from an unqualified column name.

@@ -294,7 +294,7 @@ fn log_arrangement_size_inner<'scope, B, L>(
     mut logic: L,
 ) -> Arranged<'scope, TraceAgent<Spine<ArcBatch<B>>>>
 where
-    B: Batch + 'static,
+    B: mz_row_spine::preserving::FoldMerge + 'static,
     L: FnMut(&B) -> (usize, usize, usize) + 'static,
 {
     let scope = arranged.stream.scope();

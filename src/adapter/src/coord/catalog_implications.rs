@@ -1333,6 +1333,7 @@ impl Coordinator {
                             since: None,
                             timeline: Some(timeline.clone()),
                             primary: None,
+                            preserve_update_times: table.preserve_update_times_key.is_some(),
                         };
 
                         let global_id = table
@@ -1378,6 +1379,7 @@ impl Coordinator {
                             since: None,
                             timeline: Some(timeline.clone()),
                             primary: None,
+                            preserve_update_times: false,
                         };
 
                         let global_id = table
@@ -1578,6 +1580,7 @@ impl Coordinator {
                 timeline: Some(source.timeline),
                 since: None,
                 primary: None,
+                preserve_update_times: false,
             },
         );
 
@@ -2004,6 +2007,7 @@ mod tests {
             custom_logical_compaction_window: None,
             is_retained_metrics_object: false,
             data_source: TableDataSource::TableWrites { defaults: vec![] },
+            preserve_update_times_key: None,
         }
     }
 

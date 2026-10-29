@@ -283,8 +283,17 @@ pub fn build_compute_dataflow(
                         ops
                     });
 
-                    let snapshot_mode = if import.with_snapshot || !subscribe_snapshot_optimization
-                    {
+                    let snapshot_mode = if import.preserve_update_times {
+                        // `suppress_early_progress` below holds the minimum
+                        // capability until the input passes `as_of`, so the
+                        // arrangement's first batch spans the snapshot's
+                        // times below `as_of`.
+                        assert!(
+                            import.with_snapshot && dataflow.as_of.is_some(),
+                            "a time-preserving import needs its snapshot and an as_of"
+                        );
+                        SnapshotMode::IncludePreservingTimes
+                    } else if import.with_snapshot || !subscribe_snapshot_optimization {
                         SnapshotMode::Include
                     } else {
                         compute_state.metrics.inc_subscribe_snapshot_optimization();
@@ -360,7 +369,11 @@ pub fn build_compute_dataflow(
                             .leave_region(scope),
                     );
 
-                    imported_sources.push((mz_expr::Id::Global(*source_id), (oks, errs)));
+                    imported_sources.push((
+                        mz_expr::Id::Global(*source_id),
+                        (oks, errs),
+                        import.preserve_update_times,
+                    ));
 
                     // Associate returned tokens with the source identifier.
                     tokens.insert(*source_id, Rc::new(token));
@@ -380,7 +393,13 @@ pub fn build_compute_dataflow(
                     dataflow_expiration,
                 );
 
-                for (id, (oks, errs)) in imported_sources.into_iter() {
+                for (id, (oks, errs), preserve_update_times) in imported_sources.into_iter() {
+                    // The stamp fold is defined only for the totally ordered
+                    // times of the outer scope.
+                    assert!(
+                        !preserve_update_times,
+                        "time-preserving imports are not supported in recursive dataflows"
+                    );
                     let bundle = crate::render::CollectionBundle::from_edge(
                         oks.enter(region),
                         errs.enter(region),
@@ -480,11 +499,12 @@ pub fn build_compute_dataflow(
                     dataflow_expiration,
                 );
 
-                for (id, (oks, errs)) in imported_sources.into_iter() {
-                    let bundle = crate::render::CollectionBundle::from_edge(
+                for (id, (oks, errs), preserve_update_times) in imported_sources.into_iter() {
+                    let mut bundle = crate::render::CollectionBundle::from_edge(
                         oks.enter_region(region),
                         errs.enter_region(region),
                     );
+                    bundle.preserve_update_times = preserve_update_times;
                     // Associate collection bundle with the source identifier.
                     context.insert_id(id, bundle);
                 }
@@ -705,6 +725,9 @@ where
                         idx.key.clone(),
                         ArrangementFlavor::Trace(idx_id, ok_arranged, err_arranged),
                     )
+                }
+                SnapshotMode::IncludePreservingTimes => {
+                    unreachable!("index imports never preserve times")
                 }
                 SnapshotMode::Exclude => {
                     // When we import an index without a snapshot, we have two balancing considerations:

@@ -106,6 +106,7 @@ fn ok_iterator_with_copies(keys: &[Row], copies: Diff) -> PeekResultIterator<Tes
         GlobalId::User(1),
         map_filter_project,
         Timestamp::MIN,
+        false,
         None,
         cursor,
         storage,

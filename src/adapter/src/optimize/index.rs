@@ -34,11 +34,11 @@ use mz_repr::explain::trace_plan;
 use mz_repr::{GlobalId, ReprRelationType};
 use mz_sql::names::QualifiedItemName;
 use mz_sql::optimizer_metrics::OptimizerMetrics;
-use mz_transform::TransformCtx;
 use mz_transform::dataflow::DataflowMetainfo;
 use mz_transform::normalize_lets::normalize_lets;
 use mz_transform::notice::{IndexAlreadyExists, IndexKeyEmpty};
 use mz_transform::typecheck::{SharedTypecheckingContext, empty_typechecking_context};
+use mz_transform::{EmptyIndexOracle, IndexOracle, TransformCtx};
 
 use crate::optimize::dataflows::{
     ComputeInstanceSnapshot, DataflowBuilder, ExprPrep, ExprPrepMaintained,
@@ -150,7 +150,17 @@ impl Optimize<Index> for Optimizer {
         };
         let mut df_desc = MirDataflowDescription::new(full_name.to_string());
 
-        df_builder.import_into_dataflow(&index.on, &mut df_desc, &self.config.features)?;
+        let preserve_update_times =
+            mz_sql::catalog::CatalogItem::preserve_update_times_key(&on_entry).is_some();
+        if preserve_update_times {
+            df_builder.import_preserving_into_dataflow(
+                &index.on,
+                &mut df_desc,
+                &self.config.features,
+            )?;
+        } else {
+            df_builder.import_into_dataflow(&index.on, &mut df_desc, &self.config.features)?;
+        }
         df_builder.maybe_reoptimize_imported_views(&mut df_desc, &self.config)?;
 
         let index_desc = IndexDesc {
@@ -172,8 +182,16 @@ impl Optimize<Index> for Optimizer {
 
         // Construct TransformCtx for global optimization.
         let mut df_meta = DataflowMetainfo::default();
+        // The dataflow of an index on a time-preserving object reads only the
+        // object's shard. An index on the cluster offered here would be
+        // chosen over that import, and it holds no preserved times.
+        let index_oracle: &dyn IndexOracle = if preserve_update_times {
+            &EmptyIndexOracle
+        } else {
+            &df_builder
+        };
         let mut transform_ctx = TransformCtx::global(
-            &df_builder,
+            index_oracle,
             &mz_transform::EmptyStatisticsOracle, // TODO: wire proper stats
             &self.config.features,
             &self.typecheck_ctx,

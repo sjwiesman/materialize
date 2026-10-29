@@ -739,7 +739,10 @@ impl ScriptState {
         let rows = self
             .driver
             .peek(
-                PeekTarget::Index { id: out_index_id },
+                PeekTarget::Index {
+                    id: out_index_id,
+                    stamped: false,
+                },
                 count_desc,
                 Timestamp::from(ts),
             )
@@ -1170,8 +1173,9 @@ impl ScriptState {
                     Some(metadata) => PeekTarget::Persist {
                         id,
                         metadata: metadata.clone(),
+                        stamped: false,
                     },
-                    None => PeekTarget::Index { id },
+                    None => PeekTarget::Index { id, stamped: false },
                 };
                 let rows = self.driver.peek(target, desc, Timestamp::from(ts)).await?;
                 Ok(render_rows(&rows))

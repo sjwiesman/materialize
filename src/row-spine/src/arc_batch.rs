@@ -24,6 +24,7 @@
 //! here as a newtype lets cross-thread arrangement sharing build against a released
 //! differential-dataflow, with no differential-side `Arc` batch impls required.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use differential_dataflow::trace::{
@@ -31,37 +32,59 @@ use differential_dataflow::trace::{
 };
 use timely::progress::{Antichain, frontier::AntichainRef};
 
+use crate::preserving::{Advance, BuildMode, FoldMerge, FoldMerger, MergeMode, UnitFn};
+
 /// An `Arc`-backed batch, shareable across threads when `B`'s contents are `Send + Sync`.
 ///
 /// A transparent newtype around `Arc<B>`. Cloning shares the underlying batch, exactly like the
 /// `Rc`-backed default, but with atomic reference counting.
-pub struct ArcBatch<B>(pub Arc<B>);
+///
+/// The second field is how merges of the batch treat times, see [`crate::preserving`]. A merge
+/// with a time-preserving input preserves times instead of advancing them, and its output keeps
+/// the mode.
+/// Only [`ArcBuilder`]s with a preserving [`BuildMode`] produce such batches, so a trace's batches
+/// preserve times exactly when its arrangement was built preserving.
+pub struct ArcBatch<B: FoldMerge>(pub Arc<B>, MergeMode<B::Diff>);
 
 // Hand-written rather than derived: `#[derive(Clone)]` would bound `B: Clone`, but `Arc<B>` is
 // `Clone` for any `B` (it clones the handle, not the batch). The derived bound would make
 // `ArcBatch<B>: Clone` fail for a non-`Clone` batch such as `OrdValBatch`, which in turn breaks
 // `Spine<ArcBatch<B>>: TraceReader`.
-impl<B> Clone for ArcBatch<B> {
+impl<B: FoldMerge> Clone for ArcBatch<B> {
     fn clone(&self) -> Self {
-        ArcBatch(Arc::clone(&self.0))
+        ArcBatch(Arc::clone(&self.0), self.1)
     }
 }
 
-impl<B> ArcBatch<B> {
+impl<B: FoldMerge> ArcBatch<B> {
     /// Wraps a batch in an `Arc`.
     pub fn new(batch: B) -> Self {
-        ArcBatch(Arc::new(batch))
+        ArcBatch(Arc::new(batch), MergeMode::Advance)
+    }
+
+    fn with_mode(batch: B, mode: MergeMode<B::Diff>) -> Self {
+        ArcBatch(Arc::new(batch), mode)
+    }
+
+    /// Whether this batch belongs to a time-preserving arrangement.
+    pub fn preserves_times(&self) -> bool {
+        self.1.preserves_times()
+    }
+
+    /// How merges of this batch treat times.
+    pub fn merge_mode(&self) -> MergeMode<B::Diff> {
+        self.1
     }
 }
 
-impl<B> std::ops::Deref for ArcBatch<B> {
+impl<B: FoldMerge> std::ops::Deref for ArcBatch<B> {
     type Target = B;
     fn deref(&self) -> &B {
         &self.0
     }
 }
 
-impl<B: BatchReader + Navigable> Navigable for ArcBatch<B> {
+impl<B: FoldMerge + Navigable> Navigable for ArcBatch<B> {
     type Cursor = ArcBatchCursor<B::Cursor>;
     fn cursor(&self) -> Self::Cursor {
         // Disambiguate to the inner batch's cursor, reached through the `Deref`, so the wrapper's
@@ -70,7 +93,7 @@ impl<B: BatchReader + Navigable> Navigable for ArcBatch<B> {
     }
 }
 
-impl<B: BatchReader> BatchReader for ArcBatch<B> {
+impl<B: FoldMerge> BatchReader for ArcBatch<B> {
     type Time = B::Time;
     fn len(&self) -> usize {
         self.0.len()
@@ -91,7 +114,10 @@ impl<C> ArcBatchCursor<C> {
     }
 }
 
-impl<C: Cursor> Cursor for ArcBatchCursor<C> {
+impl<C: Cursor> Cursor for ArcBatchCursor<C>
+where
+    C::Storage: FoldMerge,
+{
     type Storage = ArcBatch<C::Storage>;
 
     type Key<'a> = C::Key<'a>;
@@ -170,40 +196,51 @@ impl<C: Cursor> Cursor for ArcBatchCursor<C> {
     }
 }
 
-impl<B: Batch> Batch for ArcBatch<B> {
+impl<B: FoldMerge> Batch for ArcBatch<B> {
     type Merger = ArcMerger<B>;
     fn empty(lower: Antichain<Self::Time>, upper: Antichain<Self::Time>) -> Self {
         ArcBatch::new(B::empty(lower, upper))
     }
 }
 
-/// Builds [`ArcBatch`]es, delegating to the inner batch's builder.
-pub struct ArcBuilder<B: Builder> {
+/// Builds [`ArcBatch`]es, delegating to the inner batch's builder. The batches get the
+/// [`MergeMode`] that `M` selects.
+pub struct ArcBuilder<B: Builder, M = Advance> {
     builder: B,
+    _mode: PhantomData<M>,
 }
 
-impl<B: Builder> Builder for ArcBuilder<B> {
+impl<B, M> Builder for ArcBuilder<B, M>
+where
+    B: Builder,
+    B::Output: FoldMerge,
+    M: BuildMode<<B::Output as FoldMerge>::Diff>,
+{
     type Input = B::Input;
     type Time = B::Time;
     type Output = ArcBatch<B::Output>;
     fn with_capacity(keys: usize, vals: usize, upds: usize) -> Self {
         ArcBuilder {
             builder: B::with_capacity(keys, vals, upds),
+            _mode: PhantomData,
         }
     }
     fn push(&mut self, input: &mut Self::Input) {
         self.builder.push(input)
     }
     fn done(self, description: Description<Self::Time>) -> ArcBatch<B::Output> {
-        ArcBatch::new(self.builder.done(description))
+        ArcBatch::with_mode(self.builder.done(description), M::mode())
     }
     fn seal(chain: &mut Vec<Self::Input>, description: Description<Self::Time>) -> Self::Output {
-        ArcBatch::new(B::seal(chain, description))
+        ArcBatch::with_mode(B::seal(chain, description), M::mode())
     }
 }
 
-impl<B: Builder + mz_timely_util::columnar::chunk::ChainState>
-    mz_timely_util::columnar::chunk::ChainState for ArcBuilder<B>
+impl<B, M> mz_timely_util::columnar::chunk::ChainState for ArcBuilder<B, M>
+where
+    B: Builder + mz_timely_util::columnar::chunk::ChainState,
+    B::Output: FoldMerge,
+    M: BuildMode<<B::Output as FoldMerge>::Diff>,
 {
     type State = B::State;
 
@@ -222,30 +259,50 @@ impl<B: Builder + mz_timely_util::columnar::chunk::ChainState>
     fn from_state(state: Self::State) -> Self {
         ArcBuilder {
             builder: B::from_state(state),
+            _mode: PhantomData,
         }
     }
 }
 
-/// Merges [`ArcBatch`]es, delegating to the inner batch's merger.
-pub struct ArcMerger<B: Batch> {
-    merger: B::Merger,
+/// Merges [`ArcBatch`]es, delegating to the inner batch's merger, or merging with
+/// [`crate::preserving::pair_or_fold`] when either input is time-preserving.
+pub enum ArcMerger<B: FoldMerge> {
+    Standard(B::Merger),
+    Preserving {
+        merger: B::FoldMerger,
+        unit: UnitFn<B::Diff>,
+    },
 }
 
-impl<B: Batch> Merger<ArcBatch<B>> for ArcMerger<B> {
+impl<B: FoldMerge> Merger<ArcBatch<B>> for ArcMerger<B> {
     fn new(
         source1: &ArcBatch<B>,
         source2: &ArcBatch<B>,
         compaction_frontier: AntichainRef<B::Time>,
     ) -> Self {
-        ArcMerger {
-            merger: B::begin_merge(&source1.0, &source2.0, compaction_frontier),
+        match source1.1.merge(source2.1) {
+            MergeMode::Advance => {
+                ArcMerger::Standard(B::begin_merge(&source1.0, &source2.0, compaction_frontier))
+            }
+            MergeMode::Pair(unit) => ArcMerger::Preserving {
+                merger: B::begin_fold_merge(&source1.0, &source2.0, compaction_frontier, unit),
+                unit,
+            },
         }
     }
     fn work(&mut self, source1: &ArcBatch<B>, source2: &ArcBatch<B>, fuel: &mut isize) {
-        self.merger.work(&source1.0, &source2.0, fuel)
+        match self {
+            ArcMerger::Standard(merger) => merger.work(&source1.0, &source2.0, fuel),
+            ArcMerger::Preserving { merger, .. } => merger.work(&source1.0, &source2.0, fuel),
+        }
     }
     fn done(self) -> ArcBatch<B> {
-        ArcBatch::new(self.merger.done())
+        match self {
+            ArcMerger::Standard(merger) => ArcBatch::new(merger.done()),
+            ArcMerger::Preserving { merger, unit } => {
+                ArcBatch::with_mode(merger.done(), MergeMode::Pair(unit))
+            }
+        }
     }
 }
 

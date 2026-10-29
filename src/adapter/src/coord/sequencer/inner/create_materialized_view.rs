@@ -583,6 +583,7 @@ impl Coordinator {
                             non_null_assertions,
                             compaction_window,
                             refresh_schedule,
+                            preserve_update_times_key,
                             ..
                         },
                     drop_ids,
@@ -596,6 +597,21 @@ impl Coordinator {
             optimizer_features,
             ..
         } = stage;
+
+        // The view's unique keys are those the optimizer inferred, which the
+        // catalog item records in its desc. Only new statements reach this
+        // point. Catalog boot re-plans persisted views without validating
+        // their keys, so an optimizer that infers fewer keys does not fail
+        // boot.
+        if let Some(key) = &preserve_update_times_key {
+            let desc = global_lir_plan.desc();
+            mz_sql::plan::validate_preserve_update_times_key(
+                &self.catalog().resolve_full_name(&name, None).to_string(),
+                desc,
+                &desc.typ().keys,
+                key,
+            )?;
+        }
 
         // Validate the replacement target, if one is given.
         if let Some(target_id) = replacement_target {
@@ -701,6 +717,7 @@ impl Coordinator {
                     custom_logical_compaction_window: compaction_window,
                     refresh_schedule: refresh_schedule.clone(),
                     initial_as_of: Some(initial_as_of.clone()),
+                    preserve_update_times_key: preserve_update_times_key.clone(),
                     optimized_plan: None,
                     physical_plan: None,
                     dataflow_metainfo: None,
@@ -785,6 +802,7 @@ impl Coordinator {
 
                     let mut collection_desc =
                         CollectionDescription::for_other(output_desc, Some(storage_as_of));
+                    collection_desc.preserve_update_times = preserve_update_times_key.is_some();
                     let mut allow_writes = true;
 
                     // If this MV is intended to replace another one, we need to start it in

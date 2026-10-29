@@ -44,6 +44,9 @@ impl StatsCursor {
         mfp_plan: &SafeMfpPlan,
         desc: &RelationDesc,
         as_of: Antichain<Timestamp>,
+        // Whether the data cursor yields each row once at its stamp, see
+        // [ReadHandle::snapshot_cursor_stamped]. Not supported with txn-wal.
+        stamped: bool,
     ) -> Result<StatsCursor, Since<Timestamp>> {
         let should_fetch = |name: &'static str, errors: bool| {
             move |stats: Option<&LazyPartStats>| {
@@ -67,12 +70,22 @@ impl StatsCursor {
                 let errors = handle
                     .snapshot_cursor(as_of.clone(), should_fetch("errors", true))
                     .await?;
-                let data = handle
-                    .snapshot_cursor(as_of.clone(), should_fetch("data", false))
-                    .await?;
+                let data = if stamped {
+                    handle
+                        .snapshot_cursor_stamped(as_of.clone(), should_fetch("data", false))
+                        .await?
+                } else {
+                    handle
+                        .snapshot_cursor(as_of.clone(), should_fetch("data", false))
+                        .await?
+                };
                 (errors, data)
             }
             Some(txns_read) => {
+                assert!(
+                    !stamped,
+                    "stamped reads of txn-wal shards are not supported"
+                );
                 let as_of = as_of
                     .as_option()
                     .expect("reads as_of empty antichain block forever")

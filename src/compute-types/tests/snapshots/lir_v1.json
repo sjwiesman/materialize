@@ -3036,6 +3036,13 @@
   "MzRenderTypmod": "UNITSTRUCT",
   "MzRowSize": "UNITSTRUCT",
   "MzTypeName": "UNITSTRUCT",
+  "MzUpdatedAt": {
+    "STRUCT": {
+      "id": {
+        "TYPENAME": "GlobalId"
+      }
+    }
+  },
   "MzValidatePrivileges": "UNITSTRUCT",
   "MzValidateRolePrivilege": "UNITSTRUCT",
   "NegFloat32": "UNITSTRUCT",
@@ -5514,6 +5521,11 @@
       "MapBuild": {
         "NEWTYPE": {
           "TYPENAME": "MapBuild"
+        }
+      },
+      "MzUpdatedAt": {
+        "NEWTYPE": {
+          "TYPENAME": "MzUpdatedAt"
         }
       },
       "Or": {

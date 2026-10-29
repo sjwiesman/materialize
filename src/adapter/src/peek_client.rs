@@ -469,7 +469,10 @@ impl PeekClient {
 
         let (peek_target, target_read_hold, literal_constraints, mfp, strategy) = match fast_path {
             FastPathPlan::PeekExisting(_coll_id, idx_id, literal_constraints, mfp) => {
-                let peek_target = PeekTarget::Index { id: idx_id };
+                let peek_target = PeekTarget::Index {
+                    id: idx_id,
+                    stamped: !mfp.updated_at_ids().is_empty(),
+                };
                 let target_read_hold = input_read_holds
                     .compute_holds
                     .get(&(compute_instance, idx_id))
@@ -494,6 +497,7 @@ impl PeekClient {
                 let peek_target = PeekTarget::Persist {
                     id: coll_id,
                     metadata,
+                    stamped: !mfp.updated_at_ids().is_empty(),
                 };
                 let target_read_hold = input_read_holds
                     .storage_holds

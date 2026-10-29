@@ -302,6 +302,12 @@ pub enum SnapshotMode {
     Include,
     /// The snapshot will not be included in the stream
     Exclude,
+    /// The snapshot will be included in the stream with each update at its
+    /// stored time, which can be below the `as_of`, see
+    /// [crate::read::ReadHandle::snapshot_preserving]. The parts are still
+    /// emitted at the `as_of` capability, so a consumer sees data whose time
+    /// is below its capability.
+    IncludePreservingTimes,
 }
 
 #[derive(Debug)]
@@ -474,18 +480,24 @@ where
         // will block when there is no data yet available in the shard.
         cap_set.downgrade(as_of.clone());
 
-        let mut snapshot_parts =
-            match snapshot_mode {
-                SnapshotMode::Include => match read.snapshot(as_of.clone()).await {
-                    Ok(parts) => parts,
-                    Err(e) => error_handler
-                        .report_and_stop(anyhow!(
-                            "{name_owned}: {shard_id} cannot serve requested as_of {as_of:?}: {e:?}"
-                        ))
-                        .await,
-                },
-                SnapshotMode::Exclude => vec![],
-            };
+        let snapshot = match snapshot_mode {
+            SnapshotMode::Include => Some(read.snapshot(as_of.clone()).await),
+            SnapshotMode::IncludePreservingTimes => {
+                Some(read.snapshot_preserving(as_of.clone()).await)
+            }
+            SnapshotMode::Exclude => None,
+        };
+        let mut snapshot_parts = match snapshot {
+            None => vec![],
+            Some(Ok(parts)) => parts,
+            Some(Err(e)) => {
+                error_handler
+                    .report_and_stop(anyhow!(
+                        "{name_owned}: {shard_id} cannot serve requested as_of {as_of:?}: {e:?}"
+                    ))
+                    .await
+            }
+        };
 
         // We're about to start producing parts to be fetched whose leases will be returned by the
         // `shard_source_descs_return` operator above. In order for that operator to successfully

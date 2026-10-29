@@ -1,0 +1,201 @@
+# Copyright Materialize, Inc. and contributors. All rights reserved.
+#
+# Use of this software is governed by the Business Source License
+# included in the LICENSE file at the root of this repository.
+#
+# As of the Change Date specified in that file, in accordance with
+# the Business Source License, use of this software will be governed
+# by the Apache License, Version 2.0.
+
+# `PRESERVE UPDATE TIMES FOR KEY (...)` is accepted only when Materialize can
+# prove that the key contains a unique key of the collection.
+
+mode cockroach
+
+simple conn=mz_system,user=mz_system
+ALTER SYSTEM SET enable_preserve_update_times = on;
+----
+COMPLETE 0
+
+simple conn=mz_system,user=mz_system
+ALTER SYSTEM SET enable_replacement_materialized_views = on;
+----
+COMPLETE 0
+
+statement ok
+CREATE TABLE t (k int, v text)
+
+# The option requires a key.
+
+statement error invalid PRESERVE UPDATE TIMES: must name a key with FOR KEY \(column, \.\.\.\)
+CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES) AS SELECT k, v FROM t
+
+statement error column referenced in PRESERVE UPDATE TIMES key does not exist: x
+CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES FOR KEY (x)) AS SELECT DISTINCT k FROM t
+
+statement error duplicate column referenced in PRESERVE UPDATE TIMES key: k
+CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES FOR KEY (k, k)) AS SELECT DISTINCT k FROM t
+
+# A view without a provable key is rejected, and the error lists the keys that
+# could be proven.
+
+simple
+CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS SELECT k, v FROM t
+----
+db error: ERROR: PRESERVE UPDATE TIMES key could not be validated as unique
+DETAIL: Materialize could not prove that the specified key ("k") contains a unique key of "materialize.public.mv". There are no known valid unique keys for "materialize.public.mv".
+
+simple
+CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES FOR KEY (v)) AS SELECT k, max(v) AS v FROM t GROUP BY k
+----
+db error: ERROR: PRESERVE UPDATE TIMES key could not be validated as unique
+DETAIL: Materialize could not prove that the specified key ("v") contains a unique key of "materialize.public.mv". The following keys are known to be unique for "materialize.public.mv":
+  ("k")
+
+simple
+CREATE MATERIALIZED VIEW mv WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS SELECT DISTINCT k, v FROM t
+----
+db error: ERROR: PRESERVE UPDATE TIMES key could not be validated as unique
+DETAIL: Materialize could not prove that the specified key ("k") contains a unique key of "materialize.public.mv". The following keys are known to be unique for "materialize.public.mv":
+  ("k", "v")
+
+# A key that is, or contains, a provable key is accepted.
+
+statement ok
+CREATE MATERIALIZED VIEW by_k WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS SELECT k, max(v) AS v FROM t GROUP BY k
+
+statement ok
+CREATE MATERIALIZED VIEW by_k_v WITH (PRESERVE UPDATE TIMES FOR KEY (v, k)) AS SELECT k, max(v) AS v FROM t GROUP BY k
+
+statement ok
+CREATE MATERIALIZED VIEW distinct_k_v WITH (PRESERVE UPDATE TIMES FOR KEY (k, v)) AS SELECT DISTINCT k, v FROM t
+
+query T
+SELECT create_sql FROM (SHOW CREATE MATERIALIZED VIEW by_k_v)
+----
+CREATE MATERIALIZED VIEW materialize.public.by_k_v⏎    IN CLUSTER quickstart⏎    WITH (PRESERVE UPDATE TIMES = FOR KEY (v, k), REFRESH = ON COMMIT)⏎    AS SELECT k, pg_catalog.max(v) AS v FROM materialize.public.t GROUP BY k;
+
+# A recursive walk deduplicated by UNION has all of its columns as a key.
+
+statement ok
+CREATE TABLE block (id uuid, parent_id uuid, parent_table text, space_id uuid, alive boolean)
+
+simple
+CREATE MATERIALIZED VIEW walk_mv WITH (PRESERVE UPDATE TIMES FOR KEY (id)) AS
+WITH MUTUALLY RECURSIVE walk(id uuid, parent_id uuid, parent_table text, space_id uuid, alive boolean) AS (
+    SELECT id, parent_id, parent_table, space_id, alive FROM block WHERE id = '1bbcbb35-d2b2-806a-b7c7-fa8e7e50f22f'
+    UNION
+    SELECT b.id, b.parent_id, b.parent_table, b.space_id, b.alive FROM block b JOIN walk w ON b.id = w.parent_id
+)
+SELECT * FROM walk;
+----
+db error: ERROR: PRESERVE UPDATE TIMES key could not be validated as unique
+DETAIL: Materialize could not prove that the specified key ("id") contains a unique key of "materialize.public.walk_mv". The following keys are known to be unique for "materialize.public.walk_mv":
+  ("id", "parent_id", "parent_table", "space_id", "alive")
+
+statement ok
+CREATE MATERIALIZED VIEW walk_mv WITH (PRESERVE UPDATE TIMES FOR KEY (id, parent_id, parent_table, space_id, alive)) AS
+WITH MUTUALLY RECURSIVE walk(id uuid, parent_id uuid, parent_table text, space_id uuid, alive boolean) AS (
+    SELECT id, parent_id, parent_table, space_id, alive FROM block WHERE id = '1bbcbb35-d2b2-806a-b7c7-fa8e7e50f22f'
+    UNION
+    SELECT b.id, b.parent_id, b.parent_table, b.space_id, b.alive FROM block b JOIN walk w ON b.id = w.parent_id
+)
+SELECT * FROM walk;
+
+# With UNION ALL the walk has no provable key.
+
+simple
+CREATE MATERIALIZED VIEW walk_all_mv WITH (PRESERVE UPDATE TIMES FOR KEY (id, parent_id, parent_table, space_id, alive)) AS
+WITH MUTUALLY RECURSIVE walk(id uuid, parent_id uuid, parent_table text, space_id uuid, alive boolean) AS (
+    SELECT id, parent_id, parent_table, space_id, alive FROM block WHERE id = '1bbcbb35-d2b2-806a-b7c7-fa8e7e50f22f'
+    UNION ALL
+    SELECT b.id, b.parent_id, b.parent_table, b.space_id, b.alive FROM block b JOIN walk w ON b.id = w.parent_id
+)
+SELECT * FROM walk;
+----
+db error: ERROR: PRESERVE UPDATE TIMES key could not be validated as unique
+DETAIL: Materialize could not prove that the specified key ("id", "parent_id", "parent_table", "space_id", "alive") contains a unique key of "materialize.public.walk_all_mv". There are no known valid unique keys for "materialize.public.walk_all_mv".
+
+# A replacement must declare the same key as its target.
+
+statement error replacement must have the same PRESERVE UPDATE TIMES key as by_k: target has PRESERVE UPDATE TIMES FOR KEY \("k"\), replacement has no PRESERVE UPDATE TIMES
+CREATE REPLACEMENT MATERIALIZED VIEW rp FOR by_k AS SELECT k, min(v) AS v FROM t GROUP BY k
+
+statement error replacement must have the same PRESERVE UPDATE TIMES key as by_k: target has PRESERVE UPDATE TIMES FOR KEY \("k"\), replacement has PRESERVE UPDATE TIMES FOR KEY \("k", "v"\)
+CREATE REPLACEMENT MATERIALIZED VIEW rp FOR by_k WITH (PRESERVE UPDATE TIMES FOR KEY (k, v)) AS SELECT k, min(v) AS v FROM t GROUP BY k
+
+statement error replacement must have the same PRESERVE UPDATE TIMES key as distinct_k_v: target has PRESERVE UPDATE TIMES FOR KEY \("k", "v"\), replacement has PRESERVE UPDATE TIMES FOR KEY \("k"\)
+CREATE REPLACEMENT MATERIALIZED VIEW rp FOR distinct_k_v WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS SELECT k, max(v) AS v FROM t GROUP BY k
+
+statement ok
+CREATE MATERIALIZED VIEW plain AS SELECT DISTINCT k FROM t
+
+statement error replacement must have the same PRESERVE UPDATE TIMES key as plain: target has no PRESERVE UPDATE TIMES, replacement has PRESERVE UPDATE TIMES FOR KEY \("k"\)
+CREATE REPLACEMENT MATERIALIZED VIEW rp FOR plain WITH (PRESERVE UPDATE TIMES FOR KEY (k)) AS SELECT DISTINCT k FROM t
+
+# The replacement's key must also be provable.
+
+simple
+CREATE REPLACEMENT MATERIALIZED VIEW rp FOR distinct_k_v WITH (PRESERVE UPDATE TIMES FOR KEY (v, k)) AS SELECT k, v FROM t
+----
+db error: ERROR: PRESERVE UPDATE TIMES key could not be validated as unique
+DETAIL: Materialize could not prove that the specified key ("v", "k") contains a unique key of "materialize.public.rp". There are no known valid unique keys for "materialize.public.rp".
+
+statement ok
+CREATE REPLACEMENT MATERIALIZED VIEW rp FOR distinct_k_v WITH (PRESERVE UPDATE TIMES FOR KEY (v, k)) AS SELECT k, v FROM t GROUP BY k, v
+
+statement ok
+ALTER MATERIALIZED VIEW distinct_k_v APPLY REPLACEMENT rp
+
+query T
+SELECT create_sql FROM (SHOW CREATE MATERIALIZED VIEW distinct_k_v)
+----
+CREATE MATERIALIZED VIEW materialize.public.distinct_k_v⏎    IN CLUSTER quickstart⏎    WITH (PRESERVE UPDATE TIMES = FOR KEY (v, k), REFRESH = ON COMMIT)⏎    AS SELECT k, v FROM materialize.public.t GROUP BY k, v;
+
+# A source table must name its upstream primary key. Load generator tables
+# have unique keys but no primary key, so they are refused.
+
+statement ok
+CREATE SOURCE auction_house FROM LOAD GENERATOR AUCTION
+
+simple
+CREATE TABLE users FROM SOURCE auction_house (REFERENCE users) WITH (PRESERVE UPDATE TIMES FOR KEY (id))
+----
+db error: ERROR: PRESERVE UPDATE TIMES requires source table "materialize.public.users" to have an upstream primary key
+HINT: A primary key removed with EXCLUDE CONSTRAINTS or EXCLUDE ALL CONSTRAINTS does not count.
+
+statement error invalid PRESERVE UPDATE TIMES: must name a key with FOR KEY \(column, \.\.\.\)
+CREATE TABLE organizations FROM SOURCE auction_house (REFERENCE organizations) WITH (PRESERVE UPDATE TIMES)
+
+# Tables without a source do not accept the option.
+
+simple
+CREATE TABLE plain_t (k int) WITH (PRESERVE UPDATE TIMES FOR KEY (k))
+----
+db error: ERROR: Expected one of PARTITION or RETAIN, found PRESERVE
+
+# Column aliases name only visible columns. The stamp column keeps its place
+# behind them and follows the alias.
+
+statement ok
+INSERT INTO t VALUES (1, 'one')
+
+query ITI colnames
+SELECT a, b, c FROM (by_k CROSS JOIN (VALUES (99)) AS r(z)) AS j(a, b, c)
+----
+a  b  c
+1  one  99
+
+query IT colnames
+SELECT * FROM by_k AS x(a, b)
+----
+a  b
+1  one
+
+statement error x has 2 columns available but 3 columns specified
+SELECT * FROM by_k AS x(a, b, c)
+
+query B
+SELECT mz_updated_at(x) > 0 FROM by_k AS x(a, b)
+----
+true

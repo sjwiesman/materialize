@@ -1954,6 +1954,12 @@ feature_flags!(
         enable_for_item_parsing: true,
     },
     {
+        name: enable_preserve_update_times,
+        desc: "PRESERVE UPDATE TIMES and mz_updated_at",
+        default: false,
+        enable_for_item_parsing: true,
+    },
+    {
         name: enable_multi_worker_storage_persist_sink,
         desc: "multi-worker storage persist sink",
         default: true,

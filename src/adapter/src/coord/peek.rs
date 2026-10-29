@@ -535,6 +535,57 @@ pub fn create_fast_path_plan(
             // can skip creating a dataflow and instead pull all the rows in
             // index and apply the linear operator against them.
             let (mfp, mir) = mz_expr::MapFilterProject::extract_from_expression(mir);
+            let updated_at = mfp.updated_at_ids();
+            if !updated_at.is_empty() {
+                // Only a stamped read of the one object the calls name can
+                // serve them: an index on it, which is built from the shard at
+                // stored times, or else the shard itself. Any other plan falls
+                // to the slow path, which rejects it.
+                let id = match updated_at.into_iter().collect::<Vec<_>>().as_slice() {
+                    [id] => *id,
+                    _ => return Ok(None),
+                };
+                return match &mir {
+                    MirRelationExpr::Get {
+                        id: Id::Global(get_id),
+                        ..
+                    } if *get_id == id => {
+                        let index = dataflow_plan
+                            .index_imports
+                            .iter()
+                            .find(|(_, import)| import.desc.on_id == id);
+                        match index {
+                            Some((index_id, IndexImport { desc, .. })) => {
+                                Ok(Some(FastPathPlan::PeekExisting(
+                                    id,
+                                    *index_id,
+                                    None,
+                                    permute_oneshot_mfp_around_index(mfp, &desc.key)?,
+                                )))
+                            }
+                            // Neither the filters nor the limit gate the
+                            // stamped persist read, since it is the only way
+                            // to serve the query without an index.
+                            None => Ok(Some(FastPathPlan::PeekPersist(
+                                id,
+                                None,
+                                mfp_to_safe_plan(mfp)?,
+                            ))),
+                        }
+                    }
+                    MirRelationExpr::Join {
+                        implementation:
+                            mz_expr::JoinImplementation::IndexedFilter(coll_id, idx_id, key, vals),
+                        ..
+                    } if *coll_id == id => Ok(Some(FastPathPlan::PeekExisting(
+                        id,
+                        *idx_id,
+                        Some(vals.clone()),
+                        permute_oneshot_mfp_around_index(mfp, key)?,
+                    ))),
+                    _ => Ok(None),
+                };
+            }
             match mir {
                 MirRelationExpr::Get {
                     id: Id::Global(get_id),
@@ -800,6 +851,7 @@ impl crate::coord::Coordinator {
                     literal_constraints,
                     map_filter_project,
                 )) => {
+                    let stamped = !map_filter_project.updated_at_ids().is_empty();
                     let read_hold = self
                         .controller
                         .compute
@@ -811,7 +863,10 @@ impl crate::coord::Coordinator {
                         (literal_constraints, timestamp, map_filter_project),
                         None,
                         true,
-                        PeekTarget::Index { id: idx_id },
+                        PeekTarget::Index {
+                            id: idx_id,
+                            stamped,
+                        },
                         StatementExecutionStrategy::FastPath,
                         read_hold,
                     )
@@ -821,6 +876,7 @@ impl crate::coord::Coordinator {
                     literal_constraint,
                     map_filter_project,
                 )) => {
+                    let stamped = !map_filter_project.updated_at_ids().is_empty();
                     let peek_command = (
                         literal_constraint.map(|r| vec![r]),
                         timestamp,
@@ -845,6 +901,7 @@ impl crate::coord::Coordinator {
                         PeekTarget::Persist {
                             id: coll_id,
                             metadata,
+                            stamped,
                         },
                         StatementExecutionStrategy::PersistFastPath,
                         read_hold,
@@ -917,7 +974,10 @@ impl crate::coord::Coordinator {
                         (None, timestamp, map_filter_project),
                         Some(index_id),
                         false,
-                        PeekTarget::Index { id: index_id },
+                        PeekTarget::Index {
+                            id: index_id,
+                            stamped: false,
+                        },
                         StatementExecutionStrategy::Standard,
                         read_hold,
                     )

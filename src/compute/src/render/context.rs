@@ -58,6 +58,7 @@ use crate::render::{LinearJoinSpec, MaybeBucketByTime, RenderTimestamp};
 use crate::typedefs::{
     ErrAgent, ErrBatcher, ErrBuilder, ErrEnter, ErrSpine, RowRowAgent, RowRowEnter, RowRowSpine,
 };
+use mz_row_spine::preserving::{Advance, BuildMode, Pair};
 use mz_row_spine::{RowRowBuilder, RowRowColPagedBuilder};
 
 /// Dataflow-local collections and arrangements.
@@ -452,6 +453,14 @@ pub struct CollectionBundle<'scope, T: RenderTimestamp> {
         VecCollection<'scope, T, DataflowErrorSer, Diff>,
     )>,
     pub arranged: BTreeMap<Vec<LirScalarExpr>, ArrangementFlavor<'scope, T>>,
+    /// Whether `collection` carries updates at their stored times, below the
+    /// dataflow's `as_of`, as a time-preserving import does. Arrangements
+    /// formed from it then merge with pairing (see
+    /// `mz_row_spine::preserving`), which keeps the times. Any other operator
+    /// reading the collection would see times its `as_of` does not cover, so
+    /// only the importer sets this, and bundles derived by other operators
+    /// leave it unset.
+    pub preserve_update_times: bool,
 }
 
 impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
@@ -463,6 +472,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
         Self {
             collection: Some((oks, errs)),
             arranged: BTreeMap::default(),
+            preserve_update_times: false,
         }
     }
 
@@ -476,6 +486,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
         Self {
             collection: None,
             arranged,
+            preserve_update_times: false,
         }
     }
 
@@ -562,6 +573,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                 .iter()
                 .map(|(key, bundle)| (key.clone(), bundle.enter_region(region)))
                 .collect(),
+            preserve_update_times: self.preserve_update_times,
         }
     }
 }
@@ -581,6 +593,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                 .iter()
                 .map(|(key, bundle)| (key.clone(), bundle.leave_region(outer)))
                 .collect(),
+            preserve_update_times: self.preserve_update_times,
         }
     }
 }
@@ -1122,8 +1135,13 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                     oks
                 };
                 let batcher = ArrangementBatcher::from_config(config_set);
+                let arrange = if self.preserve_update_times {
+                    Self::arrange_collection::<Pair>
+                } else {
+                    Self::arrange_collection::<Advance>
+                };
                 let (oks, errs_keyed, passthrough) =
-                    Self::arrange_collection(&name, oks, key.clone(), thinning.clone(), batcher);
+                    arrange(&name, oks, key.clone(), thinning.clone(), batcher);
                 let errs_concat: KeyCollection<_, _, _> = errs.clone().concat(errs_keyed).into();
                 self.collection = Some((passthrough, errs));
                 let errs =
@@ -1152,7 +1170,7 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
     /// In addition to the ok and err streams, we produce a passthrough stream that forwards
     /// the input as-is, which allows downstream consumers to reuse the collection without
     /// teeing the stream.
-    fn arrange_collection(
+    fn arrange_collection<M: BuildMode<Diff> + 'static>(
         name: &String,
         oks: ColCollection<'scope, T>,
         key: Vec<LirScalarExpr>,
@@ -1233,21 +1251,27 @@ impl<'scope, T: RenderTimestamp> CollectionBundle<'scope, T> {
                 _,
                 ChunkChunker<(Row, Row), T, Diff, ComputeSpill>,
                 AccountedChunkBatcher<(Row, Row), T, Diff, ComputeSpill>,
-                UnchunkBuilder<RowRowColPagedBuilder<T, Diff>, (Row, Row), T, Diff, ComputeSpill>,
+                UnchunkBuilder<
+                    RowRowColPagedBuilder<T, Diff, M>,
+                    (Row, Row),
+                    T,
+                    Diff,
+                    ComputeSpill,
+                >,
                 RowRowSpine<_, _>,
             >(exchange, name),
             ArrangementBatcher::Columnar => ok_stream.mz_arrange_core::<
                 _,
                 batcher::ColumnChunker<_>,
                 Col2ValColBatcher<_, _, _, _>,
-                RowRowColPagedBuilder<_, _>,
+                RowRowColPagedBuilder<_, _, M>,
                 RowRowSpine<_, _>,
             >(exchange, name),
             ArrangementBatcher::Columnation => ok_stream.mz_arrange_core::<
                 _,
                 batcher::Chunker<_>,
                 Col2ValBatcher<_, _, _, _>,
-                RowRowBuilder<_, _>,
+                RowRowBuilder<_, _, M>,
                 RowRowSpine<_, _>,
             >(exchange, name),
         };
@@ -1487,7 +1511,7 @@ mod tests {
             worker.dataflow::<Timestamp, _, _>(|scope| {
                 let (mut input, collection) = scope.new_collection();
                 let (arranged, errs, _passthrough) =
-                    CollectionBundle::<Timestamp>::arrange_collection(
+                    CollectionBundle::<Timestamp>::arrange_collection::<Advance>(
                         &"col".to_string(),
                         vec_to_columnar(collection),
                         key,
@@ -1575,7 +1599,7 @@ mod tests {
             worker.dataflow::<Timestamp, _, _>(|scope| {
                 let (mut input, collection) = scope.new_collection();
                 let (_arranged, _errs, passthrough) =
-                    CollectionBundle::<Timestamp>::arrange_collection(
+                    CollectionBundle::<Timestamp>::arrange_collection::<Advance>(
                         &"col".to_string(),
                         vec_to_columnar(collection),
                         key,
@@ -1641,7 +1665,7 @@ mod tests {
                 let (edge, _errs) = bundle.as_collection_core(mfp, None, Antichain::new());
                 let produced = columnar_to_vec(edge.clone()).inner.capture();
                 let (_arranged, _arrange_errs, _passthrough) =
-                    CollectionBundle::<Timestamp>::arrange_collection(
+                    CollectionBundle::<Timestamp>::arrange_collection::<Advance>(
                         &"arrange".to_string(),
                         edge,
                         vec![LirScalarExpr::column(0)],
@@ -1760,7 +1784,7 @@ mod tests {
             worker.dataflow::<Timestamp, _, _>(|scope| {
                 let (mut input, collection) = scope.new_collection();
                 let (arranged, arr_errs, _passthrough) =
-                    CollectionBundle::<Timestamp>::arrange_collection(
+                    CollectionBundle::<Timestamp>::arrange_collection::<Advance>(
                         &"agg".to_string(),
                         vec_to_columnar(collection),
                         key.clone(),

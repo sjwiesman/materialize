@@ -441,6 +441,7 @@ impl<T: Timestamp + Codec64> RustType<ProtoStateDiff> for StateDiff<T> {
             critical_readers,
             writers,
             schemas,
+            preserve_update_times,
             since,
             legacy_batches,
             hollow_batches,
@@ -466,6 +467,11 @@ impl<T: Timestamp + Codec64> RustType<ProtoStateDiff> for StateDiff<T> {
         );
         field_diffs_into_proto(ProtoStateField::Writers, writers, &mut writer);
         field_diffs_into_proto(ProtoStateField::Schemas, schemas, &mut writer);
+        field_diffs_into_proto(
+            ProtoStateField::PreserveUpdateTimes,
+            preserve_update_times,
+            &mut writer,
+        );
         field_diffs_into_proto(ProtoStateField::Since, since, &mut writer);
         field_diffs_into_proto(ProtoStateField::LegacyBatches, legacy_batches, &mut writer);
         field_diffs_into_proto(ProtoStateField::HollowBatches, hollow_batches, &mut writer);
@@ -527,6 +533,14 @@ impl<T: Timestamp + Codec64> RustType<ProtoStateDiff> for StateDiff<T> {
                         |()| Ok(()),
                         |v| v.into_rust(),
                     )?,
+                    ProtoStateField::PreserveUpdateTimes => {
+                        field_diff_into_rust::<(), bool, _, _, _, _>(
+                            diff,
+                            &mut state_diff.preserve_update_times,
+                            |()| Ok(()),
+                            |v| v.into_rust(),
+                        )?
+                    }
                     ProtoStateField::ActiveGc => {
                         field_diff_into_rust::<(), ProtoActiveGc, _, _, _, _>(
                             diff,
@@ -973,6 +987,7 @@ impl<T: Timestamp + Lattice + Codec64> RustType<ProtoRollup> for Rollup<T> {
             last_gc_req: self.state.state.collections.last_gc_req.into_proto(),
             active_rollup: self.state.state.collections.active_rollup.into_proto(),
             active_gc: self.state.state.collections.active_gc.into_proto(),
+            preserve_update_times: self.state.state.collections.preserve_update_times,
             rollups: self
                 .state
                 .state
@@ -1078,6 +1093,7 @@ impl<T: Timestamp + Lattice + Codec64> RustType<ProtoRollup> for Rollup<T> {
             critical_readers,
             writers,
             schemas,
+            preserve_update_times: x.preserve_update_times,
             trace: x.trace.into_rust_if_some("trace")?,
         };
         let state = State {

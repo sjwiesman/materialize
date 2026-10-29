@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use differential_dataflow::trace::cursor::BatchCursor;
 use differential_dataflow::trace::implementations::BatchContainer;
 use differential_dataflow::trace::{Cursor, Navigable, TraceReader};
-use mz_compute_client::protocol::command::Peek;
+use mz_compute_client::protocol::command::{Peek, PeekTarget};
 use mz_compute_client::protocol::response::{PeekError, PeekResponse};
 use mz_expr::row::RowCollection;
 use mz_expr::{ColumnOrder, RowComparator};
@@ -202,6 +202,7 @@ where
             Key<'a>: ExtendDatums + Eq,
             KeyContainer: BatchContainer<Owned = Row>,
             Val<'a>: ExtendDatums,
+            Time = Timestamp,
             TimeGat<'a>: PartialOrder<Timestamp>,
             DiffGat<'a> = &'a Diff,
         >,
@@ -228,6 +229,7 @@ where
             peek.target.id(),
             peek.map_filter_project.clone(),
             peek.timestamp,
+            matches!(peek.target, PeekTarget::Index { stamped: true, .. }),
             peek.literal_constraints.clone().as_deref_mut(),
             oks_handle,
             None,

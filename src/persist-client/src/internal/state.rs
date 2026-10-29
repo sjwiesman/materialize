@@ -1366,6 +1366,15 @@ pub struct StateCollections<T> {
     pub(crate) writers: BTreeMap<WriterId, WriterState<T>>,
     pub(crate) schemas: BTreeMap<SchemaId, EncodedSchemas>,
 
+    /// Whether the shard is in time-preserving compaction mode. See
+    /// [crate::PersistClient::enable_preserve_update_times].
+    ///
+    /// - Invariant: Once true, never becomes false. Readers that serve stamps
+    ///   rely on every compaction since the shard's first batch having
+    ///   preserved times, and a pair dropped under the unique-rows assumption
+    ///   is only correct if the assumption held for every merge of the shard.
+    pub(crate) preserve_update_times: bool,
+
     // - Invariant: `trace.since == meet(all reader.since)`
     // - Invariant: `trace.since` doesn't regress across state versions.
     // - Invariant: `trace.upper` doesn't regress across state versions.
@@ -1596,6 +1605,22 @@ where
             }
         };
         Continue(state)
+    }
+
+    /// Puts the shard in time-preserving compaction mode, returning whether
+    /// the shard is in it afterwards.
+    ///
+    /// Only allowed while the shard has never been written, so that every
+    /// update the shard holds was compacted in this mode.
+    pub fn enable_preserve_update_times(&mut self) -> ControlFlow<NoOpStateTransition<bool>, bool> {
+        if self.preserve_update_times {
+            return Break(NoOpStateTransition(true));
+        }
+        if self.trace.upper() != &Antichain::from_elem(T::minimum()) {
+            return Break(NoOpStateTransition(false));
+        }
+        self.preserve_update_times = true;
+        Continue(true)
     }
 
     pub fn register_schema<K: Codec, V: Codec>(
@@ -2403,6 +2428,7 @@ where
                 critical_readers: BTreeMap::new(),
                 writers: BTreeMap::new(),
                 schemas: BTreeMap::new(),
+                preserve_update_times: false,
                 trace: Trace::default(),
             },
         };
@@ -2821,10 +2847,11 @@ impl<T: Serialize + Timestamp + Lattice> Serialize for State<T> {
                     critical_readers,
                     writers,
                     schemas,
+                    preserve_update_times,
                     trace,
                 },
         } = self;
-        let mut s = s.serialize_struct("State", 13)?;
+        let mut s = s.serialize_struct("State", 14)?;
         let () = s.serialize_field("applier_version", &applier_version.to_string())?;
         let () = s.serialize_field("shard_id", shard_id)?;
         let () = s.serialize_field("seqno", seqno)?;
@@ -2838,6 +2865,7 @@ impl<T: Serialize + Timestamp + Lattice> Serialize for State<T> {
         let () = s.serialize_field("critical_readers", critical_readers)?;
         let () = s.serialize_field("writers", writers)?;
         let () = s.serialize_field("schemas", schemas)?;
+        let () = s.serialize_field("preserve_update_times", preserve_update_times)?;
         let () = s.serialize_field("since", &trace.since().elements())?;
         let () = s.serialize_field("upper", &trace.upper().elements())?;
         let trace = trace.flatten();
@@ -3207,6 +3235,7 @@ pub(crate) mod tests {
                     critical_readers,
                     writers,
                     schemas,
+                    preserve_update_times: false,
                     trace,
                 },
             },
