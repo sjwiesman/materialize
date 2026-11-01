@@ -18,6 +18,7 @@
 //! | Transformer | When used | Transform example |
 //! |-------------|-----------|-------------------|
 //! | `FullyQualifyingTransformer` | Typed phase (default normalization) | `sales` → `materialize.public.sales` |
+//! | `SelfReferenceTransformer` | A versioned object's `GRANT` and `COMMENT ON` | `materialize.public.sales` → `materialize.public."sales@2"` |
 //! | `FlatteningTransformer` | Type-checking (single-schema container) | `materialize.public.sales` → `"materialize.public.sales"` |
 //! | `StagingTransformer` | Blue/green staging | `materialize.public.sales` → `materialize.public_v1.sales` |
 //! | `ExplainTransformer` | Explain command (dedicated schema) | `materialize.public.sales` → `materialize._mz_explain."materialize.public.sales"` |
@@ -40,6 +41,7 @@
 
 use crate::project::ir::compiled::FullyQualifiedName;
 use crate::project::ir::object_id::ObjectId;
+use crate::project::ir::version::EnclosingObject;
 use mz_repr::namespaces::is_system_schema;
 use mz_sql_parser::ast::*;
 use std::collections::BTreeMap;
@@ -78,10 +80,51 @@ pub struct FullyQualifyingTransformer<'a> {
     /// Optional mapping from original database names to suffixed names.
     /// When present, 3-part names with a database in this map get rewritten.
     pub(crate) database_name_map: Option<&'a BTreeMap<String, String>>,
+    /// Declared object versions. When present, a bare reference to a
+    /// versioned object resolves to its newest version.
+    pub(crate) version_map: Option<&'a crate::project::ir::version::VersionMap>,
 }
 
-impl<'a> NameTransformer for FullyQualifyingTransformer<'a> {
-    fn transform_name(&self, name: &UnresolvedItemName) -> UnresolvedItemName {
+impl<'a> FullyQualifyingTransformer<'a> {
+    /// Rewrite a fully qualified name to the version the reference names, when its
+    /// object is versioned. A name `resolve_reference` declines passes through.
+    fn resolve_version(&self, name: UnresolvedItemName) -> UnresolvedItemName {
+        let Some(map) = self.version_map else {
+            return name;
+        };
+
+        let [database, schema, object] = name.0.as_slice() else {
+            return name;
+        };
+
+        let enclosing = self.fqn.version().map(|version| {
+            EnclosingObject::new(
+                self.fqn.database().to_string(),
+                self.fqn.schema().to_string(),
+                self.fqn.base_name().to_string(),
+                version,
+            )
+        });
+
+        let Some(resolved) = map.resolve_reference(
+            database.as_str(),
+            schema.as_str(),
+            object.as_str(),
+            enclosing.as_ref(),
+        ) else {
+            return name;
+        };
+
+        UnresolvedItemName(vec![
+            database.clone(),
+            schema.clone(),
+            Ident::new_unchecked(resolved),
+        ])
+    }
+
+    /// Fully qualify a name to `database.schema.object`, without resolving
+    /// versions.
+    fn qualify(&self, name: &UnresolvedItemName) -> UnresolvedItemName {
         match name.0.len() {
             1 => {
                 // Unqualified: object only
@@ -123,6 +166,29 @@ impl<'a> NameTransformer for FullyQualifyingTransformer<'a> {
                 name.clone()
             }
         }
+    }
+}
+
+impl<'a> NameTransformer for FullyQualifyingTransformer<'a> {
+    fn transform_name(&self, name: &UnresolvedItemName) -> UnresolvedItemName {
+        self.resolve_version(self.qualify(name))
+    }
+
+    fn database_name(&self) -> &str {
+        self.fqn.database()
+    }
+}
+
+/// Replaces every name with one object's own deployed name, for the `GRANT` and
+/// `COMMENT ON` statements accompanying a versioned object's `CREATE`. Reference
+/// validation has already established that they name no other object.
+pub struct SelfReferenceTransformer<'a> {
+    pub(crate) fqn: &'a FullyQualifiedName,
+}
+
+impl<'a> NameTransformer for SelfReferenceTransformer<'a> {
+    fn transform_name(&self, _name: &UnresolvedItemName) -> UnresolvedItemName {
+        self.fqn.to_item_name()
     }
 
     fn database_name(&self) -> &str {

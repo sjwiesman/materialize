@@ -151,7 +151,7 @@ fn typecheck_project(settings: &Settings, planned_project: &Project) -> Result<(
     let directory = &settings.directory;
     use crate::project::compiler::typecheck;
 
-    let external_types = crate::types::load_types_lock(directory).unwrap_or_default();
+    let external_types = crate::types::load_types_lock(directory)?;
 
     let (_, stats) = typecheck::run(
         directory,

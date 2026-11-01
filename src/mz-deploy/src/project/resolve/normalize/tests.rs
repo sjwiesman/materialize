@@ -2509,3 +2509,185 @@ fn test_system_schema_2part_not_qualified() {
         panic!("Expected CreateView statement");
     }
 }
+
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+#[mz_ore::test]
+fn test_bare_reference_resolves_to_newest_version() {
+    let fqn = test_fqn();
+    let mut version_map = crate::project::ir::version::VersionMap::default();
+    version_map.insert("materialize", "public", "orders", 1);
+    version_map.insert("materialize", "public", "orders", 2);
+
+    let mut visitor = NormalizingVisitor::fully_qualifying_with_versions(&fqn, Some(&version_map));
+
+    let sql = r#"
+        CREATE VIEW test_view AS
+        SELECT * FROM orders
+    "#;
+
+    let statements = parse_statements(vec![sql]).unwrap();
+    if let Statement::CreateView(view) = &statements[0] {
+        let mut query = view.definition.query.clone();
+        visitor.normalize_query(&mut query);
+
+        let normalized_sql = query.to_ast_string(FormatMode::Simple);
+
+        assert!(
+            normalized_sql.contains("materialize.public.\"orders@2\""),
+            "expected the newest version, got: {}",
+            normalized_sql
+        );
+    } else {
+        panic!("Expected CreateView statement");
+    }
+}
+
+/// Without the enclosing version, a versioned object's own base name would
+/// resolve to whichever version happens to be newest.
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+#[mz_ore::test]
+fn test_self_reference_inside_a_version_resolves_to_that_version() {
+    let fqn = FullyQualifiedName::with_versioned_name(
+        std::path::Path::new("models/materialize/public/orders@1.sql"),
+        "orders",
+        1,
+        "materialize",
+        "public",
+    )
+    .expect("valid versioned FQN");
+    let mut version_map = crate::project::ir::version::VersionMap::default();
+    version_map.insert("materialize", "public", "orders", 1);
+    version_map.insert("materialize", "public", "orders", 2);
+    version_map.insert("materialize", "public", "shipments", 1);
+    version_map.insert("materialize", "public", "shipments", 2);
+
+    let mut visitor = NormalizingVisitor::fully_qualifying_with_versions(&fqn, Some(&version_map));
+
+    let sql = r#"
+        CREATE VIEW test_view AS
+        SELECT * FROM orders, shipments
+    "#;
+
+    let statements = parse_statements(vec![sql]).unwrap();
+    if let Statement::CreateView(view) = &statements[0] {
+        let mut query = view.definition.query.clone();
+        visitor.normalize_query(&mut query);
+
+        let normalized_sql = query.to_ast_string(FormatMode::Simple);
+
+        assert!(
+            normalized_sql.contains("materialize.public.\"orders@1\""),
+            "expected the enclosing version, got: {}",
+            normalized_sql
+        );
+        assert!(
+            normalized_sql.contains("materialize.public.\"shipments@2\""),
+            "expected the newest version of another object, got: {}",
+            normalized_sql
+        );
+    } else {
+        panic!("Expected CreateView statement");
+    }
+}
+
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+#[mz_ore::test]
+fn test_explicit_version_reference_is_left_alone() {
+    let fqn = test_fqn();
+    let mut version_map = crate::project::ir::version::VersionMap::default();
+    version_map.insert("materialize", "public", "orders", 1);
+    version_map.insert("materialize", "public", "orders", 2);
+    // Giving the pinned spelling its own entry is what makes the skip
+    // observable: a resolver that looked the name up would find this entry and
+    // rewrite the reference.
+    version_map.insert("materialize", "public", "orders@1", 5);
+
+    let mut visitor = NormalizingVisitor::fully_qualifying_with_versions(&fqn, Some(&version_map));
+
+    let sql = r#"
+        CREATE VIEW test_view AS
+        SELECT * FROM "orders@1"
+    "#;
+
+    let statements = parse_statements(vec![sql]).unwrap();
+    if let Statement::CreateView(view) = &statements[0] {
+        let mut query = view.definition.query.clone();
+        visitor.normalize_query(&mut query);
+
+        let normalized_sql = query.to_ast_string(FormatMode::Simple);
+
+        assert!(
+            normalized_sql.contains("materialize.public.\"orders@1\""),
+            "a pinned reference must not be repointed, got: {}",
+            normalized_sql
+        );
+        assert!(
+            !normalized_sql.contains("orders@1@5"),
+            "a pinned reference must not be resolved through the map, got: {}",
+            normalized_sql
+        );
+    } else {
+        panic!("Expected CreateView statement");
+    }
+}
+
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+#[mz_ore::test]
+fn test_unversioned_reference_is_left_alone() {
+    let fqn = test_fqn();
+    let version_map = crate::project::ir::version::VersionMap::default();
+
+    let mut visitor = NormalizingVisitor::fully_qualifying_with_versions(&fqn, Some(&version_map));
+
+    let sql = r#"
+        CREATE VIEW test_view AS
+        SELECT * FROM orders
+    "#;
+
+    let statements = parse_statements(vec![sql]).unwrap();
+    if let Statement::CreateView(view) = &statements[0] {
+        let mut query = view.definition.query.clone();
+        visitor.normalize_query(&mut query);
+
+        let normalized_sql = query.to_ast_string(FormatMode::Simple);
+
+        assert!(
+            normalized_sql.contains("materialize.public.orders"),
+            "an unversioned name must qualify without a suffix, got: {}",
+            normalized_sql
+        );
+    } else {
+        panic!("Expected CreateView statement");
+    }
+}
+
+#[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `rust_psm_stack_pointer` on OS `linux`
+#[mz_ore::test]
+fn test_cross_schema_bare_reference_resolves() {
+    let fqn = test_fqn();
+    let mut version_map = crate::project::ir::version::VersionMap::default();
+    version_map.insert("materialize", "raw", "orders", 5);
+
+    let mut visitor = NormalizingVisitor::fully_qualifying_with_versions(&fqn, Some(&version_map));
+
+    let sql = r#"
+        CREATE VIEW test_view AS
+        SELECT * FROM raw.orders
+    "#;
+
+    let statements = parse_statements(vec![sql]).unwrap();
+    if let Statement::CreateView(view) = &statements[0] {
+        let mut query = view.definition.query.clone();
+        visitor.normalize_query(&mut query);
+
+        let normalized_sql = query.to_ast_string(FormatMode::Simple);
+
+        assert!(
+            normalized_sql.contains("materialize.raw.\"orders@5\""),
+            "expected cross-schema resolution, got: {}",
+            normalized_sql
+        );
+    } else {
+        panic!("Expected CreateView statement");
+    }
+}

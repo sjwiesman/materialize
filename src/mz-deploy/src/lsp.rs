@@ -103,6 +103,8 @@ mod code_lens;
 mod completion;
 pub mod diagnostics;
 mod document_symbol;
+#[cfg(test)]
+mod fixtures;
 pub mod functions;
 pub mod goto_definition;
 pub mod hover;

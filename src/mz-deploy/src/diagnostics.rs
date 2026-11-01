@@ -32,9 +32,11 @@ use mz_repr::ColumnName;
 use mz_sql::catalog::CatalogError;
 use mz_sql::names::PartialItemName;
 use mz_sql::plan::PlanError;
+use mz_sql_parser::ast::Ident;
 
 use crate::project::compiler::typecheck::ObjectTypeCheckErrorKind;
 use crate::project::error::ValidationErrorKind;
+use crate::project::ir::version;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Severity {
@@ -262,6 +264,11 @@ fn format_plan(
             }],
         );
     }
+    if let PlanError::Catalog(CatalogError::UnknownItem(name)) = e {
+        if let Some(footer) = versioned_unknown_item_footer(name) {
+            return (e.to_string(), vec![footer], Vec::new());
+        }
+    }
     fallback_plan(e)
 }
 
@@ -290,6 +297,10 @@ fn format_catalog(
             };
             (message, Vec::new(), vec![suggestion])
         }
+        CatalogError::UnknownItem(name) => match versioned_unknown_item_footer(name) {
+            Some(footer) => (e.to_string(), vec![footer], Vec::new()),
+            None => fallback_catalog(e),
+        },
         other => fallback_catalog(other),
     }
 }
@@ -297,6 +308,35 @@ fn format_catalog(
 fn fallback_catalog(e: &CatalogError) -> (String, Vec<String>, Vec<Suggestion>) {
     let footers = e.hint().into_iter().collect();
     (e.to_string(), footers, Vec::new())
+}
+
+/// The trailing item component of a possibly-qualified catalog name, which is not
+/// always valid SQL and so falls back to splitting on the final `.`.
+fn item_component(name: &str) -> String {
+    match mz_sql_parser::parser::parse_item_name(name) {
+        Ok(parsed) => parsed
+            .0
+            .into_iter()
+            .next_back()
+            .map(Ident::into_string)
+            .unwrap_or_else(|| name.to_string()),
+        Err(_) => last_component(name).to_string(),
+    }
+}
+
+/// A footer for an unknown item whose name carries an `@N` version suffix.
+/// `None` when `name`'s item component is not a versioned name.
+fn versioned_unknown_item_footer(name: &str) -> Option<String> {
+    let item = item_component(name);
+    let (base, version) = version::parse_physical_name(&item);
+    let version = version?;
+    Some(format!(
+        "'@{version}' in '{base}@{version}' is a version suffix mz-deploy derived from a \
+         filename, not something written in your SQL. Nothing in the database or types.lock \
+         provides that name yet. If '{base}@{version}' was never deployed, create it. If \
+         '{base}' is already deployed under a different name, rename it to '{base}@{version}' \
+         in the database and re-run 'mz-deploy lock'."
+    ))
 }
 
 /// Format `table.column` as a dotted PostgreSQL reference (relation +
@@ -479,6 +519,44 @@ mod tests {
         let e = CatalogError::UnknownItem("schema.bogus_table".to_string());
         let r = locate_catalog(&e, source).unwrap();
         assert_eq!(&source[r], "bogus_table");
+    }
+
+    #[mz_ore::test]
+    fn format_catalog_versioned_unknown_item_names_base_and_version() {
+        let e = CatalogError::UnknownItem("raw.catalog_extractor.orders@1".to_string());
+        let (message, footers, suggestions) = format_catalog(&e, "", &(0..0));
+        assert_eq!(message, e.to_string());
+        assert!(suggestions.is_empty());
+        assert_eq!(footers.len(), 1);
+        assert!(footers[0].contains("orders@1"));
+        assert!(footers[0].contains("mz-deploy lock"));
+    }
+
+    #[mz_ore::test]
+    fn format_catalog_versioned_unknown_item_handles_a_quoted_component() {
+        let e = CatalogError::UnknownItem("app.ingest.\"orders@1\"".to_string());
+        let (_, footers, _) = format_catalog(&e, "", &(0..0));
+        assert_eq!(footers.len(), 1);
+        assert!(footers[0].contains("orders@1"));
+        assert!(footers[0].contains("mz-deploy lock"));
+    }
+
+    #[mz_ore::test]
+    fn format_catalog_unversioned_unknown_item_is_unchanged() {
+        let e = CatalogError::UnknownItem("raw.orders".to_string());
+        let (message, footers, suggestions) = format_catalog(&e, "", &(0..0));
+        assert_eq!(message, e.to_string());
+        assert!(footers.is_empty());
+        assert!(suggestions.is_empty());
+    }
+
+    #[mz_ore::test]
+    fn format_catalog_at_sign_without_valid_version_is_unchanged() {
+        // Leading zero: not the canonical spelling of any integer, so not a
+        // version suffix.
+        let e = CatalogError::UnknownItem("raw.orders@01".to_string());
+        let (_, footers, _) = format_catalog(&e, "", &(0..0));
+        assert!(footers.is_empty());
     }
 
     #[mz_ore::test]

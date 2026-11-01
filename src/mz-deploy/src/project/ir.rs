@@ -19,3 +19,4 @@ pub(crate) mod graph;
 pub(crate) mod infrastructure;
 pub(crate) mod object_id;
 pub(crate) mod unit_test;
+pub(crate) mod version;

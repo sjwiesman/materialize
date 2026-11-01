@@ -61,7 +61,7 @@ where
 
 /// A parsed SQL statement paired with its byte offset within the source file.
 #[derive(Debug, Clone)]
-pub struct LocatedStatement {
+pub(crate) struct LocatedStatement {
     /// The parsed AST node.
     pub ast: Statement<Raw>,
     /// Byte offset of the statement's start within the (resolved) SQL text.

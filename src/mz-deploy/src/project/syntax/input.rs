@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 /// A single file variant of a database object (default or profile-specific).
 #[derive(Debug, Clone)]
-pub struct ObjectVariant {
+pub(crate) struct ObjectVariant {
     /// The full path to the file
     pub path: PathBuf,
     /// The profile name, or `None` for the default variant
@@ -56,7 +56,7 @@ pub struct ObjectVariant {
 /// All statements are parsed into `statements` field without validation of their
 /// relationships or correctness.
 #[derive(Debug, Clone)]
-pub struct DatabaseObject {
+pub(crate) struct DatabaseObject {
     /// The name of the object (without extension or profile suffix)
     pub name: String,
     /// The directory-derived database name (no profile suffix applied).
@@ -66,6 +66,7 @@ pub struct DatabaseObject {
     pub database: String,
     /// The schema name (directory name)
     pub schema: String,
+    pub version: Option<u32>,
     /// All profile variants for this object (at least one)
     pub variants: Vec<ObjectVariant>,
 }

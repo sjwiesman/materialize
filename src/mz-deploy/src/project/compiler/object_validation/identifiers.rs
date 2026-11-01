@@ -168,11 +168,12 @@ pub(super) fn validate_fqn_identifiers(
         ));
     }
 
-    // Validate object name
-    if let Err(reason) = validate_identifier_format(fqn.object(), IdentifierKind::Object) {
+    // The deployed name may carry an `@version` suffix, which no bare identifier
+    // may contain, so only the declared name is format-checked.
+    if let Err(reason) = validate_identifier_format(fqn.base_name(), IdentifierKind::Object) {
         errors.push(ValidationError::with_file_and_offset(
             ValidationErrorKind::InvalidIdentifier {
-                name: fqn.object().to_string(),
+                name: fqn.base_name().to_string(),
                 reason,
             },
             fqn.path.clone(),
@@ -243,12 +244,13 @@ pub(super) fn validate_ident(
 ) {
     let ident = stmt.ident();
 
-    // The object name in the statement must match the file name
-    if ident.object.as_str() != fqn.object() {
+    // The object name in the statement must match the file name, minus any
+    // version suffix, which comes from the filename and is never written in SQL.
+    if ident.object.as_str() != fqn.base_name() {
         errors.push(ValidationError::with_file_and_offset(
             ValidationErrorKind::ObjectNameMismatch {
                 declared: ident.object.to_string(),
-                expected: fqn.object().to_string(),
+                expected: fqn.base_name().to_string(),
             },
             fqn.path.clone(),
             main_offset,
