@@ -1872,7 +1872,26 @@ pub struct CreateTableFromSourceStatement<T: AstInfo> {
     pub include_metadata: Vec<SourceIncludeMetadata>,
     pub format: Option<FormatSpecifier<T>>,
     pub envelope: Option<SourceEnvelope>,
+    pub ingestion_time: Option<IngestionTime>,
 }
+
+/// `WITH INGESTION TIME [AS <alias>]`: append a column holding the
+/// Materialize timestamp at which each row version was ingested.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IngestionTime {
+    pub alias: Option<Ident>,
+}
+
+impl AstDisplay for IngestionTime {
+    fn fmt<W: fmt::Write>(&self, f: &mut AstFormatter<W>) {
+        f.write_str("WITH INGESTION TIME");
+        if let Some(alias) = &self.alias {
+            f.write_str(" AS ");
+            f.write_node(alias);
+        }
+    }
+}
+impl_display!(IngestionTime);
 
 impl<T: AstInfo> AstDisplay for CreateTableFromSourceStatement<T> {
     fn fmt<W: fmt::Write>(&self, f: &mut AstFormatter<W>) {
@@ -1887,6 +1906,7 @@ impl<T: AstInfo> AstDisplay for CreateTableFromSourceStatement<T> {
             include_metadata,
             format,
             envelope,
+            ingestion_time,
         } = self;
         f.write_str("CREATE TABLE ");
         if *if_not_exists {
@@ -1932,6 +1952,10 @@ impl<T: AstInfo> AstDisplay for CreateTableFromSourceStatement<T> {
         if let Some(envelope) = &envelope {
             f.write_str(" ENVELOPE ");
             f.write_node(envelope);
+        }
+        if let Some(ingestion_time) = ingestion_time {
+            f.write_str(" ");
+            f.write_node(ingestion_time);
         }
         if !with_options.is_empty() {
             f.write_str(" WITH (");

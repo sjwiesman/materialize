@@ -557,6 +557,7 @@ fn rewrite_sources_to_tables(
                             include_metadata,
                             format,
                             envelope,
+                            ingestion_time: None,
                             external_reference: Some(external_reference),
                             with_options: table_with_options,
                         });
@@ -638,6 +639,7 @@ fn rewrite_sources_to_tables(
                             include_metadata,
                             format,
                             envelope,
+                            ingestion_time: None,
                             external_reference: Some(external_reference.into()),
                             with_options: table_with_options,
                         });
@@ -767,6 +769,7 @@ fn rewrite_sources_to_tables(
                     envelope: None,
                     include_metadata: vec![],
                     format: None,
+                    ingestion_time: None,
                 };
 
                 info!(

@@ -297,6 +297,10 @@ impl Pretty {
             docs.push(nest_title("ENVELOPE", self.doc_display_pass(envelope)));
         }
 
+        if let Some(ingestion_time) = &v.ingestion_time {
+            docs.push(self.doc_display_pass(ingestion_time));
+        }
+
         if !v.with_options.is_empty() {
             docs.push(bracket(
                 "WITH (",

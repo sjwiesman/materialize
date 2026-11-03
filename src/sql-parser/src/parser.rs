@@ -5365,6 +5365,17 @@ impl<'a> Parser<'a> {
             None
         };
 
+        let ingestion_time = if self.parse_keywords(&[WITH, INGESTION, TIME]) {
+            let alias = if self.parse_keyword(AS) {
+                Some(self.parse_identifier()?)
+            } else {
+                None
+            };
+            Some(IngestionTime { alias })
+        } else {
+            None
+        };
+
         let with_options = if self.parse_keyword(WITH) {
             self.expect_token(&Token::LParen)?;
             let options = self.parse_comma_separated(Parser::parse_table_from_source_option)?;
@@ -5385,6 +5396,7 @@ impl<'a> Parser<'a> {
                 format,
                 include_metadata,
                 envelope,
+                ingestion_time,
                 with_options,
             },
         ))
