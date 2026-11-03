@@ -62,6 +62,7 @@ use mz_ore::option::FallibleMapExt;
 use mz_ore::stack::{CheckedRecursion, RecursionGuard};
 use mz_ore::str::StrExt;
 use mz_repr::adt::char::CharLength;
+use mz_repr::adt::interval::Interval;
 use mz_repr::adt::numeric::{NUMERIC_DATUM_MAX_PRECISION, NumericMaxScale};
 use mz_repr::adt::timestamp::TimestampPrecision;
 use mz_repr::adt::varchar::VarCharMaxLength;
@@ -77,12 +78,12 @@ use mz_sql_parser::ast::visit_mut::{self, VisitMut};
 use mz_sql_parser::ast::{
     AsOf, Assignment, AstInfo, CastFailureMode, CreateWebhookSourceBody, CreateWebhookSourceCheck,
     CreateWebhookSourceHeader, CreateWebhookSourceSecret, CteBlock, DeleteStatement, Distinct,
-    Expr, Function, FunctionArgs, HomogenizingFunction, Ident, InsertSource, IsExprConstruct, Join,
-    JoinConstraint, JoinOperator, Limit, MapEntry, MutRecBlock, MutRecBlockOption,
-    MutRecBlockOptionName, OrderByExpr, Query, Select, SelectItem, SelectOption, SelectOptionName,
-    SetExpr, SetOperator, ShowStatement, SubscriptPosition, TableAlias, TableFactor,
-    TableWithJoins, UnresolvedItemName, UpdateStatement, Value, Values, WindowFrame,
-    WindowFrameBound, WindowFrameUnits, WindowSpec, visit,
+    Expr, Function, FunctionArgs, HomogenizingFunction, Ident, InsertSource, IntervalValue,
+    IsExprConstruct, Join, JoinConstraint, JoinOperator, Limit, MapEntry, MutRecBlock,
+    MutRecBlockOption, MutRecBlockOptionName, OrderByExpr, Query, Select, SelectItem, SelectOption,
+    SelectOptionName, SetExpr, SetOperator, ShowStatement, SubscriptPosition, TableAlias,
+    TableFactor, TableWithJoins, Tumble, UnresolvedItemName, UpdateStatement, Value, Values,
+    WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec, visit,
 };
 use mz_sql_parser::ident;
 
@@ -3122,15 +3123,7 @@ fn plan_table_factor(
         } => {
             let mut qcx = (*qcx).clone();
             if !lateral {
-                // Since this derived table was not marked as `LATERAL`,
-                // make elements in outer scopes invisible until we reach the
-                // next lateral barrier.
-                for scope in &mut qcx.outer_scopes {
-                    if scope.lateral_barrier {
-                        break;
-                    }
-                    scope.items.clear();
-                }
+                hide_outer_scopes_until_lateral_barrier(&mut qcx);
             }
             qcx.outer_scopes[0].lateral_barrier = true;
             let (expr, scope) = plan_nested_query(&mut qcx, subquery)?;
@@ -3143,7 +3136,348 @@ fn plan_table_factor(
             let scope = plan_table_alias(scope, alias.as_ref())?;
             Ok((expr, scope))
         }
+
+        TableFactor::Tumble(tumble) => plan_tumble(qcx, tumble),
     }
+}
+
+/// Makes the columns of `qcx`'s outer scopes invisible up to the nearest lateral barrier, as
+/// planning a table factor that is not `LATERAL` requires.
+fn hide_outer_scopes_until_lateral_barrier(qcx: &mut QueryContext) {
+    for scope in &mut qcx.outer_scopes {
+        if scope.lateral_barrier {
+            break;
+        }
+        scope.items.clear();
+    }
+}
+
+/// Returns whether output column `column` of `expr` is exactly column `outer` of the nearest outer
+/// scope, passed through unchanged.
+///
+/// This recognizes the shapes a `SELECT` list produces, and follows references to non-recursive
+/// CTEs into their definitions, which are planned in the same outer scopes. A join is not
+/// traversed, because a lateral join changes what its right input's outer scopes are, so a column
+/// that only reaches the outer reference through a join is reported as `false`.
+fn is_outer_column(expr: &HirRelationExpr, column: usize, outer: usize) -> bool {
+    fn go<'a>(
+        expr: &'a HirRelationExpr,
+        column: usize,
+        outer: usize,
+        ctes: &mut BTreeMap<LocalId, &'a HirRelationExpr>,
+    ) -> bool {
+        match expr {
+            HirRelationExpr::Project { input, outputs } => go(input, outputs[column], outer, ctes),
+            HirRelationExpr::Map { input, scalars } => {
+                let arity = input.arity();
+                let mut column = column;
+                while column >= arity {
+                    match &scalars[column - arity] {
+                        HirScalarExpr::Column(
+                            ColumnRef {
+                                level: 1,
+                                column: c,
+                            },
+                            _,
+                        ) => {
+                            return *c == outer;
+                        }
+                        // A reference to an earlier column of the same `Map`.
+                        HirScalarExpr::Column(
+                            ColumnRef {
+                                level: 0,
+                                column: c,
+                            },
+                            _,
+                        ) => column = *c,
+                        _ => return false,
+                    }
+                }
+                go(input, column, outer, ctes)
+            }
+            HirRelationExpr::Reduce {
+                input, group_key, ..
+            } => group_key
+                .get(column)
+                .is_some_and(|&key| go(input, key, outer, ctes)),
+            HirRelationExpr::Filter { input, .. }
+            | HirRelationExpr::Distinct { input }
+            | HirRelationExpr::TopK { input, .. }
+            | HirRelationExpr::Negate { input }
+            | HirRelationExpr::Threshold { input } => go(input, column, outer, ctes),
+            HirRelationExpr::Let {
+                id, value, body, ..
+            } => {
+                ctes.insert(*id, value);
+                go(body, column, outer, ctes)
+            }
+            HirRelationExpr::LetRec { body, .. } => go(body, column, outer, ctes),
+            HirRelationExpr::Get {
+                id: Id::Local(id), ..
+            } => match ctes.get(id) {
+                Some(value) => go(value, column, outer, ctes),
+                None => false,
+            },
+            HirRelationExpr::Union { base, inputs } => {
+                go(base, column, outer, ctes)
+                    && inputs.iter().all(|input| go(input, column, outer, ctes))
+            }
+            HirRelationExpr::Constant { .. }
+            | HirRelationExpr::Get { .. }
+            | HirRelationExpr::CallTable { .. }
+            | HirRelationExpr::Join { .. } => false,
+        }
+    }
+    go(expr, column, outer, &mut BTreeMap::new())
+}
+
+/// The number of columns of a `TUMBLE`'s window binding: `start`, `end`, and `close`.
+const WINDOW_ARITY: usize = 3;
+
+/// Returns whether output column `column` of `expr` is the first column of the `TUMBLE` whose pane
+/// binding is `pane_id`, reached only through projections, maps, and filters that compute no
+/// window function.
+///
+/// This is the shape of a materialized view over `TUMBLE ... PER PANE`. Anything else between the
+/// view's output and the `TUMBLE`, such as an aggregate, `DISTINCT`, `LIMIT`, a join, or a window
+/// function, would combine the rows of different panes, and could move another value into the
+/// first column, by which the sink freezes each row.
+pub fn is_tumble_passthrough(expr: &HirRelationExpr, column: usize, pane_id: LocalId) -> bool {
+    match expr {
+        HirRelationExpr::Project { input, outputs } => {
+            is_tumble_passthrough(input, outputs[column], pane_id)
+        }
+        HirRelationExpr::Map { input, scalars } => {
+            let mut windowing = false;
+            for scalar in scalars {
+                mz_expr::visit::Visit::visit_pre(scalar, &mut |e: &HirScalarExpr| {
+                    windowing |= matches!(e, HirScalarExpr::Windowing(..));
+                });
+            }
+            if windowing {
+                return false;
+            }
+            let arity = input.arity();
+            let mut column = column;
+            while column >= arity {
+                match &scalars[column - arity] {
+                    // A reference to an earlier column of the same `Map`.
+                    HirScalarExpr::Column(
+                        ColumnRef {
+                            level: 0,
+                            column: c,
+                        },
+                        _,
+                    ) => column = *c,
+                    _ => return false,
+                }
+            }
+            is_tumble_passthrough(input, column, pane_id)
+        }
+        HirRelationExpr::Filter { input, .. } => is_tumble_passthrough(input, column, pane_id),
+        // The join `plan_tumble` builds, of the window binding and the body, whose first column
+        // follows the window binding's columns.
+        HirRelationExpr::Join { right, .. } => {
+            matches!(&**right, HirRelationExpr::Let { id, .. } if *id == pane_id)
+                && column == WINDOW_ARITY
+        }
+        _ => false,
+    }
+}
+
+/// Returns the `TUMBLE` table factors anywhere in `query`.
+pub fn tumble_table_factors<T: AstInfo>(query: &Query<T>) -> Vec<&Tumble<T>> {
+    struct Finder<'ast, T: AstInfo>(Vec<&'ast Tumble<T>>);
+    impl<'ast, T: AstInfo> Visit<'ast, T> for Finder<'ast, T> {
+        fn visit_tumble(&mut self, node: &'ast Tumble<T>) {
+            self.0.push(node);
+            visit::visit_tumble(self, node);
+        }
+    }
+    let mut finder = Finder(Vec::new());
+    finder.visit_query(query);
+    finder.0
+}
+
+/// Validates the `SIZE`, `OFFSET`, and `CLOSE DELAY` arguments of a `TUMBLE` table factor,
+/// returning them in that order with defaults filled in.
+pub fn plan_tumble_intervals(
+    tumble: &Tumble<Aug>,
+) -> Result<(Interval, Interval, Interval), PlanError> {
+    let Tumble {
+        size,
+        offset,
+        close_delay,
+        ..
+    } = tumble;
+    let check = |name: &str, value: &IntervalValue| -> Result<Interval, PlanError> {
+        let interval = literal::plan_interval(value)?;
+        if interval.months != 0 {
+            sql_bail!("TUMBLE {name} must not involve units larger than days");
+        }
+        if interval.as_microseconds() < 0 || interval.as_microseconds() % 1000 != 0 {
+            sql_bail!("TUMBLE {name} must be a non-negative whole number of milliseconds");
+        }
+        Ok(interval)
+    };
+    let size = check("SIZE", size)?;
+    if size.as_microseconds() == 0 {
+        sql_bail!("TUMBLE SIZE must be positive");
+    }
+    let offset = offset
+        .as_ref()
+        .map(|o| check("OFFSET", o))
+        .transpose()?
+        .unwrap_or_default();
+    let close_delay = close_delay
+        .as_ref()
+        .map(|d| check("CLOSE DELAY", d))
+        .transpose()?
+        .unwrap_or_default();
+    Ok((size, offset, close_delay))
+}
+
+/// Plans `TUMBLE(...) AS w PER PANE (<body>)` as
+///
+/// ```sql
+/// (SELECT start, start + size AS "end", start + size + close_delay AS close
+///  FROM (SELECT DISTINCT start FROM binned)) AS w,
+/// LATERAL (WITH <pane> AS (SELECT <input columns> FROM binned WHERE start = w.start) <body>)
+/// ```
+///
+/// projected to the body's columns, where `binned` is the input extended by each row's pane
+/// start, `date_bin(size, ts - offset) + offset`. Decorrelation turns the correlated pane binding
+/// into a grouping by the pane start.
+fn plan_tumble(
+    qcx: &QueryContext,
+    tumble: &Tumble<Aug>,
+) -> Result<(HirRelationExpr, Scope), PlanError> {
+    let Tumble {
+        input,
+        pane_alias,
+        pane_id,
+        time_column,
+        body,
+        ..
+    } = tumble;
+    qcx.scx
+        .require_feature_flag(&vars::UNSAFE_ENABLE_MATERIALIZED_VIEW_FREEZE)?;
+    if qcx.lifetime != QueryLifetime::MaterializedView {
+        sql_bail!("TUMBLE ... PER PANE is only supported in materialized views");
+    }
+    let (size, offset, close_delay) = plan_tumble_intervals(tumble)?;
+
+    let (input_expr, input_scope) = qcx.resolve_table_name(input.clone())?;
+    let input_type = qcx.relation_type(&input_expr);
+    let arity = input_type.arity();
+    let time_column_name = normalize::column_name(time_column.clone());
+    let Some(ts) = input_scope
+        .items
+        .iter()
+        .position(|item| item.column_name == time_column_name)
+    else {
+        sql_bail!(
+            "column {} in DESCRIPTOR not found",
+            time_column_name.quoted()
+        );
+    };
+
+    let lit = |i: Interval| HirScalarExpr::literal(Datum::Interval(i), SqlScalarType::Interval);
+    let (sub, bin, add): (BinaryFunc, BinaryFunc, BinaryFunc) =
+        match input_type.column_types[ts].scalar_type {
+            SqlScalarType::Timestamp { .. } => (
+                expr_func::SubTimestampInterval.into(),
+                expr_func::DateBinTimestamp.into(),
+                expr_func::AddTimestampInterval.into(),
+            ),
+            SqlScalarType::TimestampTz { .. } => (
+                expr_func::SubTimestampTzInterval.into(),
+                expr_func::DateBinTimestampTz.into(),
+                expr_func::AddTimestampTzInterval.into(),
+            ),
+            ref other => sql_bail!(
+                "DESCRIPTOR column {} must have type timestamp or timestamp with time zone, not {}",
+                time_column_name.quoted(),
+                qcx.humanize_sql_scalar_type(other, false),
+            ),
+        };
+    let start = lit(size).call_binary(
+        HirScalarExpr::column(ts).call_binary(lit(offset), sub.clone()),
+        bin,
+    );
+    let start = start.call_binary(lit(offset), add.clone());
+    // A row with a NULL event time belongs to no pane. Without this filter its NULL pane start
+    // would be a pane that no row joins, for which a body with a global aggregate produces a
+    // row of default values.
+    let binned = input_expr
+        .map(vec![start])
+        .filter(vec![HirScalarExpr::column(arity).call_is_null().not()]);
+
+    // `end` and `close` are computed after the `DISTINCT`, so the optimizer sees that panes are
+    // keyed by `start` alone.
+    let panes = binned.clone().project(vec![arity]).distinct().map(vec![
+        HirScalarExpr::column(0).call_binary(lit(size), add.clone()),
+        HirScalarExpr::column(1).call_binary(lit(close_delay), add),
+    ]);
+    let window_name = normalize::ident(tumble.window_name());
+    let window_scope = Scope::from_source(
+        Some(PartialItemName {
+            database: None,
+            schema: None,
+            item: window_name.clone(),
+        }),
+        ["start", "end", "close"],
+    );
+
+    // The body sees the window as its nearest outer scope, and nothing beyond it, because a
+    // `TUMBLE` table factor is not `LATERAL`.
+    let mut qcx = qcx.clone();
+    hide_outer_scopes_until_lateral_barrier(&mut qcx);
+    let mut body_qcx = qcx.derived_context(window_scope, qcx.relation_type(&panes));
+    body_qcx.outer_scopes[0].lateral_barrier = true;
+
+    let pane_name = match pane_alias {
+        Some(alias) => normalize::ident(alias.clone()),
+        None => input.full_item_name().item.clone(),
+    };
+    let pane_desc = RelationDesc::new(input_type, input_scope.column_names().cloned());
+    body_qcx.ctes.insert(
+        *pane_id,
+        CteDesc {
+            name: pane_name.clone(),
+            desc: pane_desc,
+        },
+    );
+    let window_start = HirScalarExpr::unnamed_column(ColumnRef {
+        level: 1,
+        column: 0,
+    });
+    let pane = binned
+        .filter(vec![
+            HirScalarExpr::column(arity).call_binary(window_start, expr_func::Eq),
+        ])
+        .project((0..arity).collect());
+    let (body_expr, body_scope) = plan_nested_query(&mut body_qcx, body)?;
+    let body_arity = body_qcx.relation_type(&body_expr).arity();
+    // The sink freezes each row by the pane start in the view's first column, so the body's
+    // first column must be the window's `start` itself. Checking the planned body rather than its
+    // text rejects a `w.start` that resolves to a column of a relation the body names like the
+    // window.
+    if body_arity == 0 || !is_outer_column(&body_expr, 0, 0) {
+        sql_bail!("the first column of a PER PANE body must be {window_name}.start");
+    }
+    let body_expr = HirRelationExpr::Let {
+        name: pane_name,
+        id: *pane_id,
+        value: Box::new(pane),
+        body: Box::new(body_expr),
+    };
+
+    let expr = panes
+        .join(body_expr, HirScalarExpr::literal_true(), JoinKind::Inner)
+        .project((WINDOW_ARITY..WINDOW_ARITY + body_arity).collect());
+    let scope = Scope::from_source(None, body_scope.column_names().cloned());
+    Ok((expr, scope))
 }
 
 /// Plans a `ROWS FROM` expression.

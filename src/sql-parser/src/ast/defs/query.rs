@@ -23,7 +23,7 @@ use std::hash::Hash;
 use std::mem;
 
 use crate::ast::display::{self, AstDisplay, AstFormatter, WithOptionName};
-use crate::ast::{AstInfo, Expr, Function, Ident, ShowStatement, WithOptionValue};
+use crate::ast::{AstInfo, Expr, Function, Ident, IntervalValue, ShowStatement, WithOptionValue};
 
 /// The most complete variant of a `SELECT` query expression, optionally
 /// including `WITH`, `UNION` / other set operations, and `ORDER BY`.
@@ -596,6 +596,8 @@ pub enum TableFactor<T: AstInfo> {
         join: Box<TableWithJoins<T>>,
         alias: Option<TableAlias>,
     },
+    /// A tumbling window, see [`Tumble`].
+    Tumble(Tumble<T>),
 }
 
 impl<T: AstInfo> AstDisplay for TableFactor<T> {
@@ -668,10 +670,76 @@ impl<T: AstInfo> AstDisplay for TableFactor<T> {
                     f.write_node(alias);
                 }
             }
+            TableFactor::Tumble(tumble) => f.write_node(tumble),
         }
     }
 }
 impl_display_t!(TableFactor);
+
+/// A tumbling window over `input` whose `body` is evaluated once per pane:
+///
+/// ```text
+/// TUMBLE(TABLE <input> [AS <pane_alias>], DESCRIPTOR(<time_column>),
+///        SIZE => <interval> [, OFFSET => <interval>] [, CLOSE DELAY => <interval>])
+///     [AS <window_alias>] PER PANE (<body>)
+/// ```
+///
+/// Inside `body`, `pane_alias` (by default the input's name) binds the rows of one pane,
+/// and the window (see [`Tumble::window_name`]) binds the pane's `start`, `end`, and `close`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Tumble<T: AstInfo> {
+    pub input: T::ItemName,
+    pub pane_alias: Option<Ident>,
+    /// The id of the pane binding, which `body` references like a CTE.
+    pub pane_id: T::CteId,
+    pub time_column: Ident,
+    pub size: IntervalValue,
+    pub offset: Option<IntervalValue>,
+    pub close_delay: Option<IntervalValue>,
+    pub window_alias: Option<Ident>,
+    pub body: Box<Query<T>>,
+}
+
+impl<T: AstInfo> Tumble<T> {
+    /// The name that binds the window inside `body`: `window_alias`, or `tumble`.
+    pub fn window_name(&self) -> Ident {
+        self.window_alias
+            .clone()
+            .unwrap_or_else(|| Ident::new_unchecked("tumble"))
+    }
+}
+
+impl<T: AstInfo> AstDisplay for Tumble<T> {
+    fn fmt<W: fmt::Write>(&self, f: &mut AstFormatter<W>) {
+        f.write_str("TUMBLE(TABLE ");
+        f.write_node(&self.input);
+        if let Some(pane_alias) = &self.pane_alias {
+            f.write_str(" AS ");
+            f.write_node(pane_alias);
+        }
+        f.write_str(", DESCRIPTOR(");
+        f.write_node(&self.time_column);
+        f.write_str("), SIZE => INTERVAL '");
+        f.write_node(&self.size);
+        if let Some(offset) = &self.offset {
+            f.write_str(", OFFSET => INTERVAL '");
+            f.write_node(offset);
+        }
+        if let Some(close_delay) = &self.close_delay {
+            f.write_str(", CLOSE DELAY => INTERVAL '");
+            f.write_node(close_delay);
+        }
+        f.write_str(")");
+        if let Some(window_alias) = &self.window_alias {
+            f.write_str(" AS ");
+            f.write_node(window_alias);
+        }
+        f.write_str(" PER PANE (");
+        f.write_node(&self.body);
+        f.write_str(")");
+    }
+}
+impl_display_t!(Tumble);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TableAlias {

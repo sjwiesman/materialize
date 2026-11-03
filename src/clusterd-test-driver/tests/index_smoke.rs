@@ -56,7 +56,7 @@ async fn index_over_small_shard() {
     let shard = ShardId::new();
     let desc = sample_desc();
     let rows = sample_rows(10_000, 16);
-    write_rows_single_ts(&client, shard, &desc, &rows, Timestamp::from(0))
+    write_rows_single_ts(&client, shard, &desc, &rows, Timestamp::from(0), 1)
         .await
         .expect("write");
 

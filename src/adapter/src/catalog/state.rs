@@ -1668,6 +1668,7 @@ impl CatalogState {
                     non_null_assertions: materialized_view.non_null_assertions,
                     custom_logical_compaction_window: materialized_view.compaction_window,
                     refresh_schedule: materialized_view.refresh_schedule,
+                    freeze: materialized_view.freeze,
                     initial_as_of,
                     optimized_plan: None,
                     physical_plan: None,

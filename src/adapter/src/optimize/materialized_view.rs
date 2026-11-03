@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mz_compute_types::plan::LirRelationExpr;
+use mz_compute_types::sinks::FreezeSpec;
 use mz_compute_types::sinks::{
     ComputeSinkConnection, ComputeSinkDesc, MaterializedViewSinkConnection,
 };
@@ -71,6 +72,8 @@ pub struct Optimizer {
     non_null_assertions: Vec<usize>,
     /// Refresh schedule, e.g., `REFRESH EVERY '1 day'`
     refresh_schedule: Option<RefreshSchedule>,
+    /// Per-pane freezing of the output.
+    freeze: Option<FreezeSpec>,
     /// A human-readable name exposed internally (useful for debugging).
     debug_name: String,
     /// Optimizer config.
@@ -90,6 +93,7 @@ impl Optimizer {
         column_names: Vec<ColumnName>,
         non_null_assertions: Vec<usize>,
         refresh_schedule: Option<RefreshSchedule>,
+        freeze: Option<FreezeSpec>,
         debug_name: String,
         config: OptimizerConfig,
         metrics: OptimizerMetrics,
@@ -103,6 +107,7 @@ impl Optimizer {
             column_names,
             non_null_assertions,
             refresh_schedule,
+            freeze,
             debug_name,
             config,
             metrics,
@@ -171,7 +176,14 @@ impl Optimize<HirRelationExpr> for Optimizer {
         trace_plan!(at: "raw", &expr);
 
         // HIR ⇒ MIR lowering and decorrelation
-        let mir_expr = expr.clone().lower(&self.config, Some(&self.metrics))?;
+        let mut mir_expr = expr.clone().lower(&self.config, Some(&self.metrics))?;
+
+        // The sink relies on this filter, see `FreezeSpec::predicate`. Local optimization pushes
+        // it to the inputs, where it releases the state of closed panes.
+        if let Some(freeze) = &self.freeze {
+            let predicate = freeze.predicate(&mir_expr.typ());
+            mir_expr = mir_expr.filter([predicate]);
+        }
 
         // MIR ⇒ MIR optimization (local)
         let mut df_meta = DataflowMetainfo::default();
@@ -254,6 +266,7 @@ impl Optimize<LocalMirPlan> for Optimizer {
             connection: ComputeSinkConnection::MaterializedView(MaterializedViewSinkConnection {
                 value_desc: rel_desc,
                 storage_metadata: (),
+                freeze: self.freeze.clone(),
             }),
             with_snapshot: true,
             up_to: Antichain::default(),
