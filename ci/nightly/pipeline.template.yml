@@ -2345,6 +2345,17 @@ steps:
           composition: cluster
           args: [--slow-only]
 
+  - id: cluster-autoscaler
+    label: Cluster autoscaler
+    depends_on: build-aarch64
+    skip: "Not yet run against a live environment"
+    timeout_in_minutes: 90
+    agents:
+      queue: hetzner-aarch64-8cpu-16gb
+    plugins:
+      - ./ci/plugins/mzcompose:
+          composition: cluster-autoscaler
+
   - id: balancerd
     label: Balancerd
     depends_on: build-aarch64
