@@ -2323,28 +2323,28 @@ CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', AUTO SCALING STRATEGY = (ON 
 ----
 CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc', LINGER DURATION = '600s')))
 =>
-CreateCluster(CreateClusterStatement { name: Ident("cluster"), options: [ClusterOption { name: Size, value: Some(Value(String("scale=1,workers=1"))) }, ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: Some(OnHydrationOptionValue { hydration_size: String("400cc"), linger_duration: Some(String("600s")) }) })) }], features: [], if_not_exists: false })
+CreateCluster(CreateClusterStatement { name: Ident("cluster"), options: [ClusterOption { name: Size, value: Some(Value(String("scale=1,workers=1"))) }, ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: Some(OnHydrationOptionValue { hydration_size: String("400cc"), linger_duration: Some(String("600s")) }), on_load: None })) }], features: [], if_not_exists: false })
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc')))
 ----
 CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc')))
 =>
-CreateCluster(CreateClusterStatement { name: Ident("cluster"), options: [ClusterOption { name: Size, value: Some(Value(String("scale=1,workers=1"))) }, ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: Some(OnHydrationOptionValue { hydration_size: String("400cc"), linger_duration: None }) })) }], features: [], if_not_exists: false })
+CreateCluster(CreateClusterStatement { name: Ident("cluster"), options: [ClusterOption { name: Size, value: Some(Value(String("scale=1,workers=1"))) }, ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: Some(OnHydrationOptionValue { hydration_size: String("400cc"), linger_duration: None }), on_load: None })) }], features: [], if_not_exists: false })
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', AUTO SCALING STRATEGY = ())
 ----
 CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', AUTO SCALING STRATEGY = ())
 =>
-CreateCluster(CreateClusterStatement { name: Ident("cluster"), options: [ClusterOption { name: Size, value: Some(Value(String("scale=1,workers=1"))) }, ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: None })) }], features: [], if_not_exists: false })
+CreateCluster(CreateClusterStatement { name: Ident("cluster"), options: [ClusterOption { name: Size, value: Some(Value(String("scale=1,workers=1"))) }, ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: None, on_load: None })) }], features: [], if_not_exists: false })
 
 parse-statement
 ALTER CLUSTER cluster SET (AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc')))
 ----
 ALTER CLUSTER cluster SET (AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc')))
 =>
-AlterCluster(AlterClusterStatement { if_exists: false, name: Ident("cluster"), action: SetOptions { options: [ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: Some(OnHydrationOptionValue { hydration_size: String("400cc"), linger_duration: None }) })) }], with_options: [] } })
+AlterCluster(AlterClusterStatement { if_exists: false, name: Ident("cluster"), action: SetOptions { options: [ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: Some(OnHydrationOptionValue { hydration_size: String("400cc"), linger_duration: None }), on_load: None })) }], with_options: [] } })
 
 parse-statement
 ALTER CLUSTER cluster RESET (AUTO SCALING STRATEGY)
@@ -2370,42 +2370,72 @@ CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', AUTO SCALING STRATEGY = (ON 
 parse-statement
 CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE DOWN AFTER = '1h')))
 ----
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE DOWN AFTER = '1h')))
+=>
+CreateCluster(CreateClusterStatement { name: Ident("cluster"), options: [ClusterOption { name: Size, value: Some(Value(String("100cc"))) }, ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: None, on_load: Some(OnLoadOptionValue { min_size: String("50cc"), max_size: String("800cc"), scale_down_after: Some(String("1h")) }) })) }], features: [], if_not_exists: false })
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE '50cc', MAX SIZE '800cc')))
 ----
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc')))
+=>
+CreateCluster(CreateClusterStatement { name: Ident("cluster"), options: [ClusterOption { name: Size, value: Some(Value(String("100cc"))) }, ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: None, on_load: Some(OnLoadOptionValue { min_size: String("50cc"), max_size: String("800cc"), scale_down_after: None }) })) }], features: [], if_not_exists: false })
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc'), ON HYDRATION (HYDRATION SIZE = '400cc')))
 ----
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc'), ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc')))
+=>
+CreateCluster(CreateClusterStatement { name: Ident("cluster"), options: [ClusterOption { name: Size, value: Some(Value(String("100cc"))) }, ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: Some(OnHydrationOptionValue { hydration_size: String("400cc"), linger_duration: None }), on_load: Some(OnLoadOptionValue { min_size: String("50cc"), max_size: String("800cc"), scale_down_after: None }) })) }], features: [], if_not_exists: false })
 
 parse-statement
 ALTER CLUSTER cluster SET (AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc', LINGER DURATION = '600s'), ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE DOWN AFTER = '30m')))
 ----
+ALTER CLUSTER cluster SET (AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc', LINGER DURATION = '600s'), ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE DOWN AFTER = '30m')))
+=>
+AlterCluster(AlterClusterStatement { if_exists: false, name: Ident("cluster"), action: SetOptions { options: [ClusterOption { name: AutoScalingStrategy, value: Some(ClusterAutoScalingStrategyOptionValue(ClusterAutoScalingStrategyOptionValue { on_hydration: Some(OnHydrationOptionValue { hydration_size: String("400cc"), linger_duration: Some(String("600s")) }), on_load: Some(OnLoadOptionValue { min_size: String("50cc"), max_size: String("800cc"), scale_down_after: Some(String("30m")) }) })) }], with_options: [] } })
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc')))
 ----
+error: Expected comma, found right parenthesis
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc')))
+                                                                                           ^
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MAX SIZE = '800cc', MIN SIZE = '50cc')))
 ----
+error: Expected MIN, found MAX
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MAX SIZE = '800cc', MIN SIZE = '50cc')))
+                                                                          ^
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE UP AFTER = '1h')))
 ----
+error: Expected DOWN, found UP
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE UP AFTER = '1h')))
+                                                                                                                       ^
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc'), ON LOAD (MIN SIZE = '50cc', MAX SIZE = '400cc')))
 ----
+error: ON LOAD specified more than once
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc'), ON LOAD (MIN SIZE = '50cc', MAX SIZE = '400cc')))
+                                                                                                                                                                ^
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON REFRESH (MIN SIZE = '50cc')))
 ----
+error: Expected one of HYDRATION or LOAD, found REFRESH
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON REFRESH (MIN SIZE = '50cc')))
+                                                                    ^
 
 parse-statement
 SELECT min(down) AS min, max(load) AS down FROM scale
 ----
+SELECT min(down) AS min, max(load) AS down FROM scale
+=>
+Select(SelectStatement { query: Query { ctes: Simple([]), body: Select(Select { distinct: None, projection: [Expr { expr: Function(Function { name: Name(UnresolvedItemName([Ident("min")])), args: Args { args: [Identifier([Ident("down")])], order_by: [] }, filter: None, over: None, distinct: false }), alias: Some(Ident("min")) }, Expr { expr: Function(Function { name: Name(UnresolvedItemName([Ident("max")])), args: Args { args: [Identifier([Ident("load")])], order_by: [] }, filter: None, over: None, distinct: false }), alias: Some(Ident("down")) }], from: [TableWithJoins { relation: Table { name: Name(UnresolvedItemName([Ident("scale")])), alias: None }, joins: [] }], selection: None, group_by: [], having: None, qualify: None, options: [] }), order_by: [], limit: None, offset: None }, as_of: None })
 
 parse-statement
 CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', WORKLOAD CLASS NULL)
