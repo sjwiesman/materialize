@@ -297,13 +297,11 @@ fn diff_cluster_options(
     let local_options = index_options(local);
     let live_options = index_options(live);
 
-    let size_is_autoscaled = [&local_options, &live_options]
-        .into_iter()
-        .all(|options| {
-            options
-                .get(&ClusterOptionName::AutoScalingStrategy)
-                .is_some_and(|option| has_on_load(option))
-        });
+    let size_is_autoscaled = [&local_options, &live_options].into_iter().all(|options| {
+        options
+            .get(&ClusterOptionName::AutoScalingStrategy)
+            .is_some_and(|option| has_on_load(option))
+    });
 
     let to_set = local_options
         .values()

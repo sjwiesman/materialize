@@ -341,7 +341,10 @@ pub enum OnLoadRangeError {
         cluster_size: String,
         family_sizes: Vec<String>,
     },
-    MinAboveMax { min_size: String, max_size: String },
+    MinAboveMax {
+        min_size: String,
+        max_size: String,
+    },
     /// The cluster `SIZE`, or the target of its in-progress resize, is outside
     /// the range or not an enabled size.
     SizeOutOfRange {
@@ -460,7 +463,10 @@ mod tests {
     use super::*;
 
     fn sizes() -> ClusterReplicaSizeMap {
-        let allocation = |scale: u16, workers: u64, cpu: Option<f64>, mem: Option<&str>,
+        let allocation = |scale: u16,
+                          workers: u64,
+                          cpu: Option<f64>,
+                          mem: Option<&str>,
                           credits: &str,
                           family: Option<&str>,
                           disabled: bool| {

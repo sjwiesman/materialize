@@ -32,12 +32,12 @@ use std::time::Duration;
 use mz_controller_types::ReplicaId;
 use mz_repr::{Timestamp, TimestampManipulation};
 
-use crate::load::{LoadParams, LoadSignals};
 use crate::ctx::{
     BurstAudit, BurstFinishCause, BurstRecord, BurstWrite, ClusterSchedule, ClusterState,
     CreateReason, OnTimeout, ReconfigurationAudit, ReconfigurationRecord, ReconfigurationStatus,
     ReconfigurationWrite, RefreshWindowDecision, RefreshWindowInputs, ReplicaShape, StateWrite,
 };
+use crate::load::{LoadParams, LoadSignals};
 
 /// A replica slot a strategy desires this tick. The reconcile kernel unions
 /// slots across strategies and matches them by [`ReplicaShape`] against the

@@ -14,19 +14,18 @@ use mz_audit_log::{
     AlterAddColumnV1, AlterApplyReplacementV1, AlterClusterReconfigurationV1,
     AlterDefaultPrivilegeV1, AlterRetainHistoryV1, AlterSetClusterV1, AlterSourceSinkV1,
     AlterSourceTimestampIntervalV1, BurstFinishCauseV1, ClusterHydrationBurstV1,
-    ClusterLoadBackoffV1, ClusterLoadHoldV1, ClusterLoadScaleV1, LoadDirectionV1, LoadHoldV1,
-    LoadScaleReasonV1, ReconfigurationOriginV1,
-    ClusterReplicaLoggingV1, CreateClusterReplicaV1, CreateClusterReplicaV2,
-    CreateClusterReplicaV3, CreateClusterReplicaV4, CreateIndexV1, CreateMaterializedViewV1,
-    CreateOrDropClusterReplicaReasonV1, CreateRoleV1, CreateSourceSinkV1, CreateSourceSinkV2,
-    CreateSourceSinkV3, CreateSourceSinkV4, DropClusterReplicaV1, DropClusterReplicaV2,
-    DropClusterReplicaV3, EventDetails, EventType, EventV1, FromPreviousIdV1, FullNameV1,
-    GrantRoleV1, GrantRoleV2, HydrationBurstLifecycleV1, IdFullNameV1, IdNameV1,
-    ReconfigurationLifecycleV1, RefreshDecisionWithReasonV1, RefreshDecisionWithReasonV2,
-    RenameClusterReplicaV1, RenameClusterV1, RenameItemV1, RenameSchemaV1, RevokeRoleV1,
-    RevokeRoleV2, RotateKeysV1, SchedulingDecisionV1, SchedulingDecisionsWithReasonsV1,
-    SchedulingDecisionsWithReasonsV2, SchemaV1, SchemaV2, SetV1, ToNewIdV1, UpdateItemV1,
-    UpdateOwnerV1, UpdatePrivilegeV1, VersionedEvent,
+    ClusterLoadBackoffV1, ClusterLoadHoldV1, ClusterLoadScaleV1, ClusterReplicaLoggingV1,
+    CreateClusterReplicaV1, CreateClusterReplicaV2, CreateClusterReplicaV3, CreateClusterReplicaV4,
+    CreateIndexV1, CreateMaterializedViewV1, CreateOrDropClusterReplicaReasonV1, CreateRoleV1,
+    CreateSourceSinkV1, CreateSourceSinkV2, CreateSourceSinkV3, CreateSourceSinkV4,
+    DropClusterReplicaV1, DropClusterReplicaV2, DropClusterReplicaV3, EventDetails, EventType,
+    EventV1, FromPreviousIdV1, FullNameV1, GrantRoleV1, GrantRoleV2, HydrationBurstLifecycleV1,
+    IdFullNameV1, IdNameV1, LoadDirectionV1, LoadHoldV1, LoadScaleReasonV1,
+    ReconfigurationLifecycleV1, ReconfigurationOriginV1, RefreshDecisionWithReasonV1,
+    RefreshDecisionWithReasonV2, RenameClusterReplicaV1, RenameClusterV1, RenameItemV1,
+    RenameSchemaV1, RevokeRoleV1, RevokeRoleV2, RotateKeysV1, SchedulingDecisionV1,
+    SchedulingDecisionsWithReasonsV1, SchedulingDecisionsWithReasonsV2, SchemaV1, SchemaV2, SetV1,
+    ToNewIdV1, UpdateItemV1, UpdateOwnerV1, UpdatePrivilegeV1, VersionedEvent,
 };
 use mz_proto::TryFromProtoError;
 
@@ -498,9 +497,7 @@ impl RustType<proto::audit_log_event_v1::LoadHoldV1> for LoadHoldV1 {
         proto::audit_log_event_v1::LoadHoldV1 { hold }
     }
 
-    fn from_proto(
-        proto: proto::audit_log_event_v1::LoadHoldV1,
-    ) -> Result<Self, TryFromProtoError> {
+    fn from_proto(proto: proto::audit_log_event_v1::LoadHoldV1) -> Result<Self, TryFromProtoError> {
         use proto::audit_log_event_v1::load_hold_v1::Hold;
         Ok(match proto.hold {
             Hold::SkewLimited(_) => LoadHoldV1::SkewLimited,

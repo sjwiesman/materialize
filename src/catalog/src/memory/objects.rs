@@ -3943,7 +3943,9 @@ impl From<ReconfigurationOrigin> for durable::ReconfigurationOrigin {
     fn from(value: ReconfigurationOrigin) -> Self {
         match value {
             ReconfigurationOrigin::User => durable::ReconfigurationOrigin::User,
-            ReconfigurationOrigin::LoadAutoscaling => durable::ReconfigurationOrigin::LoadAutoscaling,
+            ReconfigurationOrigin::LoadAutoscaling => {
+                durable::ReconfigurationOrigin::LoadAutoscaling
+            }
         }
     }
 }
@@ -3952,7 +3954,9 @@ impl From<durable::ReconfigurationOrigin> for ReconfigurationOrigin {
     fn from(value: durable::ReconfigurationOrigin) -> Self {
         match value {
             durable::ReconfigurationOrigin::User => ReconfigurationOrigin::User,
-            durable::ReconfigurationOrigin::LoadAutoscaling => ReconfigurationOrigin::LoadAutoscaling,
+            durable::ReconfigurationOrigin::LoadAutoscaling => {
+                ReconfigurationOrigin::LoadAutoscaling
+            }
         }
     }
 }

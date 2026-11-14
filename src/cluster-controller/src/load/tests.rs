@@ -10,8 +10,8 @@
 use std::time::Duration;
 
 use mz_adapter_types::cluster_state::{
-    AutoScalingPolicy, LoadAttemptPhase, LoadAudit, LoadBackoff, LoadDirection,
-    LoadHold, LoadRecord, LoadScaleReason, OnLoadPolicy, ReconfigurationOrigin,
+    AutoScalingPolicy, LoadAttemptPhase, LoadAudit, LoadBackoff, LoadDirection, LoadHold,
+    LoadRecord, LoadScaleReason, OnLoadPolicy, ReconfigurationOrigin,
 };
 use mz_compute_types::config::ComputeReplicaLogging;
 use mz_controller_types::ClusterId;
@@ -257,7 +257,13 @@ fn evaluate_needs_the_size_and_bounds_on_the_ladder() {
 #[mz_ore::test]
 fn evaluate_warms_up_until_the_activation_window_is_full() {
     let m = measurement(7000, 4);
-    let e = eval("c4", bounds("c1", "c32"), steady(0, MINUTE, "c4", &m), None, MINUTE);
+    let e = eval(
+        "c4",
+        bounds("c1", "c32"),
+        steady(0, MINUTE, "c4", &m),
+        None,
+        MINUTE,
+    );
     assert_eq!(e.status, LoadStatus::WarmingUp);
     assert_eq!(e.action, None);
     assert_eq!(e.recommended_size, None);
@@ -457,7 +463,13 @@ fn evaluate_honors_the_policy_scale_down_window() {
         scale_down_after: Some(Duration::from_secs(4 * 60 * 60)),
         ..bounds("c1", "c32")
     };
-    let e = eval("c8", bounds, steady(T0, T0 + 2 * HOUR, "c8", &m), None, T0 + 2 * HOUR);
+    let e = eval(
+        "c8",
+        bounds,
+        steady(T0, T0 + 2 * HOUR, "c8", &m),
+        None,
+        T0 + 2 * HOUR,
+    );
     assert_eq!(e.action, None);
 }
 
@@ -551,12 +563,24 @@ fn evaluate_scale_down_steps_around_a_backed_off_target() {
 
     // c2 failed: go to c4 instead.
     let record = backoff("c2", LoadDirection::Down, 3 * HOUR);
-    let e = eval("c8", bounds("c1", "c32"), samples.clone(), Some(&record), 2 * HOUR);
+    let e = eval(
+        "c8",
+        bounds("c1", "c32"),
+        samples.clone(),
+        Some(&record),
+        2 * HOUR,
+    );
     assert_eq!(target(&e), Some("c4"));
 
     // c4 failed, which rules out everything below it too.
     let record = backoff("c4", LoadDirection::Down, 3 * HOUR);
-    let e = eval("c8", bounds("c1", "c32"), samples.clone(), Some(&record), 2 * HOUR);
+    let e = eval(
+        "c8",
+        bounds("c1", "c32"),
+        samples.clone(),
+        Some(&record),
+        2 * HOUR,
+    );
     assert_eq!(e.status, LoadStatus::BackingOff);
     assert_eq!(e.action, None);
 
@@ -572,11 +596,23 @@ fn evaluate_scale_up_stops_below_a_backed_off_target() {
     let samples = steady(0, 2 * MINUTE, "c4", &m);
 
     let record = backoff("c16", LoadDirection::Up, HOUR);
-    let e = eval("c4", bounds("c1", "c32"), samples.clone(), Some(&record), 2 * MINUTE);
+    let e = eval(
+        "c4",
+        bounds("c1", "c32"),
+        samples.clone(),
+        Some(&record),
+        2 * MINUTE,
+    );
     assert_eq!(target(&e), Some("c8"));
 
     let record = backoff("c8", LoadDirection::Up, HOUR);
-    let e = eval("c4", bounds("c1", "c32"), samples, Some(&record), 2 * MINUTE);
+    let e = eval(
+        "c4",
+        bounds("c1", "c32"),
+        samples,
+        Some(&record),
+        2 * MINUTE,
+    );
     assert_eq!(e.status, LoadStatus::BackingOff);
     assert_eq!(e.action, None);
 }
@@ -614,7 +650,13 @@ fn converge(start: &str, demand: f64, alpha: f64) -> Vec<String> {
     // Twelve hours is several scale-down windows past the last change.
     for at in (0..12 * HOUR).step_by(usize::cast_from(MINUTE)) {
         samples.push(sample(at, &size, observe(&size)));
-        let e = eval(&size, bounds("c1", "c32"), samples.clone(), Some(&record), at);
+        let e = eval(
+            &size,
+            bounds("c1", "c32"),
+            samples.clone(),
+            Some(&record),
+            at,
+        );
         if let Some(action) = e.action {
             size = action.target_size;
             record.last_cutover = Some(ts(at));
@@ -708,7 +750,11 @@ fn apply(state: &mut ClusterState, write: &StateWrite) {
 }
 
 fn audits(write: &StateWrite) -> Vec<LoadAudit> {
-    write.load.as_ref().map(|w| w.audit.clone()).unwrap_or_default()
+    write
+        .load
+        .as_ref()
+        .map(|w| w.audit.clone())
+        .unwrap_or_default()
 }
 
 fn busy_samples(size: &str) -> Vec<LoadSample> {
@@ -779,7 +825,8 @@ fn strategy_clears_its_record_when_disengaged() {
 
 #[mz_ore::test]
 fn strategy_does_nothing_without_the_signal() {
-    let write = OnLoadStrategy.update_state(&state("c4"), &LiveSignals::default(), &config(), ts(0));
+    let write =
+        OnLoadStrategy.update_state(&state("c4"), &LiveSignals::default(), &config(), ts(0));
     assert!(write.is_empty());
 }
 
@@ -861,7 +908,13 @@ fn strategy_backs_off_a_failed_target_for_longer_each_time() {
         let mut s = scaling_up();
         settle(&mut s, status);
         let write = update(&s, Vec::new(), 25 * HOUR);
-        let record = write.load.as_ref().expect("write").record.clone().expect("record");
+        let record = write
+            .load
+            .as_ref()
+            .expect("write")
+            .record
+            .clone()
+            .expect("record");
         assert_eq!(record.attempt, None);
         assert_eq!(
             record.backoff,
@@ -895,7 +948,11 @@ fn strategy_backs_off_a_failed_target_for_longer_each_time() {
 #[mz_ore::test]
 fn strategy_backs_off_a_failed_scale_down_in_the_down_direction() {
     let mut s = state("c8");
-    let write = update(&s, steady(0, 2 * HOUR, "c8", &measurement(1200, 2)), 2 * HOUR);
+    let write = update(
+        &s,
+        steady(0, 2 * HOUR, "c8", &measurement(1200, 2)),
+        2 * HOUR,
+    );
     apply(&mut s, &write);
     assert_eq!(
         s.reconfiguration.as_ref().expect("written").target.size,
@@ -939,12 +996,20 @@ fn lagging(progress: u32, cpu_millicores: u64) -> LoadMeasurement {
 /// A state that scaled up from `c4` to `c8` because of lag and has cut over.
 fn evaluating() -> ClusterState {
     let mut s = state("c4");
-    let write = update(&s, steady(0, 2 * MINUTE, "c4", &lagging(700, 5000)), 2 * MINUTE);
+    let write = update(
+        &s,
+        steady(0, 2 * MINUTE, "c4", &lagging(700, 5000)),
+        2 * MINUTE,
+    );
     apply(&mut s, &write);
     settle(&mut s, ReconfigurationStatus::Finalized);
     let write = update(&s, Vec::new(), HOUR);
     apply(&mut s, &write);
-    let attempt = s.load.as_ref().and_then(|r| r.attempt.as_ref()).expect("attempt");
+    let attempt = s
+        .load
+        .as_ref()
+        .and_then(|r| r.attempt.as_ref())
+        .expect("attempt");
     assert_eq!(attempt.phase, LoadAttemptPhase::Evaluating);
     assert_eq!(attempt.progress_before, Some(700));
     s
@@ -959,7 +1024,12 @@ fn strategy_reverts_a_scale_up_that_did_not_help() {
     assert!(update(&s, early, HOUR + 4 * MINUTE).is_empty());
 
     // Still behind by as much as before, on twice the cores.
-    let after = steady(HOUR + 5 * MINUTE, HOUR + 7 * MINUTE, "c8", &lagging(720, 2000));
+    let after = steady(
+        HOUR + 5 * MINUTE,
+        HOUR + 7 * MINUTE,
+        "c8",
+        &lagging(720, 2000),
+    );
     let write = update(&s, after, HOUR + 7 * MINUTE);
     let reconfiguration = write
         .reconfiguration
@@ -967,7 +1037,13 @@ fn strategy_reverts_a_scale_up_that_did_not_help() {
         .and_then(|w| w.record.as_ref())
         .expect("revert written");
     assert_eq!(reconfiguration.target.size, "c4");
-    let record = write.load.as_ref().expect("write").record.clone().expect("record");
+    let record = write
+        .load
+        .as_ref()
+        .expect("write")
+        .record
+        .clone()
+        .expect("record");
     assert_eq!(record.backoff[0].size, "c8");
     assert_eq!(record.backoff[0].direction, LoadDirection::Up);
     assert_eq!(

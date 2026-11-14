@@ -687,7 +687,11 @@ impl Catalog {
             let ClusterVariant::Managed(managed) = &mut cluster.config.variant else {
                 continue;
             };
-            let Some(load) = managed.load.as_mut().filter(|load| !load.backoff.is_empty()) else {
+            let Some(load) = managed
+                .load
+                .as_mut()
+                .filter(|load| !load.backoff.is_empty())
+            else {
                 continue;
             };
             load.backoff.clear();

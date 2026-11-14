@@ -216,7 +216,9 @@ fn measure_replica(replica: &ReplicaLoad, params: &LoadParams) -> Option<LoadMea
         let busy = dataflow.busy.as_secs_f64();
         let (ratio, catch_up) = match dataflow.progress {
             Some(progress) => {
-                let deficit = progress.input_advance.saturating_sub(progress.output_advance);
+                let deficit = progress
+                    .input_advance
+                    .saturating_sub(progress.output_advance);
                 if deficit <= FRONTIER_JITTER {
                     (1.0, 1.0)
                 } else {
@@ -455,8 +457,8 @@ pub fn evaluate(
     let cpu_demand = median_by(&|m| m.cpu_demand_millicores);
     let memory_demand = median_by(&|m| m.memory_demand_bytes);
     let lagging = median_by(&|m| u64::from(m.min_progress)) < 1000;
-    let saturated = median_by(&|m| u64::from(m.max_worker_utilization))
-        >= u64::from(SATURATED_UTILIZATION);
+    let saturated =
+        median_by(&|m| u64::from(m.max_worker_utilization)) >= u64::from(SATURATED_UTILIZATION);
 
     if recommended > current {
         return Some(match ladder.allow_up(current, recommended, record, now) {
@@ -799,7 +801,9 @@ fn back_off(
         .backoff
         .iter()
         .position(|b| b.size == size && b.direction == direction);
-    let failures = index.map_or(0, |i| record.backoff[i].failures).saturating_add(1);
+    let failures = index
+        .map_or(0, |i| record.backoff[i].failures)
+        .saturating_add(1);
     let duration = BACKOFF_BASE
         .saturating_mul(1u32.checked_shl(failures - 1).unwrap_or(u32::MAX))
         .min(BACKOFF_MAX);
@@ -965,14 +969,9 @@ impl Strategy for OnLoadStrategy {
         if in_progress {
             return StateWrite::default();
         }
-        let Some(evaluation) = evaluate(
-            &state.size,
-            policy.into(),
-            load,
-            Some(&record),
-            params,
-            now,
-        ) else {
+        let Some(evaluation) =
+            evaluate(&state.size, policy.into(), load, Some(&record), params, now)
+        else {
             return StateWrite::default();
         };
         if let Some(action) = &evaluation.action {
