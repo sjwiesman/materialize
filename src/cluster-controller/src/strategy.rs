@@ -32,6 +32,7 @@ use std::time::Duration;
 use mz_controller_types::ReplicaId;
 use mz_repr::{Timestamp, TimestampManipulation};
 
+use crate::load::{LoadParams, LoadSignals};
 use crate::ctx::{
     BurstAudit, BurstFinishCause, BurstRecord, BurstWrite, ClusterSchedule, ClusterState,
     CreateReason, OnTimeout, ReconfigurationAudit, ReconfigurationRecord, ReconfigurationStatus,
@@ -116,6 +117,8 @@ pub struct SignalRequest {
     /// Pull the refresh-window inputs (bound REFRESH MV frontiers, schedules,
     /// the current read timestamp).
     pub refresh_window: bool,
+    /// Pull the cluster's size ladder and window of load samples.
+    pub load: bool,
 }
 
 impl SignalRequest {
@@ -128,12 +131,14 @@ impl SignalRequest {
             readiness,
             hydratable_objects,
             refresh_window,
+            load,
         } = other;
         SignalRequest {
             hydration: self.hydration || hydration,
             readiness: self.readiness.union(&readiness).cloned().collect(),
             hydratable_objects: self.hydratable_objects || hydratable_objects,
             refresh_window: self.refresh_window || refresh_window,
+            load: self.load || load,
         }
     }
 }
@@ -149,6 +154,13 @@ pub struct ConfigSignals {
     /// The system-default burst linger duration, written into a new `burst`
     /// record when the policy's `linger_duration` is omitted.
     pub default_burst_linger: Duration,
+    /// Whether the `ON LOAD` strategy is enabled environment-wide (the
+    /// break-glass flag).
+    pub load_enabled: bool,
+    pub load: LoadParams,
+    /// The deadline the `ON LOAD` strategy gives the reconfigurations it
+    /// starts, the same default a user `ALTER` without `WITH (WAIT ...)` gets.
+    pub default_reconfiguration_timeout: Duration,
 }
 
 /// The fulfilled live signals for one cluster, fetched by the kernel per the
@@ -175,6 +187,8 @@ pub struct LiveSignals {
     /// [`ClusterControllerCtx::refresh_window_inputs`]:
     ///     crate::ctx::ClusterControllerCtx::refresh_window_inputs
     pub refresh_window: Option<RefreshWindowInputs>,
+    /// The load signal. `None` when not requested or unavailable.
+    pub load: Option<LoadSignals>,
 }
 
 /// The implicit baseline strategy, always present.

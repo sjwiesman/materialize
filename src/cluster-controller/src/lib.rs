@@ -34,11 +34,18 @@
 //! [`ClusterControllerCtx`]: crate::ctx::ClusterControllerCtx
 
 pub mod ctx;
+pub mod load;
 pub mod strategy;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mz_adapter_types::dyncfgs::{DEFAULT_HYDRATION_BURST_LINGER, ENABLE_HYDRATION_BURST};
+use mz_adapter_types::dyncfgs::{
+    DEFAULT_CLUSTER_RECONFIGURATION_TIMEOUT, DEFAULT_HYDRATION_BURST_LINGER,
+    ENABLE_HYDRATION_BURST, ENABLE_LOAD_AUTOSCALING, LOAD_AUTOSCALING_ACTIVATION_INTERVALS,
+    LOAD_AUTOSCALING_CATCH_UP, LOAD_AUTOSCALING_DEFAULT_SCALE_DOWN_AFTER,
+    LOAD_AUTOSCALING_MIN_PROGRESS_RATIO, LOAD_AUTOSCALING_POLICY_INTERVAL,
+    LOAD_AUTOSCALING_TARGET_MEMORY, LOAD_AUTOSCALING_TARGET_UTILIZATION, LOAD_AUTOSCALING_WARM_UP,
+};
 use mz_controller_types::ClusterId;
 use mz_dyncfg::ConfigSet;
 use mz_ore::soft_panic_or_log;
@@ -48,6 +55,7 @@ use crate::ctx::{
     CreateReason, Decision, ObservedReplica, ReconfigurationAudit, ReconfigurationRecord,
     ReconfigurationStatus, ReconfigurationWrite, RefreshWindowInputs, ReplicaShape, StateWrite,
 };
+use crate::load::{LoadParams, OnLoadStrategy};
 use crate::strategy::{
     BaselineStrategy, ConfigSignals, DesiredReplica, GracefulReconfigurationStrategy,
     HydrationBurstStrategy, LiveSignals, OnRefreshStrategy, SignalRequest, Strategy,
@@ -72,6 +80,7 @@ impl ClusterController {
                 Box::new(GracefulReconfigurationStrategy),
                 Box::new(OnRefreshStrategy),
                 Box::new(HydrationBurstStrategy),
+                Box::new(OnLoadStrategy),
             ],
             dyncfgs,
         }
@@ -83,6 +92,10 @@ impl ClusterController {
         ConfigSignals {
             burst_enabled: ENABLE_HYDRATION_BURST.get(&self.dyncfgs),
             default_burst_linger: DEFAULT_HYDRATION_BURST_LINGER.get(&self.dyncfgs),
+            load_enabled: ENABLE_LOAD_AUTOSCALING.get(&self.dyncfgs),
+            load: load_params(&self.dyncfgs),
+            default_reconfiguration_timeout: DEFAULT_CLUSTER_RECONFIGURATION_TIMEOUT
+                .get(&self.dyncfgs),
         }
     }
 
@@ -312,6 +325,11 @@ impl ClusterController {
                 writes.iter().map(|w| w.burst.clone()),
                 &mut conflicts,
             ),
+            load: join(
+                "load",
+                writes.iter().map(|w| w.load.clone()),
+                &mut conflicts,
+            ),
         };
 
         if !conflicts.is_empty() {
@@ -399,6 +417,9 @@ impl ClusterController {
                     }
                 }
             }
+            if request.load {
+                live.load = ctx.load_signals(state.cluster_id).await;
+            }
             if request.refresh_window {
                 refresh_window_clusters.push(state.cluster_id);
             }
@@ -450,6 +471,23 @@ impl ClusterController {
             .collect();
 
         reconcile_replicas(state, &contributions)
+    }
+}
+
+/// The load model's tunables as currently configured. Shared with the
+/// environment, which applies the same parameters when it takes load samples.
+pub fn load_params(dyncfgs: &ConfigSet) -> LoadParams {
+    // Float-to-int `as` saturates, so an out-of-range ratio clamps.
+    let permille = |ratio: f64| (ratio.clamp(0.0, 1.0) * 1000.0) as u32;
+    LoadParams {
+        policy_interval: LOAD_AUTOSCALING_POLICY_INTERVAL.get(dyncfgs),
+        target_utilization: permille(LOAD_AUTOSCALING_TARGET_UTILIZATION.get(dyncfgs)),
+        target_memory: permille(LOAD_AUTOSCALING_TARGET_MEMORY.get(dyncfgs)),
+        activation_intervals: LOAD_AUTOSCALING_ACTIVATION_INTERVALS.get(dyncfgs),
+        default_scale_down_after: LOAD_AUTOSCALING_DEFAULT_SCALE_DOWN_AFTER.get(dyncfgs),
+        warm_up: LOAD_AUTOSCALING_WARM_UP.get(dyncfgs),
+        catch_up: LOAD_AUTOSCALING_CATCH_UP.get(dyncfgs),
+        min_progress: permille(LOAD_AUTOSCALING_MIN_PROGRESS_RATIO.get(dyncfgs)),
     }
 }
 

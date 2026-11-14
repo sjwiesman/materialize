@@ -40,9 +40,12 @@ use timely::progress::Antichain;
 // ctx vocabulary, so re-export them here.
 pub use mz_adapter_types::cluster_state::{
     AutoScalingPolicy, AvailabilityZones, BurstAudit, BurstFinishCause, BurstRecord,
-    ClusterSchedule, ExpectedClusterState, OnHydrationPolicy, OnTimeout, ReconfigurationAudit,
-    ReconfigurationRecord, ReconfigurationStatus, ReconfigurationTarget, ReplicaShape,
+    ClusterSchedule, ExpectedClusterState, LoadAudit, LoadRecord, OnHydrationPolicy, OnLoadPolicy,
+    OnTimeout, ReconfigurationAudit, ReconfigurationOrigin, ReconfigurationRecord,
+    ReconfigurationStatus, ReconfigurationTarget, ReplicaShape,
 };
+
+use crate::load::LoadSignals;
 
 /// A replica that actually exists on a cluster, as observed through the ctx.
 /// Every replica physically on the cluster appears here, whether or not the
@@ -240,6 +243,8 @@ pub struct ClusterState {
     pub reconfiguration: Option<ReconfigurationRecord>,
     /// In-flight hydration burst, if any.
     pub burst: Option<BurstRecord>,
+    /// The `ON LOAD` strategy's bookkeeping, if any.
+    pub load: Option<LoadRecord>,
     /// The replicas that actually exist on the cluster, owned or not.
     pub replicas: Vec<ObservedReplica>,
 }
@@ -268,6 +273,7 @@ impl ClusterState {
             auto_scaling_policy: self.auto_scaling_policy.clone(),
             reconfiguration: self.reconfiguration.clone(),
             burst: self.burst.clone(),
+            load: self.load.clone(),
         }
     }
 }
@@ -290,6 +296,9 @@ pub struct StateWrite {
     /// Write or clear the burst record, together with its audit intent.
     /// `None` leaves the record unchanged.
     pub burst: Option<BurstWrite>,
+    /// Write or clear the load record, together with its audit intent. `None`
+    /// leaves the record unchanged.
+    pub load: Option<LoadWrite>,
 }
 
 /// A write to the `reconfiguration` record, bundled with the audit intent
@@ -318,6 +327,17 @@ pub struct BurstWrite {
     pub audit: Option<BurstAudit>,
 }
 
+/// A write to the `load` record, bundled with its audit intent. See
+/// [`ReconfigurationWrite`]. One write can carry several transitions, for
+/// example a backoff together with the reconfiguration that reverts to the
+/// old size. A bookkeeping rewrite carries none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadWrite {
+    /// The record to write, or `None` to clear it.
+    pub record: Option<LoadRecord>,
+    pub audit: Vec<LoadAudit>,
+}
+
 impl StateWrite {
     /// Whether this write would actually mutate any durable field.
     pub fn is_empty(&self) -> bool {
@@ -331,6 +351,7 @@ impl StateWrite {
             new_arrangement_compression,
             reconfiguration,
             burst,
+            load,
         } = self;
         new_size.is_none()
             && new_replication_factor.is_none()
@@ -339,6 +360,7 @@ impl StateWrite {
             && new_arrangement_compression.is_none()
             && reconfiguration.is_none()
             && burst.is_none()
+            && load.is_none()
     }
 }
 
@@ -472,6 +494,14 @@ pub trait ClusterControllerCtx: Send {
         &mut self,
         cluster_ids: &[ClusterId],
     ) -> Option<RefreshWindowInputsBatch>;
+
+    /// The load signal for `cluster_id`: its size ladder and the window of load
+    /// samples the environment has collected. `None` when the signal is
+    /// unavailable, in which case the load strategy does nothing this tick.
+    ///
+    /// The window is held in memory by the environment and starts empty after
+    /// a restart.
+    async fn load_signals(&mut self, cluster_id: ClusterId) -> Option<LoadSignals>;
 
     /// Apply a tick's batch of decisions under their compare-and-append guards.
     /// Each decision carries the [`ExpectedClusterState`] it was derived from;

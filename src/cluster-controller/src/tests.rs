@@ -29,9 +29,10 @@ use crate::ClusterController;
 use crate::ctx::{
     ApplyOutcome, AutoScalingPolicy, AvailabilityZones, BurstAudit, ClusterControllerCtx,
     ClusterSchedule, ClusterState, CreateReason, Decision, ObservedReplica, ReconfigurationAudit,
-    ReconfigurationStatus, RefreshWindowClusterInputs, RefreshWindowInputs,
+    ReconfigurationOrigin, ReconfigurationStatus, RefreshWindowClusterInputs, RefreshWindowInputs,
     RefreshWindowInputsBatch, ReplicaShape, StateWrite,
 };
+use crate::load::LoadSignals;
 use crate::strategy::{ConfigSignals, DesiredReplica, LiveSignals, Strategy};
 
 /// A controller over the crate's dyncfgs at their defaults: burst enabled (the
@@ -47,6 +48,7 @@ fn config() -> ConfigSignals {
     ConfigSignals {
         burst_enabled: true,
         default_burst_linger: Duration::ZERO,
+        ..Default::default()
     }
 }
 
@@ -110,6 +112,7 @@ fn state(
         auto_scaling_policy: None,
         reconfiguration: None,
         burst: None,
+        load: None,
         replicas,
     }
 }
@@ -157,6 +160,8 @@ struct FakeCtx {
     /// pose the state this gate exists for: hydrated but still behind.
     ready: BTreeSet<ReplicaId>,
     ready_by_reference: BTreeMap<BTreeSet<ReplicaId>, BTreeSet<ReplicaId>>,
+    /// The load signal the fake reports per cluster.
+    load_signals: BTreeMap<ClusterId, LoadSignals>,
     /// How many times the controller probed hydration, for asserting that an
     /// object-less cluster is never probed.
     hydration_probes: usize,
@@ -190,6 +195,7 @@ impl FakeCtx {
             hydrated: BTreeSet::new(),
             ready: BTreeSet::new(),
             ready_by_reference: BTreeMap::new(),
+            load_signals: BTreeMap::new(),
             hydration_probes: 0,
             readiness_references: Vec::new(),
             has_hydratable_objects: BTreeMap::new(),
@@ -295,6 +301,10 @@ impl ClusterControllerCtx for FakeCtx {
             .get(&cluster_id)
             .copied()
             .unwrap_or(false)
+    }
+
+    async fn load_signals(&mut self, cluster_id: ClusterId) -> Option<LoadSignals> {
+        self.load_signals.get(&cluster_id).cloned()
     }
 
     async fn refresh_window_inputs(
@@ -419,6 +429,7 @@ impl FakeCtx {
                     new_arrangement_compression,
                     reconfiguration,
                     burst,
+                    load,
                 } = write;
                 if let Some(size) = new_size {
                     state.size = size.clone();
@@ -440,6 +451,9 @@ impl FakeCtx {
                 }
                 if let Some(burst) = burst {
                     state.burst = burst.record.clone();
+                }
+                if let Some(load) = load {
+                    state.load = load.record.clone();
                 }
             }
             Decision::CreateReplica {
@@ -874,6 +888,7 @@ async fn caa_conflict_is_rejected_and_recovered() {
                         deadline: now,
                         on_timeout: OnTimeout::Rollback,
                         status: ReconfigurationStatus::InProgress,
+                        origin: ReconfigurationOrigin::User,
                     }),
                     audit: None,
                 }),
@@ -942,6 +957,7 @@ async fn caa_conflict_is_rejected_and_recovered() {
                 auto_scaling_policy: None,
                 reconfiguration: None,
                 burst: None,
+                load: None,
             }
         );
         if let Some(record) = write
@@ -1042,6 +1058,7 @@ async fn create_drop_is_caa_guarded_and_recovers() {
                 auto_scaling_policy: None,
                 reconfiguration: None,
                 burst: None,
+                load: None,
             }
         );
     } else {
@@ -1292,6 +1309,7 @@ fn record_on_timeout(
         deadline: Timestamp::from(deadline),
         on_timeout,
         status: ReconfigurationStatus::InProgress,
+        origin: ReconfigurationOrigin::User,
     }
 }
 
@@ -1321,6 +1339,7 @@ fn reconfiguring_state(
         auto_scaling_policy: None,
         reconfiguration: Some(rec),
         burst: None,
+        load: None,
         replicas,
     };
     let signals = LiveSignals {
@@ -1900,8 +1919,10 @@ fn graceful_az_only_reconfiguration_is_a_shape_change() {
             deadline: Timestamp::from(5000u64),
             on_timeout: OnTimeout::Rollback,
             status: ReconfigurationStatus::InProgress,
+            origin: ReconfigurationOrigin::User,
         }),
         burst: None,
+        load: None,
         replicas: vec![ObservedReplica {
             replica_id: replica(1),
             name: "r0".to_string(),
@@ -2434,6 +2455,7 @@ async fn forced_cutover_swap_preserves_the_burst_replica() {
             hydration_size: "400cc".to_string(),
             linger_duration: Some(Duration::from_secs(60)),
         }),
+        on_load: None,
     });
     state.burst = Some(BurstRecord {
         burst_size: "400cc".to_string(),
@@ -2488,6 +2510,7 @@ async fn resource_exhaustion_leaves_an_unaffordable_burst_armed() {
             hydration_size: "400cc".to_string(),
             linger_duration: Some(Duration::from_secs(60)),
         }),
+        on_load: None,
     });
     state.burst = Some(BurstRecord {
         burst_size: "400cc".to_string(),
@@ -2589,6 +2612,7 @@ fn scheduled_state(
         auto_scaling_policy: None,
         reconfiguration: None,
         burst: None,
+        load: None,
         replicas,
     };
     let signals = LiveSignals {
@@ -3243,6 +3267,7 @@ mod hydration_burst {
                 hydration_size: hydration_size.to_string(),
                 linger_duration: Some(linger),
             }),
+            on_load: None,
         });
         s.burst = burst;
         // Most burst cases have something to hydrate; tests for the object
@@ -3306,6 +3331,7 @@ mod hydration_burst {
                 hydration_size: "400cc".to_string(),
                 linger_duration: None,
             }),
+            on_load: None,
         });
         let config = ConfigSignals {
             default_burst_linger: Duration::from_secs(42),
@@ -3963,6 +3989,7 @@ mod hydration_burst {
                 hydration_size: "400cc".into(),
                 linger_duration: Some(Duration::from_millis(100)),
             }),
+            on_load: None,
         });
         let write = controller().merge_state_writes(
             &state,

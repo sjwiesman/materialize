@@ -160,6 +160,7 @@ Distinct
 Doc
 Dot
 Double
+Down
 Drop
 Duration
 Eager

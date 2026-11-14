@@ -552,6 +552,76 @@ pub const DEFAULT_HYDRATION_BURST_LINGER: Config<Duration> = Config::new(
     ParameterScope::Environment,
 );
 
+/// Break-glass for the `ON LOAD` autoscaling strategy. When off the controller
+/// never resizes a cluster for load. Load recommendations are still computed
+/// and the other strategies are unaffected.
+pub const ENABLE_LOAD_AUTOSCALING: Config<bool> = Config::new(
+    "enable_load_autoscaling",
+    false,
+    "Whether the cluster controller's ON LOAD strategy may resize clusters (break-glass; leaves load recommendations and the other strategies untouched).",
+    ParameterScope::Environment,
+);
+
+/// How often a load sample is taken per cluster. Also the unit of
+/// `load_autoscaling_activation_intervals`.
+pub const LOAD_AUTOSCALING_POLICY_INTERVAL: Config<Duration> = Config::new(
+    "load_autoscaling_policy_interval",
+    Duration::from_secs(60),
+    "How often the ON LOAD strategy samples a cluster's load.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_TARGET_UTILIZATION: Config<f64> = Config::new(
+    "load_autoscaling_target_utilization",
+    0.7,
+    "The fraction of a size's CPU capacity the ON LOAD strategy sizes a cluster's CPU demand to.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_TARGET_MEMORY: Config<f64> = Config::new(
+    "load_autoscaling_target_memory",
+    0.8,
+    "The fraction of a size's memory the ON LOAD strategy sizes a cluster's memory demand to.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_ACTIVATION_INTERVALS: Config<usize> = Config::new(
+    "load_autoscaling_activation_intervals",
+    3,
+    "How many consecutive load samples must call for a larger size before the ON LOAD strategy scales up.",
+    ParameterScope::Environment,
+);
+
+/// The scale-down window used when a cluster's `ON LOAD` policy omits
+/// `SCALE DOWN AFTER`.
+pub const LOAD_AUTOSCALING_DEFAULT_SCALE_DOWN_AFTER: Config<Duration> = Config::new(
+    "load_autoscaling_default_scale_down_after",
+    Duration::from_secs(60 * 60),
+    "How long a cluster's load must have fit a smaller size before the ON LOAD strategy scales down, when the policy omits SCALE DOWN AFTER.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_WARM_UP: Config<Duration> = Config::new(
+    "load_autoscaling_warm_up",
+    Duration::from_secs(5 * 60),
+    "How long after a replica hydrates, or the cluster changes size, load samples are ignored.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_CATCH_UP: Config<Duration> = Config::new(
+    "load_autoscaling_catch_up",
+    Duration::from_secs(15 * 60),
+    "The time within which the ON LOAD strategy sizes a lagging dataflow to catch up.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_MIN_PROGRESS_RATIO: Config<f64> = Config::new(
+    "load_autoscaling_min_progress_ratio",
+    0.25,
+    "The floor on a dataflow's measured progress ratio. Bounds a single ON LOAD scale-up at the inverse of this factor.",
+    ParameterScope::Environment,
+);
+
 /// Adds the full set of all adapter `Config`s.
 pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
     configs
@@ -563,6 +633,15 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&DEFAULT_CLUSTER_RECONFIGURATION_TIMEOUT)
         .add(&ENABLE_HYDRATION_BURST)
         .add(&DEFAULT_HYDRATION_BURST_LINGER)
+        .add(&ENABLE_LOAD_AUTOSCALING)
+        .add(&LOAD_AUTOSCALING_POLICY_INTERVAL)
+        .add(&LOAD_AUTOSCALING_TARGET_UTILIZATION)
+        .add(&LOAD_AUTOSCALING_TARGET_MEMORY)
+        .add(&LOAD_AUTOSCALING_ACTIVATION_INTERVALS)
+        .add(&LOAD_AUTOSCALING_DEFAULT_SCALE_DOWN_AFTER)
+        .add(&LOAD_AUTOSCALING_WARM_UP)
+        .add(&LOAD_AUTOSCALING_CATCH_UP)
+        .add(&LOAD_AUTOSCALING_MIN_PROGRESS_RATIO)
         .add(&WITH_0DT_DEPLOYMENT_MAX_WAIT)
         .add(&WITH_0DT_DEPLOYMENT_DDL_CHECK_INTERVAL)
         .add(&ENABLE_0DT_DEPLOYMENT_PANIC_AFTER_TIMEOUT)
