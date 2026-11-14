@@ -3511,6 +3511,17 @@ class FlipFlagsAction(Action):
             "read_then_write_max_dependencies",
             "enable_hydration_burst",
             "default_hydration_burst_linger",
+            # The load strategy's break-glass and tuning. The workload does
+            # not model size changes the strategy would start.
+            "enable_load_autoscaling",
+            "load_autoscaling_policy_interval",
+            "load_autoscaling_target_utilization",
+            "load_autoscaling_target_memory",
+            "load_autoscaling_activation_intervals",
+            "load_autoscaling_default_scale_down_after",
+            "load_autoscaling_warm_up",
+            "load_autoscaling_catch_up",
+            "load_autoscaling_min_progress_ratio",
             # The graceful cut-over lag gate. Flipping the gate off or the
             # allowance to an arbitrary value mid-reconfiguration changes when a
             # cut-over fires, which the workload does not model.

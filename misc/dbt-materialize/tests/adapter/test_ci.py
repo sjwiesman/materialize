@@ -312,6 +312,57 @@ class TestClusterOps:
         assert strategy is not None, "Autoscaling strategy was not configured"
         assert strategy[0] == "scale=1,workers=2"
 
+    def test_create_cluster_with_on_load_strategy(self, project):
+        run_dbt(
+            [
+                "run-operation",
+                "create_cluster",
+                "--args",
+                '{"cluster_name": "test_autoscaling", "size": "scale=1,workers=2", "auto_scaling_strategy": {"on_hydration": {"hydration_size": "scale=1,workers=8"}, "on_load": {"min_size": "scale=1,workers=1", "max_size": "scale=1,workers=4", "scale_down_after": "30m"}}, "force_deploy_suffix": false}',
+            ]
+        )
+
+        strategy = get_cluster_auto_scaling_strategy(project, "test_autoscaling")
+        assert strategy is not None, "Autoscaling strategy was not configured"
+        assert strategy[0] == "scale=1,workers=8"
+        on_load = project.run_sql(
+            """
+            SELECT
+                s.strategy->'on_load'->>'min_size',
+                s.strategy->'on_load'->>'max_size',
+                (s.strategy->'on_load'->'scale_down_after'->>'secs')::bigint
+            FROM mz_internal.mz_cluster_auto_scaling_strategies s
+            JOIN mz_clusters c ON c.id = s.cluster_id
+            WHERE c.name = 'test_autoscaling'
+            """,
+            fetch="one",
+        )
+        assert on_load[0] == "scale=1,workers=1"
+        assert on_load[1] == "scale=1,workers=4"
+        assert on_load[2] == 1800
+
+        # Missing max_size
+        run_dbt(
+            [
+                "run-operation",
+                "alter_cluster_auto_scaling_strategy",
+                "--args",
+                '{"cluster_name": "test_autoscaling", "auto_scaling_strategy": {"on_load": {"min_size": "scale=1,workers=1"}}}',
+            ],
+            expect_pass=False,
+        )
+
+        # The server rejects a range that does not hold the cluster size.
+        run_dbt(
+            [
+                "run-operation",
+                "alter_cluster_auto_scaling_strategy",
+                "--args",
+                '{"cluster_name": "test_autoscaling", "auto_scaling_strategy": {"on_load": {"min_size": "scale=1,workers=4", "max_size": "scale=1,workers=8"}}}',
+            ],
+            expect_pass=False,
+        )
+
     def test_create_cluster_auto_scaling_strategy_validation(self, project):
         # Hydration size equal to the cluster size is a no-op burst
         run_dbt(

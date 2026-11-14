@@ -28,8 +28,10 @@ use crate::durable::objects::{
     SystemPrivilegesValue, TxnWalShardValue, UnfinalizedShardKey,
 };
 use crate::durable::{
-    BurstState, ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
-    ReconfigurationStatus, ReconfigurationTarget, ReplicaConfig, ReplicaLocation,
+    BurstState, ClusterConfig, ClusterVariant, ClusterVariantManaged, LoadAttempt,
+    LoadAttemptPhase, LoadBackoff, LoadDirection, LoadHold, LoadState, ReconfigurationOrigin,
+    ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget, ReplicaConfig,
+    ReplicaLocation,
 };
 
 use super::{RoleAuthKey, RoleAuthValue};
@@ -88,6 +90,7 @@ impl RustType<proto::ClusterVariant> for ClusterVariant {
                 auto_scaling_strategy,
                 reconfiguration,
                 burst,
+                load,
             }) => proto::ClusterVariant::Managed(proto::ManagedCluster {
                 size: size.to_string(),
                 availability_zones: availability_zones.clone(),
@@ -99,6 +102,7 @@ impl RustType<proto::ClusterVariant> for ClusterVariant {
                 auto_scaling_strategy: auto_scaling_strategy.into_proto(),
                 reconfiguration: reconfiguration.into_proto(),
                 burst: burst.into_proto(),
+                load: load.into_proto(),
             }),
             ClusterVariant::Unmanaged => proto::ClusterVariant::Unmanaged,
         }
@@ -118,6 +122,7 @@ impl RustType<proto::ClusterVariant> for ClusterVariant {
                 auto_scaling_strategy: managed.auto_scaling_strategy.into_rust()?,
                 reconfiguration: managed.reconfiguration.into_rust()?,
                 burst: managed.burst.into_rust()?,
+                load: managed.load.into_rust()?,
             })),
         }
     }
@@ -130,6 +135,7 @@ impl RustType<proto::ReconfigurationState> for ReconfigurationState {
             deadline: self.deadline.into(),
             on_timeout: self.on_timeout.into_proto(),
             status: self.status.into_proto(),
+            origin: self.origin.into_proto(),
         }
     }
 
@@ -139,6 +145,7 @@ impl RustType<proto::ReconfigurationState> for ReconfigurationState {
             deadline: mz_repr::Timestamp::new(proto.deadline),
             on_timeout: proto.on_timeout.into_rust()?,
             status: proto.status.into_rust()?,
+            origin: proto.origin.into_rust()?,
         })
     }
 }
@@ -205,6 +212,132 @@ impl RustType<proto::BurstState> for BurstState {
             burst_size: proto.burst_size,
             linger_duration: proto.linger_duration.into_rust()?,
             steady_ready_at: proto.steady_ready_at.map(mz_repr::Timestamp::new),
+        })
+    }
+}
+
+impl RustType<proto::ReconfigurationOrigin> for ReconfigurationOrigin {
+    fn into_proto(&self) -> proto::ReconfigurationOrigin {
+        match self {
+            ReconfigurationOrigin::User => proto::ReconfigurationOrigin::User,
+            ReconfigurationOrigin::LoadAutoscaling => proto::ReconfigurationOrigin::LoadAutoscaling,
+        }
+    }
+
+    fn from_proto(proto: proto::ReconfigurationOrigin) -> Result<Self, TryFromProtoError> {
+        Ok(match proto {
+            proto::ReconfigurationOrigin::User => ReconfigurationOrigin::User,
+            proto::ReconfigurationOrigin::LoadAutoscaling => ReconfigurationOrigin::LoadAutoscaling,
+        })
+    }
+}
+
+impl RustType<proto::LoadState> for LoadState {
+    fn into_proto(&self) -> proto::LoadState {
+        proto::LoadState {
+            attempt: self.attempt.into_proto(),
+            last_cutover: self.last_cutover.map(Into::into),
+            backoff: self.backoff.into_proto(),
+            hold: self.hold.into_proto(),
+        }
+    }
+
+    fn from_proto(proto: proto::LoadState) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            attempt: proto.attempt.into_rust()?,
+            last_cutover: proto.last_cutover.map(mz_repr::Timestamp::new),
+            backoff: proto.backoff.into_rust()?,
+            hold: proto.hold.into_rust()?,
+        })
+    }
+}
+
+impl RustType<proto::LoadAttempt> for LoadAttempt {
+    fn into_proto(&self) -> proto::LoadAttempt {
+        proto::LoadAttempt {
+            from_size: self.from_size.clone(),
+            target_size: self.target_size.clone(),
+            deadline: self.deadline.into(),
+            progress_before: self.progress_before,
+            phase: self.phase.into_proto(),
+        }
+    }
+
+    fn from_proto(proto: proto::LoadAttempt) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            from_size: proto.from_size,
+            target_size: proto.target_size,
+            deadline: mz_repr::Timestamp::new(proto.deadline),
+            progress_before: proto.progress_before,
+            phase: proto.phase.into_rust()?,
+        })
+    }
+}
+
+impl RustType<proto::LoadAttemptPhase> for LoadAttemptPhase {
+    fn into_proto(&self) -> proto::LoadAttemptPhase {
+        match self {
+            LoadAttemptPhase::Reconfiguring => proto::LoadAttemptPhase::Reconfiguring,
+            LoadAttemptPhase::Evaluating => proto::LoadAttemptPhase::Evaluating,
+        }
+    }
+
+    fn from_proto(proto: proto::LoadAttemptPhase) -> Result<Self, TryFromProtoError> {
+        Ok(match proto {
+            proto::LoadAttemptPhase::Reconfiguring => LoadAttemptPhase::Reconfiguring,
+            proto::LoadAttemptPhase::Evaluating => LoadAttemptPhase::Evaluating,
+        })
+    }
+}
+
+impl RustType<proto::LoadBackoff> for LoadBackoff {
+    fn into_proto(&self) -> proto::LoadBackoff {
+        proto::LoadBackoff {
+            size: self.size.clone(),
+            direction: self.direction.into_proto(),
+            until: self.until.into(),
+            failures: self.failures,
+        }
+    }
+
+    fn from_proto(proto: proto::LoadBackoff) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            size: proto.size,
+            direction: proto.direction.into_rust()?,
+            until: mz_repr::Timestamp::new(proto.until),
+            failures: proto.failures,
+        })
+    }
+}
+
+impl RustType<proto::LoadDirection> for LoadDirection {
+    fn into_proto(&self) -> proto::LoadDirection {
+        match self {
+            LoadDirection::Up => proto::LoadDirection::Up,
+            LoadDirection::Down => proto::LoadDirection::Down,
+        }
+    }
+
+    fn from_proto(proto: proto::LoadDirection) -> Result<Self, TryFromProtoError> {
+        Ok(match proto {
+            proto::LoadDirection::Up => LoadDirection::Up,
+            proto::LoadDirection::Down => LoadDirection::Down,
+        })
+    }
+}
+
+impl RustType<proto::LoadHold> for LoadHold {
+    fn into_proto(&self) -> proto::LoadHold {
+        match self {
+            LoadHold::SkewLimited => proto::LoadHold::SkewLimited,
+            LoadHold::BackingOff => proto::LoadHold::BackingOff,
+        }
+    }
+
+    fn from_proto(proto: proto::LoadHold) -> Result<Self, TryFromProtoError> {
+        Ok(match proto {
+            proto::LoadHold::SkewLimited => LoadHold::SkewLimited,
+            proto::LoadHold::BackingOff => LoadHold::BackingOff,
         })
     }
 }

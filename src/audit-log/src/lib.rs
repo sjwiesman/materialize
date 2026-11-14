@@ -241,6 +241,9 @@ pub enum EventDetails {
     RenameClusterReplicaV1(RenameClusterReplicaV1),
     AlterClusterReconfigurationV1(AlterClusterReconfigurationV1),
     ClusterHydrationBurstV1(ClusterHydrationBurstV1),
+    ClusterLoadScaleV1(ClusterLoadScaleV1),
+    ClusterLoadBackoffV1(ClusterLoadBackoffV1),
+    ClusterLoadHoldV1(ClusterLoadHoldV1),
     RenameItemV1(RenameItemV1),
     IdNameV1(IdNameV1),
     SchemaV1(SchemaV1),
@@ -428,6 +431,33 @@ pub struct AlterClusterReconfigurationV1 {
     pub target_availability_zones: Vec<String>,
     pub target_logging: ClusterReplicaLoggingV1,
     pub deadline: Option<u64>,
+    /// Who wrote the reconfiguration record. `None` on events recorded before
+    /// origins existed, all of which were written by `ALTER CLUSTER`.
+    #[serde(default)]
+    pub origin: Option<ReconfigurationOriginV1>,
+}
+
+/// Who wrote a reconfiguration record.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReconfigurationOriginV1 {
+    /// An `ALTER CLUSTER` statement.
+    User,
+    /// The `ON LOAD` autoscaling strategy. The decision is recorded in the
+    /// [`ClusterLoadScaleV1`] event of the same transaction.
+    LoadAutoscaling,
 }
 
 /// A managed cluster's introspection-logging config, recorded on a
@@ -546,6 +576,148 @@ pub struct ClusterHydrationBurstV1 {
     pub finish_cause: Option<BurstFinishCauseV1>,
     /// The size of the burst replica the record runs.
     pub burst_size: String,
+}
+
+/// Why the `ON LOAD` autoscaling strategy started a reconfiguration.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadScaleReasonV1 {
+    /// The load over the activation window calls for a larger size.
+    ScaleUp,
+    /// A replica at the realized size was killed for exceeding its memory.
+    OutOfMemory,
+    /// The load over the scale-down window fits a smaller size.
+    ScaleDown,
+    /// A lag-motivated scale-up did not improve progress and is reverted.
+    IneffectiveScaleUp,
+}
+
+/// The `ON LOAD` autoscaling strategy started a reconfiguration from
+/// `from_size` to `target_size`.
+///
+/// The reconfiguration's own lifecycle is recorded as
+/// [`AlterClusterReconfigurationV1`] events with a
+/// [`ReconfigurationOriginV1::LoadAutoscaling`] origin. This event records the
+/// decision: the reason and the demand the target was sized from.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct ClusterLoadScaleV1 {
+    pub cluster_id: String,
+    pub cluster_name: String,
+    pub from_size: String,
+    pub target_size: String,
+    pub reason: LoadScaleReasonV1,
+    pub cpu_demand_millicores: u64,
+    pub memory_demand_bytes: u64,
+}
+
+/// The direction of a size change the `ON LOAD` strategy is backing off from.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadDirectionV1 {
+    /// A scale-up to the size or any larger one is blocked.
+    Up,
+    /// A scale-down to the size or any smaller one is blocked.
+    Down,
+}
+
+/// A size failed as a target of the `ON LOAD` autoscaling strategy and is not
+/// retried in `direction` before `until`, a millisecond `mz_timestamp`.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct ClusterLoadBackoffV1 {
+    pub cluster_id: String,
+    pub cluster_name: String,
+    pub size: String,
+    pub direction: LoadDirectionV1,
+    pub until: u64,
+}
+
+/// Why the `ON LOAD` autoscaling strategy is declining to act.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadHoldV1 {
+    /// A dataflow is behind and one worker is saturated, but the load does not
+    /// call for a larger size.
+    SkewLimited,
+    /// The size the load calls for recently failed as a target.
+    BackingOff,
+}
+
+/// The `ON LOAD` autoscaling strategy entered a hold, or left its hold when
+/// `hold` is `None`.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct ClusterLoadHoldV1 {
+    pub cluster_id: String,
+    pub cluster_name: String,
+    pub hold: Option<LoadHoldV1>,
 }
 
 #[derive(
@@ -1420,6 +1592,11 @@ impl EventDetails {
             EventDetails::ClusterHydrationBurstV1(v) => {
                 serde_json::to_value(v).expect("must serialize")
             }
+            EventDetails::ClusterLoadScaleV1(v) => serde_json::to_value(v).expect("must serialize"),
+            EventDetails::ClusterLoadBackoffV1(v) => {
+                serde_json::to_value(v).expect("must serialize")
+            }
+            EventDetails::ClusterLoadHoldV1(v) => serde_json::to_value(v).expect("must serialize"),
             EventDetails::RenameItemV1(v) => serde_json::to_value(v).expect("must serialize"),
             EventDetails::IdNameV1(v) => serde_json::to_value(v).expect("must serialize"),
             EventDetails::SchemaV1(v) => serde_json::to_value(v).expect("must serialize"),

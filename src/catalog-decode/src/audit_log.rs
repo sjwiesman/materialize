@@ -182,11 +182,47 @@ pub fn details(a: JsonbRef<'_>) -> Result<Jsonb, String> {
             ],
         ),
         (
+            "AlterClusterReconfigurationV1",
+            "",
+            "origin",
+            WrapKind::Double,
+            &[("User", "user"), ("LoadAutoscaling", "load-autoscaling")],
+        ),
+        (
             "ClusterHydrationBurstV1",
             "",
             "transition",
             WrapKind::Double,
             &[("Started", "started"), ("Finished", "finished")],
+        ),
+        (
+            "ClusterLoadScaleV1",
+            "",
+            "reason",
+            WrapKind::Double,
+            &[
+                ("ScaleUp", "scale-up"),
+                ("OutOfMemory", "out-of-memory"),
+                ("ScaleDown", "scale-down"),
+                ("IneffectiveScaleUp", "ineffective-scale-up"),
+            ],
+        ),
+        (
+            "ClusterLoadBackoffV1",
+            "",
+            "direction",
+            WrapKind::Double,
+            &[("Up", "up"), ("Down", "down")],
+        ),
+        (
+            "ClusterLoadHoldV1",
+            "",
+            "hold",
+            WrapKind::Double,
+            &[
+                ("SkewLimited", "skew-limited"),
+                ("BackingOff", "backing-off"),
+            ],
         ),
         (
             "ClusterHydrationBurstV1",
@@ -910,6 +946,85 @@ mod tests {
                 "transition": "started",
                 "finish_cause": null,
                 "burst_size": "small"
+            }"#,
+        );
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)] // error: unsupported operation: can't call foreign function `decContextDefault` on OS `linux`
+    fn enum_double_wrap_load_autoscaling() {
+        check(
+            r#"{"ClusterLoadScaleV1": {
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "from_size": "small",
+                "target_size": "large",
+                "reason": {"reason": {"IneffectiveScaleUp": {}}},
+                "cpu_demand_millicores": 1500,
+                "memory_demand_bytes": 1024
+            }}"#,
+            r#"{
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "from_size": "small",
+                "target_size": "large",
+                "reason": "ineffective-scale-up",
+                "cpu_demand_millicores": 1500,
+                "memory_demand_bytes": 1024
+            }"#,
+        );
+        check(
+            r#"{"ClusterLoadBackoffV1": {
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "size": "small",
+                "direction": {"direction": {"Down": {}}},
+                "until": 42
+            }}"#,
+            r#"{
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "size": "small",
+                "direction": "down",
+                "until": 42
+            }"#,
+        );
+        check(
+            r#"{"ClusterLoadHoldV1": {
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "hold": {"hold": {"SkewLimited": {}}}
+            }}"#,
+            r#"{"cluster_id": "u1", "cluster_name": "c", "hold": "skew-limited"}"#,
+        );
+        check(
+            r#"{"ClusterLoadHoldV1": {"cluster_id": "u1", "cluster_name": "c", "hold": null}}"#,
+            r#"{"cluster_id": "u1", "cluster_name": "c", "hold": null}"#,
+        );
+        check(
+            r#"{"AlterClusterReconfigurationV1": {
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "transition": {"transition": {"Started": {}}},
+                "forced": null,
+                "target_size": "small",
+                "target_replication_factor": 1,
+                "target_availability_zones": [],
+                "target_logging": {"log_logging": false, "interval": null},
+                "deadline": 7,
+                "origin": {"origin": {"LoadAutoscaling": {}}}
+            }}"#,
+            r#"{
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "transition": "started",
+                "forced": null,
+                "target_size": "small",
+                "target_replication_factor": 1,
+                "target_availability_zones": [],
+                "target_logging": {"log_logging": false, "interval": null},
+                "deadline": 7,
+                "origin": "load-autoscaling"
             }"#,
         );
     }

@@ -14,6 +14,8 @@ use mz_audit_log::{
     AlterAddColumnV1, AlterApplyReplacementV1, AlterClusterReconfigurationV1,
     AlterDefaultPrivilegeV1, AlterRetainHistoryV1, AlterSetClusterV1, AlterSourceSinkV1,
     AlterSourceTimestampIntervalV1, BurstFinishCauseV1, ClusterHydrationBurstV1,
+    ClusterLoadBackoffV1, ClusterLoadHoldV1, ClusterLoadScaleV1, LoadDirectionV1, LoadHoldV1,
+    LoadScaleReasonV1, ReconfigurationOriginV1,
     ClusterReplicaLoggingV1, CreateClusterReplicaV1, CreateClusterReplicaV2,
     CreateClusterReplicaV3, CreateClusterReplicaV4, CreateIndexV1, CreateMaterializedViewV1,
     CreateOrDropClusterReplicaReasonV1, CreateRoleV1, CreateSourceSinkV1, CreateSourceSinkV2,
@@ -310,6 +312,7 @@ impl RustType<proto::audit_log_event_v1::AlterClusterReconfigurationV1>
             target_availability_zones: self.target_availability_zones.clone(),
             target_logging: self.target_logging.into_proto(),
             deadline: self.deadline,
+            origin: self.origin.map(|origin| origin.into_proto()),
         }
     }
 
@@ -326,6 +329,7 @@ impl RustType<proto::audit_log_event_v1::AlterClusterReconfigurationV1>
             target_availability_zones: proto.target_availability_zones,
             target_logging: proto.target_logging.into_rust()?,
             deadline: proto.deadline,
+            origin: proto.origin.map(|origin| origin.into_rust()).transpose()?,
         })
     }
 }
@@ -413,6 +417,166 @@ impl RustType<proto::audit_log_event_v1::ClusterHydrationBurstV1> for ClusterHyd
                 .map(|cause| cause.into_rust())
                 .transpose()?,
             burst_size: proto.burst_size,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::ReconfigurationOriginV1> for ReconfigurationOriginV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::ReconfigurationOriginV1 {
+        use proto::audit_log_event_v1::reconfiguration_origin_v1::Origin;
+        let origin = match self {
+            ReconfigurationOriginV1::User => Origin::User(Empty {}),
+            ReconfigurationOriginV1::LoadAutoscaling => Origin::LoadAutoscaling(Empty {}),
+        };
+        proto::audit_log_event_v1::ReconfigurationOriginV1 { origin }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::ReconfigurationOriginV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::reconfiguration_origin_v1::Origin;
+        Ok(match proto.origin {
+            Origin::User(_) => ReconfigurationOriginV1::User,
+            Origin::LoadAutoscaling(_) => ReconfigurationOriginV1::LoadAutoscaling,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadScaleReasonV1> for LoadScaleReasonV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadScaleReasonV1 {
+        use proto::audit_log_event_v1::load_scale_reason_v1::Reason;
+        let reason = match self {
+            LoadScaleReasonV1::ScaleUp => Reason::ScaleUp(Empty {}),
+            LoadScaleReasonV1::OutOfMemory => Reason::OutOfMemory(Empty {}),
+            LoadScaleReasonV1::ScaleDown => Reason::ScaleDown(Empty {}),
+            LoadScaleReasonV1::IneffectiveScaleUp => Reason::IneffectiveScaleUp(Empty {}),
+        };
+        proto::audit_log_event_v1::LoadScaleReasonV1 { reason }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadScaleReasonV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::load_scale_reason_v1::Reason;
+        Ok(match proto.reason {
+            Reason::ScaleUp(_) => LoadScaleReasonV1::ScaleUp,
+            Reason::OutOfMemory(_) => LoadScaleReasonV1::OutOfMemory,
+            Reason::ScaleDown(_) => LoadScaleReasonV1::ScaleDown,
+            Reason::IneffectiveScaleUp(_) => LoadScaleReasonV1::IneffectiveScaleUp,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadDirectionV1> for LoadDirectionV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadDirectionV1 {
+        use proto::audit_log_event_v1::load_direction_v1::Direction;
+        let direction = match self {
+            LoadDirectionV1::Up => Direction::Up(Empty {}),
+            LoadDirectionV1::Down => Direction::Down(Empty {}),
+        };
+        proto::audit_log_event_v1::LoadDirectionV1 { direction }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadDirectionV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::load_direction_v1::Direction;
+        Ok(match proto.direction {
+            Direction::Up(_) => LoadDirectionV1::Up,
+            Direction::Down(_) => LoadDirectionV1::Down,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadHoldV1> for LoadHoldV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadHoldV1 {
+        use proto::audit_log_event_v1::load_hold_v1::Hold;
+        let hold = match self {
+            LoadHoldV1::SkewLimited => Hold::SkewLimited(Empty {}),
+            LoadHoldV1::BackingOff => Hold::BackingOff(Empty {}),
+        };
+        proto::audit_log_event_v1::LoadHoldV1 { hold }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadHoldV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::load_hold_v1::Hold;
+        Ok(match proto.hold {
+            Hold::SkewLimited(_) => LoadHoldV1::SkewLimited,
+            Hold::BackingOff(_) => LoadHoldV1::BackingOff,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::ClusterLoadScaleV1> for ClusterLoadScaleV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::ClusterLoadScaleV1 {
+        proto::audit_log_event_v1::ClusterLoadScaleV1 {
+            cluster_id: self.cluster_id.to_string(),
+            cluster_name: self.cluster_name.to_string(),
+            from_size: self.from_size.to_string(),
+            target_size: self.target_size.to_string(),
+            reason: self.reason.into_proto(),
+            cpu_demand_millicores: self.cpu_demand_millicores,
+            memory_demand_bytes: self.memory_demand_bytes,
+        }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::ClusterLoadScaleV1,
+    ) -> Result<Self, TryFromProtoError> {
+        Ok(ClusterLoadScaleV1 {
+            cluster_id: proto.cluster_id,
+            cluster_name: proto.cluster_name,
+            from_size: proto.from_size,
+            target_size: proto.target_size,
+            reason: proto.reason.into_rust()?,
+            cpu_demand_millicores: proto.cpu_demand_millicores,
+            memory_demand_bytes: proto.memory_demand_bytes,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::ClusterLoadBackoffV1> for ClusterLoadBackoffV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::ClusterLoadBackoffV1 {
+        proto::audit_log_event_v1::ClusterLoadBackoffV1 {
+            cluster_id: self.cluster_id.to_string(),
+            cluster_name: self.cluster_name.to_string(),
+            size: self.size.to_string(),
+            direction: self.direction.into_proto(),
+            until: self.until,
+        }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::ClusterLoadBackoffV1,
+    ) -> Result<Self, TryFromProtoError> {
+        Ok(ClusterLoadBackoffV1 {
+            cluster_id: proto.cluster_id,
+            cluster_name: proto.cluster_name,
+            size: proto.size,
+            direction: proto.direction.into_rust()?,
+            until: proto.until,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::ClusterLoadHoldV1> for ClusterLoadHoldV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::ClusterLoadHoldV1 {
+        proto::audit_log_event_v1::ClusterLoadHoldV1 {
+            cluster_id: self.cluster_id.to_string(),
+            cluster_name: self.cluster_name.to_string(),
+            hold: self.hold.map(|hold| hold.into_proto()),
+        }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::ClusterLoadHoldV1,
+    ) -> Result<Self, TryFromProtoError> {
+        Ok(ClusterLoadHoldV1 {
+            cluster_id: proto.cluster_id,
+            cluster_name: proto.cluster_name,
+            hold: proto.hold.map(|hold| hold.into_rust()).transpose()?,
         })
     }
 }
@@ -1448,6 +1612,11 @@ impl RustType<proto::audit_log_event_v1::Details> for EventDetails {
             EventDetails::ClusterHydrationBurstV1(details) => {
                 ClusterHydrationBurstV1(details.into_proto())
             }
+            EventDetails::ClusterLoadScaleV1(details) => ClusterLoadScaleV1(details.into_proto()),
+            EventDetails::ClusterLoadBackoffV1(details) => {
+                ClusterLoadBackoffV1(details.into_proto())
+            }
+            EventDetails::ClusterLoadHoldV1(details) => ClusterLoadHoldV1(details.into_proto()),
             EventDetails::ToNewIdV1(details) => ToNewIdV1(details.into_proto()),
             EventDetails::FromPreviousIdV1(details) => FromPreviousIdV1(details.into_proto()),
             EventDetails::SetV1(details) => SetV1(details.into_proto()),
@@ -1542,6 +1711,13 @@ impl RustType<proto::audit_log_event_v1::Details> for EventDetails {
             ClusterHydrationBurstV1(details) => {
                 Ok(EventDetails::ClusterHydrationBurstV1(details.into_rust()?))
             }
+            ClusterLoadScaleV1(details) => {
+                Ok(EventDetails::ClusterLoadScaleV1(details.into_rust()?))
+            }
+            ClusterLoadBackoffV1(details) => {
+                Ok(EventDetails::ClusterLoadBackoffV1(details.into_rust()?))
+            }
+            ClusterLoadHoldV1(details) => Ok(EventDetails::ClusterLoadHoldV1(details.into_rust()?)),
         }
     }
 }

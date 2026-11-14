@@ -4814,6 +4814,7 @@ impl AstDisplay for ClusterScheduleOptionValue {
 )]
 pub struct ClusterAutoScalingStrategyOptionValue {
     pub on_hydration: Option<OnHydrationOptionValue>,
+    pub on_load: Option<OnLoadOptionValue>,
 }
 
 impl AstDisplay for ClusterAutoScalingStrategyOptionValue {
@@ -4821,6 +4822,12 @@ impl AstDisplay for ClusterAutoScalingStrategyOptionValue {
         f.write_str("(");
         if let Some(on_hydration) = &self.on_hydration {
             f.write_node(on_hydration);
+        }
+        if let Some(on_load) = &self.on_load {
+            if self.on_hydration.is_some() {
+                f.write_str(", ");
+            }
+            f.write_node(on_load);
         }
         f.write_str(")");
     }
@@ -4852,6 +4859,39 @@ impl AstDisplay for OnHydrationOptionValue {
         if let Some(linger_duration) = &self.linger_duration {
             f.write_str(", LINGER DURATION = ");
             f.write_node(linger_duration);
+        }
+        f.write_str(")");
+    }
+}
+
+/// The `ON LOAD` autoscaling sub-policy: keep the cluster at the cheapest size
+/// between `min_size` and `max_size` that keeps up with its load.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Deserialize,
+    Serialize
+)]
+pub struct OnLoadOptionValue {
+    pub min_size: Value,
+    pub max_size: Value,
+    pub scale_down_after: Option<Value>,
+}
+
+impl AstDisplay for OnLoadOptionValue {
+    fn fmt<W: fmt::Write>(&self, f: &mut AstFormatter<W>) {
+        f.write_str("ON LOAD (MIN SIZE = ");
+        f.write_node(&self.min_size);
+        f.write_str(", MAX SIZE = ");
+        f.write_node(&self.max_size);
+        if let Some(scale_down_after) = &self.scale_down_after {
+            f.write_str(", SCALE DOWN AFTER = ");
+            f.write_node(scale_down_after);
         }
         f.write_str(")");
     }

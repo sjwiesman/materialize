@@ -34,7 +34,8 @@ pub use crate::durable::objects::state_update::StateUpdate;
 pub use crate::durable::objects::{
     BurstState, Cluster, ClusterConfig, ClusterReplica, ClusterSystemConfiguration, ClusterVariant,
     ClusterVariantManaged, Comment, Database, DefaultPrivilege, IntrospectionSourceIndex, Item,
-    NetworkPolicy, ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
+    LoadAttempt, LoadAttemptPhase, LoadBackoff, LoadDirection, LoadHold, LoadState, NetworkPolicy,
+    ReconfigurationOrigin, ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
     ReplicaConfig, ReplicaLocation, ReplicaSystemConfiguration, Role, RoleAuth, Schema,
     SourceReference, SourceReferences, StorageCollectionMetadata, SystemConfiguration,
     SystemObjectDescription, SystemObjectMapping, UnfinalizedShard, managed_cluster_replica_name,

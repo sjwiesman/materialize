@@ -2368,6 +2368,46 @@ CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', AUTO SCALING STRATEGY = (ON 
                                                                                                                                                             ^
 
 parse-statement
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE DOWN AFTER = '1h')))
+----
+
+parse-statement
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE '50cc', MAX SIZE '800cc')))
+----
+
+parse-statement
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc'), ON HYDRATION (HYDRATION SIZE = '400cc')))
+----
+
+parse-statement
+ALTER CLUSTER cluster SET (AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc', LINGER DURATION = '600s'), ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE DOWN AFTER = '30m')))
+----
+
+parse-statement
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc')))
+----
+
+parse-statement
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MAX SIZE = '800cc', MIN SIZE = '50cc')))
+----
+
+parse-statement
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE UP AFTER = '1h')))
+----
+
+parse-statement
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc'), ON LOAD (MIN SIZE = '50cc', MAX SIZE = '400cc')))
+----
+
+parse-statement
+CREATE CLUSTER cluster (SIZE = '100cc', AUTO SCALING STRATEGY = (ON REFRESH (MIN SIZE = '50cc')))
+----
+
+parse-statement
+SELECT min(down) AS min, max(load) AS down FROM scale
+----
+
+parse-statement
 CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', WORKLOAD CLASS NULL)
 ----
 CREATE CLUSTER cluster (SIZE = 'scale=1,workers=1', WORKLOAD CLASS = NULL)

@@ -370,6 +370,8 @@ pub struct ClusterVariantManaged {
     pub reconfiguration: Option<ReconfigurationState>,
     /// In-flight hydration burst the controller is running.
     pub burst: Option<BurstState>,
+    /// Bookkeeping of the `ON LOAD` autoscaling strategy.
+    pub load: Option<LoadState>,
 }
 
 /// The canonical name of the `index`-th (zero-based) replica of a managed
@@ -405,6 +407,16 @@ pub struct ReconfigurationState {
     /// regardless of this field.
     pub on_timeout: OnTimeoutAction,
     pub status: ReconfigurationStatus,
+    pub origin: ReconfigurationOrigin,
+}
+
+/// Who wrote a reconfiguration record.
+#[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord)]
+pub enum ReconfigurationOrigin {
+    /// An `ALTER CLUSTER` statement.
+    User,
+    /// The `ON LOAD` autoscaling strategy.
+    LoadAutoscaling,
 }
 
 /// The lifecycle status of the latest graceful reconfiguration.
@@ -448,6 +460,54 @@ pub struct BurstState {
     /// Start of the current observed readiness period for the steady set.
     /// Cleared after a failed readiness check.
     pub steady_ready_at: Option<mz_repr::Timestamp>,
+}
+
+/// Bookkeeping of the `ON LOAD` autoscaling strategy: what the strategy cannot
+/// re-derive from load samples after a restart. The semantic contract lives on
+/// `mz_adapter_types::cluster_state::LoadRecord`.
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
+pub struct LoadState {
+    pub attempt: Option<LoadAttempt>,
+    pub last_cutover: Option<mz_repr::Timestamp>,
+    pub backoff: Vec<LoadBackoff>,
+    pub hold: Option<LoadHold>,
+}
+
+/// A reconfiguration the `ON LOAD` strategy wrote and has not accounted for.
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
+pub struct LoadAttempt {
+    pub from_size: String,
+    pub target_size: String,
+    pub deadline: mz_repr::Timestamp,
+    pub progress_before: Option<u32>,
+    pub phase: LoadAttemptPhase,
+}
+
+#[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord)]
+pub enum LoadAttemptPhase {
+    Reconfiguring,
+    Evaluating,
+}
+
+/// A size the `ON LOAD` strategy must not target until `until`.
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
+pub struct LoadBackoff {
+    pub size: String,
+    pub direction: LoadDirection,
+    pub until: mz_repr::Timestamp,
+    pub failures: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord)]
+pub enum LoadDirection {
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord)]
+pub enum LoadHold {
+    SkewLimited,
+    BackingOff,
 }
 
 #[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq)]

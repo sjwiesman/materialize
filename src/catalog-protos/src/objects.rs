@@ -949,6 +949,8 @@ pub struct ManagedCluster {
     pub reconfiguration: Option<ReconfigurationState>,
     /// In-flight hydration burst the controller is running.
     pub burst: Option<BurstState>,
+    /// Bookkeeping of the `ON LOAD` autoscaling strategy.
+    pub load: Option<LoadState>,
 }
 
 /// The user-configured autoscaling policy of a managed cluster.
@@ -958,6 +960,16 @@ pub struct ManagedCluster {
 #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
 pub struct AutoScalingStrategy {
     pub on_hydration: Option<OnHydration>,
+    pub on_load: Option<OnLoad>,
+}
+
+/// The `ON LOAD` autoscaling sub-policy.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct OnLoad {
+    pub min_size: String,
+    pub max_size: String,
+    pub scale_down_after: Option<Duration>,
 }
 
 /// The `ON HYDRATION` autoscaling sub-policy.
@@ -979,6 +991,30 @@ pub struct ReconfigurationState {
     /// What to do if the deadline passes before the target hydrates.
     pub on_timeout: OnTimeoutAction,
     pub status: ReconfigurationStatus,
+    pub origin: ReconfigurationOrigin,
+}
+
+/// Who wrote a reconfiguration record.
+///
+/// NOTE: like `ReconfigurationStatus`, the serde variant names feed the
+/// `origin` CASE mapping in `mz_internal.mz_cluster_reconfigurations`.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize
+)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub enum ReconfigurationOrigin {
+    /// An `ALTER CLUSTER` statement.
+    User,
+    /// The `ON LOAD` autoscaling strategy.
+    LoadAutoscaling,
 }
 
 /// The lifecycle status of the latest graceful reconfiguration.
@@ -1052,6 +1088,93 @@ pub struct BurstState {
     /// Start of the current observed readiness period for the steady set, as an
     /// `mz_repr::Timestamp`. Cleared after a failed readiness check.
     pub steady_ready_at: Option<u64>,
+}
+
+/// Bookkeeping of the `ON LOAD` autoscaling strategy.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct LoadState {
+    /// The strategy's own reconfiguration whose outcome is not yet recorded.
+    pub attempt: Option<LoadAttempt>,
+    /// When the strategy last cut the cluster over, as an `mz_repr::Timestamp`.
+    pub last_cutover: Option<u64>,
+    pub backoff: Vec<LoadBackoff>,
+    pub hold: Option<LoadHold>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct LoadAttempt {
+    pub from_size: String,
+    pub target_size: String,
+    /// Deadline of the reconfiguration record the attempt wrote, as an
+    /// `mz_repr::Timestamp`.
+    pub deadline: u64,
+    /// Lowest progress ratio, in permille, that motivated a scale-up.
+    pub progress_before: Option<u32>,
+    pub phase: LoadAttemptPhase,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize
+)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub enum LoadAttemptPhase {
+    Reconfiguring,
+    Evaluating,
+}
+
+/// A size the `ON LOAD` strategy must not target until `until`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct LoadBackoff {
+    pub size: String,
+    pub direction: LoadDirection,
+    /// An `mz_repr::Timestamp`.
+    pub until: u64,
+    pub failures: u32,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize
+)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub enum LoadDirection {
+    Up,
+    Down,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize
+)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub enum LoadHold {
+    SkewLimited,
+    BackingOff,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1406,6 +1529,27 @@ pub mod audit_log_event_v1 {
         pub target_availability_zones: Vec<String>,
         pub target_logging: ClusterReplicaLoggingV1,
         pub deadline: Option<u64>,
+        /// Who wrote the record. Absent on events written before origins were
+        /// recorded.
+        #[serde(default)]
+        pub origin: Option<ReconfigurationOriginV1>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct ReconfigurationOriginV1 {
+        pub origin: reconfiguration_origin_v1::Origin,
+    }
+
+    pub mod reconfiguration_origin_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Origin {
+            User(Empty),
+            LoadAutoscaling(Empty),
+        }
     }
 
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1478,6 +1622,90 @@ pub mod audit_log_event_v1 {
         pub enum Cause {
             LingerElapsed(Empty),
             NoLongerWarranted(Empty),
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct ClusterLoadScaleV1 {
+        pub cluster_id: String,
+        pub cluster_name: String,
+        pub from_size: String,
+        pub target_size: String,
+        pub reason: LoadScaleReasonV1,
+        pub cpu_demand_millicores: u64,
+        pub memory_demand_bytes: u64,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadScaleReasonV1 {
+        pub reason: load_scale_reason_v1::Reason,
+    }
+
+    pub mod load_scale_reason_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Reason {
+            ScaleUp(Empty),
+            OutOfMemory(Empty),
+            ScaleDown(Empty),
+            IneffectiveScaleUp(Empty),
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct ClusterLoadBackoffV1 {
+        pub cluster_id: String,
+        pub cluster_name: String,
+        pub size: String,
+        pub direction: LoadDirectionV1,
+        pub until: u64,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadDirectionV1 {
+        pub direction: load_direction_v1::Direction,
+    }
+
+    pub mod load_direction_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Direction {
+            Up(Empty),
+            Down(Empty),
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct ClusterLoadHoldV1 {
+        pub cluster_id: String,
+        pub cluster_name: String,
+        /// The hold entered, or `None` when the strategy left its hold.
+        pub hold: Option<LoadHoldV1>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadHoldV1 {
+        pub hold: load_hold_v1::Hold,
+    }
+
+    pub mod load_hold_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Hold {
+            SkewLimited(Empty),
+            BackingOff(Empty),
         }
     }
 
@@ -1986,6 +2214,9 @@ pub mod audit_log_event_v1 {
         AlterSourceTimestampIntervalV1(AlterSourceTimestampIntervalV1),
         AlterClusterReconfigurationV1(AlterClusterReconfigurationV1),
         ClusterHydrationBurstV1(ClusterHydrationBurstV1),
+        ClusterLoadScaleV1(ClusterLoadScaleV1),
+        ClusterLoadBackoffV1(ClusterLoadBackoffV1),
+        ClusterLoadHoldV1(ClusterLoadHoldV1),
     }
 }
 

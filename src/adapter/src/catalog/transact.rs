@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use itertools::Itertools;
 use mz_adapter_types::cluster_state::{
-    BurstAudit, BurstFinishCause, ExpectedClusterState, ReconfigurationAudit,
+    BurstAudit, BurstFinishCause, ExpectedClusterState, LoadAudit, LoadDirection, LoadHold,
+    LoadScaleReason, ReconfigurationAudit,
 };
 use mz_adapter_types::compaction::CompactionWindow;
 use mz_adapter_types::connection::ConnectionId;
@@ -27,10 +28,11 @@ use mz_adapter_types::dyncfgs::{
 };
 use mz_audit_log::{
     AlterClusterReconfigurationV1, BurstFinishCauseV1, ClusterHydrationBurstV1,
-    ClusterReplicaLoggingV1, CreateOrDropClusterReplicaReasonV1, EventDetails, EventType,
-    HydrationBurstLifecycleV1, IdFullNameV1, IdNameV1, ObjectType, ReconfigurationLifecycleV1,
-    RefreshDecisionWithReasonV2, SchedulingDecisionV1, SchedulingDecisionsWithReasonsV2,
-    VersionedEvent,
+    ClusterLoadBackoffV1, ClusterLoadHoldV1, ClusterLoadScaleV1, ClusterReplicaLoggingV1,
+    CreateOrDropClusterReplicaReasonV1, EventDetails, EventType, HydrationBurstLifecycleV1,
+    IdFullNameV1, IdNameV1, LoadDirectionV1, LoadHoldV1, LoadScaleReasonV1, ObjectType,
+    ReconfigurationLifecycleV1, ReconfigurationOriginV1, RefreshDecisionWithReasonV2,
+    SchedulingDecisionV1, SchedulingDecisionsWithReasonsV2, VersionedEvent,
 };
 use mz_catalog::SYSTEM_CONN_ID;
 use mz_catalog::builtin::BuiltinLog;
@@ -39,7 +41,8 @@ use mz_catalog::expr_cache::{LocalExpressions, latest_item_version};
 use mz_catalog::memory::error::{AmbiguousRename, Error, ErrorKind};
 use mz_catalog::memory::objects::{
     CatalogEntry, CatalogItem, ClusterConfig, ClusterVariant, DataSourceDesc, DefaultPrivileges,
-    ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget, SourceReferences,
+    ReconfigurationOrigin, ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
+    SourceReferences,
 };
 use mz_cluster_controller::ctx::RefreshWindowDecision;
 use mz_controller::clusters::{ManagedReplicaLocation, ReplicaConfig, ReplicaLocation};
@@ -241,6 +244,10 @@ pub enum Op {
         /// Writer-declared hydration-burst lifecycle transition to audit for
         /// this write, alongside the record carried in `config`.
         burst_audit: Option<BurstAudit>,
+        /// Writer-declared `ON LOAD` transitions to audit for this write. Empty
+        /// for writes that leave the `load` record alone or only rewrite its
+        /// bookkeeping.
+        load_audit: Vec<LoadAudit>,
     },
     UpdateItem {
         id: CatalogItemId,
@@ -578,6 +585,7 @@ impl Catalog {
             deadline,
             on_timeout: _,
             status: _,
+            origin,
         } = record;
         let ReconfigurationTarget {
             size,
@@ -602,7 +610,90 @@ impl Catalog {
                 interval: logging.interval,
             },
             deadline: Some((*deadline).into()),
+            origin: Some(match origin {
+                ReconfigurationOrigin::User => ReconfigurationOriginV1::User,
+                ReconfigurationOrigin::LoadAutoscaling => ReconfigurationOriginV1::LoadAutoscaling,
+            }),
         })
+    }
+
+    /// Builds the audit event for one writer-declared `ON LOAD` transition.
+    fn load_audit_details(
+        cluster_id: ClusterId,
+        cluster_name: &str,
+        audit: LoadAudit,
+    ) -> EventDetails {
+        let cluster_id = cluster_id.to_string();
+        let cluster_name = cluster_name.to_string();
+        match audit {
+            LoadAudit::ScaleStarted {
+                from_size,
+                target_size,
+                reason,
+                cpu_demand_millicores,
+                memory_demand_bytes,
+            } => EventDetails::ClusterLoadScaleV1(ClusterLoadScaleV1 {
+                cluster_id,
+                cluster_name,
+                from_size,
+                target_size,
+                reason: match reason {
+                    LoadScaleReason::ScaleUp => LoadScaleReasonV1::ScaleUp,
+                    LoadScaleReason::OutOfMemory => LoadScaleReasonV1::OutOfMemory,
+                    LoadScaleReason::ScaleDown => LoadScaleReasonV1::ScaleDown,
+                    LoadScaleReason::IneffectiveScaleUp => LoadScaleReasonV1::IneffectiveScaleUp,
+                },
+                cpu_demand_millicores,
+                memory_demand_bytes,
+            }),
+            LoadAudit::BackoffStarted {
+                size,
+                direction,
+                until,
+            } => EventDetails::ClusterLoadBackoffV1(ClusterLoadBackoffV1 {
+                cluster_id,
+                cluster_name,
+                size,
+                direction: match direction {
+                    LoadDirection::Up => LoadDirectionV1::Up,
+                    LoadDirection::Down => LoadDirectionV1::Down,
+                },
+                until: until.into(),
+            }),
+            LoadAudit::HoldChanged { hold } => EventDetails::ClusterLoadHoldV1(ClusterLoadHoldV1 {
+                cluster_id,
+                cluster_name,
+                hold: hold.map(|hold| match hold {
+                    LoadHold::SkewLimited => LoadHoldV1::SkewLimited,
+                    LoadHold::BackingOff => LoadHoldV1::BackingOff,
+                }),
+            }),
+        }
+    }
+
+    /// Clears the `ON LOAD` backoff list of each of `cluster_ids` that has
+    /// one. The backoff records sizes that failed for the workload the cluster
+    /// had, and a created or dropped object changes that workload.
+    fn clear_load_backoff(
+        state: &CatalogState,
+        tx: &mut Transaction<'_>,
+        cluster_ids: impl IntoIterator<Item = ClusterId>,
+    ) -> Result<(), AdapterError> {
+        for cluster_id in cluster_ids {
+            let Some(cluster) = state.try_get_cluster(cluster_id) else {
+                continue;
+            };
+            let mut cluster = cluster.clone();
+            let ClusterVariant::Managed(managed) = &mut cluster.config.variant else {
+                continue;
+            };
+            let Some(load) = managed.load.as_mut().filter(|load| !load.backoff.is_empty()) else {
+                continue;
+            };
+            load.backoff.clear();
+            tx.update_cluster(cluster_id, cluster.into())?;
+        }
+        Ok(())
     }
 
     /// Builds a hydration-burst lifecycle audit event from the writer-declared
@@ -1709,6 +1800,7 @@ impl Catalog {
                         )));
                     }
                 }
+                Self::clear_load_backoff(state, tx, item.cluster_id())?;
 
                 let owner_privileges = vec![rbac::owner_privilege(item.typ().into(), owner_id)];
                 let default_privileges = state
@@ -2013,6 +2105,15 @@ impl Catalog {
                 // Drop any items.
                 let items_to_drop: BTreeSet<_> = delta.items.iter().copied().collect();
                 tx.remove_items(&items_to_drop)?;
+
+                // A cluster that is itself dropped has no record left to update.
+                let item_clusters: BTreeSet<_> = delta
+                    .items
+                    .iter()
+                    .filter_map(|item_id| state.get_entry(item_id).cluster_id())
+                    .filter(|cluster_id| !delta.clusters.contains(cluster_id))
+                    .collect();
+                Self::clear_load_backoff(state, tx, item_clusters)?;
 
                 for item_id in delta.items {
                     let entry = state.get_entry(&item_id);
@@ -2834,6 +2935,7 @@ impl Catalog {
                 mut config,
                 reconfiguration_audit,
                 mut burst_audit,
+                mut load_audit,
             } => {
                 let mut cluster = state.get_cluster(id).clone();
                 // A write that invalidates the in-flight burst (policy removed
@@ -2850,6 +2952,23 @@ impl Catalog {
                             burst_audit = Some(BurstAudit::Finished {
                                 cause: BurstFinishCause::NoLongerWarranted,
                             });
+                        }
+                    }
+                }
+                // The load record is retired at the same chokepoint, whoever
+                // the writer is. The strategy never changes what invalidates
+                // the record, so this cannot discard a record it just wrote.
+                if let (ClusterVariant::Managed(managed), ClusterVariant::Managed(old)) =
+                    (&mut config.variant, &cluster.config.variant)
+                {
+                    if managed.load_record_invalidated(old) {
+                        managed.load = None;
+                        let held = old.load.as_ref().is_some_and(|load| load.hold.is_some());
+                        let declared = load_audit
+                            .iter()
+                            .any(|audit| matches!(audit, LoadAudit::HoldChanged { .. }));
+                        if held && !declared {
+                            load_audit.push(LoadAudit::HoldChanged { hold: None });
                         }
                     }
                 }
@@ -2884,6 +3003,7 @@ impl Catalog {
                 cluster.config = config;
                 tx.update_cluster(id, cluster.into())?;
                 info!("update cluster {}", name);
+                let audit_name = name.clone();
 
                 CatalogState::add_to_audit_log(
                     &state.system_configuration,
@@ -2922,6 +3042,19 @@ impl Catalog {
                         EventType::Alter,
                         ObjectType::Cluster,
                         EventDetails::ClusterHydrationBurstV1(details),
+                    )?;
+                }
+
+                for audit in load_audit {
+                    CatalogState::add_to_audit_log(
+                        &state.system_configuration,
+                        oracle_write_ts,
+                        session,
+                        tx,
+                        audit_events,
+                        EventType::Alter,
+                        ObjectType::Cluster,
+                        Self::load_audit_details(id, &audit_name, audit),
                     )?;
                 }
             }
@@ -3569,10 +3702,10 @@ mod tests {
         use std::time::Duration;
 
         use mz_adapter_types::cluster_state::ReconfigurationAudit;
-        use mz_audit_log::ReconfigurationLifecycleV1;
+        use mz_audit_log::{ReconfigurationLifecycleV1, ReconfigurationOriginV1};
         use mz_catalog::memory::objects::{
-            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
-            ReconfigurationStatus, ReconfigurationTarget,
+            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationOrigin,
+            ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
         };
         use mz_controller::clusters::ReplicaLogging;
         use mz_controller_types::ClusterId;
@@ -3596,6 +3729,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration,
                 burst: None,
+                load: None,
             }),
             workload_class: None,
         };
@@ -3613,6 +3747,7 @@ mod tests {
             deadline: Timestamp::from(400u64),
             on_timeout: mz_sql::plan::OnTimeoutAction::Rollback,
             status,
+            origin: ReconfigurationOrigin::User,
         };
 
         let details = Catalog::reconfiguration_audit_details(
@@ -3638,6 +3773,7 @@ mod tests {
             Some(Duration::from_secs(5))
         );
         assert_eq!(details.deadline, Some(400));
+        assert_eq!(details.origin, Some(ReconfigurationOriginV1::User));
 
         // The `forced` bit exists only on the intent. The durable status reads
         // `Finalized` for both a hydrated and a forced cut-over, and the event
@@ -3676,8 +3812,8 @@ mod tests {
         use std::time::Duration;
 
         use mz_catalog::memory::objects::{
-            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
-            ReconfigurationStatus, ReconfigurationTarget,
+            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationOrigin,
+            ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
         };
         use mz_controller::clusters::ReplicaLogging;
         use mz_repr::Timestamp;
@@ -3698,6 +3834,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration,
                 burst: None,
+                load: None,
             }),
             workload_class: None,
         };
@@ -3719,6 +3856,7 @@ mod tests {
             deadline: Timestamp::from(400u64),
             on_timeout: mz_sql::plan::OnTimeoutAction::Rollback,
             status,
+            origin: ReconfigurationOrigin::User,
         };
 
         // Lifecycle movements: these writes must declare an audit intent.
@@ -3781,6 +3919,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration: None,
                 burst,
+                load: None,
             }),
             workload_class: None,
         };
@@ -3853,12 +3992,14 @@ mod tests {
             auto_scaling_strategy: strategy,
             reconfiguration: None,
             burst,
+            load: None,
         };
         let policy = |hydration_size: &str| AutoScalingStrategy {
             on_hydration: Some(OnHydration {
                 hydration_size: hydration_size.into(),
                 linger_duration: None,
             }),
+            on_load: None,
         };
         let record = || BurstState {
             burst_size: "large".into(),
@@ -3878,13 +4019,134 @@ mod tests {
         assert!(
             managed(
                 1,
-                Some(AutoScalingStrategy { on_hydration: None }),
+                Some(AutoScalingStrategy {
+                    on_hydration: None,
+                    on_load: None,
+                }),
                 Some(record())
             )
             .has_unwarranted_burst_record()
         );
         assert!(managed(1, Some(policy("xlarge")), Some(record())).has_unwarranted_burst_record());
         assert!(managed(0, Some(policy("large")), Some(record())).has_unwarranted_burst_record());
+    }
+
+    #[mz_ore::test]
+    fn test_load_record_invalidated() {
+        use mz_catalog::memory::objects::{ClusterVariantManaged, LoadState};
+        use mz_controller::clusters::ReplicaLogging;
+        use mz_repr::optimize::OptimizerFeatureOverrides;
+        use mz_sql::plan::{AutoScalingStrategy, OnLoad};
+
+        let policy = |max_size: &str| AutoScalingStrategy {
+            on_hydration: None,
+            on_load: Some(OnLoad {
+                min_size: "small".into(),
+                max_size: max_size.into(),
+                scale_down_after: None,
+            }),
+        };
+        let managed = |replication_factor,
+                       size: &str,
+                       strategy: Option<AutoScalingStrategy>,
+                       load: bool| ClusterVariantManaged {
+            size: size.into(),
+            availability_zones: Vec::new(),
+            logging: ReplicaLogging {
+                log_logging: false,
+                interval: None,
+            },
+            arrangement_compression: false,
+            replication_factor,
+            optimizer_feature_overrides: OptimizerFeatureOverrides::default(),
+            schedule: Default::default(),
+            auto_scaling_strategy: strategy,
+            reconfiguration: None,
+            burst: None,
+            load: load.then(|| LoadState {
+                attempt: None,
+                last_cutover: None,
+                backoff: Vec::new(),
+                hold: None,
+            }),
+        };
+        let old = managed(1, "small", Some(policy("large")), true);
+
+        assert!(!managed(1, "small", Some(policy("large")), true).load_record_invalidated(&old));
+        // A manual resize inside the range keeps the record.
+        assert!(!managed(1, "large", Some(policy("large")), true).load_record_invalidated(&old));
+        assert!(!managed(1, "small", None, false).load_record_invalidated(&old));
+
+        assert!(managed(1, "small", None, true).load_record_invalidated(&old));
+        assert!(managed(1, "small", Some(policy("xlarge")), true).load_record_invalidated(&old));
+        assert!(managed(0, "small", Some(policy("large")), true).load_record_invalidated(&old));
+    }
+
+    #[mz_ore::test]
+    fn test_load_audit_details() {
+        use mz_adapter_types::cluster_state::{
+            LoadAudit, LoadDirection, LoadHold, LoadScaleReason,
+        };
+        use mz_audit_log::{
+            ClusterLoadBackoffV1, ClusterLoadHoldV1, ClusterLoadScaleV1, EventDetails,
+            LoadDirectionV1, LoadHoldV1, LoadScaleReasonV1,
+        };
+        use mz_controller_types::ClusterId;
+        use mz_repr::Timestamp;
+
+        let cluster_id = ClusterId::user(1).expect("valid id");
+        let details = |audit| Catalog::load_audit_details(cluster_id, "c", audit);
+
+        assert_eq!(
+            details(LoadAudit::ScaleStarted {
+                from_size: "small".into(),
+                target_size: "large".into(),
+                reason: LoadScaleReason::OutOfMemory,
+                cpu_demand_millicores: 1500,
+                memory_demand_bytes: 1 << 30,
+            }),
+            EventDetails::ClusterLoadScaleV1(ClusterLoadScaleV1 {
+                cluster_id: cluster_id.to_string(),
+                cluster_name: "c".into(),
+                from_size: "small".into(),
+                target_size: "large".into(),
+                reason: LoadScaleReasonV1::OutOfMemory,
+                cpu_demand_millicores: 1500,
+                memory_demand_bytes: 1 << 30,
+            })
+        );
+        assert_eq!(
+            details(LoadAudit::BackoffStarted {
+                size: "small".into(),
+                direction: LoadDirection::Down,
+                until: Timestamp::from(400u64),
+            }),
+            EventDetails::ClusterLoadBackoffV1(ClusterLoadBackoffV1 {
+                cluster_id: cluster_id.to_string(),
+                cluster_name: "c".into(),
+                size: "small".into(),
+                direction: LoadDirectionV1::Down,
+                until: 400,
+            })
+        );
+        assert_eq!(
+            details(LoadAudit::HoldChanged {
+                hold: Some(LoadHold::SkewLimited),
+            }),
+            EventDetails::ClusterLoadHoldV1(ClusterLoadHoldV1 {
+                cluster_id: cluster_id.to_string(),
+                cluster_name: "c".into(),
+                hold: Some(LoadHoldV1::SkewLimited),
+            })
+        );
+        assert_eq!(
+            details(LoadAudit::HoldChanged { hold: None }),
+            EventDetails::ClusterLoadHoldV1(ClusterLoadHoldV1 {
+                cluster_id: cluster_id.to_string(),
+                cluster_name: "c".into(),
+                hold: None,
+            })
+        );
     }
 
     #[mz_ore::test]
@@ -3952,6 +4214,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration: None,
                 burst,
+                load: None,
             }),
             workload_class: None,
         };

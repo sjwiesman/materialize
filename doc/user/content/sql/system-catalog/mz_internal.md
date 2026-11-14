@@ -175,7 +175,8 @@ The `mz_cluster_schedules` table shows the `SCHEDULE` option specified for each 
 
 The `mz_cluster_reconfigurations` collection shows the latest graceful
 reconfiguration of each managed cluster that has been reconfigured. A
-background `ALTER CLUSTER` writes the record, and it is retained with a
+background `ALTER CLUSTER` or the `ON LOAD` autoscaling strategy writes the
+record, and it is retained with a
 terminal `status` after it settles, so a row persists after cut-over or
 rollback until a later reconfiguration overwrites it. The realized (current)
 shape is in [`mz_clusters`](../mz_catalog/#mz_clusters).
@@ -189,20 +190,21 @@ shape is in [`mz_clusters`](../mz_catalog/#mz_clusters).
 | `on_timeout`   | [`text`]         | The action applied if `deadline` passes before the target hydrates: `commit` (cut over to the not-yet-hydrated target) or `rollback` (revert to the pre-reconfiguration shape). |
 | `target`       | [`jsonb`]        | The config shape the cluster is reconfiguring to, as JSON: `size`, `replication_factor`, `availability_zones`, `logging`, and `arrangement_compression`. The realized (current) shape is in `mz_clusters`. |
 | `changes`      | [`jsonb`]        | The dimensions in which `target` differs from the cluster's realized configuration, as a JSON object holding the target value per changed dimension. Empty (`{}`) once a record settles with its target applied. A rolled-back record keeps the abandoned diff. |
+| `origin`       | [`text`]         | Who started the reconfiguration: `user` for an `ALTER CLUSTER` statement, or `load-autoscaling` for the `ON LOAD` autoscaling strategy. |
 
 ## `mz_cluster_auto_scaling_strategies`
 
 The `mz_cluster_auto_scaling_strategies` collection shows the configured
 `AUTO SCALING STRATEGY` of each managed cluster that has one, together with any
-in-flight autoscaling state. A row is present while a strategy is configured or
-an autoscaling action is running.
+autoscaling runtime state. A row is present while a strategy is configured or
+runtime state exists.
 
 <!-- RELATION_SPEC mz_internal.mz_cluster_auto_scaling_strategies -->
 | Field          | Type      | Meaning                                                        |
 |----------------|-----------|----------------------------------------------------------------|
 | `cluster_id`   | [`text`]  | The ID of the cluster. Corresponds to [`mz_clusters.id`](../mz_catalog/#mz_clusters). |
-| `strategy`     | [`jsonb`] | **Unstable** The configured autoscaling policy, as JSON. Currently an `on_hydration` sub-policy carrying its `hydration_size` and optional `linger_duration`. |
-| `state`        | [`jsonb`] | **Unstable** The in-flight autoscaling runtime state, as JSON keyed by strategy, or `NULL` when nothing is running. Currently a `burst` key carrying the active hydration burst: its `burst_size`, `linger_duration`, and `steady_ready_at`. |
+| `strategy`     | [`jsonb`] | **Unstable** The configured autoscaling policy, as JSON keyed by sub-policy: `on_hydration` carrying its `hydration_size` and optional `linger_duration`, and `on_load` carrying its `min_size`, `max_size`, and optional `scale_down_after`. An unset sub-policy is `null`. |
+| `state`        | [`jsonb`] | **Unstable** The autoscaling runtime state, as JSON keyed by strategy, or `NULL` when there is none. A `burst` key carries the active hydration burst: its `burst_size`, `linger_duration`, and `steady_ready_at`. A `load` key carries the bookkeeping of the `ON LOAD` strategy: its in-flight `attempt`, `last_cutover`, the `backoff` list of recently failed target sizes, and the `hold` reason for which it is declining to act. |
 
 ## `mz_cluster_replica_metrics`
 

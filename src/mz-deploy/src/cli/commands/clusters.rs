@@ -284,6 +284,11 @@ fn is_zero_interval(value: &WithOptionValue<Raw>) -> bool {
 /// already the server default, which `defaults` supplies. The comparison is a
 /// difference over option names, so a cluster option Materialize adds later
 /// reconciles without a change here.
+///
+/// `SIZE` is exempt while both sides carry an `ON LOAD` policy. The server then
+/// moves the live size within the policy's range, and setting it back to the
+/// definition's on every apply would undo each scaling decision at the cost of
+/// a rehydration. The definition's `SIZE` is the size the cluster starts at.
 fn diff_cluster_options(
     local: &CreateClusterStatement<Raw>,
     live: &CreateClusterStatement<Raw>,
@@ -292,8 +297,17 @@ fn diff_cluster_options(
     let local_options = index_options(local);
     let live_options = index_options(live);
 
+    let size_is_autoscaled = [&local_options, &live_options]
+        .into_iter()
+        .all(|options| {
+            options
+                .get(&ClusterOptionName::AutoScalingStrategy)
+                .is_some_and(|option| has_on_load(option))
+        });
+
     let to_set = local_options
         .values()
+        .filter(|option| !(size_is_autoscaled && option.name == ClusterOptionName::Size))
         .filter(|option| {
             live_options.get(&option.name).map(|live| comparable(live)) != Some(comparable(option))
         })
@@ -308,6 +322,15 @@ fn diff_cluster_options(
         .collect();
 
     (to_set, to_reset)
+}
+
+/// Whether an `AUTO SCALING STRATEGY` option carries an `ON LOAD` sub-policy.
+fn has_on_load(option: &ClusterOption<Raw>) -> bool {
+    matches!(
+        &option.value,
+        Some(WithOptionValue::ClusterAutoScalingStrategyOptionValue(strategy))
+            if strategy.on_load.is_some()
+    )
 }
 
 /// Index a statement's options by name, dropping the ones the server discards.
@@ -494,6 +517,54 @@ mod tests {
                 &live("25cc", 1, strategy)
             ),
             (vec![], Vec::<String>::new())
+        );
+    }
+
+    #[mz_ore::test]
+    fn test_diff_on_load() {
+        let policy = |max: &str, after: &str| {
+            format!(
+                "AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = '400cc'), \
+                 ON LOAD (MIN SIZE = '25cc', MAX SIZE = '{max}', SCALE DOWN AFTER = '{after}'))"
+            )
+        };
+        let local = |size: &str, max: &str| {
+            format!(
+                "CREATE CLUSTER scaled (SIZE = '{size}', {})",
+                policy(max, "1h")
+            )
+        };
+        let live_policy = format!(", {}", policy("200cc", "01:00:00"));
+
+        // The server moved the live size inside the range. That is not drift.
+        assert_eq!(
+            diff(&local("25cc", "200cc"), &live("100cc", 1, &live_policy)),
+            (vec![], Vec::<String>::new())
+        );
+        // A changed policy is set without dragging the size back.
+        assert_eq!(
+            diff(&local("25cc", "100cc"), &live("100cc", 1, &live_policy)),
+            (vec![policy("100cc", "1h")], Vec::<String>::new())
+        );
+        // A newly added policy is set together with the definition's size, so
+        // the server validates the range against it.
+        assert_eq!(
+            diff(&local("25cc", "200cc"), &live("100cc", 1, "")),
+            (
+                vec![policy("200cc", "1h"), "SIZE = '25cc'".to_string()],
+                Vec::<String>::new()
+            )
+        );
+        // Removing the policy makes the size the definition's again.
+        assert_eq!(
+            diff(
+                "CREATE CLUSTER scaled (SIZE = '25cc')",
+                &live("100cc", 1, &live_policy)
+            ),
+            (
+                vec!["SIZE = '25cc'".to_string()],
+                vec!["AUTO SCALING STRATEGY".to_string()]
+            )
         );
     }
 

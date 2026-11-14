@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use mz_adapter_types::cluster_state::{
-    AutoScalingPolicy, LoadAttempt, LoadAttemptPhase, LoadAudit, LoadBackoff, LoadDirection,
+    AutoScalingPolicy, LoadAttemptPhase, LoadAudit, LoadBackoff, LoadDirection,
     LoadHold, LoadRecord, LoadScaleReason, OnLoadPolicy, ReconfigurationOrigin,
 };
 use mz_compute_types::config::ComputeReplicaLogging;

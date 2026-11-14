@@ -17,7 +17,8 @@ use mz_catalog::durable::managed_cluster_replica_name;
 use mz_catalog::memory::error::ErrorKind;
 use mz_catalog::memory::objects::{
     Cluster, ClusterConfig, ClusterVariant, ClusterVariantManaged, DataSourceDesc,
-    ManagedReplicaConfigShape, ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
+    ManagedReplicaConfigShape, ReconfigurationOrigin, ReconfigurationState, ReconfigurationStatus,
+    ReconfigurationTarget,
 };
 use mz_compute_types::config::ComputeReplicaConfig;
 use mz_controller::clusters::{
@@ -168,6 +169,7 @@ impl Coordinator {
                     auto_scaling_strategy: None,
                     reconfiguration: None,
                     burst: None,
+                    load: None,
                 });
             }
         }
@@ -184,6 +186,7 @@ impl Coordinator {
                 auto_scaling_strategy,
                 reconfiguration: _,
                 burst: _,
+                load: _,
             }) => {
                 match &options.size {
                     Set(s) => size.clone_from(s),
@@ -297,6 +300,28 @@ impl Coordinator {
             return Ok(StageResult::Response(ExecuteResponse::AlteredObject(
                 ObjectType::Cluster,
             )));
+        }
+
+        if let Managed(new_managed) = &new_config.variant {
+            let in_flight_target = match &config.variant {
+                Managed(old_managed) => old_managed
+                    .reconfiguration
+                    .as_ref()
+                    .filter(|record| record.is_in_progress())
+                    .map(|record| record.target.size.as_str()),
+                Unmanaged => None,
+            };
+            let old_strategy = match &config.variant {
+                Managed(old_managed) => old_managed.auto_scaling_strategy.as_ref(),
+                Unmanaged => None,
+            };
+            self.validate_alter_on_load(
+                session,
+                new_managed,
+                old_strategy.and_then(|strategy| strategy.on_load.as_ref()),
+                !matches!(options.size, Unchanged),
+                in_flight_target,
+            )?;
         }
 
         // An `ALTER` that raises a managed cluster's replication factor above
@@ -663,6 +688,8 @@ impl Coordinator {
             deadline,
             on_timeout,
             status,
+            // A user `ALTER` takes the record over, whoever wrote it.
+            origin: ReconfigurationOrigin::User,
         };
 
         let mut realized = new_config.clone();
@@ -682,6 +709,7 @@ impl Coordinator {
                 config: realized,
                 reconfiguration_audit: Some(audit),
                 burst_audit: None,
+                load_audit: Vec::new(),
             }],
         )
         .await?;
@@ -814,6 +842,7 @@ impl Coordinator {
                     auto_scaling_strategy: plan.auto_scaling_strategy.clone(),
                     reconfiguration: None,
                     burst: None,
+                    load: None,
                 })
             }
             CreateClusterVariant::Unmanaged(_) => ClusterVariant::Unmanaged,
@@ -852,6 +881,69 @@ impl Coordinator {
             }
             err => Err(err),
         })
+    }
+
+    /// Check the `ON LOAD` policy of a managed config an `ALTER` is about to
+    /// write: its bounds when the policy changed, and the size range when the
+    /// policy or the `SIZE` changed.
+    ///
+    /// An unchanged policy is not re-checked, so an existing policy does not
+    /// block unrelated `ALTER`s if the size map or the role's allowed sizes
+    /// later shrink, matching how `SIZE` itself behaves.
+    fn validate_alter_on_load(
+        &self,
+        session: &Session,
+        new_managed: &ClusterVariantManaged,
+        old_policy: Option<&mz_sql::plan::OnLoad>,
+        size_set: bool,
+        in_flight_target: Option<&str>,
+    ) -> Result<(), AdapterError> {
+        let Some(policy) = new_managed
+            .auto_scaling_strategy
+            .as_ref()
+            .and_then(|strategy| strategy.on_load.as_ref())
+        else {
+            return Ok(());
+        };
+        let policy_changed = old_policy != Some(policy);
+        // An unmanaged cluster converted without a `SIZE` fails later for the
+        // missing size.
+        if !(policy_changed || size_set) || new_managed.size.is_empty() {
+            return Ok(());
+        }
+        if policy_changed {
+            self.ensure_valid_on_load_bounds(session, policy)?;
+        }
+        let sizes = self.catalog().cluster_replica_sizes();
+        // A statement that sets `SIZE` retargets or cancels the in-progress
+        // resize, so only its own size is checked. Otherwise the in-progress
+        // target is the size the cluster is about to have.
+        let (size, in_progress) = match in_flight_target {
+            Some(target) if !size_set => (target, true),
+            _ => (new_managed.size.as_str(), false),
+        };
+        crate::catalog::cluster_state::validate_on_load_range(sizes, policy, size, in_progress)?;
+        Ok(())
+    }
+
+    /// `MIN SIZE` and `MAX SIZE` are validated like `SIZE` itself: each must
+    /// name an enabled replica size the session role may use. Otherwise a
+    /// size-restricted role could have the strategy scale to a size it may not
+    /// `CREATE` with.
+    fn ensure_valid_on_load_bounds(
+        &self,
+        session: &Session,
+        policy: &mz_sql::plan::OnLoad,
+    ) -> Result<(), AdapterError> {
+        let role_id = session.role_metadata().current_role;
+        let allowed_sizes = self
+            .catalog()
+            .get_role_allowed_cluster_sizes(&Some(role_id));
+        for size in [&policy.min_size, &policy.max_size] {
+            self.catalog
+                .ensure_valid_replica_size(&allowed_sizes, size, false)?;
+        }
+        Ok(())
     }
 
     #[mz_ore::instrument(level = "debug")]
@@ -896,6 +988,18 @@ impl Coordinator {
                     .catalog()
                     .get_role_allowed_cluster_sizes(&Some(role_id)),
                 &on_hydration.hydration_size,
+                false,
+            )?;
+        }
+        if let Some(on_load) = auto_scaling_strategy
+            .as_ref()
+            .and_then(|strategy| strategy.on_load.as_ref())
+        {
+            self.ensure_valid_on_load_bounds(session, on_load)?;
+            crate::catalog::cluster_state::validate_on_load_range(
+                self.catalog().cluster_replica_sizes(),
+                on_load,
+                &size,
                 false,
             )?;
         }
@@ -1459,6 +1563,7 @@ impl Coordinator {
             auto_scaling_strategy,
             reconfiguration,
             burst: _,
+            load: _,
         }) = &cluster.config.variant
         else {
             panic!("expected existing managed cluster config");
@@ -1477,6 +1582,7 @@ impl Coordinator {
             auto_scaling_strategy: new_auto_scaling_strategy,
             reconfiguration: _,
             burst: _,
+            load: _,
         } = new_managed;
 
         let role_id = Some(session.role_metadata().current_role);
@@ -1578,6 +1684,7 @@ impl Coordinator {
             config: new_config,
             reconfiguration_audit: None,
             burst_audit: None,
+            load_audit: Vec::new(),
         }];
 
         self.catalog_transact(Some(session), ops).await?;
@@ -1608,6 +1715,7 @@ impl Coordinator {
             auto_scaling_strategy: _,
             reconfiguration: _,
             burst: _,
+            load: _,
         }) = &mut new_config.variant
         else {
             panic!("expected new managed cluster config");
@@ -1715,6 +1823,7 @@ impl Coordinator {
             config: new_config,
             reconfiguration_audit: None,
             burst_audit: None,
+            load_audit: Vec::new(),
         }];
 
         self.catalog_transact(Some(session), ops).await?;
@@ -1759,6 +1868,7 @@ impl Coordinator {
             config: new_config,
             reconfiguration_audit: None,
             burst_audit: None,
+            load_audit: Vec::new(),
         }];
 
         self.catalog_transact(Some(session), ops).await?;
@@ -1784,6 +1894,7 @@ impl Coordinator {
             config: new_config,
             reconfiguration_audit: None,
             burst_audit: None,
+            load_audit: Vec::new(),
         }];
 
         self.catalog_transact(Some(session), ops).await?;
@@ -2071,6 +2182,7 @@ mod tests {
             deadline: Timestamp::from(0),
             on_timeout: OnTimeoutAction::Rollback,
             status: ReconfigurationStatus::InProgress,
+            origin: ReconfigurationOrigin::User,
         };
 
         assert!(matches!(
@@ -2087,6 +2199,7 @@ mod tests {
             deadline: Timestamp::from(0),
             on_timeout: OnTimeoutAction::Rollback,
             status: ReconfigurationStatus::InProgress,
+            origin: ReconfigurationOrigin::User,
         };
 
         assert!(reconfiguration_wait_result(Some(&record), &awaited, false).is_none());
@@ -2112,6 +2225,7 @@ mod tests {
             deadline: Timestamp::from(0),
             on_timeout: OnTimeoutAction::Rollback,
             status: ReconfigurationStatus::InProgress,
+            origin: ReconfigurationOrigin::User,
         };
 
         assert!(matches!(

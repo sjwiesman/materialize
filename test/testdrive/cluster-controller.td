@@ -1247,6 +1247,83 @@ contains:AUTO SCALING STRATEGY cannot be combined with a SCHEDULE other than MAN
 
 > DROP CLUSTER cc_burst_onref
 
+# ----- Load autoscaling: ON LOAD SQL surface -----
+#
+# This section exercises parse/render/validation. The load strategy needs load
+# samples before it acts, so it starts no reconfiguration here.
+
+> CREATE CLUSTER cc_load (SIZE 'scale=1,workers=2', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=4', SCALE DOWN AFTER = '30m')))
+
+> SELECT create_sql LIKE '%AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = ''scale=1,workers=1'', MAX SIZE = ''scale=1,workers=4'', SCALE DOWN AFTER = %' FROM (SHOW CREATE CLUSTER cc_load)
+true
+
+# mz_cluster_auto_scaling_strategies surfaces the policy. The unset sub-policy
+# is JSON null, and no burst is in flight.
+> SELECT mz_clusters.name, scaling.strategy->'on_load'->>'min_size', scaling.strategy->'on_load'->>'max_size', scaling.strategy->'on_load'->'scale_down_after'->>'secs', scaling.strategy->'on_hydration' = 'null'::jsonb, scaling.state->'burst' IS NULL FROM mz_internal.mz_cluster_auto_scaling_strategies scaling JOIN mz_clusters ON mz_clusters.id = scaling.cluster_id WHERE mz_clusters.name = 'cc_load'
+cc_load scale=1,workers=1 scale=1,workers=4 1800 true true
+
+# ON LOAD composes with ON HYDRATION, in either order, and SCALE DOWN AFTER is
+# optional.
+> ALTER CLUSTER cc_load SET (AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=4'), ON HYDRATION (HYDRATION SIZE = 'scale=2,workers=2')))
+> SELECT create_sql LIKE '%AUTO SCALING STRATEGY = (ON HYDRATION (HYDRATION SIZE = ''scale=2,workers=2''), ON LOAD (MIN SIZE = ''scale=1,workers=1'', MAX SIZE = ''scale=1,workers=4''))%' FROM (SHOW CREATE CLUSTER cc_load)
+true
+> SELECT scaling.strategy->'on_hydration'->>'hydration_size', scaling.strategy->'on_load'->'scale_down_after' = 'null'::jsonb FROM mz_internal.mz_cluster_auto_scaling_strategies scaling JOIN mz_clusters ON mz_clusters.id = scaling.cluster_id WHERE mz_clusters.name = 'cc_load'
+scale=2,workers=2 true
+
+# A manual resize inside the range is allowed and recorded as user-originated.
+> ALTER CLUSTER cc_load SET (SIZE = 'scale=1,workers=4')
+> SELECT size FROM mz_catalog.mz_clusters WHERE name = 'cc_load'
+scale=1,workers=4
+> SELECT recon.origin FROM mz_internal.mz_cluster_reconfigurations recon JOIN mz_clusters ON mz_clusters.id = recon.cluster_id WHERE mz_clusters.name = 'cc_load'
+user
+
+# A resize outside the range is rejected.
+! ALTER CLUSTER cc_load SET (SIZE = 'scale=1,workers=8')
+contains:cluster SIZE ('scale=1,workers=8') must be between ON LOAD MIN SIZE ('scale=1,workers=1') and MAX SIZE ('scale=1,workers=4')
+
+# So is a new range that excludes the current size, unless the same statement
+# moves the size into it.
+! ALTER CLUSTER cc_load SET (AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=2')))
+contains:cluster SIZE ('scale=1,workers=4') must be between ON LOAD MIN SIZE ('scale=1,workers=1') and MAX SIZE ('scale=1,workers=2')
+
+> ALTER CLUSTER cc_load SET (SIZE = 'scale=1,workers=2', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=2')))
+> SELECT size FROM mz_catalog.mz_clusters WHERE name = 'cc_load'
+scale=1,workers=2
+
+! ALTER CLUSTER cc_load SET (SCHEDULE = ON REFRESH)
+contains:AUTO SCALING STRATEGY cannot be combined with a SCHEDULE other than MANUAL
+
+# Without the policy the size is unconstrained again.
+> ALTER CLUSTER cc_load RESET (AUTO SCALING STRATEGY)
+> SELECT create_sql LIKE '%AUTO SCALING STRATEGY%' FROM (SHOW CREATE CLUSTER cc_load)
+false
+> ALTER CLUSTER cc_load SET (SIZE = 'scale=1,workers=8')
+
+> DROP CLUSTER cc_load
+
+! CREATE CLUSTER cc_load_bad (SIZE 'scale=1,workers=8', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=4')))
+contains:cluster SIZE ('scale=1,workers=8') must be between ON LOAD MIN SIZE
+
+! CREATE CLUSTER cc_load_bad (SIZE 'scale=1,workers=2', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=4', MAX SIZE = 'scale=1,workers=1')))
+contains:ON LOAD MIN SIZE ('scale=1,workers=4') must not be larger than MAX SIZE ('scale=1,workers=1')
+
+# The legacy sizes are a different family from the cluster SIZE.
+! CREATE CLUSTER cc_load_bad (SIZE 'scale=1,workers=2', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1,legacy', MAX SIZE = 'scale=1,workers=4')))
+contains:ON LOAD MIN SIZE 'scale=1,workers=1,legacy' is not in the same size family as the cluster SIZE ('scale=1,workers=2')
+
+# Both bounds must name a real, enabled replica size.
+! CREATE CLUSTER cc_load_bad (SIZE 'scale=1,workers=2', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'notasize')))
+contains:unknown cluster replica size notasize
+
+! CREATE CLUSTER cc_load_bad (SIZE 'scale=1,workers=2', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'free', MAX SIZE = 'scale=1,workers=4')))
+contains:unknown cluster replica size free
+
+! CREATE CLUSTER cc_load_bad (SIZE 'scale=1,workers=2', AUTO SCALING STRATEGY = (ON LOAD (MAX SIZE = 'scale=1,workers=4')))
+contains:Expected MIN, found MAX
+
+! CREATE CLUSTER cc_load_bad (SIZE 'scale=1,workers=2', SCHEDULE = ON REFRESH, AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=4')))
+contains:AUTO SCALING STRATEGY cannot be combined with a SCHEDULE other than MANUAL
+
 # With SQL acceptance gated off, the option is rejected at plan time, at CREATE
 # and at ALTER SET. RESET stays available so a policy set while the flag was on
 # can always be shed, and the stored policy itself survives the rollback.

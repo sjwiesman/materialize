@@ -29,6 +29,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use mz_adapter_types::cluster_state::{
+    LoadAttempt, LoadAttemptPhase, LoadBackoff, LoadDirection, LoadHold,
+};
 use mz_adapter_types::dyncfgs::{
     CLUSTER_CONTROLLER_TICK_INTERVAL, CLUSTER_RECONFIGURATION_ALLOWED_LAG,
     ENABLE_CLUSTER_RECONFIGURATION_LAG_GATE,
@@ -37,10 +40,11 @@ use mz_catalog::memory::objects::{ClusterConfig, ClusterVariant};
 use mz_cluster_controller::ClusterController;
 use mz_cluster_controller::ctx::{
     ApplyOutcome, AvailabilityZones, ClusterControllerCtx, ClusterState, CreateReason, Decision,
-    ExpectedClusterState, ObservedReplica, OnTimeout, ReconfigurationRecord, ReconfigurationStatus,
-    ReconfigurationTarget, RefreshMvInfo, RefreshWindowClusterInputs, RefreshWindowInputsBatch,
-    ReplicaShape, StateWrite,
+    ExpectedClusterState, LoadRecord, ObservedReplica, OnTimeout, ReconfigurationOrigin,
+    ReconfigurationRecord, ReconfigurationStatus, ReconfigurationTarget, RefreshMvInfo,
+    RefreshWindowClusterInputs, RefreshWindowInputsBatch, ReplicaShape, StateWrite,
 };
+use mz_cluster_controller::load::LoadSignals;
 use mz_cluster_controller::strategy::duration_to_ts;
 use mz_compute_types::config::ComputeReplicaConfig;
 use mz_controller::clusters::ClusterStatus;
@@ -254,6 +258,11 @@ impl ClusterControllerCtx for CoordCtx {
         })
     }
 
+    async fn load_signals(&mut self, _cluster_id: ClusterId) -> Option<LoadSignals> {
+        // TODO: The load signal provider fills this in.
+        None
+    }
+
     async fn apply(&mut self, decisions: Vec<Decision>) -> ApplyOutcome {
         self.request(|tx| ClusterControllerRequest::Apply { decisions, tx })
             .await
@@ -450,6 +459,7 @@ impl Coordinator {
             auto_scaling_policy: expected.auto_scaling_policy,
             reconfiguration: expected.reconfiguration,
             burst: expected.burst,
+            load: expected.load,
             replicas,
         })
     }
@@ -917,6 +927,7 @@ impl Coordinator {
             new_arrangement_compression,
             reconfiguration,
             burst,
+            load,
         } = write;
         if let Some(size) = new_size {
             managed.size = size.clone();
@@ -939,17 +950,26 @@ impl Coordinator {
         if let Some(burst) = burst {
             managed.burst = burst.record.as_ref().map(memory_burst);
         }
+        if let Some(load) = load {
+            managed.load = load.record.as_ref().map(memory_load);
+        }
         // The audit intents travel with the write, declared by the strategy at
         // the decision point. We pass them through untouched so the events are
         // emitted in the same catalog transaction as the state they describe.
         let reconfiguration_audit = write.reconfiguration.as_ref().and_then(|w| w.audit);
         let burst_audit = write.burst.as_ref().and_then(|w| w.audit);
+        let load_audit = write
+            .load
+            .as_ref()
+            .map(|w| w.audit.clone())
+            .unwrap_or_default();
         Some(Op::UpdateClusterConfig {
             id: cluster_id,
             name: cluster.name.clone(),
             config,
             reconfiguration_audit,
             burst_audit,
+            load_audit,
         })
     }
 
@@ -1063,6 +1083,7 @@ fn memory_reconfiguration(
         deadline,
         on_timeout,
         status,
+        origin,
     } = record;
     let ReconfigurationTarget {
         size,
@@ -1082,6 +1103,12 @@ fn memory_reconfiguration(
         deadline: *deadline,
         on_timeout: on_timeout_from_controller(*on_timeout),
         status: status_from_controller(*status),
+        origin: match origin {
+            ReconfigurationOrigin::User => mz_catalog::memory::objects::ReconfigurationOrigin::User,
+            ReconfigurationOrigin::LoadAutoscaling => {
+                mz_catalog::memory::objects::ReconfigurationOrigin::LoadAutoscaling
+            }
+        },
     }
 }
 
@@ -1121,6 +1148,64 @@ fn memory_burst(
         burst_size: burst_size.clone(),
         linger_duration: *linger_duration,
         steady_ready_at: *steady_ready_at,
+    }
+}
+
+fn memory_load(record: &LoadRecord) -> mz_catalog::memory::objects::LoadState {
+    use mz_catalog::memory::objects as memory;
+    // Destructure the sources (no `..`): a field added to a controller type is
+    // a compile error here until it's carried across.
+    let LoadRecord {
+        attempt,
+        last_cutover,
+        backoff,
+        hold,
+    } = record;
+    memory::LoadState {
+        attempt: attempt.as_ref().map(|attempt| {
+            let LoadAttempt {
+                from_size,
+                target_size,
+                deadline,
+                progress_before,
+                phase,
+            } = attempt;
+            memory::LoadAttempt {
+                from_size: from_size.clone(),
+                target_size: target_size.clone(),
+                deadline: *deadline,
+                progress_before: *progress_before,
+                phase: match phase {
+                    LoadAttemptPhase::Reconfiguring => memory::LoadAttemptPhase::Reconfiguring,
+                    LoadAttemptPhase::Evaluating => memory::LoadAttemptPhase::Evaluating,
+                },
+            }
+        }),
+        last_cutover: *last_cutover,
+        backoff: backoff
+            .iter()
+            .map(|backoff| {
+                let LoadBackoff {
+                    size,
+                    direction,
+                    until,
+                    failures,
+                } = backoff;
+                memory::LoadBackoff {
+                    size: size.clone(),
+                    direction: match direction {
+                        LoadDirection::Up => memory::LoadDirection::Up,
+                        LoadDirection::Down => memory::LoadDirection::Down,
+                    },
+                    until: *until,
+                    failures: *failures,
+                }
+            })
+            .collect(),
+        hold: hold.map(|hold| match hold {
+            LoadHold::SkewLimited => memory::LoadHold::SkewLimited,
+            LoadHold::BackingOff => memory::LoadHold::BackingOff,
+        }),
     }
 }
 

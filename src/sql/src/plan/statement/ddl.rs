@@ -76,7 +76,8 @@ use mz_sql_parser::ast::{
     LoadGeneratorOption, LoadGeneratorOptionName, MaterializedViewOption,
     MaterializedViewOptionName, MySqlConfigOption, MySqlConfigOptionName, NetworkPolicyOption,
     NetworkPolicyOptionName, NetworkPolicyRuleDefinition, NetworkPolicyRuleOption,
-    NetworkPolicyRuleOptionName, OnHydrationOptionValue, PgConfigOption, PgConfigOptionName,
+    NetworkPolicyRuleOptionName, OnHydrationOptionValue, OnLoadOptionValue, PgConfigOption,
+    PgConfigOptionName,
     ProtobufSchema, QualifiedReplica, RefreshAtOptionValue, RefreshEveryOptionValue,
     RefreshOptionValue, ReplicaDefinition, ReplicaOption, ReplicaOptionName, RoleAttribute,
     SetRoleVar, SourceErrorPolicy, SourceIncludeMetadata, SqlServerConfigOption,
@@ -163,7 +164,8 @@ use crate::plan::{
     CreateRolePlan, CreateSchemaPlan, CreateSecretPlan, CreateSinkPlan, CreateSourcePlan,
     CreateTablePlan, CreateTypePlan, CreateViewPlan, DataSourceDesc, DropObjectsPlan,
     DropOwnedPlan, HirRelationExpr, Index, MaterializedView, MetricSink, NetworkPolicyRule,
-    NetworkPolicyRuleAction, NetworkPolicyRuleDirection, OnHydration, Plan, PlanClusterOption,
+    NetworkPolicyRuleAction, NetworkPolicyRuleDirection, OnHydration, OnLoad, Plan,
+    PlanClusterOption,
     PlanNotice, PolicyAddress, QueryContext, ReplicaConfig, Secret, Sink, Source, Table,
     TableDataSource, Type, VariableValue, View, WebhookBodyFormat, WebhookHeaderFilters,
     WebhookHeaders, WebhookValidation, literal, plan_utils, query, transform_ast,
@@ -5699,24 +5701,48 @@ fn unplan_cluster_schedule(schedule: ClusterSchedule) -> ClusterScheduleOptionVa
 fn plan_auto_scaling_strategy(
     value: ClusterAutoScalingStrategyOptionValue,
 ) -> Result<Option<AutoScalingStrategy>, PlanError> {
-    let ClusterAutoScalingStrategyOptionValue { on_hydration } = value;
-    let Some(on_hydration) = on_hydration else {
+    let ClusterAutoScalingStrategyOptionValue {
+        on_hydration,
+        on_load,
+    } = value;
+    if on_hydration.is_none() && on_load.is_none() {
         // An empty block disables autoscaling.
         return Ok(None);
-    };
+    }
 
-    let hydration_size = String::try_from_value(on_hydration.hydration_size)?;
+    let on_hydration = on_hydration
+        .map(|on_hydration| {
+            let OnHydrationOptionValue {
+                hydration_size,
+                linger_duration,
+            } = on_hydration;
+            Ok::<_, PlanError>(OnHydration {
+                hydration_size: String::try_from_value(hydration_size)?,
+                linger_duration: linger_duration.map(Duration::try_from_value).transpose()?,
+            })
+        })
+        .transpose()?;
 
-    let linger_duration = on_hydration
-        .linger_duration
-        .map(Duration::try_from_value)
+    let on_load = on_load
+        .map(|on_load| {
+            let OnLoadOptionValue {
+                min_size,
+                max_size,
+                scale_down_after,
+            } = on_load;
+            Ok::<_, PlanError>(OnLoad {
+                min_size: String::try_from_value(min_size)?,
+                max_size: String::try_from_value(max_size)?,
+                scale_down_after: scale_down_after
+                    .map(Duration::try_from_value)
+                    .transpose()?,
+            })
+        })
         .transpose()?;
 
     Ok(Some(AutoScalingStrategy {
-        on_hydration: Some(OnHydration {
-            hydration_size,
-            linger_duration,
-        }),
+        on_hydration,
+        on_load,
     }))
 }
 
@@ -5728,6 +5754,9 @@ fn plan_auto_scaling_strategy(
 /// `cluster_size` is `None` only when the effective size is unknown at plan time
 /// (an unmanaged→managed `ALTER` that does not set `SIZE`, which fails later for
 /// the missing size); the size equality check is then skipped.
+///
+/// The `ON LOAD` size range is checked at sequencing time, because ordering
+/// sizes needs the replica size map, which the planner does not see.
 fn validate_auto_scaling_strategy(
     strategy: &AutoScalingStrategy,
     cluster_size: Option<&str>,
@@ -5753,18 +5782,27 @@ fn validate_auto_scaling_strategy(
 fn unplan_auto_scaling_strategy(
     strategy: &AutoScalingStrategy,
 ) -> ClusterAutoScalingStrategyOptionValue {
+    let unplan_duration = |d: Duration| {
+        let interval = Interval::from_duration(&d)
+            .expect("planning ensured this is convertible back to Interval");
+        Value::Interval(literal::unplan_interval(&interval))
+    };
+    let AutoScalingStrategy {
+        on_hydration,
+        on_load,
+    } = strategy;
     ClusterAutoScalingStrategyOptionValue {
-        on_hydration: strategy
-            .on_hydration
+        on_hydration: on_hydration
             .as_ref()
             .map(|on_hydration| OnHydrationOptionValue {
                 hydration_size: Value::String(on_hydration.hydration_size.clone()),
-                linger_duration: on_hydration.linger_duration.map(|d| {
-                    let interval = Interval::from_duration(&d)
-                        .expect("planning ensured this is convertible back to Interval");
-                    Value::Interval(literal::unplan_interval(&interval))
-                }),
+                linger_duration: on_hydration.linger_duration.map(unplan_duration),
             }),
+        on_load: on_load.as_ref().map(|on_load| OnLoadOptionValue {
+            min_size: Value::String(on_load.min_size.clone()),
+            max_size: Value::String(on_load.max_size.clone()),
+            scale_down_after: on_load.scale_down_after.map(unplan_duration),
+        }),
     }
 }
 
