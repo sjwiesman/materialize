@@ -102,8 +102,15 @@ dry_run: false
   and optionally `cooldown`. Clusters not listed are never touched.
 - Configuration is validated at startup against `mz_cluster_replica_sizes`:
   both sizes exist, are enabled, and `min_size` is no larger than `max_size`.
+  The relation lists enabled sizes only, so existing in it is being enabled.
   A cluster whose current size lies outside its range is moved into the range
   by the normal decision path.
+- The ladder between the two bounds is the set of sizes of the same family.
+  The catalog does not expose a size family, so the family is taken from the
+  name: sizes whose names differ only in their numbers, such as `100cc` to
+  `800cc`. For sizes that do not follow a pattern, an optional `sizes` list on
+  the cluster entry gives the ladder explicitly. Bounds from different
+  families without that list are rejected at startup.
 - The model parameters (`u_target`, `m_target`, the progress-ratio clamp) are
   flags with the companion design's defaults. They are not per-cluster.
 - `dry_run` computes and reports every decision and issues no `ALTER`.
@@ -140,15 +147,27 @@ to the replica read.
 | State | Condition | Behavior |
 |---|---|---|
 | `reconfiguring` | `mz_cluster_reconfigurations.status` is in progress | Do nothing. One transition at a time. |
-| `oom` | A realized-size replica has an `oom-killed` status inside the window | Scale up now. Skips cooldown and the replica read. |
-| `cooling-down` | Last size change, or last failed attempt, is younger than `cooldown` | Do nothing. |
+| `oom` | A realized-size replica has an `oom-killed` status inside the window and after the last settled reconfiguration | Scale up now. Skips cooldown and the replica read. |
+| `cooling-down` | Last settled reconfiguration, successful or failed, is younger than `cooldown` | Do nothing. |
 | `hydrating` | No realized-size replica is fully hydrated | Do nothing. |
 | `eligible` | Otherwise | Sample hydrated replicas. |
 
-A replica counts as hydrated when every object on the cluster reports
-`hydrated` for it in `mz_hydration_statuses`. Hydration is evaluated per
-replica, so in a cluster with one hydrated and one hydrating replica only the
-first is sampled.
+A replica counts as hydrated when every index and materialized view on the
+cluster reports `hydrated` for it in `mz_hydration_statuses`, and every source
+and sink reports `hydrated` for some replica of the cluster. Sources and sinks
+run on one replica of a multi-replica cluster and never report for the others.
+Hydration is evaluated per replica, so in a cluster with one hydrated and one
+hydrating replica only the first is sampled.
+
+An out-of-memory kill only counts when it is newer than the last settled
+reconfiguration. An older kill was either answered by that reconfiguration or
+could not be, and acting on it again would bypass the cooldown on every run
+until it leaves the window.
+
+The cooldown starts from the latest `finalized`, `timed-out`, or
+`resource-exhausted` reconfiguration event in `mz_audit_events`. Those events
+record the target and not the previous shape, so a reconfiguration that
+changed something other than the size also starts a cooldown.
 
 **Hydrating replicas are never targeted.** A hydrating replica is busy by
 definition. Its busy time describes the hydration and says nothing about the
@@ -167,16 +186,21 @@ For each hydrated replica the autoscaler opens a session, sets `cluster` and
 `cluster_replica` to target it, and sets `statement_timeout` to
 `replica_read_timeout`. It then reads, in one query:
 
-- elapsed nanoseconds per operator and worker, joined to the owning dataflow
-  (`mz_scheduling_elapsed_per_worker`, `mz_dataflow_operator_dataflows`)
-- output and input frontiers per dataflow (`mz_compute_frontiers`,
+- elapsed nanoseconds per worker for the root operator of each dataflow
+  (`mz_scheduling_elapsed_per_worker`, `mz_dataflow_addresses`). The elapsed
+  time of an operator includes the operators nested in it, so the root alone
+  is the dataflow's total and summing every operator would count time more
+  than once.
+- output and input frontiers per export, with the export's dataflow
+  (`mz_compute_exports`, `mz_compute_frontiers`,
   `mz_compute_import_frontiers`)
+- `mz_now()`, the timestamp the read was served at
 
 It waits `sample_interval` and reads again. The difference between the two
-reads gives, for the interval:
+reads gives, for the interval between the two `mz_now()` values:
 
-- busy cores per dataflow and per worker, counting only operators present in
-  both reads so that a dropped dataflow cannot produce a negative delta
+- busy cores per dataflow and per worker, counting only root operators present
+  in both reads so that a dropped dataflow cannot produce a negative delta
 - the progress ratio per dataflow, as output frontier advance over input
   frontier advance, both taken from the replica itself
 
@@ -184,9 +208,18 @@ These are exactly the inputs to the demand model, and reading the frontiers
 from the replica gives the local progress ratio directly, without
 reconstructing it from wallclock lag.
 
+Frontiers advance in ticks of about a second, so two reads a sample interval
+apart can disagree by a tick at each end for a dataflow that is keeping up. A
+measured ratio of at least 0.9 therefore counts as 1. The threshold is a flag.
+
+A size's CPU capacity is its process count times the smaller of its workers
+per process and its CPU limit in cores. Busy time is worker time, and a worker
+uses at most one core.
+
 Replicas of one cluster are sampled concurrently so the run takes one
 `sample_interval` per cluster, and clusters can be sampled concurrently up to
-a configured limit.
+a limit set by a flag. The targeted sessions use serializable isolation, since
+introspection reads need no linearizability.
 
 ### Timeouts as signal
 
@@ -202,8 +235,11 @@ A targeted read can end three ways.
   replica. The cluster is reported as `error` and no decision is made.
 
 Keeping the second and third apart is what makes a timeout safe to act on.
-Statement timeouts are reported by Materialize with a specific error code on
-a live connection. Anything else is treated as the third case.
+Materialize reports a statement timeout as SQLSTATE `57014` with the message
+`canceling statement due to statement timeout`, on a connection that stays
+open. A cancel requested by a user shares the code, so both the code and the
+message are checked. Anything else, including any other SQL error, is treated
+as the third case.
 
 An unresponsive sample is retried once within the run. If the retry also
 times out, the cluster's recommendation is one step up the ladder. One step,
@@ -227,7 +263,8 @@ already retains:
 | Whether the cluster kept up over the window | `mz_wallclock_global_lag_recent_history` |
 | Out-of-memory kills in the window | `mz_cluster_replica_status_history` |
 | When the size last changed, and by whom | `mz_audit_events` |
-| Outcome and target of the last attempt | `mz_cluster_reconfigurations` |
+| Whether a reconfiguration is in flight | `mz_cluster_reconfigurations` |
+| Outcome, target, time, and role of past attempts | `mz_audit_events` |
 
 The division of labor is that **the live sample sizes the decision and the
 history vetoes it.** Process CPU from the metrics history is too coarse to
@@ -242,7 +279,9 @@ downsize.
 The cooldown gate has already passed. No history check is needed. The cost of
 a wrong upsize is bounded by the cooldown and corrected by the next downsize.
 
-**Scale up one step** on a confirmed unresponsive sample, as above.
+**Scale up one step** on a confirmed unresponsive sample, as above. If another
+replica answered and its sample asks for more than one step, the larger
+recommendation wins.
 
 **Scale down** when all of these hold:
 
@@ -255,16 +294,36 @@ a wrong upsize is bounded by the cooldown and corrected by the next downsize.
 - over the window, lag on the cluster's objects stayed bounded
 - the target is not the target of a failed attempt younger than four cooldowns
 
+The target of a scale-down is the cheapest size, no smaller than the live
+recommendation, for which the two peak conditions hold. A window whose peaks
+rule out the live recommendation can still allow a size between it and the
+current one. The window must also be covered: a cluster whose metrics history
+starts later than the window does is not scaled down yet.
+
+A size above `max_size` is the exception. The range is a cost bound, so such a
+cluster is moved to `max_size` even when a veto holds, and further down only
+when none does.
+
 **Otherwise do nothing** and report why: `steady`, `at-min`, `at-max`,
 `skew-limited` (a dataflow is behind, one worker is saturated, and a larger
 size is not recommended), or `backing-off`.
 
-A failed attempt is a reconfiguration by the autoscaler's role whose latest
-record is `timed-out` or `resource-exhausted`. It counts as a size change for
-cooldown and marks its target for the longer backoff. Only the latest record
-is retained, so only the most recent failure is remembered. That is enough to
-stop the common loop, where the same downsize is attempted every cooldown and
-fails every time because the target cannot hydrate.
+A failed attempt is a reconfiguration that settled as `timed-out` or
+`resource-exhausted`. Any failed attempt counts as a size change for cooldown.
+One started by the autoscaler's role also marks its target for the longer
+backoff. `mz_cluster_reconfigurations` holds neither a time nor a role, so
+both come from `mz_audit_events`: the controller writes the settling event
+with its time and target, and the role is the user of the latest `started`
+event before it, which is the `ALTER` that set that target. Only the most
+recent failure is consulted. That is enough to stop the common loop, where the
+same downsize is attempted every cooldown and fails every time because the
+target cannot hydrate.
+
+**Without a live sample**, for clusters with introspection disabled and
+clusters that run no compute objects, the same rules apply with the CPU demand
+left out. Memory sizes a scale-up. Lag above the bound together with window
+process CPU at or above `u_target` of the current size buys one step. Process
+CPU over the window, which only vetoes elsewhere, sizes a scale-down here.
 
 ### Acting
 
@@ -291,10 +350,13 @@ half done.
 - **Crash at any point.** Before the `ALTER`, nothing happened. After it, the
   controller owns the transition.
 - **Two copies running.** Both read the same state and reach the same
-  decision. The second `ALTER` to the same target folds into the in-progress
-  record. If their samples differ and they pick different targets, the later
-  statement retargets the reconfiguration, which the controller handles, and
-  subsequent runs see `reconfiguring`.
+  decision. Each re-reads the cluster's size and reconfiguration record just
+  before its `ALTER` and issues nothing if either changed during the run, so
+  the second copy normally stands down. The check is not atomic with the
+  `ALTER`. If both get through, a second `ALTER` to the same target folds into
+  the in-progress record, and one to a different target retargets the
+  reconfiguration, which the controller handles. Subsequent runs see
+  `reconfiguring`.
 - **A human resizes the cluster.** The audit log shows a size change, so the
   cooldown starts from it. The autoscaler then continues from the new size.
   A manual size outside the configured range is pulled back into it after the
@@ -325,10 +387,15 @@ Each run emits one JSON record per cluster to stdout:
 }
 ```
 
+The record also carries `target_size`, an `action` (`altered`, `dry-run`,
+`none`, `superseded`, or `failed`), a `mode` (`sampled` or `fallback`), the
+CPU demand, and per replica the sample status and timeout count.
+
 Because nothing is stored in the catalog, these records are the explanation
 for every decision. `mz_audit_events` separately records each `ALTER` under
-the autoscaler's role. The process exits non-zero only when it could not
-evaluate a cluster, not when it decided to do nothing.
+the autoscaler's role. The process exits non-zero when it could not evaluate a
+cluster or when Materialize rejected an `ALTER`, not when it decided to do
+nothing. An invalid configuration has its own exit code.
 
 ### Known inaccuracies
 
@@ -345,8 +412,12 @@ version:
   spike that the stateful design's activation window would have filtered. The
   cooldown bounds how often that can happen.
 - **Clusters with introspection disabled** have no busy-time relation. They
-  fall back to memory, lag, and out-of-memory decisions and are reported as
-  such.
+  fall back to memory, lag, process CPU, and out-of-memory decisions and are
+  reported as such.
+- **Foreground reconfiguration.** With `enable_background_alter_cluster` off
+  the `ALTER` waits for the cut-over and the run waits with it, up to the
+  catalog session's statement timeout. The record the statement wrote outlives
+  the wait, so a timeout there is reported as a successful action.
 
 ### Relationship to the built-in design
 
@@ -362,18 +433,24 @@ cluster should be rejected by convention, not by mechanism.
 
 - **Decision function.** Pure, table-driven: catalog snapshot, samples, and
   history in, decision out. Shared with the built-in strategy where practical.
-- **mzcompose.** A step-load scenario asserting the size sequence. A scenario
-  that holds a replica hydrating and asserts no session ever targets it. A
-  scenario that saturates a replica so targeted reads time out and asserts a
-  one-step upsize. A scenario that kills the autoscaler mid-run at each step
-  and asserts the cluster converges anyway.
+- **mzcompose.** A step-load scenario asserting the direction of each size
+  change, since how far a given load pushes a cluster depends on the machine.
+  A scenario that holds a replica hydrating and asserts no session ever
+  targets it. A scenario in which targeted reads time out and asserts a
+  one-step upsize. It uses a statement timeout of one millisecond in place of
+  a saturated replica, which exercises the same error from Materialize without
+  depending on how hard a test can load a replica. Open question 5 still needs
+  a real saturation run. A scenario that kills the autoscaler mid-run at each
+  step and asserts the cluster converges anyway.
 - **Dry run against real environments** before enabling actions anywhere.
 
 ## Minimal Viable Prototype
 
-Not built yet. The first deliverable is the process in `dry_run` mode, since
-that already answers the open questions about signal quality and needs no
-permission to alter anything.
+`misc/python/materialize/cluster_autoscaler`, run as `bin/cluster-autoscaler`.
+The decision function and the sampling arithmetic are pure and unit tested.
+The mzcompose scenarios are in `test/cluster-autoscaler`. The first use is in
+`dry_run` mode, since that already answers the open questions about signal
+quality and needs no permission to alter anything.
 
 ## Alternatives
 
@@ -409,16 +486,20 @@ process produces.
 2. **One cooldown or two?** A single period gates both directions and doubles
    as the downsize window. Upsizes after a recent downsize might deserve a
    shorter wait.
-3. **Language and home.** A Rust binary in this repository can share the
-   decision function with the built-in strategy. A Python tool under `misc/`
-   is faster to iterate on. Where it is published for self-managed users is a
-   product question.
+3. **Publishing.** The prototype is a Python tool under `misc/`, which is
+   faster to iterate on than a Rust binary and cannot share the decision
+   function with the built-in strategy. Where it is published for self-managed
+   users is a product question.
 4. **Lag bound for the downsize veto.** "Stayed bounded" needs a number. The
-   controller's `cluster_reconfiguration_allowed_lag` (60s) is the natural
-   candidate, and may be too strict for clusters whose inputs are themselves
-   slow.
+   prototype defaults to 60s, the controller's
+   `cluster_reconfiguration_allowed_lag`, as a flag. It may be too strict for
+   clusters whose inputs are themselves slow.
 5. **Does the targeted read measurably disturb a busy replica?** Expected to
    be negligible for two small queries per run. Should be measured in the
    saturation scenario.
-6. **Privileges.** The exact minimal grant set for the autoscaler role needs
-   to be confirmed and documented.
+6. **Privileges.** `ALTER CLUSTER` requires ownership of the cluster, and the
+   targeted reads require `USAGE` on it. The grant set in the tool's README
+   needs to be confirmed against a live environment.
+7. **Should a failed scale-up back off as well?** Only a failed scale-down
+   target is held back for four cooldowns. A failed scale-up is retried after
+   one, on the grounds that being too small costs freshness.
