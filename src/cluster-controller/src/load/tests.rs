@@ -24,6 +24,9 @@ use crate::strategy::{ConfigSignals, LiveSignals, Strategy};
 const GIB: u64 = 1 << 30;
 const MINUTE: u64 = 60_000;
 const HOUR: u64 = 60 * MINUTE;
+/// A start time far enough from zero that a window longer than the samples
+/// reaches back before the first one.
+const T0: u64 = 100 * HOUR;
 
 fn params() -> LoadParams {
     LoadParams {
@@ -432,17 +435,17 @@ fn evaluate_scale_down_window_is_at_least_twice_the_hydration_time() {
     let e = eval(
         "c8",
         bounds("c1", "c32"),
-        steady(0, 2 * HOUR, "c8", &m),
+        steady(T0, T0 + 2 * HOUR, "c8", &m),
         None,
-        2 * HOUR,
+        T0 + 2 * HOUR,
     );
     assert_eq!(e.action, None);
     let e = eval(
         "c8",
         bounds("c1", "c32"),
-        steady(0, 4 * HOUR, "c8", &m),
+        steady(T0, T0 + 4 * HOUR, "c8", &m),
         None,
-        4 * HOUR,
+        T0 + 4 * HOUR,
     );
     assert_eq!(target(&e), Some("c2"));
 }
@@ -454,7 +457,7 @@ fn evaluate_honors_the_policy_scale_down_window() {
         scale_down_after: Some(Duration::from_secs(4 * 60 * 60)),
         ..bounds("c1", "c32")
     };
-    let e = eval("c8", bounds, steady(0, 2 * HOUR, "c8", &m), None, 2 * HOUR);
+    let e = eval("c8", bounds, steady(T0, T0 + 2 * HOUR, "c8", &m), None, T0 + 2 * HOUR);
     assert_eq!(e.action, None);
 }
 
