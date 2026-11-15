@@ -822,6 +822,7 @@ mz_catalog_raw
 mz_cluster_auto_scaling_strategies
 mz_cluster_deployment_lineage
 mz_cluster_reconfigurations
+mz_cluster_replica_busy_history
 mz_cluster_replica_history
 mz_cluster_replica_metrics
 mz_cluster_replica_metrics_history

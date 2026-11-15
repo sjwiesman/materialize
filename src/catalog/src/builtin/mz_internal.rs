@@ -26,9 +26,9 @@ use mz_storage_client::controller::IntrospectionType;
 use mz_storage_client::healthcheck::{
     MZ_AWS_PRIVATELINK_CONNECTION_STATUS_HISTORY_DESC, MZ_PREPARED_STATEMENT_HISTORY_DESC,
     MZ_SESSION_HISTORY_DESC, MZ_SINK_STATUS_HISTORY_DESC, MZ_SOURCE_STATUS_HISTORY_DESC,
-    MZ_SQL_TEXT_DESC, MZ_STATEMENT_EXECUTION_HISTORY_DESC, REPLICA_METRICS_HISTORY_DESC,
-    REPLICA_STATUS_HISTORY_DESC, WALLCLOCK_GLOBAL_LAG_HISTOGRAM_RAW_DESC,
-    WALLCLOCK_LAG_HISTORY_DESC,
+    MZ_SQL_TEXT_DESC, MZ_STATEMENT_EXECUTION_HISTORY_DESC, REPLICA_BUSY_HISTORY_DESC,
+    REPLICA_METRICS_HISTORY_DESC, REPLICA_STATUS_HISTORY_DESC,
+    WALLCLOCK_GLOBAL_LAG_HISTOGRAM_RAW_DESC, WALLCLOCK_LAG_HISTORY_DESC,
 };
 use mz_storage_client::statistics::{MZ_SINK_STATISTICS_RAW_DESC, MZ_SOURCE_STATISTICS_RAW_DESC};
 
@@ -5250,6 +5250,42 @@ pub static MZ_OBJECT_ARRANGEMENT_SIZES_UNIFIED: LazyLock<BuiltinSource> = LazyLo
         ontology: None,
     }
 });
+
+pub static MZ_CLUSTER_REPLICA_BUSY_HISTORY: LazyLock<BuiltinSource> =
+    LazyLock::new(|| BuiltinSource {
+        name: "mz_cluster_replica_busy_history",
+        schema: MZ_INTERNAL_SCHEMA,
+        oid: oid::SOURCE_MZ_CLUSTER_REPLICA_BUSY_HISTORY_OID,
+        desc: REPLICA_BUSY_HISTORY_DESC.clone(),
+        data_source: IntrospectionType::ReplicaBusyHistory.into(),
+        column_comments: BTreeMap::from_iter([
+            (
+                "replica_id",
+                "The ID of the cluster replica. Corresponds to `mz_cluster_replicas.id`.",
+            ),
+            ("window_start", "The start of the window."),
+            ("window_end", "The end of the window."),
+            (
+                "workers",
+                "The number of workers that reported the window. Workers that disagree on the \
+                 bounds of a window, around a replica start or a change of \
+                 `compute_worker_busy_window`, report it in separate rows.",
+            ),
+            (
+                "busy_ns",
+                "The time the workers spent not parked within the window, summed over workers, in \
+                 nanoseconds.",
+            ),
+            (
+                "max_worker_busy_ns",
+                "The longest time any one worker spent not parked within the window, in \
+                 nanoseconds.",
+            ),
+        ]),
+        is_retained_metrics_object: false,
+        access: vec![PUBLIC_SELECT],
+        ontology: None,
+    });
 
 pub static MZ_OBJECT_ARRANGEMENT_SIZES_IND: LazyLock<BuiltinIndex> =
     LazyLock::new(|| BuiltinIndex {
