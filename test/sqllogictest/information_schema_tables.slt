@@ -337,6 +337,10 @@ mz_cluster_reconfigurations
 MATERIALIZED VIEW
 materialize
 mz_internal
+mz_cluster_replica_busy_history
+SOURCE
+materialize
+mz_internal
 mz_cluster_replica_history
 VIEW
 materialize

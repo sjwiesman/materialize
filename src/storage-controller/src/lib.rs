@@ -3905,6 +3905,7 @@ impl From<&IntrospectionType> for CollectionManagerKind {
             | IntrospectionType::PrivatelinkConnectionStatusHistory
             | IntrospectionType::ReplicaStatusHistory
             | IntrospectionType::ReplicaMetricsHistory
+            | IntrospectionType::ReplicaBusyHistory
             | IntrospectionType::WallclockLagHistory
             | IntrospectionType::WallclockLagHistogram
             | IntrospectionType::PreparedStatementHistory

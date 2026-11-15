@@ -914,6 +914,7 @@ UNINTERESTING_SYSTEM_PARAMETERS = [
     "storage_dataflow_suspendable_sources",
     "storage_downgrade_since_during_finalization",
     "replica_metrics_history_retention_interval",
+    "replica_busy_history_retention_interval",
     "wallclock_lag_history_retention_interval",
     "wallclock_global_lag_histogram_retention_interval",
     "kafka_client_id_enrichment_rules",

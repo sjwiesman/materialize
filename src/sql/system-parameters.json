@@ -3874,6 +3874,15 @@
       "dyncfg": true
     },
     {
+      "name": "replica_busy_history_retention_interval",
+      "typeName": "duration",
+      "default": "30 d",
+      "description": "The interval of time to keep when truncating the replica busy history.",
+      "scope": "environment",
+      "userVisible": false,
+      "dyncfg": true
+    },
+    {
       "name": "replica_hydration_history_retention_period",
       "typeName": "duration",
       "default": "120 d",

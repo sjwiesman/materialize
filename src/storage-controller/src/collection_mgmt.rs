@@ -87,8 +87,9 @@ use mz_repr::{ColumnName, DatumVec, Diff, GlobalId, Row, Timestamp};
 use mz_storage_client::client::{AppendOnlyUpdate, Status, TimestamplessUpdate};
 use mz_storage_client::controller::{IntrospectionType, MonotonicAppender, StorageWriteOp};
 use mz_storage_client::healthcheck::{
-    MZ_SINK_STATUS_HISTORY_DESC, MZ_SOURCE_STATUS_HISTORY_DESC, REPLICA_METRICS_HISTORY_DESC,
-    WALLCLOCK_GLOBAL_LAG_HISTOGRAM_RAW_DESC, WALLCLOCK_LAG_HISTORY_DESC,
+    MZ_SINK_STATUS_HISTORY_DESC, MZ_SOURCE_STATUS_HISTORY_DESC, REPLICA_BUSY_HISTORY_DESC,
+    REPLICA_METRICS_HISTORY_DESC, WALLCLOCK_GLOBAL_LAG_HISTOGRAM_RAW_DESC,
+    WALLCLOCK_LAG_HISTORY_DESC,
 };
 use mz_storage_client::metrics::StorageControllerMetrics;
 use mz_storage_client::statistics::ControllerSinkStatistics;
@@ -96,8 +97,8 @@ use mz_storage_client::storage_collections::StorageCollections;
 use mz_storage_types::StorageDiff;
 use mz_storage_types::controller::InvalidUpper;
 use mz_storage_types::dyncfgs::{
-    REPLICA_METRICS_HISTORY_RETENTION_INTERVAL, WALLCLOCK_GLOBAL_LAG_HISTOGRAM_RETENTION_INTERVAL,
-    WALLCLOCK_LAG_HISTORY_RETENTION_INTERVAL,
+    REPLICA_BUSY_HISTORY_RETENTION_INTERVAL, REPLICA_METRICS_HISTORY_RETENTION_INTERVAL,
+    WALLCLOCK_GLOBAL_LAG_HISTOGRAM_RETENTION_INTERVAL, WALLCLOCK_LAG_HISTORY_RETENTION_INTERVAL,
 };
 use mz_storage_types::parameters::{
     STORAGE_MANAGED_COLLECTIONS_BATCH_DURATION_DEFAULT, StorageParameters,
@@ -685,6 +686,7 @@ where
             }
 
             introspection_type @ IntrospectionType::ReplicaMetricsHistory
+            | introspection_type @ IntrospectionType::ReplicaBusyHistory
             | introspection_type @ IntrospectionType::WallclockLagHistory
             | introspection_type @ IntrospectionType::WallclockLagHistogram
             | introspection_type @ IntrospectionType::PreparedStatementHistory
@@ -1077,6 +1079,7 @@ impl AppendOnlyWriteTask {
                 | Some(IntrospectionType::SinkStatusHistory) => Some(BTreeMap::new()),
 
                 Some(IntrospectionType::ReplicaMetricsHistory)
+                | Some(IntrospectionType::ReplicaBusyHistory)
                 | Some(IntrospectionType::WallclockLagHistory)
                 | Some(IntrospectionType::WallclockLagHistogram)
                 | Some(IntrospectionType::PrivatelinkConnectionStatusHistory)
@@ -1143,6 +1146,7 @@ impl AppendOnlyWriteTask {
         };
         let initial_statuses = match introspection_type {
             IntrospectionType::ReplicaMetricsHistory
+            | IntrospectionType::ReplicaBusyHistory
             | IntrospectionType::WallclockLagHistory
             | IntrospectionType::WallclockLagHistogram => {
                 let result = partially_truncate_metrics_history(
@@ -1476,6 +1480,13 @@ async fn partially_truncate_metrics_history(
             REPLICA_METRICS_HISTORY_RETENTION_INTERVAL.get(&config_set),
             REPLICA_METRICS_HISTORY_DESC
                 .get_by_name(&ColumnName::from("occurred_at"))
+                .expect("schema has not changed")
+                .0,
+        ),
+        IntrospectionType::ReplicaBusyHistory => (
+            REPLICA_BUSY_HISTORY_RETENTION_INTERVAL.get(&config_set),
+            REPLICA_BUSY_HISTORY_DESC
+                .get_by_name(&ColumnName::from("window_end"))
                 .expect("schema has not changed")
                 .0,
         ),

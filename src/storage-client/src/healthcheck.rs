@@ -178,6 +178,23 @@ pub static REPLICA_METRICS_HISTORY_DESC: LazyLock<RelationDesc> = LazyLock::new(
         .finish()
 });
 
+pub static REPLICA_BUSY_HISTORY_DESC: LazyLock<RelationDesc> = LazyLock::new(|| {
+    RelationDesc::builder()
+        .with_column("replica_id", SqlScalarType::String.nullable(false))
+        .with_column(
+            "window_start",
+            SqlScalarType::TimestampTz { precision: None }.nullable(false),
+        )
+        .with_column(
+            "window_end",
+            SqlScalarType::TimestampTz { precision: None }.nullable(false),
+        )
+        .with_column("workers", SqlScalarType::UInt64.nullable(false))
+        .with_column("busy_ns", SqlScalarType::UInt64.nullable(false))
+        .with_column("max_worker_busy_ns", SqlScalarType::UInt64.nullable(false))
+        .finish()
+});
+
 pub static WALLCLOCK_LAG_HISTORY_DESC: LazyLock<RelationDesc> = LazyLock::new(|| {
     RelationDesc::builder()
         .with_column("object_id", SqlScalarType::String.nullable(false))

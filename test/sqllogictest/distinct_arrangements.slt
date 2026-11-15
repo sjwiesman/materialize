@@ -1189,16 +1189,18 @@ JOIN mz_introspection.mz_dataflow_operator_dataflows mdod ON mash.operator_id = 
 GROUP BY mdod.name
 ORDER BY mdod.name
 ----
-AccumulableErrorCheck  4
-Arrange␠ReduceMinsMaxes  1
-Arrange␠errors  1
-ArrangeAccumulable␠[val:␠empty]  4
+AccumulableErrorCheck  5
+Arrange␠ReduceMinsMaxes  2
+Arrange␠errors  2
+ArrangeAccumulable␠[val:␠empty]  5
 ArrangeBy[[Column(0,␠"operator_id")]]  2
 ArrangeBy[[Column(1,␠"dataflow_id")]]  2
-Distinct␠errors  1
-ReduceAccumulable  4
-ReduceMinsMaxes  1
+Arranged␠MinsMaxesHierarchical␠input  7
+Distinct␠errors  2
+ReduceAccumulable  5
+ReduceMinsMaxes  2
 ReduceMinsMaxes␠Error␠Check  1
+Reduced␠Fallibly␠MinsMaxesHierarchical  7
 
 statement ok
 COMMIT
