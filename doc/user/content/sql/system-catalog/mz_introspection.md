@@ -463,6 +463,7 @@ The `mz_scheduling_parks_histogram` view describes a histogram of [dataflow] wor
 | `requested_ns`  | [`uint8`]   | The requested length of the park event in nanoseconds.   |
 | `count`         | [`numeric`] | The (noncumulative) count of park events in this bucket. |
 
+<!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_scheduling_busy_per_worker -->
 <!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_scheduling_parks_histogram_per_worker -->
 <!-- RELATION_SPEC_UNDOCUMENTED mz_introspection.mz_scheduling_parks_histogram_raw -->
 

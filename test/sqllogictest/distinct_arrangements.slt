@@ -1145,6 +1145,7 @@ Arrange Timely(MessagesSent)
 Arrange Timely(Operates)
 Arrange Timely(Parks)
 Arrange Timely(Reachability)
+Arrange Timely(WorkerBusy)
 
 statement ok
 COMMIT

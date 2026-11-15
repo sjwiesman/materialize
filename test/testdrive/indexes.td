@@ -358,6 +358,7 @@ mz_peek_durations_histogram_raw_s2_primary_idx              mz_peek_durations_hi
 mz_recent_activity_log_thinned_ind                          mz_recent_activity_log_thinned               mz_catalog_server    {sql_hash}                                  ""
 mz_recent_storage_usage_ind                                 mz_recent_storage_usage                      mz_catalog_server    {object_id}                                 ""
 mz_roles_ind                                                mz_roles                                     mz_catalog_server    {id}                                        ""
+mz_scheduling_busy_per_worker_s2_primary_idx                mz_scheduling_busy_per_worker                mz_catalog_server    {worker_id}                                 ""
 mz_scheduling_elapsed_raw_s2_primary_idx                    mz_scheduling_elapsed_raw                    mz_catalog_server    {id,worker_id}                              ""
 mz_scheduling_parks_histogram_raw_s2_primary_idx            mz_scheduling_parks_histogram_raw            mz_catalog_server    {worker_id,slept_for_ns,requested_ns}       ""
 mz_schemas_ind                                              mz_schemas                                   mz_catalog_server    {database_id}                               ""

@@ -1006,6 +1006,7 @@ UNINTERESTING_SYSTEM_PARAMETERS = [
     "enable_hydration_burst",
     "default_hydration_burst_linger",
     "cluster_reconfiguration_allowed_lag",
+    "compute_worker_busy_window",
 ]
 
 

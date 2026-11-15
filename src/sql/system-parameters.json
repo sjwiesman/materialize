@@ -515,6 +515,15 @@
       "dyncfg": true
     },
     {
+      "name": "compute_worker_busy_window",
+      "typeName": "duration",
+      "default": "1 min",
+      "description": "The length of the windows in which compute replicas measure worker busy time.",
+      "scope": "environment",
+      "userVisible": false,
+      "dyncfg": true
+    },
+    {
       "name": "console_oidc_client_id",
       "typeName": "string",
       "default": "",
