@@ -1169,6 +1169,10 @@ mz_records_per_dataflow_per_worker
 VIEW
 materialize
 mz_introspection
+mz_scheduling_busy_per_worker
+SOURCE
+materialize
+mz_introspection
 mz_scheduling_elapsed
 VIEW
 materialize

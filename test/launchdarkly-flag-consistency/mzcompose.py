@@ -460,6 +460,7 @@ KNOWN_MISSING_FROM_LD: set[str] = set("""
     with_0dt_caught_up_check_cutoff
     with_0dt_caught_up_check_stability_period
     with_0dt_deployment_ddl_check_interval
+    compute_worker_busy_window
     """.split())
 
 # LaunchDarkly flags that are no longer synchronized parameters (in the current

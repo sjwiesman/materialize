@@ -100,6 +100,7 @@ mz_recent_activity_log_thinned_ind  CREATE␠INDEX␠"mz_recent_activity_log_thi
 mz_recent_sql_text_ind  CREATE␠INDEX␠"mz_recent_sql_text_ind"␠IN␠CLUSTER␠[s2]␠ON␠[s721␠AS␠"mz_internal"."mz_recent_sql_text"]␠("sql_hash")
 mz_recent_storage_usage_ind  CREATE␠INDEX␠"mz_recent_storage_usage_ind"␠IN␠CLUSTER␠[s2]␠ON␠[s840␠AS␠"mz_catalog"."mz_recent_storage_usage"]␠("object_id")
 mz_roles_ind  CREATE␠INDEX␠"mz_roles_ind"␠IN␠CLUSTER␠[s2]␠ON␠[s512␠AS␠"mz_catalog"."mz_roles"]␠("id")
+mz_scheduling_busy_per_worker_s2_primary_idx  CREATE␠INDEX␠"mz_scheduling_busy_per_worker_s2_primary_idx"␠IN␠CLUSTER␠[s2]␠ON␠"mz_introspection"."mz_scheduling_busy_per_worker"␠("worker_id")
 mz_scheduling_elapsed_raw_s2_primary_idx  CREATE␠INDEX␠"mz_scheduling_elapsed_raw_s2_primary_idx"␠IN␠CLUSTER␠[s2]␠ON␠"mz_introspection"."mz_scheduling_elapsed_raw"␠("id",␠"worker_id")
 mz_scheduling_parks_histogram_raw_s2_primary_idx  CREATE␠INDEX␠"mz_scheduling_parks_histogram_raw_s2_primary_idx"␠IN␠CLUSTER␠[s2]␠ON␠"mz_introspection"."mz_scheduling_parks_histogram_raw"␠("worker_id",␠"slept_for_ns",␠"requested_ns")
 mz_schemas_ind  CREATE␠INDEX␠"mz_schemas_ind"␠IN␠CLUSTER␠[s2]␠ON␠[s492␠AS␠"mz_catalog"."mz_schemas"]␠("database_id")
@@ -694,6 +695,10 @@ mz_roles  name
 mz_roles  oid
 mz_roles  rolcanlogin
 mz_roles  rolsuper
+mz_scheduling_busy_per_worker  busy_ns
+mz_scheduling_busy_per_worker  window_end
+mz_scheduling_busy_per_worker  window_start
+mz_scheduling_busy_per_worker  worker_id
 mz_scheduling_elapsed_raw  id
 mz_scheduling_elapsed_raw  worker_id
 mz_scheduling_parks_histogram_raw  requested_ns

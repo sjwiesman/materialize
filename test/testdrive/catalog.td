@@ -778,6 +778,7 @@ mz_message_counts_sent_raw                   log   <null>    ""
 mz_message_batch_counts_received_raw         log   <null>    ""
 mz_message_batch_counts_sent_raw             log   <null>    ""
 mz_peek_durations_histogram_raw              log   <null>    ""
+mz_scheduling_busy_per_worker                log   <null>    ""
 mz_scheduling_elapsed_raw                    log   <null>    ""
 mz_scheduling_parks_histogram_raw            log   <null>    ""
 
