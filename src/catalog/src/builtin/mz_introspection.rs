@@ -126,6 +126,15 @@ pub static MZ_SCHEDULING_PARKS_HISTOGRAM_RAW: LazyLock<BuiltinLog> = LazyLock::n
     ontology: None,
 });
 
+pub static MZ_SCHEDULING_BUSY_PER_WORKER: LazyLock<BuiltinLog> = LazyLock::new(|| BuiltinLog {
+    name: "mz_scheduling_busy_per_worker",
+    schema: MZ_INTROSPECTION_SCHEMA,
+    oid: oid::LOG_MZ_SCHEDULING_BUSY_PER_WORKER_OID,
+    variant: LogVariant::Timely(TimelyLog::WorkerBusy),
+    access: vec![PUBLIC_SELECT],
+    ontology: None,
+});
+
 pub static MZ_ARRANGEMENT_RECORDS_RAW: LazyLock<BuiltinLog> = LazyLock::new(|| BuiltinLog {
     name: "mz_arrangement_records_raw",
     schema: MZ_INTROSPECTION_SCHEMA,

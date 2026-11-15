@@ -17,13 +17,17 @@ use std::time::Duration;
 use columnar::{Columnar, Index};
 use columnation::{Columnation, CopyRegion};
 use mz_compute_client::logging::LoggingConfig;
+use mz_compute_types::dyncfgs::worker_busy_window;
+use mz_dyncfg::ConfigSet;
 use mz_ore::cast::CastFrom;
+use mz_ore::soft_panic_or_log;
 use mz_repr::{Datum, Diff, Timestamp};
 use mz_timely_util::columnar::batcher;
 use mz_timely_util::columnar::builder::ColumnBuilder;
 use mz_timely_util::columnar::{Col2ValBatcher, columnar_exchange};
 use mz_timely_util::columnation::ColumnationChunker;
 use mz_timely_util::replay::MzReplay;
+use timely::container::CapacityContainerBuilder;
 use timely::dataflow::Scope;
 use timely::dataflow::channels::pact::{ExchangeCore, Pipeline};
 use timely::dataflow::operators::Operator;
@@ -58,11 +62,13 @@ pub(super) struct Return {
 /// * `scope`: The Timely scope hosting the log analysis dataflow.
 /// * `config`: Logging configuration
 /// * `event_queue`: The source to read log events from.
+/// * `worker_config`: The worker's dyncfgs, which set the `WorkerBusy` window length.
 pub(super) fn construct(
     scope: Scope<'_, Timestamp>,
     config: &LoggingConfig,
     event_queue: EventQueue<Vec<(Duration, TimelyEvent)>>,
     shared_state: Rc<RefCell<SharedLoggingState>>,
+    worker_config: Rc<ConfigSet>,
 ) -> Return {
     scope.scoped("timely logging", move |scope| {
         let enable_logging = config.enable_logging;
@@ -102,13 +108,23 @@ pub(super) fn construct(
         let mut batches_sent_out = OutputBuilder::from(batches_sent_out);
         let (batches_received_out, batches_received) = demux.new_output();
         let mut batches_received_out = OutputBuilder::from(batches_received_out);
+        let worker_busy_port = demux.shape().outputs();
+        let (worker_busy_out, worker_busy) = demux.new_output();
+        let mut worker_busy_out: OutputBuilder<_, BusyContainerBuilder> =
+            OutputBuilder::from(worker_busy_out);
 
         let worker_id = scope.index();
+        let logging_interval_ms = std::cmp::max(1, config.interval.as_millis());
         let mut demux_state = DemuxState::default();
-        demux.build(|_capability| {
+        let mut busy = BusyTracker::new(logging_interval_ms);
+        demux.build(|mut capabilities| {
             let peers = scope.peers();
-            let logging_interval_ms = std::cmp::max(1, config.interval.as_millis());
-            move |_frontiers| {
+            // Window updates are emitted at the window's emit timestamp, whether or not an input
+            // batch carries a capability for it, so the operator holds one at its input frontier.
+            let mut busy_cap = Some(capabilities.swap_remove(worker_busy_port));
+            drop(capabilities);
+            move |frontiers| {
+                let busy_window = worker_busy_window(&worker_config);
                 let mut operates = operates_out.activate();
                 let mut channels = channels_out.activate();
                 let mut addresses = addresses_out.activate();
@@ -119,6 +135,7 @@ pub(super) fn construct(
                 let mut batches_received = batches_received_out.activate();
                 let mut schedules_duration = schedules_duration_out.activate();
                 let mut schedules_histogram = schedules_histogram_out.activate();
+                let mut worker_busy = worker_busy_out.activate();
 
                 input.for_each(|cap, data| {
                     let mut output_buffers = DemuxOutput {
@@ -144,15 +161,46 @@ pub(super) fn construct(
 
                         DemuxHandler {
                             state: &mut demux_state,
+                            busy: &mut busy,
                             shared_state: &mut shared_state.borrow_mut(),
                             output: &mut output_buffers,
                             logging_interval_ms,
                             peers,
                             time,
+                            busy_window,
                         }
                         .handle(event);
                     }
                 });
+
+                let frontier = frontiers[0].frontier().first().copied();
+                busy.progress(frontier, busy_window);
+                if let Some(cap) = &busy_cap {
+                    for (datum, ts, diff) in busy.drain_updates() {
+                        let ts = if ts < *cap.time() {
+                            soft_panic_or_log!(
+                                "busy window update at {ts} before the held capability {:?}",
+                                cap.time()
+                            );
+                            *cap.time()
+                        } else {
+                            ts
+                        };
+                        worker_busy.session_with_builder(&cap.delayed(&ts)).give((
+                            (datum, ()),
+                            ts,
+                            diff,
+                        ));
+                    }
+                }
+                match frontier {
+                    Some(frontier) => {
+                        if let Some(cap) = &mut busy_cap {
+                            cap.downgrade(&frontier);
+                        }
+                    }
+                    None => busy_cap = None,
+                }
             }
         });
 
@@ -358,6 +406,23 @@ pub(super) fn construct(
                 },
             );
 
+        let worker_busy =
+            consolidate_and_pack::<ColumnationChunker<_>, KB<_, _, _>, ColumnBuilder<_>, _, _, _>(
+                worker_busy,
+                TimelyLog::WorkerBusy,
+                move |data, packer, session| {
+                    for ((datum, ()), time, diff) in data.iter() {
+                        let data = packer.pack_slice(&[
+                            Datum::UInt64(u64::cast_from(worker_id)),
+                            Datum::MzTimestamp(Timestamp::from(datum.window_start_ms)),
+                            Datum::MzTimestamp(Timestamp::from(datum.window_end_ms)),
+                            Datum::UInt64(datum.busy_ns),
+                        ]);
+                        session.give((data, time, diff));
+                    }
+                },
+            );
+
         let logs = {
             use TimelyLog::*;
             [
@@ -371,6 +436,7 @@ pub(super) fn construct(
                 (MessagesReceived, messages_received),
                 (BatchesSent, batches_sent),
                 (BatchesReceived, batches_received),
+                (WorkerBusy, worker_busy),
             ]
         };
 
@@ -500,10 +566,167 @@ impl Columnation for ScheduleHistogramDatum {
     type InnerRegion = CopyRegion<Self>;
 }
 
+type BusyContainerBuilder = CapacityContainerBuilder<Vec<Update<(BusyDatum, ())>>>;
+
+/// A row of the `WorkerBusy` log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct BusyDatum {
+    window_start_ms: u64,
+    window_end_ms: u64,
+    busy_ns: u64,
+}
+
+impl Columnation for BusyDatum {
+    type InnerRegion = CopyRegion<Self>;
+}
+
+/// Measures one worker's busy time in the windows of the `WorkerBusy` log.
+///
+/// The log holds the last closed window of each worker: its non-parked time. Closing a window
+/// retracts the previous window's row and inserts the new one, both at [`BusyTracker::emit_ts`].
+///
+/// A window ends at the first multiple, since the Unix epoch, of the window length read when it
+/// opens. All workers of a replica therefore close a window at the same boundary and emit it at
+/// the same log timestamp. Workers that read a changed length on different sides of a boundary
+/// disagree on the bounds of the next window only. A window closes once the worker has seen every
+/// event before its end, through a later event or through its input frontier, so a worker that is
+/// parked, or never parks, closes on time. Running time spanning a boundary is split at the
+/// boundary.
+struct BusyTracker {
+    logging_interval_ms: u128,
+    window: Option<BusyWindow>,
+    /// Since when the worker's non-parked time is not yet charged. `None` while it is parked.
+    running_since: Option<Duration>,
+    busy: Duration,
+    /// The row of the last closed window.
+    reported: Option<BusyDatum>,
+    /// Updates of closed windows, not yet emitted.
+    updates: Vec<(BusyDatum, Timestamp, Diff)>,
+}
+
+/// The open window of a [`BusyTracker`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BusyWindow {
+    /// `None` for the worker's first window, which starts at its first event rather than at a
+    /// boundary, and is not reported.
+    start: Option<Duration>,
+    end: Duration,
+}
+
+impl BusyTracker {
+    fn new(logging_interval_ms: u128) -> Self {
+        Self {
+            logging_interval_ms,
+            window: None,
+            running_since: None,
+            busy: Duration::ZERO,
+            reported: None,
+            updates: Vec::new(),
+        }
+    }
+
+    /// The log timestamp of the updates of the window ending at `end`. It is the timestamp an
+    /// event at `end` gets, the first of the next window.
+    fn emit_ts(&self, end: Duration) -> Timestamp {
+        let interval = self.logging_interval_ms;
+        let ts = (end.as_millis() / interval + 1) * interval;
+        ts.try_into().expect("must fit")
+    }
+
+    /// Advances to an event at `time`, before the event is handled.
+    fn observe(&mut self, time: Duration, length: Duration) {
+        if self.window.is_none() {
+            self.window = Some(BusyWindow {
+                start: None,
+                end: next_boundary(time, length),
+            });
+            self.running_since = Some(time);
+        }
+        self.advance(time, length);
+    }
+
+    /// Advances to the input `frontier`, past which no event can arrive.
+    fn progress(&mut self, frontier: Option<Timestamp>, length: Duration) {
+        // Events are timestamped like `emit_ts`, at the end of their logging interval, so every
+        // event before `frontier` minus one logging interval has been seen. An empty frontier
+        // means the logging dataflow is shutting down, with nobody left to report to.
+        let Some(frontier) = frontier else {
+            return;
+        };
+        let interval = u64::try_from(self.logging_interval_ms).expect("must fit");
+        if let Some(now) = u64::from(frontier).checked_sub(interval) {
+            self.advance(Duration::from_millis(now), length);
+        }
+    }
+
+    /// Closes every window that ends at or before `now`.
+    fn advance(&mut self, now: Duration, length: Duration) {
+        while let Some(window) = self.window
+            && window.end <= now
+        {
+            self.close(window);
+            self.window = Some(BusyWindow {
+                start: Some(window.end),
+                end: next_boundary(window.end, length),
+            });
+        }
+    }
+
+    fn close(&mut self, window: BusyWindow) {
+        let end = window.end;
+        if let Some(since) = &mut self.running_since {
+            self.busy += end.saturating_sub(*since);
+            *since = end;
+        }
+        let busy = std::mem::take(&mut self.busy);
+        let Some(start) = window.start else {
+            return;
+        };
+
+        let ts = self.emit_ts(end);
+        if let Some(datum) = self.reported.take() {
+            self.updates.push((datum, ts, Diff::MINUS_ONE));
+        }
+        let millis = |time: Duration| u64::try_from(time.as_millis()).expect("must fit");
+        // The row is reported even when the worker was parked throughout, so a consumer can
+        // count the workers.
+        let datum = BusyDatum {
+            window_start_ms: millis(start),
+            window_end_ms: millis(end),
+            busy_ns: u64::try_from(busy.as_nanos()).expect("must fit"),
+        };
+        self.reported = Some(datum);
+        self.updates.push((datum, ts, Diff::ONE));
+    }
+
+    /// Takes the updates of the windows closed since the previous call.
+    fn drain_updates(&mut self) -> std::vec::Drain<'_, (BusyDatum, Timestamp, Diff)> {
+        self.updates.drain(..)
+    }
+
+    fn park(&mut self, time: Duration) {
+        if let Some(since) = self.running_since.take() {
+            self.busy += time.saturating_sub(since);
+        }
+    }
+
+    fn unpark(&mut self, time: Duration) {
+        self.running_since = Some(time);
+    }
+}
+
+/// The least multiple of `length` after `time`.
+fn next_boundary(time: Duration, length: Duration) -> Duration {
+    let length_ms = std::cmp::max(1, length.as_millis());
+    let end_ms = (time.as_millis() / length_ms + 1) * length_ms;
+    Duration::from_millis(end_ms.try_into().expect("must fit"))
+}
+
 /// Event handler of the demux operator.
 struct DemuxHandler<'a, 'b, 'c> {
     /// State kept by the demux operator.
     state: &'a mut DemuxState,
+    busy: &'a mut BusyTracker,
     /// State shared across log receivers.
     shared_state: &'a mut SharedLoggingState,
     /// Demux output buffers.
@@ -514,6 +737,8 @@ struct DemuxHandler<'a, 'b, 'c> {
     peers: usize,
     /// The current event time.
     time: Duration,
+    /// The window length of the `WorkerBusy` log.
+    busy_window: Duration,
 }
 
 impl DemuxHandler<'_, '_, '_> {
@@ -529,6 +754,8 @@ impl DemuxHandler<'_, '_, '_> {
     /// Handle the given timely event.
     fn handle(&mut self, event: TimelyEvent) {
         use TimelyEvent::*;
+
+        self.busy.observe(self.time, self.busy_window);
 
         match event {
             Operates(e) => self.handle_operates(e),
@@ -685,6 +912,7 @@ impl DemuxHandler<'_, '_, '_> {
     fn handle_park(&mut self, event: ParkEvent) {
         match event {
             ParkEvent::Park(requested) => {
+                self.busy.park(self.time);
                 let park = Park {
                     time: self.time,
                     requested,
@@ -695,6 +923,7 @@ impl DemuxHandler<'_, '_, '_> {
                 }
             }
             ParkEvent::Unpark => {
+                self.busy.unpark(self.time);
                 let Some(park) = self.state.last_park.take() else {
                     error!("unpark without a preceding park");
                     return;
@@ -814,3 +1043,6 @@ where
         vec.resize(index + 1, Default::default());
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -349,7 +349,7 @@ impl Coordinator {
     ///  * removing it from [`Coordinator::introspection_subscribes`]
     ///  * dropping its compute collection
     ///  * retracting any rows previously omitted by it from its corresponding storage-managed
-    ///    collection
+    ///    collection, unless that is a history (see [`SubscribeSpec::is_history`])
     pub(super) fn drop_introspection_subscribes(&mut self, replica_id: ReplicaId) {
         let to_drop: Vec<_> = self
             .introspection_subscribes
@@ -384,10 +384,12 @@ impl Coordinator {
             .compute
             .drop_collections(subscribe.cluster_id, vec![id]);
 
-        self.controller.storage.update_introspection_collection(
-            subscribe.spec.introspection_type,
-            subscribe.delete_write_op(),
-        );
+        if !subscribe.spec.is_history() {
+            self.controller.storage.update_introspection_collection(
+                subscribe.spec.introspection_type,
+                subscribe.delete_write_op(),
+            );
+        }
     }
 
     async fn reinstall_introspection_subscribe(&mut self, id: GlobalId) {
@@ -429,7 +431,9 @@ impl Coordinator {
 
         // Ensure that the contents of the target storage collection are cleaned when the new
         // subscribe starts reporting data.
-        subscribe.deferred_write = Some(subscribe.delete_write_op());
+        if !spec.is_history() {
+            subscribe.deferred_write = Some(subscribe.delete_write_op());
+        }
         // Until then, the collection serves the previous subscribe's data, which the replica may
         // have invalidated by restarting.
         subscribe.first_data_at = None;
@@ -493,12 +497,19 @@ impl Coordinator {
 
         subscribe.first_data_at.get_or_insert_with(Instant::now);
 
-        self.controller.storage.update_introspection_collection(
-            subscribe.spec.introspection_type,
-            StorageWriteOp::Append {
-                updates: new_updates,
-            },
-        );
+        if subscribe.spec.is_history() {
+            new_updates.retain(|(_row, diff)| diff.is_positive());
+            self.controller
+                .storage
+                .append_introspection_updates(subscribe.spec.introspection_type, new_updates);
+        } else {
+            self.controller.storage.update_introspection_collection(
+                subscribe.spec.introspection_type,
+                StorageWriteOp::Append {
+                    updates: new_updates,
+                },
+            );
+        }
     }
 
     /// Invalidates introspection-subscribe freshness for the given replica.
@@ -584,6 +595,15 @@ pub(super) struct SubscribeSpec {
 }
 
 impl SubscribeSpec {
+    /// Whether the target collection is an append-only history. It receives only the subscribe's
+    /// insertions, and keeps the rows of dropped and reinstalled subscribes.
+    fn is_history(&self) -> bool {
+        matches!(
+            self.introspection_type,
+            IntrospectionType::ReplicaBusyHistory
+        )
+    }
+
     fn to_plan(&self, catalog: &dyn SessionCatalog) -> Result<SubscribePlan, anyhow::Error> {
         let parsed = mz_sql::parse::parse(self.sql)?.into_element();
         let (stmt, resolved_ids) = mz_sql::names::resolve(catalog, parsed.ast)?;
@@ -673,5 +693,29 @@ const SUBSCRIBES: &[SubscribeSpec] = &[
             WHERE ce.export_id NOT LIKE 't%'
             GROUP BY ce.export_id
         )",
+    },
+    // One row per closed busy-time window of the replica, appended to a history. Every worker
+    // emits its window at the same log timestamp, so a window's row never covers only some of the
+    // workers that agree on its bounds.
+    //
+    // Without a snapshot, a subscribe installed on a running replica, after a reconnect or an
+    // environmentd restart, does not re-append the window the replica last closed. It re-appends
+    // a window an earlier subscribe delivered only if the window was emitted after its `as_of`.
+    // That `as_of` is the log's read frontier, which trails the frontier the earlier subscribe
+    // reached by the log's compaction lag, so a duplicate takes a replica that reconnects without
+    // restarting shortly after closing a window. A restarted replica starts a new log, whose
+    // windows all end after the restart.
+    SubscribeSpec {
+        introspection_type: IntrospectionType::ReplicaBusyHistory,
+        sql: "SUBSCRIBE (
+            SELECT
+                window_start::timestamptz AS window_start,
+                window_end::timestamptz AS window_end,
+                count(*)::uint8 AS workers,
+                sum(busy_ns)::uint8 AS busy_ns,
+                max(busy_ns) AS max_worker_busy_ns
+            FROM mz_introspection.mz_scheduling_busy_per_worker
+            GROUP BY window_start, window_end
+        ) WITH (SNAPSHOT = false)",
     },
 ];

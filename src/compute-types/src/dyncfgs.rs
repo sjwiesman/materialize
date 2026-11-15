@@ -830,6 +830,25 @@ pub const MV_SINK_ADVANCE_PERSIST_FRONTIERS: Config<bool> = Config::new(
     ParameterScope::Environment,
 );
 
+/// The length of the windows in which compute replicas measure worker busy time.
+///
+/// Read through [`worker_busy_window`].
+pub const COMPUTE_WORKER_BUSY_WINDOW: Config<Duration> = Config::new(
+    "compute_worker_busy_window",
+    Duration::from_secs(60),
+    "The length of the windows in which compute replicas measure worker busy time.",
+    ParameterScope::Environment,
+);
+
+/// The worker busy-time window length, from `compute_worker_busy_window`.
+///
+/// Floored at one second, because a zero length would close windows in a busy loop.
+pub fn worker_busy_window(configs: &ConfigSet) -> Duration {
+    COMPUTE_WORKER_BUSY_WINDOW
+        .get(configs)
+        .max(Duration::from_secs(1))
+}
+
 /// Adds the full set of all compute `Config`s.
 pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
     configs
@@ -886,6 +905,7 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&COMPUTE_PROMETHEUS_INTROSPECTION_SCRAPE_INTERVAL)
         .add(&SUBSCRIBE_SNAPSHOT_OPTIMIZATION)
         .add(&MV_SINK_ADVANCE_PERSIST_FRONTIERS)
+        .add(&COMPUTE_WORKER_BUSY_WINDOW)
         .add(&ENABLE_COLUMN_PAGED_BATCHER)
         .add(&ENABLE_COLUMNAR_MERGE_BATCHER)
         .add(&ENABLE_COLUMNAR_ACCUMULABLE_DIFF)

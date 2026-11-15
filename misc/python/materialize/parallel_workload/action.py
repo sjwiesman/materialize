@@ -3422,6 +3422,7 @@ class FlipFlagsAction(Action):
             "storage_dataflow_suspendable_sources",
             "storage_downgrade_since_during_finalization",
             "replica_metrics_history_retention_interval",
+            "replica_busy_history_retention_interval",
             "wallclock_lag_history_retention_interval",
             "wallclock_global_lag_histogram_retention_interval",
             "kafka_client_id_enrichment_rules",
@@ -3511,6 +3512,7 @@ class FlipFlagsAction(Action):
             "read_then_write_max_dependencies",
             "enable_hydration_burst",
             "default_hydration_burst_linger",
+            "compute_worker_busy_window",
             # The graceful cut-over lag gate. Flipping the gate off or the
             # allowance to an arbitrary value mid-reconfiguration changes when a
             # cut-over fires, which the workload does not model.

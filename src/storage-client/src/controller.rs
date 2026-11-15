@@ -85,6 +85,7 @@ pub enum IntrospectionType {
 
     ReplicaStatusHistory,
     ReplicaMetricsHistory,
+    ReplicaBusyHistory,
     WallclockLagHistory,
     WallclockLagHistogram,
 

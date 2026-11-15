@@ -577,6 +577,7 @@ name                                         type    cluster    comment
 -----------------------------------------------------------------------
 mz_aws_privatelink_connection_status_history source  <null>     ""
 mz_catalog_raw                               source  <null>     ""
+mz_cluster_replica_busy_history              source  <null>     ""
 mz_cluster_replica_metrics_history           source  <null>     ""
 mz_cluster_replica_status_history            source  <null>     ""
 mz_compute_dependencies                      source  <null>     ""
@@ -778,6 +779,7 @@ mz_message_counts_sent_raw                   log   <null>    ""
 mz_message_batch_counts_received_raw         log   <null>    ""
 mz_message_batch_counts_sent_raw             log   <null>    ""
 mz_peek_durations_histogram_raw              log   <null>    ""
+mz_scheduling_busy_per_worker                log   <null>    ""
 mz_scheduling_elapsed_raw                    log   <null>    ""
 mz_scheduling_parks_histogram_raw            log   <null>    ""
 

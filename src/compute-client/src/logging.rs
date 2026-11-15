@@ -110,6 +110,8 @@ pub enum TimelyLog {
     BatchesSent,
     /// TODO(database-issues#7533): Add documentation.
     BatchesReceived,
+    /// Each worker's busy time in its last closed window.
+    WorkerBusy,
 }
 
 /// TODO(database-issues#7533): Add documentation.
@@ -282,6 +284,14 @@ impl LogVariant {
                 .with_column("channel_id", SqlScalarType::UInt64.nullable(false))
                 .with_column("from_worker_id", SqlScalarType::UInt64.nullable(false))
                 .with_column("to_worker_id", SqlScalarType::UInt64.nullable(false))
+                .finish(),
+
+            LogVariant::Timely(TimelyLog::WorkerBusy) => RelationDesc::builder()
+                .with_column("worker_id", SqlScalarType::UInt64.nullable(false))
+                .with_column("window_start", SqlScalarType::MzTimestamp.nullable(false))
+                .with_column("window_end", SqlScalarType::MzTimestamp.nullable(false))
+                .with_column("busy_ns", SqlScalarType::UInt64.nullable(false))
+                .with_key(vec![0])
                 .finish(),
 
             LogVariant::Timely(TimelyLog::Reachability) => RelationDesc::builder()

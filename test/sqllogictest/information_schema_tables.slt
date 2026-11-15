@@ -329,6 +329,10 @@ mz_cluster_reconfigurations
 MATERIALIZED VIEW
 materialize
 mz_internal
+mz_cluster_replica_busy_history
+SOURCE
+materialize
+mz_internal
 mz_cluster_replica_history
 VIEW
 materialize
@@ -1167,6 +1171,10 @@ materialize
 mz_introspection
 mz_records_per_dataflow_per_worker
 VIEW
+materialize
+mz_introspection
+mz_scheduling_busy_per_worker
+SOURCE
 materialize
 mz_introspection
 mz_scheduling_elapsed
