@@ -679,6 +679,18 @@ impl Default for ClusterSchedule {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialOrd, PartialEq, Eq, Ord)]
 pub struct AutoScalingStrategy {
     pub on_hydration: Option<OnHydration>,
+    pub on_load: Option<OnLoad>,
+}
+
+/// The `ON LOAD` autoscaling sub-policy: keep the cluster at the cheapest size
+/// between `min_size` and `max_size` that keeps up with its load.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialOrd, PartialEq, Eq, Ord)]
+pub struct OnLoad {
+    pub min_size: String,
+    pub max_size: String,
+    /// How long the load must have fit a smaller size before the cluster
+    /// scales down. `None` falls back to the system default at the controller.
+    pub scale_down_after: Option<Duration>,
 }
 
 /// The `ON HYDRATION` autoscaling sub-policy: while objects are un-hydrated, run

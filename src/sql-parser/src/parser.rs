@@ -4837,45 +4837,52 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse the value of the `AUTO SCALING STRATEGY` cluster option: a
-    /// paren-enclosed list of strategy sub-policies. v1 supports only
-    /// `ON HYDRATION (HYDRATION SIZE = '...' [, LINGER DURATION = '...'])`. An
-    /// empty list `()` disables autoscaling.
+    /// paren-enclosed, comma-separated list of strategy sub-policies, each at
+    /// most once and in any order. An empty list `()` disables autoscaling.
+    ///
+    /// ```text
+    /// ON HYDRATION (HYDRATION SIZE = '...' [, LINGER DURATION = '...'])
+    /// ON LOAD (MIN SIZE = '...', MAX SIZE = '...' [, SCALE DOWN AFTER = '...'])
+    /// ```
     fn parse_cluster_option_auto_scaling_strategy(
         &mut self,
     ) -> Result<ClusterOption<Raw>, ParserError> {
         let _ = self.consume_token(&Token::Eq);
         self.expect_token(&Token::LParen)?;
-        let mut value = ClusterAutoScalingStrategyOptionValue { on_hydration: None };
+        let mut value = ClusterAutoScalingStrategyOptionValue {
+            on_hydration: None,
+            on_load: None,
+        };
         if !self.consume_token(&Token::RParen) {
-            // The list is a comma-separated set of strategy sub-policies, each
-            // named by a leading keyword. Only `ON HYDRATION` exists in v1.
             loop {
-                self.expect_keywords(&[ON, HYDRATION])?;
-                self.expect_token(&Token::LParen)?;
-                self.expect_keywords(&[HYDRATION, SIZE])?;
-                let _ = self.consume_token(&Token::Eq);
-                let hydration_size = self.parse_value()?;
-                let linger_duration = if self.consume_token(&Token::Comma) {
-                    self.expect_keywords(&[LINGER, DURATION])?;
-                    let _ = self.consume_token(&Token::Eq);
-                    Some(self.parse_value()?)
-                } else {
-                    None
-                };
-                self.expect_token(&Token::RParen)?;
-                // Each sub-policy may appear at most once; a repeated entry would
-                // otherwise silently keep only the last.
-                if value.on_hydration.is_some() {
-                    return parser_err!(
-                        self,
-                        self.peek_prev_pos(),
-                        "ON HYDRATION specified more than once"
-                    );
+                self.expect_keyword(ON)?;
+                // A repeated sub-policy is rejected, because keeping only the
+                // last one would silently drop the others.
+                match self.expect_one_of_keywords(&[HYDRATION, LOAD])? {
+                    HYDRATION => {
+                        let on_hydration = self.parse_on_hydration_option_value()?;
+                        if value.on_hydration.is_some() {
+                            return parser_err!(
+                                self,
+                                self.peek_prev_pos(),
+                                "ON HYDRATION specified more than once"
+                            );
+                        }
+                        value.on_hydration = Some(on_hydration);
+                    }
+                    LOAD => {
+                        let on_load = self.parse_on_load_option_value()?;
+                        if value.on_load.is_some() {
+                            return parser_err!(
+                                self,
+                                self.peek_prev_pos(),
+                                "ON LOAD specified more than once"
+                            );
+                        }
+                        value.on_load = Some(on_load);
+                    }
+                    _ => unreachable!(),
                 }
-                value.on_hydration = Some(OnHydrationOptionValue {
-                    hydration_size,
-                    linger_duration,
-                });
                 if !self.consume_token(&Token::Comma) {
                     break;
                 }
@@ -4887,6 +4894,51 @@ impl<'a> Parser<'a> {
             value: Some(WithOptionValue::ClusterAutoScalingStrategyOptionValue(
                 value,
             )),
+        })
+    }
+
+    /// Parse the body of an `ON HYDRATION` sub-policy, after the keywords.
+    fn parse_on_hydration_option_value(&mut self) -> Result<OnHydrationOptionValue, ParserError> {
+        self.expect_token(&Token::LParen)?;
+        self.expect_keywords(&[HYDRATION, SIZE])?;
+        let _ = self.consume_token(&Token::Eq);
+        let hydration_size = self.parse_value()?;
+        let linger_duration = if self.consume_token(&Token::Comma) {
+            self.expect_keywords(&[LINGER, DURATION])?;
+            let _ = self.consume_token(&Token::Eq);
+            Some(self.parse_value()?)
+        } else {
+            None
+        };
+        self.expect_token(&Token::RParen)?;
+        Ok(OnHydrationOptionValue {
+            hydration_size,
+            linger_duration,
+        })
+    }
+
+    /// Parse the body of an `ON LOAD` sub-policy, after the keywords.
+    fn parse_on_load_option_value(&mut self) -> Result<OnLoadOptionValue, ParserError> {
+        self.expect_token(&Token::LParen)?;
+        self.expect_keywords(&[MIN, SIZE])?;
+        let _ = self.consume_token(&Token::Eq);
+        let min_size = self.parse_value()?;
+        self.expect_token(&Token::Comma)?;
+        self.expect_keywords(&[MAX, SIZE])?;
+        let _ = self.consume_token(&Token::Eq);
+        let max_size = self.parse_value()?;
+        let scale_down_after = if self.consume_token(&Token::Comma) {
+            self.expect_keywords(&[SCALE, DOWN, AFTER])?;
+            let _ = self.consume_token(&Token::Eq);
+            Some(self.parse_value()?)
+        } else {
+            None
+        };
+        self.expect_token(&Token::RParen)?;
+        Ok(OnLoadOptionValue {
+            min_size,
+            max_size,
+            scale_down_after,
         })
     }
 

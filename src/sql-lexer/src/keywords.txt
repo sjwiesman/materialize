@@ -160,6 +160,7 @@ Distinct
 Doc
 Dot
 Double
+Down
 Drop
 Duration
 Eager
@@ -301,6 +302,7 @@ Memory
 Message
 Metadata
 Metric
+Min
 Minute
 Minutes
 Mock
