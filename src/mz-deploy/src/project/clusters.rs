@@ -589,6 +589,30 @@ mod tests {
     }
 
     #[mz_ore::test]
+    fn test_load_clusters_on_load_strategy() {
+        let dir = create_test_dir();
+        let clusters_dir = dir.path().join("clusters");
+        fs::create_dir(&clusters_dir).unwrap();
+
+        fs::write(
+            clusters_dir.join("analytics.sql"),
+            "CREATE CLUSTER analytics (SIZE = '100cc', AUTO SCALING STRATEGY = \
+             (ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE DOWN AFTER = '1h'), \
+             ON HYDRATION (HYDRATION SIZE = '3200cc')));",
+        )
+        .unwrap();
+
+        let result = load_clusters(dir.path(), "default", None, &BTreeMap::new()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            create_sql(&result[0]),
+            "CREATE CLUSTER analytics (SIZE = '100cc', AUTO SCALING STRATEGY = \
+             (ON HYDRATION (HYDRATION SIZE = '3200cc'), \
+             ON LOAD (MIN SIZE = '50cc', MAX SIZE = '800cc', SCALE DOWN AFTER = '1h')))"
+        );
+    }
+
+    #[mz_ore::test]
     fn test_load_clusters_invalid_variant_errors() {
         let dir = create_test_dir();
         let clusters_dir = dir.path().join("clusters");

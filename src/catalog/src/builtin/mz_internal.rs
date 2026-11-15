@@ -847,6 +847,11 @@ pub static MZ_CLUSTER_RECONFIGURATIONS: LazyLock<BuiltinMaterializedView> = Lazy
             .with_column("on_timeout", SqlScalarType::String.nullable(false))
             .with_column("target", SqlScalarType::Jsonb.nullable(false))
             .with_column("changes", SqlScalarType::Jsonb.nullable(false))
+            .with_column("origin", SqlScalarType::String.nullable(false))
+            .with_column(
+                "trial_ready_since",
+                SqlScalarType::MzTimestamp.nullable(true),
+            )
             .with_key(vec![0])
             .finish(),
         column_comments: BTreeMap::from_iter([
@@ -874,6 +879,14 @@ pub static MZ_CLUSTER_RECONFIGURATIONS: LazyLock<BuiltinMaterializedView> = Lazy
                 "changes",
                 "The dimensions in which `target` differs from the cluster's realized configuration, as a JSON object holding the target value per changed dimension. Empty (`{}`) once a record settles with its target applied. A rolled-back record keeps the abandoned diff.",
             ),
+            (
+                "origin",
+                "Who started the reconfiguration: `user` for an `ALTER CLUSTER` statement, or `load-autoscaling` for the `ON LOAD` autoscaling strategy.",
+            ),
+            (
+                "trial_ready_since",
+                "For a trial, which the `ON LOAD` strategy starts to try a smaller size, since when the target replicas have held without interruption. The cluster cuts over once they have held for the trial duration. `NULL` for a reconfiguration that is not a trial, and while the target replicas do not hold.",
+            ),
         ]),
         // One row per managed cluster with a reconfiguration record, retained
         // with a terminal `status` after it settles until the next `ALTER`
@@ -900,7 +913,8 @@ WITH (
     ASSERT NOT NULL deadline,
     ASSERT NOT NULL on_timeout,
     ASSERT NOT NULL target,
-    ASSERT NOT NULL changes
+    ASSERT NOT NULL changes,
+    ASSERT NOT NULL origin
 ) AS
 WITH
     managed AS (
@@ -948,7 +962,13 @@ SELECT
         THEN jsonb_build_object('logging', r.target->'logging') ELSE '{}'::jsonb END ||
     CASE WHEN r.target->'arrangement_compression' != r.config->'arrangement_compression'
         THEN jsonb_build_object('arrangement_compression', r.target->'arrangement_compression') ELSE '{}'::jsonb END
-    AS changes
+    AS changes,
+    CASE r.reconfiguration->>'origin'
+        WHEN 'User' THEN 'user'
+        WHEN 'LoadAutoscaling' THEN 'load-autoscaling'
+        ELSE r.reconfiguration->>'origin'
+    END AS origin,
+    (r.reconfiguration->'trial'->>'ready_since')::mz_timestamp AS trial_ready_since
 FROM records r",
         is_retained_metrics_object: false,
         access: vec![PUBLIC_SELECT],
@@ -997,18 +1017,18 @@ pub static MZ_CLUSTER_AUTO_SCALING_STRATEGIES: LazyLock<BuiltinMaterializedView>
                 ),
                 (
                     "strategy",
-                    "**Unstable** The configured autoscaling policy, as JSON. Currently an `on_hydration` sub-policy carrying its `hydration_size` and optional `linger_duration`.",
+                    "**Unstable** The configured autoscaling policy, as JSON keyed by sub-policy: `on_hydration` carrying its `hydration_size` and optional `linger_duration`, and `on_load` carrying its `min_size`, `max_size`, and optional `scale_down_after`. An unset sub-policy is `null`.",
                 ),
                 (
                     "state",
-                    "**Unstable** The in-flight autoscaling runtime state, as JSON keyed by strategy, or `NULL` when nothing is running. Currently a `burst` key carrying the active hydration burst: its `burst_size`, `linger_duration`, and `steady_ready_at`.",
+                    "**Unstable** The autoscaling runtime state, as JSON keyed by strategy, or `NULL` when there is none. A `burst` key carries the active hydration burst: its `burst_size`, `linger_duration`, and `steady_ready_at`. A `load` key carries the bookkeeping of the `ON LOAD` strategy: its in-flight `attempt`, `last_cutover`, the `backoff` list of recently failed target sizes, and the `hold` reason for which it is declining to act.",
                 ),
             ]),
-            // One row per managed cluster with a strategy configured or a burst
-            // running (a burst can briefly outlive a just-removed policy).
-            // Absent fields serialize as JSON `null`. `state` is keyed by
-            // strategy so a future strategy's state is another key, not a
-            // schema change.
+            // One row per managed cluster with a strategy configured or runtime
+            // state present (a burst can briefly outlive a just-removed
+            // policy). Absent fields serialize as JSON `null`. `state` is keyed
+            // by strategy, and a strategy without state has no key, so readers
+            // test for a key and not for a non-NULL `state`.
             sql: "
 IN CLUSTER mz_catalog_server
 WITH (
@@ -1020,7 +1040,8 @@ WITH
         SELECT
             mz_internal.parse_catalog_id(data->'key'->'id') AS cluster_id,
             data->'value'->'config'->'variant'->'Managed'->'auto_scaling_strategy' AS strategy,
-            data->'value'->'config'->'variant'->'Managed'->'burst' AS burst
+            data->'value'->'config'->'variant'->'Managed'->'burst' AS burst,
+            data->'value'->'config'->'variant'->'Managed'->'load' AS load
         FROM mz_internal.mz_catalog_raw
         WHERE
             data->>'kind' = 'Cluster' AND
@@ -1029,9 +1050,12 @@ WITH
 SELECT
     m.cluster_id,
     COALESCE(m.strategy, 'null'::jsonb) AS strategy,
-    CASE WHEN m.burst != 'null' THEN jsonb_build_object('burst', m.burst) END AS state
+    CASE WHEN m.burst != 'null' OR m.load != 'null' THEN
+        CASE WHEN m.burst != 'null' THEN jsonb_build_object('burst', m.burst) ELSE '{}'::jsonb END ||
+        CASE WHEN m.load != 'null' THEN jsonb_build_object('load', m.load) ELSE '{}'::jsonb END
+    END AS state
 FROM managed m
-WHERE m.strategy != 'null' OR m.burst != 'null'",
+WHERE m.strategy != 'null' OR m.burst != 'null' OR m.load != 'null'",
             is_retained_metrics_object: false,
             access: vec![PUBLIC_SELECT],
             ontology: Some(Ontology {
@@ -5287,6 +5311,92 @@ pub static MZ_CLUSTER_REPLICA_BUSY_HISTORY: LazyLock<BuiltinSource> =
         ontology: None,
     });
 
+pub static MZ_CLUSTER_LOAD_RECOMMENDATIONS: LazyLock<BuiltinTable> =
+    LazyLock::new(|| BuiltinTable {
+        name: "mz_cluster_load_recommendations",
+        schema: MZ_INTERNAL_SCHEMA,
+        oid: oid::TABLE_MZ_CLUSTER_LOAD_RECOMMENDATIONS_OID,
+        desc: RelationDesc::builder()
+            .with_column("cluster_id", SqlScalarType::String.nullable(false))
+            .with_column(
+                "sampled_at",
+                SqlScalarType::TimestampTz { precision: None }.nullable(false),
+            )
+            .with_column("lag", SqlScalarType::Interval.nullable(true))
+            .with_column("progress_ratio", SqlScalarType::Float64.nullable(true))
+            .with_column("slowest_object_id", SqlScalarType::String.nullable(true))
+            .with_column("heap_fraction", SqlScalarType::Float64.nullable(true))
+            .with_column(
+                "mean_worker_utilization",
+                SqlScalarType::Float64.nullable(true),
+            )
+            .with_column(
+                "max_worker_utilization",
+                SqlScalarType::Float64.nullable(true),
+            )
+            .with_column("recommended_size", SqlScalarType::String.nullable(true))
+            .with_column("status", SqlScalarType::String.nullable(false))
+            .with_key(vec![0])
+            .finish(),
+        column_comments: BTreeMap::from_iter([
+            (
+                "cluster_id",
+                "The ID of the cluster. Corresponds to `mz_clusters.id`.",
+            ),
+            (
+                "sampled_at",
+                "The time of the sample the row was computed from.",
+            ),
+            (
+                "lag",
+                "How far the cluster's outputs trail their direct inputs: the largest lag among \
+                 the dataflows of the freshest replica at the cluster's size. `NULL` until the \
+                 cluster has a representative sample.",
+            ),
+            (
+                "progress_ratio",
+                "How far the output of the dataflow in `slowest_object_id` advanced over the \
+                 last sample interval, relative to how far its inputs advanced. 1 when the \
+                 inputs did not advance, above 1 while the dataflow catches up. `NULL` until the \
+                 cluster has a representative sample.",
+            ),
+            (
+                "slowest_object_id",
+                "The ID of the object whose dataflow lags the most on the freshest replica. \
+                 Corresponds to `mz_objects.id`.",
+            ),
+            (
+                "heap_fraction",
+                "The heap of the busiest replica process as a fraction of its heap limit, \
+                 between 0 and 1. `NULL` until the cluster has a representative sample.",
+            ),
+            (
+                "mean_worker_utilization",
+                "The fraction of the last sample interval the freshest replica's workers were \
+                 not parked, averaged over its workers. `NULL` until the cluster has a \
+                 representative sample.",
+            ),
+            (
+                "max_worker_utilization",
+                "The fraction of the last sample interval the freshest replica's busiest worker \
+                 was not parked. `NULL` until the cluster has a representative sample.",
+            ),
+            (
+                "recommended_size",
+                "The size the `ON LOAD` rules would move the cluster to. `NULL` until there are \
+                 enough samples.",
+            ),
+            (
+                "status",
+                "What the rules conclude: `steady`, `scaling-up`, `scaling-down`, \
+                 `skew-limited`, `stalled`, `at-max`, `at-min`, `backing-off`, or `warming-up`.",
+            ),
+        ]),
+        is_retained_metrics_object: false,
+        access: vec![PUBLIC_SELECT],
+        ontology: None,
+    });
+
 pub static MZ_OBJECT_ARRANGEMENT_SIZES_IND: LazyLock<BuiltinIndex> =
     LazyLock::new(|| BuiltinIndex {
         name: "mz_object_arrangement_sizes_ind",
@@ -6289,12 +6399,12 @@ pub static MZ_SHOW_CLUSTERS: LazyLock<BuiltinView> = LazyLock::new(|| {
         name,
         replicas,
         CASE
-            WHEN recon.summary IS NOT NULL AND scaling.state IS NOT NULL
+            WHEN recon.summary IS NOT NULL AND scaling.state->'burst' IS NOT NULL
                 THEN recon.summary
                      || '; hydration burst at ' || (scaling.state->'burst'->>'burst_size')
             WHEN recon.summary IS NOT NULL
                 THEN recon.summary
-            WHEN scaling.state IS NOT NULL
+            WHEN scaling.state->'burst' IS NOT NULL
                 THEN 'hydration burst at ' || (scaling.state->'burst'->>'burst_size')
             ELSE NULL
         END AS activity,

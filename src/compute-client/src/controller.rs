@@ -519,6 +519,21 @@ impl ComputeController {
         Ok(rx)
     }
 
+    /// Requests the frontiers of the instance's non-transient collections that a load signal
+    /// compares across an interval. A dropped response means the instance shut down before
+    /// answering. This method sends one request and does not wait for it.
+    pub fn load_frontiers(
+        &self,
+        instance_id: ComputeInstanceId,
+    ) -> Result<oneshot::Receiver<LoadFrontiers>, InstanceMissing> {
+        let instance = self.instance(instance_id)?;
+        let (tx, rx) = oneshot::channel();
+        instance.call(move |i| {
+            let _ = tx.send(i.load_frontiers());
+        });
+        Ok(rx)
+    }
+
     /// Returns the state of the [`ComputeController`] formatted as JSON.
     ///
     /// The returned value is not guaranteed to be stable and may change at any point in time.
@@ -1446,6 +1461,26 @@ impl Collection {
             write_frontier,
         }
     }
+}
+
+/// Frontiers of an instance's collections, from [`ComputeController::load_frontiers`].
+#[derive(Clone, Debug, Default)]
+pub struct LoadFrontiers {
+    /// Per collection, the least write frontier of its direct dependencies. Absent for a
+    /// collection without dependencies.
+    pub input: BTreeMap<GlobalId, Antichain<Timestamp>>,
+    /// Per replica of the instance.
+    pub replicas: BTreeMap<ReplicaId, ReplicaLoadFrontiers>,
+}
+
+/// One replica's part of [`LoadFrontiers`].
+#[derive(Clone, Debug)]
+pub struct ReplicaLoadFrontiers {
+    /// Whether the replica has hydrated every collection it hosts.
+    pub hydrated: bool,
+    /// Per hosted collection, the replica's output frontier. Its write frontier would not do:
+    /// that can reflect another replica's writes, see `FrontiersResponse::output_frontier`.
+    pub output: BTreeMap<GlobalId, Antichain<Timestamp>>,
 }
 
 /// The frontiers of a compute collection.

@@ -29,6 +29,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use mz_adapter_types::cluster_state::{
+    LoadAttempt, LoadBackoff, LoadDirection, LoadHold, LoadScaleUp,
+};
 use mz_adapter_types::dyncfgs::{
     CLUSTER_CONTROLLER_TICK_INTERVAL, CLUSTER_RECONFIGURATION_ALLOWED_LAG,
     ENABLE_CLUSTER_RECONFIGURATION_LAG_GATE,
@@ -37,11 +40,12 @@ use mz_catalog::memory::objects::{ClusterConfig, ClusterVariant};
 use mz_cluster_controller::ClusterController;
 use mz_cluster_controller::ctx::{
     ApplyOutcome, AvailabilityZones, ClusterControllerCtx, ClusterState, CreateReason, Decision,
-    ExpectedClusterState, ObservedReplica, OnTimeout, ReconfigurationRecord, ReconfigurationStatus,
-    ReconfigurationTarget, RefreshMvInfo, RefreshWindowClusterInputs, RefreshWindowInputsBatch,
-    ReplicaShape, StateWrite,
+    ExpectedClusterState, LoadRecord, ObservedReplica, OnTimeout, ReconfigurationOrigin,
+    ReconfigurationRecord, ReconfigurationStatus, ReconfigurationTarget, ReconfigurationTrial,
+    RefreshMvInfo, RefreshWindowClusterInputs, RefreshWindowInputsBatch, ReplicaShape, StateWrite,
 };
-use mz_cluster_controller::strategy::duration_to_ts;
+use mz_cluster_controller::load::LoadSignals;
+use mz_cluster_controller::strategy::{ReadinessCriteria, duration_to_ts};
 use mz_compute_types::config::ComputeReplicaConfig;
 use mz_controller::clusters::ClusterStatus;
 use mz_controller_types::{ClusterId, ReplicaId};
@@ -80,8 +84,8 @@ pub enum ClusterControllerRequest {
         tx: oneshot::Sender<BTreeSet<ReplicaId>>,
     },
     /// Of `replicas` on `cluster`, which are online, have all current
-    /// collections hydrated, *and* are within the configured cut-over lag of
-    /// the `reference` replicas, the ones the cut-over would drop.
+    /// collections hydrated, *and* meet `criteria` against the `reference`
+    /// replicas, the ones the cut-over would drop.
     ///
     /// The stronger form of [`Self::HydratedReplicas`], for callers deciding
     /// whether to cut over to a replica rather than merely observing that its
@@ -90,6 +94,7 @@ pub enum ClusterControllerRequest {
         cluster_id: ClusterId,
         replicas: Vec<ReplicaId>,
         reference: BTreeSet<ReplicaId>,
+        criteria: ReadinessCriteria,
         tx: oneshot::Sender<BTreeSet<ReplicaId>>,
     },
     /// Whether the cluster has any hydratable (dataflow-backed) objects bound to
@@ -106,6 +111,11 @@ pub enum ClusterControllerRequest {
     },
     /// One timestamp-oracle read for a completed refresh-window input batch.
     RefreshWindowReadTs { tx: oneshot::Sender<Timestamp> },
+    /// The load signal for one managed cluster. `None` if it is missing or unmanaged.
+    LoadSignals {
+        cluster_id: ClusterId,
+        tx: oneshot::Sender<Option<LoadSignals>>,
+    },
     /// Apply a tick's batch of decisions under their compare-and-append guards.
     Apply {
         decisions: Vec<Decision>,
@@ -197,6 +207,7 @@ impl ClusterControllerCtx for CoordCtx {
         cluster_id: ClusterId,
         replicas: &[ReplicaId],
         reference: &BTreeSet<ReplicaId>,
+        criteria: ReadinessCriteria,
     ) -> BTreeSet<ReplicaId> {
         let replicas = replicas.to_vec();
         let reference = reference.clone();
@@ -204,6 +215,7 @@ impl ClusterControllerCtx for CoordCtx {
             cluster_id,
             replicas,
             reference,
+            criteria,
             tx,
         })
         .await
@@ -252,6 +264,12 @@ impl ClusterControllerCtx for CoordCtx {
             read_ts,
             cluster_inputs,
         })
+    }
+
+    async fn load_signals(&mut self, cluster_id: ClusterId) -> Option<LoadSignals> {
+        self.request(|tx| ClusterControllerRequest::LoadSignals { cluster_id, tx })
+            .await
+            .flatten()
     }
 
     async fn apply(&mut self, decisions: Vec<Decision>) -> ApplyOutcome {
@@ -368,17 +386,32 @@ impl Coordinator {
                 cluster_id,
                 replicas,
                 reference,
+                criteria,
                 tx,
             } => {
                 // Tests hold readiness checks while arranging hydrated but
                 // lagging replicas, then release this to exercise the real probe.
                 fail::fail_point!("cluster_controller_hold_readiness", |_| ());
-                let checks = self.start_readiness_checks(
-                    cluster_id,
-                    replicas,
-                    self.reconfiguration_allowed_lag(),
-                    &reference,
-                );
+                let ReadinessCriteria {
+                    allowed_lag,
+                    max_heap_fraction,
+                } = criteria;
+                let allowed_lag = match allowed_lag {
+                    Some(lag) => Some(duration_to_ts(lag)),
+                    None => self.reconfiguration_allowed_lag(),
+                };
+                // A replica without heap metrics yet cannot show it fits.
+                let replicas = replicas
+                    .into_iter()
+                    .filter(|replica_id| {
+                        max_heap_fraction.is_none_or(|max| {
+                            self.replica_heap(cluster_id, *replica_id)
+                                .is_some_and(|heap| heap.fraction < max)
+                        })
+                    })
+                    .collect();
+                let checks =
+                    self.start_readiness_checks(cluster_id, replicas, allowed_lag, &reference);
                 Self::finish_readiness_checks(checks, tx);
             }
             ClusterControllerRequest::HasHydratableObjects { cluster_id, tx } => {
@@ -396,6 +429,9 @@ impl Coordinator {
                     let read_ts = oracle.read_ts().await;
                     let _ = tx.send(read_ts);
                 });
+            }
+            ClusterControllerRequest::LoadSignals { cluster_id, tx } => {
+                let _ = tx.send(self.cluster_load_signals(cluster_id));
             }
             ClusterControllerRequest::Apply { decisions, tx } => {
                 let outcome = if active {
@@ -450,6 +486,7 @@ impl Coordinator {
             auto_scaling_policy: expected.auto_scaling_policy,
             reconfiguration: expected.reconfiguration,
             burst: expected.burst,
+            load: expected.load,
             replicas,
         })
     }
@@ -518,18 +555,60 @@ impl Coordinator {
         allowed_lag: Option<Timestamp>,
         reference: &BTreeSet<ReplicaId>,
     ) -> Vec<ReplicaReadinessCheck> {
+        let mut checks = Vec::new();
+        for replica_id in replicas {
+            let Some(exclude) = self.replica_hydration_gate(cluster_id, replica_id) else {
+                continue;
+            };
+            match self.controller.compute.collections_ready_for_replicas(
+                cluster_id,
+                vec![replica_id],
+                exclude,
+                allowed_lag,
+                reference.clone(),
+            ) {
+                Ok(compute_ready) => checks.push(ReplicaReadinessCheck {
+                    replica_id,
+                    compute_ready,
+                }),
+                // The replica is not known to the compute controller. Treat it
+                // as not ready.
+                Err(_) => continue,
+            }
+        }
+        checks
+    }
+
+    /// The coordinator-side part of a check that a replica has hydrated: it is
+    /// online and has hydrated its storage collections. Returns the objects the
+    /// compute side of the check must skip, or `None` when the replica fails
+    /// this part or is unknown to the storage controller.
+    ///
+    /// We wait for a replica to be online even when it has no objects that
+    /// need hydration on it (e.g. a single-replica source).
+    pub(crate) fn replica_hydration_gate(
+        &self,
+        cluster_id: ClusterId,
+        replica_id: ReplicaId,
+    ) -> Option<BTreeSet<mz_repr::GlobalId>> {
         use mz_catalog::memory::objects::CatalogItem;
 
+        let status = self
+            .cluster_replica_statuses
+            .try_get_cluster_replica_statuses(cluster_id, replica_id)
+            .map(ClusterReplicaStatuses::cluster_replica_status);
+        if !matches!(status, Some(ClusterStatus::Online)) {
+            return None;
+        }
         // Materialized views pinned to a replica (via `IN CLUSTER ... REPLICA`)
         // are only ever installed on that replica, so any other replica can
-        // never report them hydrated. Collect the cluster's pinned MVs once,
-        // then exclude the ones pinned elsewhere from each replica's hydration
-        // check. Otherwise a graceful reconfiguration's cut-over to a fresh
-        // replica set would wait forever for the new replicas to hydrate an MV
-        // bound to a replica being replaced, then roll back at the deadline
-        // (leaving the old replica, and the targeted MV, in place). Indexes
-        // cannot be replica-pinned, so MVs are the only case.
-        let pinned_mvs: Vec<(ReplicaId, mz_repr::GlobalId)> = self
+        // never report them hydrated. Otherwise a graceful reconfiguration's
+        // cut-over to a fresh replica set would wait forever for the new
+        // replicas to hydrate an MV bound to a replica being replaced, then
+        // roll back at the deadline (leaving the old replica, and the targeted
+        // MV, in place). Indexes cannot be replica-pinned, so MVs are the only
+        // case.
+        let exclude: BTreeSet<mz_repr::GlobalId> = self
             .catalog()
             .try_get_cluster(cluster_id)
             .into_iter()
@@ -537,56 +616,17 @@ impl Coordinator {
             .filter_map(|id| match self.catalog().get_entry(id).item() {
                 CatalogItem::MaterializedView(mv) => mv
                     .target_replica
-                    .map(|target| (target, mv.global_id_writes())),
+                    .filter(|target| *target != replica_id)
+                    .map(|_| mv.global_id_writes()),
                 _ => None,
             })
             .collect();
-
-        let mut checks = Vec::new();
-        for replica_id in replicas {
-            // Skip replicas that are not online. We wait for a replica to be
-            // online even when it has no objects that need hydration on it
-            // (e.g. a single-replica source).
-            let status = self
-                .cluster_replica_statuses
-                .try_get_cluster_replica_statuses(cluster_id, replica_id)
-                .map(ClusterReplicaStatuses::cluster_replica_status);
-            if !matches!(status, Some(ClusterStatus::Online)) {
-                continue;
-            }
-            let exclude: BTreeSet<mz_repr::GlobalId> = pinned_mvs
-                .iter()
-                .filter(|(target, _)| *target != replica_id)
-                .map(|(_, id)| *id)
-                .collect();
-            let compute_fut = match self.controller.compute.collections_ready_for_replicas(
-                cluster_id,
-                vec![replica_id],
-                exclude.clone(),
-                allowed_lag,
-                reference.clone(),
-            ) {
-                Ok(fut) => fut,
-                // The replica is not known to the compute controller. Treat it
-                // as not ready.
-                Err(_) => continue,
-            };
-            let storage_hydrated = match self.controller.storage.collections_hydrated_on_replicas(
-                Some(vec![replica_id]),
-                &cluster_id,
-                &exclude,
-            ) {
-                Ok(hydrated) => hydrated,
-                Err(_) => continue,
-            };
-            if storage_hydrated {
-                checks.push(ReplicaReadinessCheck {
-                    replica_id,
-                    compute_ready: compute_fut,
-                });
-            }
-        }
-        checks
+        let storage_hydrated = self
+            .controller
+            .storage
+            .collections_hydrated_on_replicas(Some(vec![replica_id]), &cluster_id, &exclude)
+            .ok()?;
+        storage_hydrated.then_some(exclude)
     }
 
     /// The catalog- and storage-derived refresh-window signals for one scheduled
@@ -917,6 +957,7 @@ impl Coordinator {
             new_arrangement_compression,
             reconfiguration,
             burst,
+            load,
         } = write;
         if let Some(size) = new_size {
             managed.size = size.clone();
@@ -939,17 +980,26 @@ impl Coordinator {
         if let Some(burst) = burst {
             managed.burst = burst.record.as_ref().map(memory_burst);
         }
+        if let Some(load) = load {
+            managed.load = load.record.as_ref().map(memory_load);
+        }
         // The audit intents travel with the write, declared by the strategy at
         // the decision point. We pass them through untouched so the events are
         // emitted in the same catalog transaction as the state they describe.
         let reconfiguration_audit = write.reconfiguration.as_ref().and_then(|w| w.audit);
         let burst_audit = write.burst.as_ref().and_then(|w| w.audit);
+        let load_audit = write
+            .load
+            .as_ref()
+            .map(|w| w.audit.clone())
+            .unwrap_or_default();
         Some(Op::UpdateClusterConfig {
             id: cluster_id,
             name: cluster.name.clone(),
             config,
             reconfiguration_audit,
             burst_audit,
+            load_audit,
         })
     }
 
@@ -1063,6 +1113,8 @@ fn memory_reconfiguration(
         deadline,
         on_timeout,
         status,
+        origin,
+        trial,
     } = record;
     let ReconfigurationTarget {
         size,
@@ -1082,6 +1134,26 @@ fn memory_reconfiguration(
         deadline: *deadline,
         on_timeout: on_timeout_from_controller(*on_timeout),
         status: status_from_controller(*status),
+        origin: match origin {
+            ReconfigurationOrigin::User => mz_catalog::memory::objects::ReconfigurationOrigin::User,
+            ReconfigurationOrigin::LoadAutoscaling => {
+                mz_catalog::memory::objects::ReconfigurationOrigin::LoadAutoscaling
+            }
+        },
+        trial: trial.as_ref().map(|trial| {
+            let ReconfigurationTrial {
+                allowed_lag,
+                hold_for,
+                max_heap_fraction,
+                ready_since,
+            } = trial;
+            mz_catalog::memory::objects::ReconfigurationTrial {
+                allowed_lag: *allowed_lag,
+                hold_for: *hold_for,
+                max_heap_fraction: *max_heap_fraction,
+                ready_since: *ready_since,
+            }
+        }),
     }
 }
 
@@ -1121,6 +1193,73 @@ fn memory_burst(
         burst_size: burst_size.clone(),
         linger_duration: *linger_duration,
         steady_ready_at: *steady_ready_at,
+    }
+}
+
+fn memory_load(record: &LoadRecord) -> mz_catalog::memory::objects::LoadState {
+    use mz_catalog::memory::objects as memory;
+    // Destructure the sources (no `..`): a field added to a controller type is
+    // a compile error here until it's carried across.
+    let LoadRecord {
+        attempt,
+        last_cutover,
+        last_scale_up,
+        backoff,
+        hold,
+    } = record;
+    memory::LoadState {
+        attempt: attempt.as_ref().map(|attempt| {
+            let LoadAttempt {
+                from_size,
+                target_size,
+                deadline,
+                progress_before,
+            } = attempt;
+            memory::LoadAttempt {
+                from_size: from_size.clone(),
+                target_size: target_size.clone(),
+                deadline: *deadline,
+                progress_before: *progress_before,
+            }
+        }),
+        last_cutover: *last_cutover,
+        last_scale_up: last_scale_up.as_ref().map(|scale_up| {
+            let LoadScaleUp {
+                from_size,
+                target_size,
+                progress,
+            } = scale_up;
+            memory::LoadScaleUp {
+                from_size: from_size.clone(),
+                target_size: target_size.clone(),
+                progress: *progress,
+            }
+        }),
+        backoff: backoff
+            .iter()
+            .map(|backoff| {
+                let LoadBackoff {
+                    size,
+                    direction,
+                    until,
+                    failures,
+                } = backoff;
+                memory::LoadBackoff {
+                    size: size.clone(),
+                    direction: match direction {
+                        LoadDirection::Up => memory::LoadDirection::Up,
+                        LoadDirection::Down => memory::LoadDirection::Down,
+                    },
+                    until: *until,
+                    failures: *failures,
+                }
+            })
+            .collect(),
+        hold: hold.map(|hold| match hold {
+            LoadHold::SkewLimited => memory::LoadHold::SkewLimited,
+            LoadHold::Stalled => memory::LoadHold::Stalled,
+            LoadHold::BackingOff => memory::LoadHold::BackingOff,
+        }),
     }
 }
 

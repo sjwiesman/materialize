@@ -425,6 +425,7 @@ impl Cluster {
                 // the create statement.
                 reconfiguration: _,
                 burst: _,
+                load: _,
             }) => {
                 let introspection = match logging {
                     ReplicaLogging {
@@ -3493,6 +3494,8 @@ pub struct ClusterVariantManaged {
     pub reconfiguration: Option<ReconfigurationState>,
     /// In-flight hydration burst the controller is running.
     pub burst: Option<BurstState>,
+    /// Bookkeeping of the `ON LOAD` autoscaling strategy.
+    pub load: Option<LoadState>,
 }
 
 /// Per-replica config shape of a managed cluster.
@@ -3535,6 +3538,7 @@ impl ClusterVariantManaged {
             auto_scaling_strategy: _,
             reconfiguration: _,
             burst: _,
+            load: _,
         } = self;
         ManagedReplicaConfigShape::new(size, availability_zones, logging, *arrangement_compression)
     }
@@ -3552,6 +3556,7 @@ impl ClusterVariantManaged {
             auto_scaling_strategy: _,
             reconfiguration: _,
             burst: _,
+            load: _,
         } = self;
         ReconfigurationTarget {
             size: size.clone(),
@@ -3601,6 +3606,25 @@ impl ClusterVariantManaged {
             hydration_size,
         )
     }
+
+    /// Whether moving from `old` to this config invalidates the `load` record
+    /// this config carries: the `ON LOAD` policy is absent or differs from
+    /// `old`'s, or the cluster is turned off (`replication_factor` 0). The
+    /// record's attempt and backoff describe sizes judged under the old policy
+    /// and workload. `false` when there is no record.
+    pub fn load_record_invalidated(&self, old: &ClusterVariantManaged) -> bool {
+        if self.load.is_none() {
+            return false;
+        }
+        let on_load = |managed: &'_ ClusterVariantManaged| {
+            managed
+                .auto_scaling_strategy
+                .as_ref()
+                .and_then(|strategy| strategy.on_load.clone())
+        };
+        let policy = on_load(self);
+        policy.is_none() || policy != on_load(old) || self.replication_factor == 0
+    }
 }
 
 impl From<ClusterVariantManaged> for durable::ClusterVariantManaged {
@@ -3618,6 +3642,7 @@ impl From<ClusterVariantManaged> for durable::ClusterVariantManaged {
             auto_scaling_strategy,
             reconfiguration,
             burst,
+            load,
         } = managed;
         Self {
             size,
@@ -3630,6 +3655,7 @@ impl From<ClusterVariantManaged> for durable::ClusterVariantManaged {
             auto_scaling_strategy,
             reconfiguration: reconfiguration.map(Into::into),
             burst: burst.map(Into::into),
+            load: load.map(Into::into),
         }
     }
 }
@@ -3649,6 +3675,7 @@ impl From<durable::ClusterVariantManaged> for ClusterVariantManaged {
             auto_scaling_strategy,
             reconfiguration,
             burst,
+            load,
         } = managed;
         Self {
             size,
@@ -3661,6 +3688,7 @@ impl From<durable::ClusterVariantManaged> for ClusterVariantManaged {
             auto_scaling_strategy,
             reconfiguration: reconfiguration.map(Into::into),
             burst: burst.map(Into::into),
+            load: load.map(Into::into),
         }
     }
 }
@@ -3677,6 +3705,51 @@ pub struct ReconfigurationState {
     pub deadline: Timestamp,
     pub on_timeout: OnTimeoutAction,
     pub status: ReconfigurationStatus,
+    pub origin: ReconfigurationOrigin,
+    pub trial: Option<ReconfigurationTrial>,
+}
+
+/// In-memory mirror of [`durable::ReconfigurationTrial`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialOrd, PartialEq, Eq, Ord)]
+pub struct ReconfigurationTrial {
+    pub allowed_lag: Duration,
+    pub hold_for: Duration,
+    pub max_heap_fraction: u32,
+    pub ready_since: Option<Timestamp>,
+}
+
+impl From<ReconfigurationTrial> for durable::ReconfigurationTrial {
+    fn from(trial: ReconfigurationTrial) -> Self {
+        let ReconfigurationTrial {
+            allowed_lag,
+            hold_for,
+            max_heap_fraction,
+            ready_since,
+        } = trial;
+        Self {
+            allowed_lag,
+            hold_for,
+            max_heap_fraction,
+            ready_since,
+        }
+    }
+}
+
+impl From<durable::ReconfigurationTrial> for ReconfigurationTrial {
+    fn from(trial: durable::ReconfigurationTrial) -> Self {
+        let durable::ReconfigurationTrial {
+            allowed_lag,
+            hold_for,
+            max_heap_fraction,
+            ready_since,
+        } = trial;
+        Self {
+            allowed_lag,
+            hold_for,
+            max_heap_fraction,
+            ready_since,
+        }
+    }
 }
 
 /// In-memory mirror of [`durable::ReconfigurationStatus`].
@@ -3759,12 +3832,16 @@ impl From<ReconfigurationState> for durable::ReconfigurationState {
             deadline,
             on_timeout,
             status,
+            origin,
+            trial,
         } = state;
         Self {
             target: target.into(),
             deadline,
             on_timeout,
             status: status.into(),
+            origin: origin.into(),
+            trial: trial.map(Into::into),
         }
     }
 }
@@ -3778,12 +3855,16 @@ impl From<durable::ReconfigurationState> for ReconfigurationState {
             deadline,
             on_timeout,
             status,
+            origin,
+            trial,
         } = state;
         Self {
             target: target.into(),
             deadline,
             on_timeout,
             status: status.into(),
+            origin: origin.into(),
+            trial: trial.map(Into::into),
         }
     }
 }
@@ -3885,6 +3966,290 @@ impl From<durable::BurstState> for BurstState {
             burst_size,
             linger_duration,
             steady_ready_at,
+        }
+    }
+}
+
+/// In-memory mirror of [`durable::ReconfigurationOrigin`].
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord
+)]
+pub enum ReconfigurationOrigin {
+    User,
+    LoadAutoscaling,
+}
+
+impl From<ReconfigurationOrigin> for durable::ReconfigurationOrigin {
+    fn from(value: ReconfigurationOrigin) -> Self {
+        match value {
+            ReconfigurationOrigin::User => durable::ReconfigurationOrigin::User,
+            ReconfigurationOrigin::LoadAutoscaling => {
+                durable::ReconfigurationOrigin::LoadAutoscaling
+            }
+        }
+    }
+}
+
+impl From<durable::ReconfigurationOrigin> for ReconfigurationOrigin {
+    fn from(value: durable::ReconfigurationOrigin) -> Self {
+        match value {
+            durable::ReconfigurationOrigin::User => ReconfigurationOrigin::User,
+            durable::ReconfigurationOrigin::LoadAutoscaling => {
+                ReconfigurationOrigin::LoadAutoscaling
+            }
+        }
+    }
+}
+
+/// In-memory mirror of [`durable::LoadState`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialOrd, PartialEq, Eq, Ord)]
+pub struct LoadState {
+    pub attempt: Option<LoadAttempt>,
+    pub last_cutover: Option<Timestamp>,
+    pub last_scale_up: Option<LoadScaleUp>,
+    pub backoff: Vec<LoadBackoff>,
+    pub hold: Option<LoadHold>,
+}
+
+impl From<LoadState> for durable::LoadState {
+    fn from(value: LoadState) -> Self {
+        let LoadState {
+            attempt,
+            last_cutover,
+            last_scale_up,
+            backoff,
+            hold,
+        } = value;
+        Self {
+            attempt: attempt.map(Into::into),
+            last_cutover,
+            last_scale_up: last_scale_up.map(Into::into),
+            backoff: backoff.into_iter().map(Into::into).collect(),
+            hold: hold.map(Into::into),
+        }
+    }
+}
+
+impl From<durable::LoadState> for LoadState {
+    fn from(value: durable::LoadState) -> Self {
+        let durable::LoadState {
+            attempt,
+            last_cutover,
+            last_scale_up,
+            backoff,
+            hold,
+        } = value;
+        Self {
+            attempt: attempt.map(Into::into),
+            last_cutover,
+            last_scale_up: last_scale_up.map(Into::into),
+            backoff: backoff.into_iter().map(Into::into).collect(),
+            hold: hold.map(Into::into),
+        }
+    }
+}
+
+/// In-memory mirror of [`durable::LoadAttempt`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialOrd, PartialEq, Eq, Ord)]
+pub struct LoadAttempt {
+    pub from_size: String,
+    pub target_size: String,
+    pub deadline: Timestamp,
+    pub progress_before: Option<u32>,
+}
+
+impl From<LoadAttempt> for durable::LoadAttempt {
+    fn from(value: LoadAttempt) -> Self {
+        let LoadAttempt {
+            from_size,
+            target_size,
+            deadline,
+            progress_before,
+        } = value;
+        Self {
+            from_size,
+            target_size,
+            deadline,
+            progress_before,
+        }
+    }
+}
+
+impl From<durable::LoadAttempt> for LoadAttempt {
+    fn from(value: durable::LoadAttempt) -> Self {
+        let durable::LoadAttempt {
+            from_size,
+            target_size,
+            deadline,
+            progress_before,
+        } = value;
+        Self {
+            from_size,
+            target_size,
+            deadline,
+            progress_before,
+        }
+    }
+}
+
+/// In-memory mirror of [`durable::LoadScaleUp`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialOrd, PartialEq, Eq, Ord)]
+pub struct LoadScaleUp {
+    pub from_size: String,
+    pub target_size: String,
+    pub progress: u32,
+}
+
+impl From<LoadScaleUp> for durable::LoadScaleUp {
+    fn from(value: LoadScaleUp) -> Self {
+        let LoadScaleUp {
+            from_size,
+            target_size,
+            progress,
+        } = value;
+        Self {
+            from_size,
+            target_size,
+            progress,
+        }
+    }
+}
+
+impl From<durable::LoadScaleUp> for LoadScaleUp {
+    fn from(value: durable::LoadScaleUp) -> Self {
+        let durable::LoadScaleUp {
+            from_size,
+            target_size,
+            progress,
+        } = value;
+        Self {
+            from_size,
+            target_size,
+            progress,
+        }
+    }
+}
+
+/// In-memory mirror of [`durable::LoadBackoff`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialOrd, PartialEq, Eq, Ord)]
+pub struct LoadBackoff {
+    pub size: String,
+    pub direction: LoadDirection,
+    pub until: Timestamp,
+    pub failures: u32,
+}
+
+impl From<LoadBackoff> for durable::LoadBackoff {
+    fn from(value: LoadBackoff) -> Self {
+        let LoadBackoff {
+            size,
+            direction,
+            until,
+            failures,
+        } = value;
+        Self {
+            size,
+            direction: direction.into(),
+            until,
+            failures,
+        }
+    }
+}
+
+impl From<durable::LoadBackoff> for LoadBackoff {
+    fn from(value: durable::LoadBackoff) -> Self {
+        let durable::LoadBackoff {
+            size,
+            direction,
+            until,
+            failures,
+        } = value;
+        Self {
+            size,
+            direction: direction.into(),
+            until,
+            failures,
+        }
+    }
+}
+
+/// In-memory mirror of [`durable::LoadDirection`].
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord
+)]
+pub enum LoadDirection {
+    Up,
+    Down,
+}
+
+impl From<LoadDirection> for durable::LoadDirection {
+    fn from(value: LoadDirection) -> Self {
+        match value {
+            LoadDirection::Up => durable::LoadDirection::Up,
+            LoadDirection::Down => durable::LoadDirection::Down,
+        }
+    }
+}
+
+impl From<durable::LoadDirection> for LoadDirection {
+    fn from(value: durable::LoadDirection) -> Self {
+        match value {
+            durable::LoadDirection::Up => LoadDirection::Up,
+            durable::LoadDirection::Down => LoadDirection::Down,
+        }
+    }
+}
+
+/// In-memory mirror of [`durable::LoadHold`].
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Serialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord
+)]
+pub enum LoadHold {
+    SkewLimited,
+    Stalled,
+    BackingOff,
+}
+
+impl From<LoadHold> for durable::LoadHold {
+    fn from(value: LoadHold) -> Self {
+        match value {
+            LoadHold::SkewLimited => durable::LoadHold::SkewLimited,
+            LoadHold::Stalled => durable::LoadHold::Stalled,
+            LoadHold::BackingOff => durable::LoadHold::BackingOff,
+        }
+    }
+}
+
+impl From<durable::LoadHold> for LoadHold {
+    fn from(value: durable::LoadHold) -> Self {
+        match value {
+            durable::LoadHold::SkewLimited => LoadHold::SkewLimited,
+            durable::LoadHold::Stalled => LoadHold::Stalled,
+            durable::LoadHold::BackingOff => LoadHold::BackingOff,
         }
     }
 }

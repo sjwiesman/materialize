@@ -14,9 +14,14 @@
 -- limitations under the License.
 
 {#
-Helpers for the `AUTO SCALING STRATEGY` cluster option (hydration burst),
-which lets a managed cluster temporarily burst to a larger size while it has
-un-hydrated objects, then return to its steady size once hydration completes.
+Helpers for the `AUTO SCALING STRATEGY` cluster option. Its sub-policies are
+independent and can be combined:
+
+  - `on_hydration` (hydration burst) lets a managed cluster temporarily burst
+    to a larger size while it has un-hydrated objects, then return to its
+    steady size once hydration completes.
+  - `on_load` lets Materialize move the cluster's SIZE within a range to keep
+    up with its load.
 
 The adapter models the strategy as a nested mapping:
 
@@ -24,6 +29,10 @@ The adapter models the strategy as a nested mapping:
     on_hydration:
       hydration_size: '800cc'   # required; must differ from the cluster SIZE
       linger_duration: '15s'    # optional; default '0s'
+    on_load:
+      min_size: '50cc'          # required
+      max_size: '800cc'         # required
+      scale_down_after: '1h'    # optional
 
 An empty mapping ({}) renders as `AUTO SCALING STRATEGY = ()`, which disables
 autoscaling.
@@ -54,15 +63,15 @@ when provided.
     {% endif %}
 
     {% for key in auto_scaling_strategy %}
-        {% if key != 'on_hydration' %}
+        {% if key not in ['on_hydration', 'on_load'] %}
             {{ exceptions.raise_compiler_error(
                 "Unknown auto_scaling_strategy key '" ~ key ~ "'. "
-                ~ "The only supported sub-policy is 'on_hydration'."
+                ~ "The supported sub-policies are 'on_hydration' and 'on_load'."
             ) }}
         {% endif %}
     {% endfor %}
 
-    {% if auto_scaling_strategy %}
+    {% if 'on_hydration' in auto_scaling_strategy %}
         {% set on_hydration = auto_scaling_strategy.get('on_hydration') %}
         {% if on_hydration is not mapping or not on_hydration.get('hydration_size') %}
             {{ exceptions.raise_compiler_error(
@@ -87,6 +96,27 @@ when provided.
             ) }}
         {% endif %}
     {% endif %}
+
+    {# The server checks that the range holds the cluster SIZE, which needs
+       the ordering of sizes. #}
+    {% if 'on_load' in auto_scaling_strategy %}
+        {% set on_load = auto_scaling_strategy.get('on_load') %}
+        {% if on_load is not mapping or not on_load.get('min_size') or not on_load.get('max_size') %}
+            {{ exceptions.raise_compiler_error(
+                "auto_scaling_strategy.on_load must be a mapping with 'min_size' "
+                ~ "and 'max_size' keys, e.g. {'min_size': '50cc', "
+                ~ "'max_size': '800cc', 'scale_down_after': '1h'}. Got: " ~ on_load
+            ) }}
+        {% endif %}
+        {% for key in on_load %}
+            {% if key not in ['min_size', 'max_size', 'scale_down_after'] %}
+                {{ exceptions.raise_compiler_error(
+                    "Unknown auto_scaling_strategy.on_load key '" ~ key ~ "'. "
+                    ~ "Supported keys: min_size, max_size, scale_down_after."
+                ) }}
+            {% endif %}
+        {% endfor %}
+    {% endif %}
 {% endmacro %}
 
 {#
@@ -98,12 +128,27 @@ disabling form `AUTO SCALING STRATEGY = ()`.
     {% if not auto_scaling_strategy %}
         {{ return("AUTO SCALING STRATEGY = ()") }}
     {% endif %}
+    {% set policies = [] %}
     {% set on_hydration = auto_scaling_strategy.get('on_hydration') %}
-    {% set parts = ["HYDRATION SIZE = " ~ dbt.string_literal(on_hydration.get('hydration_size'))] %}
-    {% if on_hydration.get('linger_duration') is not none %}
-        {% do parts.append("LINGER DURATION = " ~ dbt.string_literal(on_hydration.get('linger_duration'))) %}
+    {% if on_hydration %}
+        {% set parts = ["HYDRATION SIZE = " ~ dbt.string_literal(on_hydration.get('hydration_size'))] %}
+        {% if on_hydration.get('linger_duration') is not none %}
+            {% do parts.append("LINGER DURATION = " ~ dbt.string_literal(on_hydration.get('linger_duration'))) %}
+        {% endif %}
+        {% do policies.append("ON HYDRATION (" ~ parts | join(", ") ~ ")") %}
     {% endif %}
-    {{ return("AUTO SCALING STRATEGY = (ON HYDRATION (" ~ parts | join(", ") ~ "))") }}
+    {% set on_load = auto_scaling_strategy.get('on_load') %}
+    {% if on_load %}
+        {% set parts = [
+            "MIN SIZE = " ~ dbt.string_literal(on_load.get('min_size')),
+            "MAX SIZE = " ~ dbt.string_literal(on_load.get('max_size')),
+        ] %}
+        {% if on_load.get('scale_down_after') is not none %}
+            {% do parts.append("SCALE DOWN AFTER = " ~ dbt.string_literal(on_load.get('scale_down_after'))) %}
+        {% endif %}
+        {% do policies.append("ON LOAD (" ~ parts | join(", ") ~ ")") %}
+    {% endif %}
+    {{ return("AUTO SCALING STRATEGY = (" ~ policies | join(", ") ~ ")") }}
 {% endmacro %}
 
 {#
@@ -112,9 +157,9 @@ mz_internal.mz_cluster_auto_scaling_strategies and returns it as an
 `auto_scaling_strategy` mapping, or none when the cluster has no strategy
 configured (or the server predates the feature).
 
-NOTE: the catalog stores the linger duration as a {secs, nanos} object. The
-read-back keeps whole seconds only, so sub-second linger components are
-dropped when the strategy is copied to another cluster.
+NOTE: the catalog stores durations as a {secs, nanos} object. The read-back
+keeps whole seconds only, so sub-second components are dropped when the
+strategy is copied to another cluster.
 
 NOTE: mz_cluster_auto_scaling_strategies is a builtin materialized view
 maintained on mz_catalog_server, so it reflects DDL with a small delay,
@@ -138,7 +183,10 @@ not be visible yet.
     {% set strategy_query %}
         SELECT
             s.strategy->'on_hydration'->>'hydration_size' AS hydration_size,
-            (s.strategy->'on_hydration'->'linger_duration'->>'secs')::bigint AS linger_secs
+            (s.strategy->'on_hydration'->'linger_duration'->>'secs')::bigint AS linger_secs,
+            s.strategy->'on_load'->>'min_size' AS min_size,
+            s.strategy->'on_load'->>'max_size' AS max_size,
+            (s.strategy->'on_load'->'scale_down_after'->>'secs')::bigint AS scale_down_secs
         FROM mz_internal.mz_cluster_auto_scaling_strategies s
         JOIN mz_clusters c ON c.id = s.cluster_id
         WHERE c.name = {{ dbt.string_literal(cluster_name) }}
@@ -146,13 +194,27 @@ not be visible yet.
 
     {% set strategy_result = run_query(strategy_query) %}
     {# A row can exist with a null strategy while a burst from a just-removed
-       policy is still draining, so also require a hydration size. #}
-    {% if strategy_result.rows and strategy_result.rows[0][0] is not none %}
-        {% set on_hydration = {'hydration_size': strategy_result.rows[0][0]} %}
-        {% if strategy_result.rows[0][1] is not none %}
-            {% do on_hydration.update({'linger_duration': strategy_result.rows[0][1] ~ 's'}) %}
+       policy is still draining, so require a sub-policy's mandatory size. #}
+    {% set strategy = {} %}
+    {% if strategy_result.rows %}
+        {% set row = strategy_result.rows[0] %}
+        {% if row[0] is not none %}
+            {% set on_hydration = {'hydration_size': row[0]} %}
+            {% if row[1] is not none %}
+                {% do on_hydration.update({'linger_duration': row[1] ~ 's'}) %}
+            {% endif %}
+            {% do strategy.update({'on_hydration': on_hydration}) %}
         {% endif %}
-        {{ return({'on_hydration': on_hydration}) }}
+        {% if row[2] is not none %}
+            {% set on_load = {'min_size': row[2], 'max_size': row[3]} %}
+            {% if row[4] is not none %}
+                {% do on_load.update({'scale_down_after': row[4] ~ 's'}) %}
+            {% endif %}
+            {% do strategy.update({'on_load': on_load}) %}
+        {% endif %}
+    {% endif %}
+    {% if strategy %}
+        {{ return(strategy) }}
     {% endif %}
 
     {{ return(none) }}

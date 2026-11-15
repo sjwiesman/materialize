@@ -18,27 +18,29 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mz_adapter_types::dyncfgs::all_dyncfgs;
 use mz_compute_types::config::ComputeReplicaLogging;
+use mz_compute_types::dyncfgs::COMPUTE_WORKER_BUSY_WINDOW;
 use mz_controller_types::{ClusterId, ReplicaId};
-use mz_dyncfg::ConfigSet;
+use mz_dyncfg::ConfigUpdates;
 use mz_ore::cast::CastFrom;
 use mz_repr::{GlobalId, Timestamp};
 
-use crate::ClusterController;
 use crate::ctx::{
     ApplyOutcome, AutoScalingPolicy, AvailabilityZones, BurstAudit, ClusterControllerCtx,
     ClusterSchedule, ClusterState, CreateReason, Decision, ObservedReplica, ReconfigurationAudit,
-    ReconfigurationStatus, RefreshWindowClusterInputs, RefreshWindowInputs,
+    ReconfigurationOrigin, ReconfigurationStatus, RefreshWindowClusterInputs, RefreshWindowInputs,
     RefreshWindowInputsBatch, ReplicaShape, StateWrite,
 };
-use crate::strategy::{ConfigSignals, DesiredReplica, LiveSignals, Strategy};
+use crate::load::LoadSignals;
+use crate::strategy::{ConfigSignals, DesiredReplica, LiveSignals, ReadinessCriteria, Strategy};
+use crate::testing::dyncfgs;
+use crate::{ClusterController, load_params};
 
 /// A controller over the crate's dyncfgs at their defaults: burst enabled (the
 /// break-glass default) and a zero default linger, so seam tests observe burst
 /// teardown as soon as the steady set hydrates.
 fn controller() -> ClusterController {
-    ClusterController::new(all_dyncfgs(ConfigSet::default()))
+    ClusterController::new(dyncfgs())
 }
 
 /// The config signals the kernel tests evaluate against, matching what
@@ -47,6 +49,7 @@ fn config() -> ConfigSignals {
     ConfigSignals {
         burst_enabled: true,
         default_burst_linger: Duration::ZERO,
+        ..Default::default()
     }
 }
 
@@ -110,6 +113,7 @@ fn state(
         auto_scaling_policy: None,
         reconfiguration: None,
         burst: None,
+        load: None,
         replicas,
     }
 }
@@ -157,11 +161,15 @@ struct FakeCtx {
     /// pose the state this gate exists for: hydrated but still behind.
     ready: BTreeSet<ReplicaId>,
     ready_by_reference: BTreeMap<BTreeSet<ReplicaId>, BTreeSet<ReplicaId>>,
+    /// The load signal the fake reports per cluster.
+    load_signals: BTreeMap<ClusterId, LoadSignals>,
     /// How many times the controller probed hydration, for asserting that an
     /// object-less cluster is never probed.
     hydration_probes: usize,
     /// The reference set passed with each readiness probe, in order.
     readiness_references: Vec<BTreeSet<ReplicaId>>,
+    /// The criteria passed with each readiness probe, in order.
+    readiness_criteria: Vec<ReadinessCriteria>,
     /// What the fake answers when the controller pulls the object-existence
     /// signal; an absent entry reads `false` (no objects). Held beside the
     /// states (like `hydrated`) rather than read from them, and
@@ -190,8 +198,10 @@ impl FakeCtx {
             hydrated: BTreeSet::new(),
             ready: BTreeSet::new(),
             ready_by_reference: BTreeMap::new(),
+            load_signals: BTreeMap::new(),
             hydration_probes: 0,
             readiness_references: Vec::new(),
+            readiness_criteria: Vec::new(),
             has_hydratable_objects: BTreeMap::new(),
             refresh_window: None,
             refresh_window_probes: Vec::new(),
@@ -277,8 +287,10 @@ impl ClusterControllerCtx for FakeCtx {
         _cluster_id: ClusterId,
         replicas: &[ReplicaId],
         reference: &BTreeSet<ReplicaId>,
+        criteria: ReadinessCriteria,
     ) -> BTreeSet<ReplicaId> {
         self.readiness_references.push(reference.clone());
+        self.readiness_criteria.push(criteria);
         let ready = self
             .ready_by_reference
             .get(reference)
@@ -295,6 +307,10 @@ impl ClusterControllerCtx for FakeCtx {
             .get(&cluster_id)
             .copied()
             .unwrap_or(false)
+    }
+
+    async fn load_signals(&mut self, cluster_id: ClusterId) -> Option<LoadSignals> {
+        self.load_signals.get(&cluster_id).cloned()
     }
 
     async fn refresh_window_inputs(
@@ -419,6 +435,7 @@ impl FakeCtx {
                     new_arrangement_compression,
                     reconfiguration,
                     burst,
+                    load,
                 } = write;
                 if let Some(size) = new_size {
                     state.size = size.clone();
@@ -440,6 +457,9 @@ impl FakeCtx {
                 }
                 if let Some(burst) = burst {
                     state.burst = burst.record.clone();
+                }
+                if let Some(load) = load {
+                    state.load = load.record.clone();
                 }
             }
             Decision::CreateReplica {
@@ -642,7 +662,7 @@ fn controller_with(strategies: Vec<Box<dyn Strategy>>) -> ClusterController {
     // for union/diff tests rather than going through `new()`.
     ClusterController {
         strategies,
-        dyncfgs: all_dyncfgs(ConfigSet::default()),
+        dyncfgs: dyncfgs(),
     }
 }
 
@@ -874,6 +894,8 @@ async fn caa_conflict_is_rejected_and_recovered() {
                         deadline: now,
                         on_timeout: OnTimeout::Rollback,
                         status: ReconfigurationStatus::InProgress,
+                        origin: ReconfigurationOrigin::User,
+                        trial: None,
                     }),
                     audit: None,
                 }),
@@ -942,6 +964,7 @@ async fn caa_conflict_is_rejected_and_recovered() {
                 auto_scaling_policy: None,
                 reconfiguration: None,
                 burst: None,
+                load: None,
             }
         );
         if let Some(record) = write
@@ -1042,6 +1065,7 @@ async fn create_drop_is_caa_guarded_and_recovers() {
                 auto_scaling_policy: None,
                 reconfiguration: None,
                 burst: None,
+                load: None,
             }
         );
     } else {
@@ -1292,6 +1316,8 @@ fn record_on_timeout(
         deadline: Timestamp::from(deadline),
         on_timeout,
         status: ReconfigurationStatus::InProgress,
+        origin: ReconfigurationOrigin::User,
+        trial: None,
     }
 }
 
@@ -1321,6 +1347,7 @@ fn reconfiguring_state(
         auto_scaling_policy: None,
         reconfiguration: Some(rec),
         burst: None,
+        load: None,
         replicas,
     };
     let signals = LiveSignals {
@@ -1330,7 +1357,8 @@ fn reconfiguring_state(
                 .iter()
                 .filter(|r| r.shape.as_ref().is_some_and(|s| s.size == size))
                 .map(|r| r.replica_id)
-                .collect(),
+                .collect::<BTreeSet<_>>()
+                .into(),
             ready,
         )]),
         ..Default::default()
@@ -1415,7 +1443,7 @@ fn graceful_readiness_reference_is_the_realized_set() {
     let request = g.signal_request(&state, &config());
     assert_eq!(
         request.readiness,
-        BTreeSet::from([BTreeSet::from([replica(1), replica(2)])]),
+        BTreeSet::from([BTreeSet::from([replica(1), replica(2)]).into()]),
         "reference is exactly the realized-shape replicas",
     );
     assert!(
@@ -1465,7 +1493,7 @@ fn graceful_holds_when_target_is_hydrated_but_lagging() {
 
     // Once they catch up, the same state cuts over.
     signals.ready_replicas.insert(
-        BTreeSet::from([replica(1), replica(2)]),
+        BTreeSet::from([replica(1), replica(2)]).into(),
         BTreeSet::from([replica(3), replica(4)]),
     );
     let write = g.update_state(&state, &signals, &config(), now);
@@ -1900,8 +1928,11 @@ fn graceful_az_only_reconfiguration_is_a_shape_change() {
             deadline: Timestamp::from(5000u64),
             on_timeout: OnTimeout::Rollback,
             status: ReconfigurationStatus::InProgress,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         }),
         burst: None,
+        load: None,
         replicas: vec![ObservedReplica {
             replica_id: replica(1),
             name: "r0".to_string(),
@@ -1935,9 +1966,10 @@ fn graceful_az_only_reconfiguration_is_a_shape_change() {
 
     // Mark the realized replica ready: it is NOT a target replica (wrong AZ),
     // so this must not trigger a cut-over.
-    signals
-        .ready_replicas
-        .insert(BTreeSet::from([replica(1)]), BTreeSet::from([replica(1)]));
+    signals.ready_replicas.insert(
+        BTreeSet::from([replica(1)]).into(),
+        BTreeSet::from([replica(1)]),
+    );
     assert!(g.update_state(&state, &signals, &config(), now).is_empty());
 }
 
@@ -2434,6 +2466,7 @@ async fn forced_cutover_swap_preserves_the_burst_replica() {
             hydration_size: "400cc".to_string(),
             linger_duration: Some(Duration::from_secs(60)),
         }),
+        on_load: None,
     });
     state.burst = Some(BurstRecord {
         burst_size: "400cc".to_string(),
@@ -2488,6 +2521,7 @@ async fn resource_exhaustion_leaves_an_unaffordable_burst_armed() {
             hydration_size: "400cc".to_string(),
             linger_duration: Some(Duration::from_secs(60)),
         }),
+        on_load: None,
     });
     state.burst = Some(BurstRecord {
         burst_size: "400cc".to_string(),
@@ -2589,6 +2623,7 @@ fn scheduled_state(
         auto_scaling_policy: None,
         reconfiguration: None,
         burst: None,
+        load: None,
         replicas,
     };
     let signals = LiveSignals {
@@ -3243,6 +3278,7 @@ mod hydration_burst {
                 hydration_size: hydration_size.to_string(),
                 linger_duration: Some(linger),
             }),
+            on_load: None,
         });
         s.burst = burst;
         // Most burst cases have something to hydrate; tests for the object
@@ -3306,6 +3342,7 @@ mod hydration_burst {
                 hydration_size: "400cc".to_string(),
                 linger_duration: None,
             }),
+            on_load: None,
         });
         let config = ConfigSignals {
             default_burst_linger: Duration::from_secs(42),
@@ -3467,9 +3504,10 @@ mod hydration_burst {
                 .is_empty(),
             "hydration alone must not start linger"
         );
-        signals
-            .ready_replicas
-            .insert(BTreeSet::from([replica(3)]), BTreeSet::from([replica(1)]));
+        signals.ready_replicas.insert(
+            BTreeSet::from([replica(3)]).into(),
+            BTreeSet::from([replica(1)]),
+        );
         let write = HydrationBurstStrategy.update_state(&s, &signals, &config(), now(2000));
         let burst = written_burst_record(&write).expect("stamped");
         assert_eq!(burst.steady_ready_at, Some(now(2000)));
@@ -3516,9 +3554,10 @@ mod hydration_burst {
             Some(record("400cc", Duration::from_millis(100), None)),
         );
         // The real probe reports the helper ready against itself.
-        signals
-            .ready_replicas
-            .insert(BTreeSet::from([replica(3)]), BTreeSet::from([replica(3)]));
+        signals.ready_replicas.insert(
+            BTreeSet::from([replica(3)]).into(),
+            BTreeSet::from([replica(3)]),
+        );
         assert!(
             HydrationBurstStrategy
                 .update_state(&s, &signals, &config(), now(1000))
@@ -3963,6 +4002,7 @@ mod hydration_burst {
                 hydration_size: "400cc".into(),
                 linger_duration: Some(Duration::from_millis(100)),
             }),
+            on_load: None,
         });
         let write = controller().merge_state_writes(
             &state,
@@ -4170,3 +4210,17 @@ mod hydration_burst {
         );
     }
 }
+
+#[mz_ore::test]
+fn load_params_floor_the_policy_interval_like_the_sampler() {
+    let configs = dyncfgs();
+    let mut updates = ConfigUpdates::default();
+    updates.add(&COMPUTE_WORKER_BUSY_WINDOW, Duration::ZERO);
+    updates.apply(&configs);
+    assert_eq!(
+        load_params(&configs).policy_interval,
+        Duration::from_secs(1)
+    );
+}
+
+mod load_trial;

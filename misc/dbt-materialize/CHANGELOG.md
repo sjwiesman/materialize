@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+* Support the `on_load` sub-policy of the `AUTO SCALING STRATEGY` cluster
+  option, which lets Materialize move a cluster's size within a range to keep
+  up with its load. The `auto_scaling_strategy` argument of `create_cluster`
+  and `alter_cluster_auto_scaling_strategy` accepts it next to `on_hydration`,
+  and `deploy_init` copies it to the deployment cluster:
+
+  ```bash
+  dbt run-operation alter_cluster_auto_scaling_strategy --args '{cluster_name: quickstart, auto_scaling_strategy: {on_load: {min_size: "50cc", max_size: "800cc", scale_down_after: "1h"}}}'
+  ```
+
 * Fix the deployment timestamp in the schema comment `deploy_promote` leaves
   behind. It read the second row of the first column instead of the second
   column of the only row, so every tag said `Deployment by <user> on ` with
