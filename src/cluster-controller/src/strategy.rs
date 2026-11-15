@@ -35,8 +35,10 @@ use mz_repr::{Timestamp, TimestampManipulation};
 use crate::ctx::{
     BurstAudit, BurstFinishCause, BurstRecord, BurstWrite, ClusterSchedule, ClusterState,
     CreateReason, OnTimeout, ReconfigurationAudit, ReconfigurationRecord, ReconfigurationStatus,
-    ReconfigurationWrite, RefreshWindowDecision, RefreshWindowInputs, ReplicaShape, StateWrite,
+    ReconfigurationTrial, ReconfigurationWrite, RefreshWindowDecision, RefreshWindowInputs,
+    ReplicaShape, StateWrite,
 };
+use crate::load::{LoadParams, LoadSignals};
 
 /// A replica slot a strategy desires this tick. The reconcile kernel unions
 /// slots across strategies and matches them by [`ReplicaShape`] against the
@@ -103,19 +105,52 @@ pub struct SignalRequest {
     /// Probe which of the cluster's replicas report all collections hydrated.
     pub hydration: bool,
     /// Probe which of the cluster's replicas are ready to be cut over to:
-    /// hydrated, and within the configured lag of the *reference* replicas
-    /// in each reference set, the ones the cut-over will drop.
+    /// hydrated, and meeting each probe's criteria against its *reference*
+    /// replicas, the ones the cut-over will drop.
     ///
-    /// Reference sets stay separate when strategies retire different replicas.
-    /// Each set must include every replica its transition retires. Including
-    /// a surviving replica only delays readiness.
-    pub readiness: BTreeSet<BTreeSet<ReplicaId>>,
+    /// Probes stay separate when strategies retire different replicas or ask
+    /// for different criteria. Each reference set must include every replica
+    /// its transition retires. Including a surviving replica only delays
+    /// readiness.
+    pub readiness: BTreeSet<ReadinessProbe>,
     /// Check whether the cluster has at least one hydratable object bound to
     /// it. See `ClusterControllerCtx::has_hydratable_objects` for what counts.
     pub hydratable_objects: bool,
     /// Pull the refresh-window inputs (bound REFRESH MV frontiers, schedules,
     /// the current read timestamp).
     pub refresh_window: bool,
+    /// Pull the cluster's size ladder and window of load samples.
+    pub load: bool,
+}
+
+/// One readiness probe: the replicas a transition retires, and what a
+/// replica must meet against them to be ready.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReadinessProbe {
+    pub reference: BTreeSet<ReplicaId>,
+    pub criteria: ReadinessCriteria,
+}
+
+impl From<BTreeSet<ReplicaId>> for ReadinessProbe {
+    fn from(reference: BTreeSet<ReplicaId>) -> Self {
+        ReadinessProbe {
+            reference,
+            criteria: ReadinessCriteria::default(),
+        }
+    }
+}
+
+/// What a replica must meet, beyond hydration, to be ready. The default is
+/// the environment's configured lag allowance and no heap check.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReadinessCriteria {
+    /// How far the replica's output frontiers may trail the reference
+    /// replicas'. `None` applies the environment's configured allowance, which
+    /// can be disabled. `Some` applies even then.
+    pub allowed_lag: Option<Duration>,
+    /// The steady-state heap fraction, in permille, the replica must stay
+    /// below. `None` skips the check.
+    pub max_heap_fraction: Option<u32>,
 }
 
 impl SignalRequest {
@@ -128,12 +163,14 @@ impl SignalRequest {
             readiness,
             hydratable_objects,
             refresh_window,
+            load,
         } = other;
         SignalRequest {
             hydration: self.hydration || hydration,
             readiness: self.readiness.union(&readiness).cloned().collect(),
             hydratable_objects: self.hydratable_objects || hydratable_objects,
             refresh_window: self.refresh_window || refresh_window,
+            load: self.load || load,
         }
     }
 }
@@ -149,6 +186,13 @@ pub struct ConfigSignals {
     /// The system-default burst linger duration, written into a new `burst`
     /// record when the policy's `linger_duration` is omitted.
     pub default_burst_linger: Duration,
+    /// Whether the `ON LOAD` strategy is enabled environment-wide (the
+    /// break-glass flag).
+    pub load_enabled: bool,
+    pub load: LoadParams,
+    /// The deadline the `ON LOAD` strategy gives the reconfigurations it
+    /// starts, the same default a user `ALTER` without `WITH (WAIT ...)` gets.
+    pub default_reconfiguration_timeout: Duration,
 }
 
 /// The fulfilled live signals for one cluster, fetched by the kernel per the
@@ -161,10 +205,10 @@ pub struct LiveSignals {
     /// The replicas observed this tick to be online and to have *all* current
     /// collections on the cluster hydrated.
     pub hydrated_replicas: BTreeSet<ReplicaId>,
-    /// The replicas observed this tick to be ready to cut over to: hydrated, and
-    /// within the configured lag of each keyed reference set. The hydration
-    /// signal is populated independently, only when requested.
-    pub ready_replicas: BTreeMap<BTreeSet<ReplicaId>, BTreeSet<ReplicaId>>,
+    /// The replicas observed this tick to be ready to cut over to, per
+    /// requested probe. The hydration signal is populated independently, only
+    /// when requested.
+    pub ready_replicas: BTreeMap<ReadinessProbe, BTreeSet<ReplicaId>>,
     /// Whether the cluster has at least one hydratable object. `false` when not
     /// requested.
     pub has_hydratable_objects: bool,
@@ -175,6 +219,8 @@ pub struct LiveSignals {
     /// [`ClusterControllerCtx::refresh_window_inputs`]:
     ///     crate::ctx::ClusterControllerCtx::refresh_window_inputs
     pub refresh_window: Option<RefreshWindowInputs>,
+    /// The load signal. `None` when not requested or unavailable.
+    pub load: Option<LoadSignals>,
 }
 
 /// The implicit baseline strategy, always present.
@@ -260,6 +306,13 @@ impl Strategy for BaselineStrategy {
 /// out without touching the realized config and stops desiring the target
 /// replicas, reverting to the pre-reconfiguration set.
 ///
+/// A record with a [`ReconfigurationTrial`] cuts over only once the target set
+/// has been ready for the trial's `hold_for` without interruption, where ready
+/// means the trial's lag allowance in place of the configured one, plus its
+/// heap check. The first ready tick stamps `ready_since`, a tick that finds the set
+/// not ready clears it, and both are bookkeeping writes without an audit. The
+/// deadline and `on_timeout` apply as to any record.
+///
 /// Both functions are pure over the observed [`ClusterState`] and the fetched
 /// [`LiveSignals`]. Readiness is requested via [`Strategy::signal_request`]
 /// exactly while an in-progress reconfiguration is present.
@@ -282,7 +335,9 @@ impl GracefulReconfigurationStrategy {
         record: &ReconfigurationRecord,
     ) -> bool {
         let target_shape = record.target.shape();
-        let ready = signals.ready_replicas.get(&self.reference_replicas(state));
+        let ready = signals
+            .ready_replicas
+            .get(&self.readiness_probe(state, record));
         let ready_target_replicas = state
             .replicas
             .iter()
@@ -291,6 +346,41 @@ impl GracefulReconfigurationStrategy {
             .count();
         let target_rf = usize::try_from(record.target.replication_factor).unwrap_or(usize::MAX);
         ready_target_replicas >= target_rf
+    }
+
+    /// Whether the record's cut-over precondition holds: the target set is
+    /// ready and, for a trial, has been since at least `hold_for`.
+    fn held(record: &ReconfigurationRecord, ready: bool, now: Timestamp) -> bool {
+        match &record.trial {
+            None => ready,
+            // A hold that overflows the timestamp space never elapses.
+            Some(trial) => {
+                ready
+                    && trial
+                        .ready_since
+                        .unwrap_or(now)
+                        .try_step_forward_by(&duration_to_ts(trial.hold_for))
+                        .is_some_and(|until| now >= until)
+            }
+        }
+    }
+
+    fn readiness_probe(
+        &self,
+        state: &ClusterState,
+        record: &ReconfigurationRecord,
+    ) -> ReadinessProbe {
+        let criteria = match &record.trial {
+            Some(trial) => ReadinessCriteria {
+                allowed_lag: Some(trial.allowed_lag),
+                max_heap_fraction: Some(trial.max_heap_fraction),
+            },
+            None => ReadinessCriteria::default(),
+        };
+        ReadinessProbe {
+            reference: self.reference_replicas(state),
+            criteria,
+        }
     }
 
     fn reference_replicas(&self, state: &ClusterState) -> BTreeSet<ReplicaId> {
@@ -318,15 +408,15 @@ impl GracefulReconfigurationStrategy {
 
 impl Strategy for GracefulReconfigurationStrategy {
     fn signal_request(&self, state: &ClusterState, _config: &ConfigSignals) -> SignalRequest {
-        let in_progress = state
+        let Some(record) = state
             .reconfiguration
             .as_ref()
-            .is_some_and(|record| record.is_in_progress());
-        if !in_progress {
+            .filter(|record| record.is_in_progress())
+        else {
             return SignalRequest::default();
-        }
+        };
         SignalRequest {
-            readiness: BTreeSet::from([self.reference_replicas(state)]),
+            readiness: BTreeSet::from([self.readiness_probe(state, record)]),
             ..Default::default()
         }
     }
@@ -367,10 +457,11 @@ impl Strategy for GracefulReconfigurationStrategy {
         // that create arrives in the same transaction that retires the realized
         // replicas and does not have to fit alongside them.
         let ready = self.target_ready(state, signals, record);
+        let held = Self::held(record, ready, now);
         let deadline_reached = now >= record.deadline;
         let commit_on_timeout = deadline_reached && matches!(record.on_timeout, OnTimeout::Commit);
         let target_materialized = self.target_materialized(state, record);
-        if ready || (commit_on_timeout && target_materialized) {
+        if held || (commit_on_timeout && target_materialized) {
             return StateWrite {
                 new_size: Some(record.target.size.clone()),
                 new_replication_factor: Some(record.target.replication_factor),
@@ -386,7 +477,7 @@ impl Strategy for GracefulReconfigurationStrategy {
                     // under `Commit` is forced: the target is not ready.
                     // Declared here because only this decision point knows.
                     // The durable status reads `Finalized` either way.
-                    audit: Some(ReconfigurationAudit::Finalized { forced: !ready }),
+                    audit: Some(ReconfigurationAudit::Finalized { forced: !held }),
                 }),
                 ..Default::default()
             };
@@ -410,7 +501,25 @@ impl Strategy for GracefulReconfigurationStrategy {
             };
         }
 
-        // Before the deadline: keep waiting.
+        // Before the deadline: keep waiting, and keep a trial's hold clock.
+        if let Some(trial) = &record.trial {
+            let ready_since = ready.then(|| trial.ready_since.unwrap_or(now));
+            if ready_since != trial.ready_since {
+                return StateWrite {
+                    reconfiguration: Some(ReconfigurationWrite {
+                        record: Some(ReconfigurationRecord {
+                            trial: Some(ReconfigurationTrial {
+                                ready_since,
+                                ..trial.clone()
+                            }),
+                            ..record.clone()
+                        }),
+                        audit: None,
+                    }),
+                    ..Default::default()
+                };
+            }
+        }
         StateWrite::default()
     }
 
@@ -442,7 +551,8 @@ impl Strategy for GracefulReconfigurationStrategy {
         // `now >= deadline` matches `update_state`'s boundary, so a zero-timeout
         // rollback stops desiring the target on the same tick it marks the
         // record timed out.
-        let timed_out = now >= record.deadline && !self.target_ready(state, signals, record);
+        let ready = self.target_ready(state, signals, record);
+        let timed_out = now >= record.deadline && !Self::held(record, ready, now);
         if timed_out && matches!(record.on_timeout, OnTimeout::Rollback) {
             return Vec::new();
         }
@@ -746,7 +856,7 @@ impl Strategy for HydrationBurstStrategy {
         SignalRequest {
             hydration: active && state.burst.is_none(),
             readiness: if self.warranted_record(state, config).is_some() {
-                BTreeSet::from([self.reference_replicas(state)])
+                BTreeSet::from([self.reference_replicas(state).into()])
             } else {
                 BTreeSet::new()
             },
@@ -820,7 +930,7 @@ impl Strategy for HydrationBurstStrategy {
             Some(record) => {
                 let steady_ready = signals
                     .ready_replicas
-                    .get(&self.reference_replicas(state))
+                    .get(&ReadinessProbe::from(self.reference_replicas(state)))
                     .is_some_and(|ready| self.contains_steady_replica(state, ready));
                 match (record.steady_ready_at, steady_ready) {
                     // Steady set ready and the linger has elapsed: tear down.

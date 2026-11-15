@@ -552,6 +552,95 @@ pub const DEFAULT_HYDRATION_BURST_LINGER: Config<Duration> = Config::new(
     ParameterScope::Environment,
 );
 
+/// Break-glass for the `ON LOAD` autoscaling strategy. When off the controller
+/// never resizes a cluster for load. Load recommendations are still computed
+/// and the other strategies are unaffected.
+pub const ENABLE_LOAD_AUTOSCALING: Config<bool> = Config::new(
+    "enable_load_autoscaling",
+    false,
+    "Whether the cluster controller's ON LOAD strategy may resize clusters (break-glass; leaves load recommendations and the other strategies untouched).",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_LAG_TOLERANCE: Config<Duration> = Config::new(
+    "load_autoscaling_lag_tolerance",
+    Duration::from_secs(2),
+    "The cluster lag at or below which the ON LOAD strategy counts a cluster as fresh, and the lag a trial size may show over the current one.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_ACTIVATION_INTERVALS: Config<usize> = Config::new(
+    "load_autoscaling_activation_intervals",
+    3,
+    "How many consecutive load samples must call for a larger size before the ON LOAD strategy scales up.",
+    ParameterScope::Environment,
+);
+
+/// The scale-down window used when a cluster's `ON LOAD` policy omits
+/// `SCALE DOWN AFTER`.
+pub const LOAD_AUTOSCALING_DEFAULT_SCALE_DOWN_AFTER: Config<Duration> = Config::new(
+    "load_autoscaling_default_scale_down_after",
+    Duration::from_secs(60 * 60),
+    "How long a cluster's load must have fit a smaller size before the ON LOAD strategy scales down, when the policy omits SCALE DOWN AFTER.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_WARM_UP: Config<Duration> = Config::new(
+    "load_autoscaling_warm_up",
+    Duration::from_secs(5 * 60),
+    "How long after a replica hydrates, or the cluster changes size, load samples are ignored.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_CATCH_UP: Config<Duration> = Config::new(
+    "load_autoscaling_catch_up",
+    Duration::from_secs(15 * 60),
+    "The time within which the ON LOAD strategy sizes a lagging dataflow to catch up.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_MIN_PROGRESS_RATIO: Config<f64> = Config::new(
+    "load_autoscaling_min_progress_ratio",
+    0.25,
+    "The floor on a dataflow's measured progress ratio. Bounds a single ON LOAD scale-up at the inverse of this factor.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_HEAP_TARGET: Config<f64> = Config::new(
+    "load_autoscaling_heap_target",
+    0.5,
+    "The steady-state heap fraction the ON LOAD strategy chooses a size for.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_HEAP_HIGH_WATER: Config<f64> = Config::new(
+    "load_autoscaling_heap_high_water",
+    0.8,
+    "The steady-state heap fraction above which the ON LOAD strategy scales a cluster up, once sustained.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_HEAP_HIGH_WATER_DURATION: Config<Duration> = Config::new(
+    "load_autoscaling_heap_high_water_duration",
+    Duration::from_secs(15 * 60),
+    "How long the steady-state heap must stay above the high-water mark before the ON LOAD strategy scales up.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_CPU_MARGIN: Config<f64> = Config::new(
+    "load_autoscaling_cpu_margin",
+    0.8,
+    "The share of a smaller size's cores the peak busy time may use for the ON LOAD strategy to try that size.",
+    ParameterScope::Environment,
+);
+
+pub const LOAD_AUTOSCALING_TRIAL_DURATION: Config<Duration> = Config::new(
+    "load_autoscaling_trial_duration",
+    Duration::from_secs(15 * 60),
+    "How long a smaller size must keep up and fit in memory beside the current one before the ON LOAD strategy cuts over to it.",
+    ParameterScope::Environment,
+);
+
 /// Adds the full set of all adapter `Config`s.
 pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
     configs
@@ -563,6 +652,18 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&DEFAULT_CLUSTER_RECONFIGURATION_TIMEOUT)
         .add(&ENABLE_HYDRATION_BURST)
         .add(&DEFAULT_HYDRATION_BURST_LINGER)
+        .add(&ENABLE_LOAD_AUTOSCALING)
+        .add(&LOAD_AUTOSCALING_LAG_TOLERANCE)
+        .add(&LOAD_AUTOSCALING_ACTIVATION_INTERVALS)
+        .add(&LOAD_AUTOSCALING_DEFAULT_SCALE_DOWN_AFTER)
+        .add(&LOAD_AUTOSCALING_WARM_UP)
+        .add(&LOAD_AUTOSCALING_CATCH_UP)
+        .add(&LOAD_AUTOSCALING_MIN_PROGRESS_RATIO)
+        .add(&LOAD_AUTOSCALING_HEAP_TARGET)
+        .add(&LOAD_AUTOSCALING_HEAP_HIGH_WATER)
+        .add(&LOAD_AUTOSCALING_HEAP_HIGH_WATER_DURATION)
+        .add(&LOAD_AUTOSCALING_CPU_MARGIN)
+        .add(&LOAD_AUTOSCALING_TRIAL_DURATION)
         .add(&WITH_0DT_DEPLOYMENT_MAX_WAIT)
         .add(&WITH_0DT_DEPLOYMENT_DDL_CHECK_INTERVAL)
         .add(&ENABLE_0DT_DEPLOYMENT_PANIC_AFTER_TIMEOUT)
