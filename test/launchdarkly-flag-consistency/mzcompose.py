@@ -462,6 +462,18 @@ KNOWN_MISSING_FROM_LD: set[str] = set("""
     with_0dt_deployment_ddl_check_interval
     compute_worker_busy_window
     replica_busy_history_retention_interval
+    enable_load_autoscaling
+    load_autoscaling_activation_intervals
+    load_autoscaling_default_scale_down_after
+    load_autoscaling_warm_up
+    load_autoscaling_catch_up
+    load_autoscaling_min_progress_ratio
+    load_autoscaling_lag_tolerance
+    load_autoscaling_heap_target
+    load_autoscaling_heap_high_water
+    load_autoscaling_heap_high_water_duration
+    load_autoscaling_cpu_margin
+    load_autoscaling_trial_duration
     """.split())
 
 # LaunchDarkly flags that are no longer synchronized parameters (in the current

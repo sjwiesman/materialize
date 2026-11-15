@@ -329,6 +329,7 @@ def get_variable_system_parameters(
         # On by default so CI exercises the jq function, which is off in
         # production while it earns trust.
         VariableSystemParameter("enable_jq", "true", ["true", "false"]),
+        VariableSystemParameter("enable_load_autoscaling", "true", ["true", "false"]),
         # On by default so CI exercises the columnar merge batcher, which is
         # off in production while it earns trust.
         VariableSystemParameter(
@@ -991,6 +992,17 @@ UNINTERESTING_SYSTEM_PARAMETERS = [
     "default_hydration_burst_linger",
     "cluster_reconfiguration_allowed_lag",
     "compute_worker_busy_window",
+    "load_autoscaling_activation_intervals",
+    "load_autoscaling_default_scale_down_after",
+    "load_autoscaling_warm_up",
+    "load_autoscaling_catch_up",
+    "load_autoscaling_min_progress_ratio",
+    "load_autoscaling_lag_tolerance",
+    "load_autoscaling_heap_target",
+    "load_autoscaling_heap_high_water",
+    "load_autoscaling_heap_high_water_duration",
+    "load_autoscaling_cpu_margin",
+    "load_autoscaling_trial_duration",
 ]
 
 
