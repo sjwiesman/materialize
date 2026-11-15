@@ -529,6 +529,7 @@ impl Controller {
         // provisioned.
         self.deprovision_replica(cluster_id, replica_id, self.deploy_generation)?;
         self.metrics_tasks.remove(&replica_id);
+        self.replica_metrics.remove(&replica_id);
 
         // Remove HTTP addresses from the locator.
         self.replica_http_locator

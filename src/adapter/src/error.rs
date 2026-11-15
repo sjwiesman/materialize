@@ -42,6 +42,7 @@ use timely::progress::Antichain;
 use tokio::sync::oneshot;
 use tokio_postgres::error::SqlState;
 
+use crate::catalog::cluster_state::OnLoadRangeError;
 use crate::coord::NetworkPolicyError;
 use crate::optimize::OptimizerError;
 use crate::peek_client::CollectionLookupError;
@@ -324,6 +325,8 @@ pub enum AdapterError {
     /// Attempt to change a cluster's schedule while a graceful reconfiguration
     /// is in progress.
     AlterClusterScheduleWhileReconfiguring,
+    /// An `ON LOAD` size range that does not fit the cluster.
+    InvalidOnLoadRange(OnLoadRangeError),
     /// Attempt to use `WAIT` on an `ALTER` of a scheduled (non-`MANUAL`)
     /// cluster, whose replica set the controller reshapes in the background.
     AlterClusterWaitOnScheduledCluster,
@@ -804,6 +807,7 @@ impl AdapterError {
                 configuration, or wait for it to settle, then convert."
                     .to_string(),
             ),
+            AdapterError::InvalidOnLoadRange(e) => e.hint(),
             AdapterError::AlterClusterUnmanagedWhileBursting => Some(
                 "Remove the strategy with ALTER CLUSTER ... RESET (AUTO SCALING STRATEGY), \
                 or wait for the burst to wind down, then convert."
@@ -1096,6 +1100,7 @@ impl AdapterError {
             AdapterError::AlterClusterResourceExhausted => SqlState::INSUFFICIENT_RESOURCES,
             AdapterError::AlterClusterUnmanagedWhileReconfiguring => SqlState::OBJECT_IN_USE,
             AdapterError::AlterClusterUnmanagedWhileBursting => SqlState::OBJECT_IN_USE,
+            AdapterError::InvalidOnLoadRange(_) => SqlState::INVALID_PARAMETER_VALUE,
             AdapterError::AlterClusterScheduleWhileReconfiguring => SqlState::OBJECT_IN_USE,
             AdapterError::AlterClusterWaitOnScheduledCluster => SqlState::FEATURE_NOT_SUPPORTED,
             AdapterError::ReplacementSchemaMismatch(_) => SqlState::FEATURE_NOT_SUPPORTED,
@@ -1587,6 +1592,7 @@ impl fmt::Display for AdapterError {
                     "cannot convert cluster to unmanaged while a reconfiguration is in progress"
                 )
             }
+            AdapterError::InvalidOnLoadRange(e) => e.fmt(f),
             AdapterError::AlterClusterUnmanagedWhileBursting => {
                 write!(
                     f,
@@ -1814,6 +1820,12 @@ impl From<mz_pgwire_common::ConnectionError> for AdapterError {
                 }
             }
         }
+    }
+}
+
+impl From<OnLoadRangeError> for AdapterError {
+    fn from(value: OnLoadRangeError) -> Self {
+        AdapterError::InvalidOnLoadRange(value)
     }
 }
 

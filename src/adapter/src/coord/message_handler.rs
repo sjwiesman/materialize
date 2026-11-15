@@ -20,6 +20,7 @@ use mz_audit_log::VersionedStorageUsage;
 use mz_catalog::memory::objects::ClusterReplicaProcessStatus;
 use mz_controller::ControllerResponse;
 use mz_controller::clusters::{ClusterEvent, ClusterStatus};
+use mz_orchestrator::OfflineReason;
 use mz_ore::cast::CastFrom;
 use mz_ore::instrument;
 use mz_ore::now::EpochMillis;
@@ -185,6 +186,15 @@ impl Coordinator {
             }
             Message::HydrationHistoryRun => {
                 self.run_hydration_history_collection();
+            }
+            Message::ClusterLoadSample { boundary } => {
+                self.cluster_load_sample(boundary);
+            }
+            Message::ClusterLoadFrontiers {
+                boundary,
+                frontiers,
+            } => {
+                self.cluster_load_record(boundary, frontiers);
             }
             Message::CaughtUpCheck(request) => {
                 self.handle_caught_up_check_request(request);
@@ -1116,6 +1126,10 @@ impl Coordinator {
         // arrangement sizes history don't record that data as current.
         if !matches!(event.status, ClusterStatus::Online) || restart_count_changed {
             self.invalidate_introspection_freshness(event.replica_id);
+            self.cluster_load.note_restarted(event.replica_id);
+        }
+        if event.status == ClusterStatus::Offline(Some(OfflineReason::OomKilled)) {
+            self.cluster_load.note_oom_killed(event.replica_id);
         }
 
         if let Some(old_replica_status) = old_replica_status {

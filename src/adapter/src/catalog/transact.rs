@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use itertools::Itertools;
 use mz_adapter_types::cluster_state::{
-    BurstAudit, BurstFinishCause, ExpectedClusterState, ReconfigurationAudit,
+    BurstAudit, BurstFinishCause, ExpectedClusterState, LoadAudit, LoadDirection, LoadHold,
+    LoadScaleDecision, LoadScaleReason, LoadScaleSample, ReconfigurationAudit,
 };
 use mz_adapter_types::compaction::CompactionWindow;
 use mz_adapter_types::connection::ConnectionId;
@@ -27,8 +28,10 @@ use mz_adapter_types::dyncfgs::{
 };
 use mz_audit_log::{
     AlterClusterReconfigurationV1, BurstFinishCauseV1, ClusterHydrationBurstV1,
-    ClusterReplicaLoggingV1, CreateOrDropClusterReplicaReasonV1, EventDetails, EventType,
-    HydrationBurstLifecycleV1, IdFullNameV1, IdNameV1, ObjectType, ReconfigurationLifecycleV1,
+    ClusterLoadBackoffV1, ClusterLoadHoldV1, ClusterReplicaLoggingV1,
+    CreateOrDropClusterReplicaReasonV1, EventDetails, EventType, HydrationBurstLifecycleV1,
+    IdFullNameV1, IdNameV1, LoadDirectionV1, LoadHoldV1, LoadScaleDecisionV1, LoadScaleReasonV1,
+    LoadScaleSampleV1, ObjectType, ReconfigurationLifecycleV1, ReconfigurationOriginV1,
     RefreshDecisionWithReasonV2, SchedulingDecisionV1, SchedulingDecisionsWithReasonsV2,
     VersionedEvent,
 };
@@ -39,7 +42,8 @@ use mz_catalog::expr_cache::{LocalExpressions, latest_item_version};
 use mz_catalog::memory::error::{AmbiguousRename, Error, ErrorKind};
 use mz_catalog::memory::objects::{
     CatalogEntry, CatalogItem, ClusterConfig, ClusterVariant, DataSourceDesc, DefaultPrivileges,
-    ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget, SourceReferences,
+    ReconfigurationOrigin, ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
+    SourceReferences,
 };
 use mz_cluster_controller::ctx::RefreshWindowDecision;
 use mz_controller::clusters::{ManagedReplicaLocation, ReplicaConfig, ReplicaLocation};
@@ -241,6 +245,10 @@ pub enum Op {
         /// Writer-declared hydration-burst lifecycle transition to audit for
         /// this write, alongside the record carried in `config`.
         burst_audit: Option<BurstAudit>,
+        /// Writer-declared `ON LOAD` transitions to audit for this write. Empty
+        /// for writes that leave the `load` record alone or only rewrite its
+        /// bookkeeping.
+        load_audit: Vec<LoadAudit>,
     },
     UpdateItem {
         id: CatalogItemId,
@@ -536,21 +544,23 @@ impl Catalog {
         // The one mirror match from the write-side vocabulary to the audit-log
         // vocabulary. `forced` exists only on the intent: the durable status
         // reads `Finalized` for both a hydrated and a forced cut-over.
-        let (transition, forced) = match audit {
-            ReconfigurationAudit::Started => (ReconfigurationLifecycleV1::Started, None),
-            ReconfigurationAudit::Cancelled => (ReconfigurationLifecycleV1::Cancelled, None),
-            ReconfigurationAudit::Finalized { forced } => {
-                (ReconfigurationLifecycleV1::Finalized, Some(forced))
+        let (transition, forced, load) = match audit {
+            ReconfigurationAudit::Started { load } => {
+                (ReconfigurationLifecycleV1::Started, None, load)
             }
-            ReconfigurationAudit::TimedOut => (ReconfigurationLifecycleV1::TimedOut, None),
+            ReconfigurationAudit::Cancelled => (ReconfigurationLifecycleV1::Cancelled, None, None),
+            ReconfigurationAudit::Finalized { forced } => {
+                (ReconfigurationLifecycleV1::Finalized, Some(forced), None)
+            }
+            ReconfigurationAudit::TimedOut => (ReconfigurationLifecycleV1::TimedOut, None, None),
             ReconfigurationAudit::ResourceExhausted => {
-                (ReconfigurationLifecycleV1::ResourceExhausted, None)
+                (ReconfigurationLifecycleV1::ResourceExhausted, None, None)
             }
         };
         let coherent = matches!(
             (audit, record.status),
             (
-                ReconfigurationAudit::Started,
+                ReconfigurationAudit::Started { .. },
                 ReconfigurationStatus::InProgress
             ) | (
                 ReconfigurationAudit::Cancelled,
@@ -578,6 +588,9 @@ impl Catalog {
             deadline,
             on_timeout: _,
             status: _,
+            origin,
+            // The trial's hold is bookkeeping, not part of the target.
+            trial: _,
         } = record;
         let ReconfigurationTarget {
             size,
@@ -602,7 +615,98 @@ impl Catalog {
                 interval: logging.interval,
             },
             deadline: Some((*deadline).into()),
+            origin: Some(match origin {
+                ReconfigurationOrigin::User => ReconfigurationOriginV1::User,
+                ReconfigurationOrigin::LoadAutoscaling => ReconfigurationOriginV1::LoadAutoscaling,
+            }),
+            load: load.map(|LoadScaleDecision { reason, sample }| LoadScaleDecisionV1 {
+                reason: match reason {
+                    LoadScaleReason::ScaleUp => LoadScaleReasonV1::ScaleUp,
+                    LoadScaleReason::OutOfMemory => LoadScaleReasonV1::OutOfMemory,
+                    LoadScaleReason::HeapHighWater => LoadScaleReasonV1::HeapHighWater,
+                    LoadScaleReason::ScaleDown => LoadScaleReasonV1::ScaleDown,
+                    LoadScaleReason::IneffectiveScaleUp => LoadScaleReasonV1::IneffectiveScaleUp,
+                },
+                sample: sample.map(|sample| {
+                    let LoadScaleSample {
+                        lag,
+                        progress,
+                        heap_fraction,
+                        busy_millicores,
+                    } = sample;
+                    LoadScaleSampleV1 {
+                        lag_ms: u64::try_from(lag.as_millis()).unwrap_or(u64::MAX),
+                        progress_permille: progress,
+                        heap_fraction_permille: heap_fraction,
+                        busy_millicores,
+                    }
+                }),
+            }),
         })
+    }
+
+    /// Builds the audit event for one writer-declared `ON LOAD` transition.
+    fn load_audit_details(
+        cluster_id: ClusterId,
+        cluster_name: &str,
+        audit: LoadAudit,
+    ) -> EventDetails {
+        let cluster_id = cluster_id.to_string();
+        let cluster_name = cluster_name.to_string();
+        match audit {
+            LoadAudit::BackoffStarted {
+                size,
+                direction,
+                until,
+            } => EventDetails::ClusterLoadBackoffV1(ClusterLoadBackoffV1 {
+                cluster_id,
+                cluster_name,
+                size,
+                direction: match direction {
+                    LoadDirection::Up => LoadDirectionV1::Up,
+                    LoadDirection::Down => LoadDirectionV1::Down,
+                },
+                until: until.into(),
+            }),
+            LoadAudit::HoldChanged { hold } => EventDetails::ClusterLoadHoldV1(ClusterLoadHoldV1 {
+                cluster_id,
+                cluster_name,
+                hold: hold.map(|hold| match hold {
+                    LoadHold::SkewLimited => LoadHoldV1::SkewLimited,
+                    LoadHold::Stalled => LoadHoldV1::Stalled,
+                    LoadHold::BackingOff => LoadHoldV1::BackingOff,
+                }),
+            }),
+        }
+    }
+
+    /// Clears the `ON LOAD` backoff list of each of `cluster_ids` that has
+    /// one. The backoff records sizes that failed for the workload the cluster
+    /// had, and a created or dropped object changes that workload.
+    fn clear_load_backoff(
+        state: &CatalogState,
+        tx: &mut Transaction<'_>,
+        cluster_ids: impl IntoIterator<Item = ClusterId>,
+    ) -> Result<(), AdapterError> {
+        for cluster_id in cluster_ids {
+            let Some(cluster) = state.try_get_cluster(cluster_id) else {
+                continue;
+            };
+            let mut cluster = cluster.clone();
+            let ClusterVariant::Managed(managed) = &mut cluster.config.variant else {
+                continue;
+            };
+            let Some(load) = managed
+                .load
+                .as_mut()
+                .filter(|load| !load.backoff.is_empty())
+            else {
+                continue;
+            };
+            load.backoff.clear();
+            tx.update_cluster(cluster_id, cluster.into())?;
+        }
+        Ok(())
     }
 
     /// Builds a hydration-burst lifecycle audit event from the writer-declared
@@ -1709,6 +1813,7 @@ impl Catalog {
                         )));
                     }
                 }
+                Self::clear_load_backoff(state, tx, item.cluster_id())?;
 
                 let owner_privileges = vec![rbac::owner_privilege(item.typ().into(), owner_id)];
                 let default_privileges = state
@@ -2013,6 +2118,15 @@ impl Catalog {
                 // Drop any items.
                 let items_to_drop: BTreeSet<_> = delta.items.iter().copied().collect();
                 tx.remove_items(&items_to_drop)?;
+
+                // A cluster that is itself dropped has no record left to update.
+                let item_clusters: BTreeSet<_> = delta
+                    .items
+                    .iter()
+                    .filter_map(|item_id| state.get_entry(item_id).cluster_id())
+                    .filter(|cluster_id| !delta.clusters.contains(cluster_id))
+                    .collect();
+                Self::clear_load_backoff(state, tx, item_clusters)?;
 
                 for item_id in delta.items {
                     let entry = state.get_entry(&item_id);
@@ -2834,6 +2948,7 @@ impl Catalog {
                 mut config,
                 reconfiguration_audit,
                 mut burst_audit,
+                mut load_audit,
             } => {
                 let mut cluster = state.get_cluster(id).clone();
                 // A write that invalidates the in-flight burst (policy removed
@@ -2850,6 +2965,23 @@ impl Catalog {
                             burst_audit = Some(BurstAudit::Finished {
                                 cause: BurstFinishCause::NoLongerWarranted,
                             });
+                        }
+                    }
+                }
+                // The load record is retired at the same chokepoint, whoever
+                // the writer is. The strategy never changes what invalidates
+                // the record, so this cannot discard a record it just wrote.
+                if let (ClusterVariant::Managed(managed), ClusterVariant::Managed(old)) =
+                    (&mut config.variant, &cluster.config.variant)
+                {
+                    if managed.load_record_invalidated(old) {
+                        managed.load = None;
+                        let held = old.load.as_ref().is_some_and(|load| load.hold.is_some());
+                        let declared = load_audit
+                            .iter()
+                            .any(|audit| matches!(audit, LoadAudit::HoldChanged { .. }));
+                        if held && !declared {
+                            load_audit.push(LoadAudit::HoldChanged { hold: None });
                         }
                     }
                 }
@@ -2884,6 +3016,7 @@ impl Catalog {
                 cluster.config = config;
                 tx.update_cluster(id, cluster.into())?;
                 info!("update cluster {}", name);
+                let audit_name = name.clone();
 
                 CatalogState::add_to_audit_log(
                     &state.system_configuration,
@@ -2922,6 +3055,19 @@ impl Catalog {
                         EventType::Alter,
                         ObjectType::Cluster,
                         EventDetails::ClusterHydrationBurstV1(details),
+                    )?;
+                }
+
+                for audit in load_audit {
+                    CatalogState::add_to_audit_log(
+                        &state.system_configuration,
+                        oracle_write_ts,
+                        session,
+                        tx,
+                        audit_events,
+                        EventType::Alter,
+                        ObjectType::Cluster,
+                        Self::load_audit_details(id, &audit_name, audit),
                     )?;
                 }
             }
@@ -3568,11 +3714,16 @@ mod tests {
     fn test_reconfiguration_audit_details() {
         use std::time::Duration;
 
-        use mz_adapter_types::cluster_state::ReconfigurationAudit;
-        use mz_audit_log::ReconfigurationLifecycleV1;
+        use mz_adapter_types::cluster_state::{
+            LoadScaleDecision, LoadScaleReason, LoadScaleSample, ReconfigurationAudit,
+        };
+        use mz_audit_log::{
+            LoadScaleDecisionV1, LoadScaleReasonV1, LoadScaleSampleV1, ReconfigurationLifecycleV1,
+            ReconfigurationOriginV1,
+        };
         use mz_catalog::memory::objects::{
-            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
-            ReconfigurationStatus, ReconfigurationTarget,
+            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationOrigin,
+            ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
         };
         use mz_controller::clusters::ReplicaLogging;
         use mz_controller_types::ClusterId;
@@ -3596,6 +3747,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration,
                 burst: None,
+                load: None,
             }),
             workload_class: None,
         };
@@ -3613,13 +3765,15 @@ mod tests {
             deadline: Timestamp::from(400u64),
             on_timeout: mz_sql::plan::OnTimeoutAction::Rollback,
             status,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         };
 
         let details = Catalog::reconfiguration_audit_details(
             &managed(Some(record(ReconfigurationStatus::InProgress))),
             cluster_id,
             "c",
-            ReconfigurationAudit::Started,
+            ReconfigurationAudit::Started { load: None },
         )
         .expect("record supplies audit details");
         assert_eq!(details.cluster_id, cluster_id.to_string());
@@ -3638,6 +3792,46 @@ mod tests {
             Some(Duration::from_secs(5))
         );
         assert_eq!(details.deadline, Some(400));
+        assert_eq!(details.origin, Some(ReconfigurationOriginV1::User));
+        assert_eq!(details.load, None);
+
+        // A record the `ON LOAD` strategy started carries its decision.
+        let loaded = Catalog::reconfiguration_audit_details(
+            &managed(Some(ReconfigurationState {
+                origin: ReconfigurationOrigin::LoadAutoscaling,
+                ..record(ReconfigurationStatus::InProgress)
+            })),
+            cluster_id,
+            "c",
+            ReconfigurationAudit::Started {
+                load: Some(LoadScaleDecision {
+                    reason: LoadScaleReason::HeapHighWater,
+                    sample: Some(LoadScaleSample {
+                        lag: Duration::from_millis(1500),
+                        progress: 1000,
+                        heap_fraction: 850,
+                        busy_millicores: 1200,
+                    }),
+                }),
+            },
+        )
+        .expect("record supplies audit details");
+        assert_eq!(
+            loaded.origin,
+            Some(ReconfigurationOriginV1::LoadAutoscaling)
+        );
+        assert_eq!(
+            loaded.load,
+            Some(LoadScaleDecisionV1 {
+                reason: LoadScaleReasonV1::HeapHighWater,
+                sample: Some(LoadScaleSampleV1 {
+                    lag_ms: 1500,
+                    progress_permille: 1000,
+                    heap_fraction_permille: 850,
+                    busy_millicores: 1200,
+                }),
+            })
+        );
 
         // The `forced` bit exists only on the intent. The durable status reads
         // `Finalized` for both a hydrated and a forced cut-over, and the event
@@ -3666,7 +3860,7 @@ mod tests {
             &managed(None),
             cluster_id,
             "c",
-            ReconfigurationAudit::Started,
+            ReconfigurationAudit::Started { load: None },
         );
         assert!(missing.is_err());
     }
@@ -3676,8 +3870,8 @@ mod tests {
         use std::time::Duration;
 
         use mz_catalog::memory::objects::{
-            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
-            ReconfigurationStatus, ReconfigurationTarget,
+            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationOrigin,
+            ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
         };
         use mz_controller::clusters::ReplicaLogging;
         use mz_repr::Timestamp;
@@ -3698,6 +3892,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration,
                 burst: None,
+                load: None,
             }),
             workload_class: None,
         };
@@ -3719,6 +3914,8 @@ mod tests {
             deadline: Timestamp::from(400u64),
             on_timeout: mz_sql::plan::OnTimeoutAction::Rollback,
             status,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         };
 
         // Lifecycle movements: these writes must declare an audit intent.
@@ -3781,6 +3978,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration: None,
                 burst,
+                load: None,
             }),
             workload_class: None,
         };
@@ -3853,12 +4051,14 @@ mod tests {
             auto_scaling_strategy: strategy,
             reconfiguration: None,
             burst,
+            load: None,
         };
         let policy = |hydration_size: &str| AutoScalingStrategy {
             on_hydration: Some(OnHydration {
                 hydration_size: hydration_size.into(),
                 linger_duration: None,
             }),
+            on_load: None,
         };
         let record = || BurstState {
             burst_size: "large".into(),
@@ -3878,13 +4078,114 @@ mod tests {
         assert!(
             managed(
                 1,
-                Some(AutoScalingStrategy { on_hydration: None }),
+                Some(AutoScalingStrategy {
+                    on_hydration: None,
+                    on_load: None,
+                }),
                 Some(record())
             )
             .has_unwarranted_burst_record()
         );
         assert!(managed(1, Some(policy("xlarge")), Some(record())).has_unwarranted_burst_record());
         assert!(managed(0, Some(policy("large")), Some(record())).has_unwarranted_burst_record());
+    }
+
+    #[mz_ore::test]
+    fn test_load_record_invalidated() {
+        use mz_catalog::memory::objects::{ClusterVariantManaged, LoadState};
+        use mz_controller::clusters::ReplicaLogging;
+        use mz_repr::optimize::OptimizerFeatureOverrides;
+        use mz_sql::plan::{AutoScalingStrategy, OnLoad};
+
+        let policy = |max_size: &str| AutoScalingStrategy {
+            on_hydration: None,
+            on_load: Some(OnLoad {
+                min_size: "small".into(),
+                max_size: max_size.into(),
+                scale_down_after: None,
+            }),
+        };
+        let managed = |replication_factor,
+                       size: &str,
+                       strategy: Option<AutoScalingStrategy>,
+                       load: bool| ClusterVariantManaged {
+            size: size.into(),
+            availability_zones: Vec::new(),
+            logging: ReplicaLogging {
+                log_logging: false,
+                interval: None,
+            },
+            arrangement_compression: false,
+            replication_factor,
+            optimizer_feature_overrides: OptimizerFeatureOverrides::default(),
+            schedule: Default::default(),
+            auto_scaling_strategy: strategy,
+            reconfiguration: None,
+            burst: None,
+            load: load.then(|| LoadState {
+                attempt: None,
+                last_cutover: None,
+                last_scale_up: None,
+                backoff: Vec::new(),
+                hold: None,
+            }),
+        };
+        let old = managed(1, "small", Some(policy("large")), true);
+
+        assert!(!managed(1, "small", Some(policy("large")), true).load_record_invalidated(&old));
+        // A manual resize inside the range keeps the record.
+        assert!(!managed(1, "large", Some(policy("large")), true).load_record_invalidated(&old));
+        assert!(!managed(1, "small", None, false).load_record_invalidated(&old));
+
+        assert!(managed(1, "small", None, true).load_record_invalidated(&old));
+        assert!(managed(1, "small", Some(policy("xlarge")), true).load_record_invalidated(&old));
+        assert!(managed(0, "small", Some(policy("large")), true).load_record_invalidated(&old));
+    }
+
+    #[mz_ore::test]
+    fn test_load_audit_details() {
+        use mz_adapter_types::cluster_state::{LoadAudit, LoadDirection, LoadHold};
+        use mz_audit_log::{
+            ClusterLoadBackoffV1, ClusterLoadHoldV1, EventDetails, LoadDirectionV1, LoadHoldV1,
+        };
+        use mz_controller_types::ClusterId;
+        use mz_repr::Timestamp;
+
+        let cluster_id = ClusterId::user(1).expect("valid id");
+        let details = |audit| Catalog::load_audit_details(cluster_id, "c", audit);
+
+        assert_eq!(
+            details(LoadAudit::BackoffStarted {
+                size: "small".into(),
+                direction: LoadDirection::Down,
+                until: Timestamp::from(400u64),
+            }),
+            EventDetails::ClusterLoadBackoffV1(ClusterLoadBackoffV1 {
+                cluster_id: cluster_id.to_string(),
+                cluster_name: "c".into(),
+                size: "small".into(),
+                direction: LoadDirectionV1::Down,
+                until: 400,
+            })
+        );
+        assert_eq!(
+            details(LoadAudit::HoldChanged {
+                hold: Some(LoadHold::Stalled),
+            }),
+            EventDetails::ClusterLoadHoldV1(ClusterLoadHoldV1 {
+                cluster_id: cluster_id.to_string(),
+                cluster_name: "c".into(),
+                hold: Some(LoadHoldV1::Stalled),
+            })
+        );
+        assert_eq!(
+            details(LoadAudit::HoldChanged { hold: None }),
+            EventDetails::ClusterLoadHoldV1(ClusterLoadHoldV1 {
+                cluster_id: cluster_id.to_string(),
+                cluster_name: "c".into(),
+                hold: None,
+            })
+        );
     }
 
     #[mz_ore::test]
@@ -3952,6 +4253,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration: None,
                 burst,
+                load: None,
             }),
             workload_class: None,
         };
@@ -4579,6 +4881,252 @@ mod tests {
             assert!(
                 observed.lock().expect("recorder lock").is_empty(),
                 "an aborted transaction must not notify callbacks"
+            );
+
+            catalog.expire().await;
+        })
+        .await
+    }
+
+    #[mz_ore::test(tokio::test)]
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `TLS_client_method`
+    async fn test_transact_load_record_lifecycle() {
+        use mz_audit_log::{ClusterLoadHoldV1, EventDetails, VersionedEvent};
+        use mz_catalog::memory::objects::{
+            ClusterConfig, ClusterVariant, ClusterVariantManaged, Index, LoadBackoff,
+            LoadDirection, LoadHold, LoadState,
+        };
+        use mz_controller::clusters::ReplicaLogging;
+        use mz_controller_types::ClusterId;
+        use mz_repr::optimize::OptimizerFeatureOverrides;
+        use mz_repr::{SqlScalarType, Timestamp};
+        use mz_sql::plan::{AutoScalingStrategy, OnLoad};
+
+        use crate::catalog::DropObjectInfo;
+
+        Catalog::with_debug(|mut catalog| async move {
+            let size = "scale=1,workers=1".to_string();
+            let strategy = |max_size: &str| AutoScalingStrategy {
+                on_hydration: None,
+                on_load: Some(OnLoad {
+                    min_size: size.clone(),
+                    max_size: max_size.into(),
+                    scale_down_after: None,
+                }),
+            };
+            let managed =
+                |strategy: Option<AutoScalingStrategy>, load: Option<LoadState>| ClusterConfig {
+                    variant: ClusterVariant::Managed(ClusterVariantManaged {
+                        size: size.clone(),
+                        availability_zones: Vec::new(),
+                        logging: ReplicaLogging {
+                            log_logging: false,
+                            interval: None,
+                        },
+                        arrangement_compression: false,
+                        replication_factor: 1,
+                        optimizer_feature_overrides: OptimizerFeatureOverrides::default(),
+                        schedule: Default::default(),
+                        auto_scaling_strategy: strategy,
+                        reconfiguration: None,
+                        burst: None,
+                        load,
+                    }),
+                    workload_class: None,
+                };
+            let backed_off = || LoadState {
+                attempt: None,
+                last_cutover: None,
+                last_scale_up: None,
+                backoff: vec![LoadBackoff {
+                    size: "scale=1,workers=2".into(),
+                    direction: LoadDirection::Up,
+                    until: Timestamp::from(1_000u64),
+                    failures: 1,
+                }],
+                hold: Some(LoadHold::BackingOff),
+            };
+            let load = |catalog: &Catalog, id: ClusterId| -> Option<LoadState> {
+                match &catalog.get_cluster(id).config.variant {
+                    ClusterVariant::Managed(managed) => managed.load.clone(),
+                    ClusterVariant::Unmanaged => panic!("cluster must stay managed"),
+                }
+            };
+            let commit_ts = catalog.current_upper().await;
+            let cluster_id = catalog
+                .allocate_user_cluster_id(commit_ts)
+                .await
+                .expect("allocate cluster");
+            let update = |config: ClusterConfig| Op::UpdateClusterConfig {
+                id: cluster_id,
+                name: "load_cluster".into(),
+                config,
+                reconfiguration_audit: None,
+                burst_audit: None,
+                load_audit: Vec::new(),
+            };
+
+            let oracle_write_ts = catalog.current_upper().await;
+            catalog
+                .transact(
+                    None,
+                    oracle_write_ts,
+                    None,
+                    vec![Op::CreateCluster {
+                        id: cluster_id,
+                        name: "load_cluster".into(),
+                        introspection_sources: Vec::new(),
+                        owner_id: MZ_SYSTEM_ROLE_ID,
+                        config: managed(Some(strategy("scale=1,workers=4")), None),
+                    }],
+                )
+                .await
+                .expect("create cluster");
+
+            let set_backoff = || {
+                update(managed(
+                    Some(strategy("scale=1,workers=4")),
+                    Some(backed_off()),
+                ))
+            };
+            let oracle_write_ts = catalog.current_upper().await;
+            catalog
+                .transact(None, oracle_write_ts, None, vec![set_backoff()])
+                .await
+                .expect("write load record");
+            assert_eq!(load(&catalog, cluster_id), Some(backed_off()));
+
+            let database = catalog
+                .resolve_database(DEFAULT_DATABASE_NAME)
+                .expect("default database");
+            let database_spec = ResolvedDatabaseSpecifier::Id(database.id());
+            let schema = catalog
+                .resolve_schema_in_database(&database_spec, DEFAULT_SCHEMA, &SYSTEM_CONN_ID)
+                .expect("default schema");
+            let schema_spec = schema.id.clone();
+            let item_name = |item: &str| QualifiedItemName {
+                qualifiers: ItemQualifiers {
+                    database_spec: database_spec.clone(),
+                    schema_spec: schema_spec.clone(),
+                },
+                item: item.into(),
+            };
+            let (table_id, table_global_id) = catalog
+                .allocate_user_id_for_test()
+                .await
+                .expect("allocate table id");
+            let (index_id, index_global_id) = catalog
+                .allocate_user_id_for_test()
+                .await
+                .expect("allocate index id");
+            let table = Op::CreateItem {
+                id: table_id,
+                name: item_name("t"),
+                item: CatalogItem::Table(Table {
+                    create_sql: Some(format!(
+                        "CREATE TABLE {DEFAULT_DATABASE_NAME}.{DEFAULT_SCHEMA}.t (a int4)"
+                    )),
+                    desc: VersionedRelationDesc::new(
+                        RelationDesc::builder()
+                            .with_column("a", SqlScalarType::Int32.nullable(true))
+                            .finish(),
+                    ),
+                    collections: [(RelationVersion::root(), table_global_id)]
+                        .into_iter()
+                        .collect(),
+                    conn_id: None,
+                    resolved_ids: ResolvedIds::empty(),
+                    custom_logical_compaction_window: None,
+                    is_retained_metrics_object: false,
+                    data_source: TableDataSource::TableWrites { defaults: vec![] },
+                }),
+                owner_id: MZ_SYSTEM_ROLE_ID,
+            };
+            let index = Op::CreateItem {
+                id: index_id,
+                name: item_name("t_idx"),
+                item: CatalogItem::Index(Index {
+                    create_sql: format!(
+                        "CREATE INDEX t_idx IN CLUSTER [{cluster_id}] ON \
+                         [{table_id} AS {DEFAULT_DATABASE_NAME}.{DEFAULT_SCHEMA}.t] (a)"
+                    ),
+                    global_id: index_global_id,
+                    on: table_global_id,
+                    keys: Arc::from([mz_expr::MirScalarExpr::column(0)]),
+                    conn_id: None,
+                    resolved_ids: [(table_id, table_global_id)].into_iter().collect(),
+                    cluster_id,
+                    custom_logical_compaction_window: None,
+                    is_retained_metrics_object: false,
+                    optimized_plan: None,
+                    physical_plan: None,
+                    dataflow_metainfo: None,
+                }),
+                owner_id: MZ_SYSTEM_ROLE_ID,
+            };
+
+            // Creating an object on the cluster clears the backoff list and
+            // keeps the rest of the record.
+            let oracle_write_ts = catalog.current_upper().await;
+            catalog
+                .transact(None, oracle_write_ts, None, vec![table, index])
+                .await
+                .expect("create table and index");
+            let cleared = LoadState {
+                backoff: Vec::new(),
+                ..backed_off()
+            };
+            assert_eq!(load(&catalog, cluster_id), Some(cleared.clone()));
+
+            // So does dropping one.
+            let oracle_write_ts = catalog.current_upper().await;
+            catalog
+                .transact(None, oracle_write_ts, None, vec![set_backoff()])
+                .await
+                .expect("write load record");
+            let oracle_write_ts = catalog.current_upper().await;
+            catalog
+                .transact(
+                    None,
+                    oracle_write_ts,
+                    None,
+                    vec![Op::DropObjects(vec![DropObjectInfo::Item(index_id)])],
+                )
+                .await
+                .expect("drop index");
+            assert_eq!(load(&catalog, cluster_id), Some(cleared));
+
+            // Changing the policy retires the record, and leaving the hold is
+            // audited although the writer declared nothing.
+            let oracle_write_ts = catalog.current_upper().await;
+            let result = catalog
+                .transact(
+                    None,
+                    oracle_write_ts,
+                    None,
+                    vec![update(managed(
+                        Some(strategy("scale=1,workers=2")),
+                        Some(backed_off()),
+                    ))],
+                )
+                .await
+                .expect("change policy");
+            assert_eq!(load(&catalog, cluster_id), None);
+            let holds: Vec<_> = result
+                .audit_events
+                .iter()
+                .filter_map(|VersionedEvent::V1(event)| match &event.details {
+                    EventDetails::ClusterLoadHoldV1(details) => Some(details.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                holds,
+                vec![ClusterLoadHoldV1 {
+                    cluster_id: cluster_id.to_string(),
+                    cluster_name: "load_cluster".into(),
+                    hold: None,
+                }]
             );
 
             catalog.expire().await;

@@ -487,6 +487,13 @@ impl Coordinator {
             }
         }
 
+        self.cluster_load.observe_introspection(
+            subscribe.spec.introspection_type,
+            subscribe.replica_id,
+            subscribe.deferred_write.is_some(),
+            &new_updates,
+        );
+
         // If we have a pending deferred write, we need to apply it _before_ the append of the new
         // rows.
         if let Some(op) = subscribe.deferred_write.take() {

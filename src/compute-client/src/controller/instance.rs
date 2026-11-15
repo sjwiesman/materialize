@@ -54,8 +54,8 @@ use crate::controller::error::{
 use crate::controller::instance_client::PeekError;
 use crate::controller::replica::{ReplicaClient, ReplicaConfig};
 use crate::controller::{
-    CollectionReadiness, ComputeControllerResponse, IntrospectionUpdates, PeekNotification,
-    ReplicaId, StorageCollections,
+    CollectionReadiness, ComputeControllerResponse, IntrospectionUpdates, LoadFrontiers,
+    PeekNotification, ReplicaId, ReplicaLoadFrontiers, StorageCollections,
 };
 use crate::logging::LogVariant;
 use crate::metrics::IntCounter;
@@ -934,6 +934,48 @@ impl Instance {
         id: GlobalId,
     ) -> Result<Antichain<Timestamp>, CollectionMissing> {
         Ok(self.collection(id)?.write_frontier())
+    }
+
+    /// Reports the frontiers of the instance's non-transient collections that a load signal
+    /// compares across an interval.
+    pub(super) fn load_frontiers(&self) -> LoadFrontiers {
+        let mut frontiers = LoadFrontiers::default();
+        for replica in self.replicas.values() {
+            frontiers.replicas.insert(
+                replica.id,
+                ReplicaLoadFrontiers {
+                    hydrated: true,
+                    output: BTreeMap::new(),
+                },
+            );
+        }
+        for (id, collection) in self.collections_iter() {
+            if id.is_transient() {
+                continue;
+            }
+            let input = self.dependency_write_frontiers(collection).reduce(|a, b| {
+                if PartialOrder::less_equal(&a, &b) {
+                    a
+                } else {
+                    b
+                }
+            });
+            if let Some(input) = input {
+                frontiers.input.insert(id, input);
+            }
+            for replica in self.replicas_hosting(id).expect("collection must exist") {
+                let replica_collection = replica.expect_collection(id);
+                let entry = frontiers
+                    .replicas
+                    .get_mut(&replica.id)
+                    .expect("inserted above");
+                entry.hydrated &= replica_collection.hydrated();
+                entry
+                    .output
+                    .insert(id, replica_collection.output_frontier.clone());
+            }
+        }
+        frontiers
     }
 }
 

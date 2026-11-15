@@ -220,6 +220,7 @@ use crate::{AdapterNotice, ReadHolds, flags};
 pub(crate) mod appends;
 pub(crate) mod catalog_serving;
 pub(crate) mod cluster_controller;
+pub(crate) mod cluster_load;
 pub(crate) mod consistency;
 pub(crate) mod id_bundle;
 pub(crate) mod in_memory_oracle;
@@ -408,6 +409,13 @@ pub enum Message {
     ArrangementSizesPrune(Vec<BuiltinTableUpdate>),
     HydrationHistorySchedule,
     HydrationHistoryRun,
+    ClusterLoadSample {
+        boundary: EpochMillis,
+    },
+    ClusterLoadFrontiers {
+        boundary: EpochMillis,
+        frontiers: BTreeMap<ClusterId, mz_compute_client::controller::LoadFrontiers>,
+    },
     CaughtUpCheck(caught_up::CaughtUpCheckRequest),
     /// Performs any cleanup and logging actions necessary for
     /// finalizing a statement execution.
@@ -564,6 +572,8 @@ impl Message {
             Message::ArrangementSizesPrune(_) => "arrangement_sizes_prune",
             Message::HydrationHistorySchedule => "hydration_history_schedule",
             Message::HydrationHistoryRun => "hydration_history_run",
+            Message::ClusterLoadSample { .. } => "cluster_load_sample",
+            Message::ClusterLoadFrontiers { .. } => "cluster_load_frontiers",
             Message::CaughtUpCheck(_) => "caught_up_check",
             Message::RetireExecute { .. } => "retire_execute",
             Message::ExecuteSingleStatementTransaction { .. } => {
@@ -1985,6 +1995,8 @@ pub struct Coordinator {
     connection_cancel_watches: BTreeMap<ConnectionId, (watch::Sender<bool>, watch::Receiver<bool>)>,
     /// Active introspection subscribes.
     introspection_subscribes: BTreeMap<GlobalId, IntrospectionSubscribe>,
+    /// The load signal of the `ON LOAD` autoscaling strategy.
+    cluster_load: cluster_load::ClusterLoad,
     /// The last replica visited by the sequential hydration-history sweep.
     hydration_history_replica_cursor: Option<ReplicaId>,
     /// Hydration-history sweep owned by the coordinator while one is in flight.
@@ -4034,6 +4046,7 @@ impl Coordinator {
             self.schedule_storage_usage_collection().await;
             self.schedule_arrangement_sizes_collection();
             self.schedule_hydration_history_collection();
+            self.schedule_cluster_load_sample(self.now());
             self.spawn_privatelink_vpc_endpoints_watch_task();
             self.spawn_statement_logging_task();
             self.spawn_catalog_info_metrics_task();
@@ -5251,6 +5264,7 @@ pub fn serve(
                     active_copies: BTreeMap::new(),
                     connection_cancel_watches: BTreeMap::new(),
                     introspection_subscribes: BTreeMap::new(),
+                    cluster_load: Default::default(),
                     hydration_history_replica_cursor: None,
                     hydration_history_sweep: None,
                     metric_sinks: BTreeMap::new(),
