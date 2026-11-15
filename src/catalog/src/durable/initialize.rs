@@ -797,6 +797,7 @@ fn default_cluster_config(args: &BootstrapArgs) -> Result<ClusterConfig, Catalog
             auto_scaling_strategy: None,
             reconfiguration: None,
             burst: None,
+            load: None,
         }),
         workload_class: None,
     })

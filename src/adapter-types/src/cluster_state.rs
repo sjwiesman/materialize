@@ -98,6 +98,7 @@ pub struct ExpectedClusterState {
     pub auto_scaling_policy: Option<AutoScalingPolicy>,
     pub reconfiguration: Option<ReconfigurationRecord>,
     pub burst: Option<BurstRecord>,
+    pub load: Option<LoadRecord>,
 }
 
 /// The status of the latest graceful reconfiguration record.
@@ -123,6 +124,37 @@ pub struct ReconfigurationRecord {
     /// What to do once the deadline passes with the target not yet hydrated.
     pub on_timeout: OnTimeout,
     pub status: ReconfigurationStatus,
+    pub origin: ReconfigurationOrigin,
+    /// Extra cut-over requirements. `None` cuts over on the first tick the
+    /// target set is ready.
+    pub trial: Option<ReconfigurationTrial>,
+}
+
+/// The requirements a trial reconfiguration's target set must hold for
+/// `hold_for` without interruption before the cluster cuts over to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReconfigurationTrial {
+    /// How far a target replica's output may trail the outgoing replicas.
+    /// Replaces the `cluster_reconfiguration_allowed_lag` dyncfg.
+    pub allowed_lag: Duration,
+    pub hold_for: Duration,
+    /// The heap fraction, in permille, a target replica must stay below.
+    pub max_heap_fraction: u32,
+    /// Since when the target set has been ready without interruption.
+    pub ready_since: Option<Timestamp>,
+}
+
+/// Who wrote a reconfiguration record.
+///
+/// A user-written record always wins: the load strategy writes a record only
+/// when none is in progress, and a user `ALTER` overwrites a record of either
+/// origin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconfigurationOrigin {
+    /// An `ALTER CLUSTER` statement.
+    User,
+    /// The `ON LOAD` autoscaling strategy.
+    LoadAutoscaling,
 }
 
 impl ReconfigurationRecord {
@@ -140,7 +172,8 @@ impl ReconfigurationRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconfigurationAudit {
     /// A record was written or re-targeted: converging onto a new target.
-    Started,
+    /// `load` is the `ON LOAD` strategy's decision behind a record it wrote.
+    Started { load: Option<LoadScaleDecision> },
     /// The user re-targeted back to the still-realized shape.
     Cancelled,
     /// The realized config cut over to the target. `forced` records whether
@@ -254,11 +287,156 @@ pub enum ClusterSchedule {
 /// durable state. A plain-data mirror of `mz_sql::plan::AutoScalingStrategy`,
 /// free of a dependency on the SQL layer.
 ///
-/// Extensible: future strategies are additional optional sub-policies. v1 carries
-/// only the `ON HYDRATION` burst policy.
+/// Extensible: strategies are optional sub-policies that engage independently.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutoScalingPolicy {
     pub on_hydration: Option<OnHydrationPolicy>,
+    pub on_load: Option<OnLoadPolicy>,
+}
+
+/// The `ON LOAD` sub-policy: keep the cluster at the cheapest size in
+/// `[min_size, max_size]` that keeps up with its observed load.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnLoadPolicy {
+    pub min_size: String,
+    pub max_size: String,
+    /// How long the load must have fit a smaller size before scaling down.
+    /// `None` falls back to the system default.
+    pub scale_down_after: Option<Duration>,
+}
+
+/// The `ON LOAD` strategy's durable bookkeeping, mirrored from durable state.
+///
+/// Holds only what cannot be re-derived from load samples after a restart: the
+/// reconfiguration the strategy is waiting on, the scale-up it has yet to
+/// judge, the targets that recently failed, and the hold state already
+/// audited.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoadRecord {
+    /// The strategy's own reconfiguration that has not been accounted for yet.
+    pub attempt: Option<LoadAttempt>,
+    /// When the strategy last cut the cluster over to a new size. Samples up
+    /// to a warm-up period after it describe the transition, not the workload.
+    pub last_cutover: Option<Timestamp>,
+    /// The lag-motivated scale-up behind the last cut-over, until the first
+    /// activation window at its target size has judged whether it helped.
+    pub last_scale_up: Option<LoadScaleUp>,
+    /// Sizes that recently failed as a target, at most one entry per size and
+    /// direction.
+    pub backoff: Vec<LoadBackoff>,
+    /// The reason the strategy is declining to act, if any. Stored so that
+    /// entering and leaving a hold is audited once and not every tick.
+    pub hold: Option<LoadHold>,
+}
+
+/// A reconfiguration written by the `ON LOAD` strategy whose outcome the
+/// strategy has not yet recorded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadAttempt {
+    pub from_size: String,
+    pub target_size: String,
+    /// The deadline of the reconfiguration record this attempt wrote. Together
+    /// with the target size it identifies that record, so a record a user
+    /// wrote over it is not mistaken for the attempt's outcome.
+    pub deadline: Timestamp,
+    /// The median progress ratio, in permille, of the samples that motivated
+    /// a scale-up. `None` for an attempt not motivated by lag.
+    pub progress_before: Option<u32>,
+}
+
+/// A lag-motivated scale-up the `ON LOAD` strategy cut over to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadScaleUp {
+    pub from_size: String,
+    pub target_size: String,
+    /// The median progress ratio, in permille, of the samples that motivated
+    /// it.
+    pub progress: u32,
+}
+
+/// A size the `ON LOAD` strategy must not target until `until`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadBackoff {
+    pub size: String,
+    pub direction: LoadDirection,
+    pub until: Timestamp,
+    /// Consecutive failures for this size and direction. Kept after `until`
+    /// passes so the next failure backs off for longer.
+    pub failures: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadDirection {
+    /// A scale-up to this size or any larger one is blocked.
+    Up,
+    /// A scale-down to this size or any smaller one is blocked.
+    Down,
+}
+
+/// Why the `ON LOAD` strategy is declining to act although the cluster is not
+/// at its recommended size or is not keeping up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadHold {
+    /// The cluster is behind while its workers are mostly idle and the
+    /// busiest one is saturated: a hot key. More workers would not help.
+    SkewLimited,
+    /// The cluster is behind while its workers are mostly idle and none is
+    /// saturated: the dataflows wait on something other than CPU.
+    Stalled,
+    /// The size the load calls for recently failed as a target.
+    BackingOff,
+}
+
+/// Why the `ON LOAD` strategy started a reconfiguration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadScaleReason {
+    /// The cluster was behind its inputs in every sample of the activation
+    /// window.
+    ScaleUp,
+    /// A replica at the realized size was killed for exceeding its memory.
+    OutOfMemory,
+    /// The steady-state heap stayed above the high-water mark.
+    HeapHighWater,
+    /// The cluster kept up over the scale-down window and its peak load fits
+    /// a smaller size. The smaller size is tried before it is committed.
+    ScaleDown,
+    /// A lag-motivated scale-up did not improve progress, so it is reverted.
+    IneffectiveScaleUp,
+}
+
+/// The lifecycle transition a write to the `load` record represents, declared
+/// by the writer like [`ReconfigurationAudit`]. Bookkeeping rewrites declare no
+/// audit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadAudit {
+    /// A target failed and is now backed off.
+    BackoffStarted {
+        size: String,
+        direction: LoadDirection,
+        until: Timestamp,
+    },
+    /// The strategy entered (`Some`) or left (`None`) a hold.
+    HoldChanged { hold: Option<LoadHold> },
+}
+
+/// Why the `ON LOAD` strategy started a reconfiguration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadScaleDecision {
+    pub reason: LoadScaleReason,
+    /// The sample values the decision was taken on. `None` for a decision
+    /// without a usable sample, such as after a memory kill.
+    pub sample: Option<LoadScaleSample>,
+}
+
+/// The sample values behind a scale decision. Ratios are in permille.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoadScaleSample {
+    /// Cluster lag.
+    pub lag: Duration,
+    pub progress: u32,
+    pub heap_fraction: u32,
+    /// Non-parked worker time per unit of time, in millicores.
+    pub busy_millicores: u64,
 }
 
 /// The `ON HYDRATION` burst sub-policy: while some object on the cluster is not

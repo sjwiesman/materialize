@@ -241,6 +241,8 @@ pub enum EventDetails {
     RenameClusterReplicaV1(RenameClusterReplicaV1),
     AlterClusterReconfigurationV1(AlterClusterReconfigurationV1),
     ClusterHydrationBurstV1(ClusterHydrationBurstV1),
+    ClusterLoadBackoffV1(ClusterLoadBackoffV1),
+    ClusterLoadHoldV1(ClusterLoadHoldV1),
     RenameItemV1(RenameItemV1),
     IdNameV1(IdNameV1),
     SchemaV1(SchemaV1),
@@ -428,6 +430,36 @@ pub struct AlterClusterReconfigurationV1 {
     pub target_availability_zones: Vec<String>,
     pub target_logging: ClusterReplicaLoggingV1,
     pub deadline: Option<u64>,
+    /// Who wrote the reconfiguration record. `None` on events recorded before
+    /// origins existed, all of which were written by `ALTER CLUSTER`.
+    #[serde(default)]
+    pub origin: Option<ReconfigurationOriginV1>,
+    /// On a `started` transition of a record the `ON LOAD` autoscaling
+    /// strategy wrote: the decision behind it. `None` otherwise.
+    #[serde(default)]
+    pub load: Option<LoadScaleDecisionV1>,
+}
+
+/// Who wrote a reconfiguration record.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReconfigurationOriginV1 {
+    /// An `ALTER CLUSTER` statement.
+    User,
+    /// The `ON LOAD` autoscaling strategy.
+    LoadAutoscaling,
 }
 
 /// A managed cluster's introspection-logging config, recorded on a
@@ -546,6 +578,169 @@ pub struct ClusterHydrationBurstV1 {
     pub finish_cause: Option<BurstFinishCauseV1>,
     /// The size of the burst replica the record runs.
     pub burst_size: String,
+}
+
+/// Why the `ON LOAD` autoscaling strategy started a reconfiguration.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadScaleReasonV1 {
+    /// The cluster was behind its inputs in every sample of the activation
+    /// window.
+    ScaleUp,
+    /// A replica at the realized size was killed for exceeding its memory.
+    OutOfMemory,
+    /// The steady-state heap stayed above the high-water mark.
+    HeapHighWater,
+    /// The load over the scale-down window fits a smaller size.
+    ScaleDown,
+    /// A lag-motivated scale-up did not improve progress and is reverted.
+    IneffectiveScaleUp,
+}
+
+/// Why the `ON LOAD` autoscaling strategy started a reconfiguration.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct LoadScaleDecisionV1 {
+    pub reason: LoadScaleReasonV1,
+    /// `None` for a decision without a usable sample, such as after a memory
+    /// kill.
+    pub sample: Option<LoadScaleSampleV1>,
+}
+
+/// The sample values an `ON LOAD` scale decision was taken on.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct LoadScaleSampleV1 {
+    /// Cluster lag, in milliseconds.
+    pub lag_ms: u64,
+    /// How far output frontiers advanced relative to their inputs.
+    pub progress_permille: u32,
+    /// Heap of the busiest process relative to its heap limit.
+    pub heap_fraction_permille: u32,
+    /// Non-parked worker time per unit of time.
+    pub busy_millicores: u64,
+}
+
+/// The direction of a size change the `ON LOAD` strategy is backing off from.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadDirectionV1 {
+    /// A scale-up to the size or any larger one is blocked.
+    Up,
+    /// A scale-down to the size or any smaller one is blocked.
+    Down,
+}
+
+/// A size failed as a target of the `ON LOAD` autoscaling strategy and is not
+/// retried in `direction` before `until`, a millisecond `mz_timestamp`.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct ClusterLoadBackoffV1 {
+    pub cluster_id: String,
+    pub cluster_name: String,
+    pub size: String,
+    pub direction: LoadDirectionV1,
+    pub until: u64,
+}
+
+/// Why the `ON LOAD` autoscaling strategy is declining to act.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadHoldV1 {
+    /// The cluster is behind while its workers are mostly idle and the
+    /// busiest one is saturated.
+    SkewLimited,
+    /// The cluster is behind while its workers are mostly idle and none is
+    /// saturated.
+    Stalled,
+    /// The size the load calls for recently failed as a target.
+    BackingOff,
+}
+
+/// The `ON LOAD` autoscaling strategy entered a hold, or left its hold when
+/// `hold` is `None`.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct ClusterLoadHoldV1 {
+    pub cluster_id: String,
+    pub cluster_name: String,
+    pub hold: Option<LoadHoldV1>,
 }
 
 #[derive(
@@ -1420,6 +1615,10 @@ impl EventDetails {
             EventDetails::ClusterHydrationBurstV1(v) => {
                 serde_json::to_value(v).expect("must serialize")
             }
+            EventDetails::ClusterLoadBackoffV1(v) => {
+                serde_json::to_value(v).expect("must serialize")
+            }
+            EventDetails::ClusterLoadHoldV1(v) => serde_json::to_value(v).expect("must serialize"),
             EventDetails::RenameItemV1(v) => serde_json::to_value(v).expect("must serialize"),
             EventDetails::IdNameV1(v) => serde_json::to_value(v).expect("must serialize"),
             EventDetails::SchemaV1(v) => serde_json::to_value(v).expect("must serialize"),
