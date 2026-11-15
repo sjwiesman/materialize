@@ -604,6 +604,7 @@ mz_wallclock_lag_history                     source  <null>     ""
 name                                     comment
 ------------------------------------------------
 mz_aggregates                            ""
+mz_cluster_load_recommendations          ""
 mz_cluster_replica_size_internal         ""
 mz_license_keys                          ""
 mz_object_arrangement_size_history       ""
