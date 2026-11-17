@@ -205,6 +205,8 @@ is growing, steady, or shrinking. It does not say how large the lag is. A
 dataflow at a steady 30 seconds of lag has a ratio of 1.
 
 The **fingerprint** identifies the set of dataflows installed on the cluster.
+It is a hash of the sorted identifiers of the collections the cluster's
+dataflows export.
 
 Summaries are appended to two relations and read back at startup, so a
 restart of `environmentd` does not empty the quiet window.
@@ -265,6 +267,10 @@ This is the whole oscillation policy. A workload that spikes once a day with
 cluster following its workload. A workload that spikes every three hours
 doubles the interval at each recurrence until descents become rare, and the
 cluster stays up. Nothing has to be configured to tell the two apart.
+
+There is at most one entry per size and verdict. An entry is kept after it
+stops blocking, because the next verdict against that size needs its `at` and
+`interval` to decide whether to double. A new verdict replaces the entry.
 
 Evidence and floors are cleared when the fingerprint changes or the user
 changes the policy. They describe sizes for a workload that no longer exists.
@@ -365,12 +371,12 @@ end the trial reaches a verdict, once.
 - it was not killed for memory.
 
 A candidate that passes is cut over to. A candidate that fails, is killed, or
-has not hydrated within its budget is dropped, and `Insufficient(S)` is
-recorded. There is no retry within a trial. A trial that could restart its
+has not hydrated when its hydration budget ends is dropped, and
+`Insufficient(S)` is recorded. There is no retry within a trial. A trial that could restart its
 hold until it passed would test the quietest quarter hour of the day.
 
-**Probation.** For one interval after a descent, the size it left is known to
-have been sufficient for this workload. If a dataflow goes behind during
+**Probation.** For `W` after a descent, measured from `last_cutover`, the
+size it left is known to have been sufficient for this workload. If a dataflow goes behind during
 probation, the cluster returns to that size with a plain reconfiguration and
 no trial, and `Insufficient` is recorded for the smaller size. If the
 dataflow is still behind after the return, the ordinary up-trial applies.
@@ -466,10 +472,22 @@ origin: User | LoadAutoscaling
 trial:  Option<{ kind: Up | Down, hold_for, deadline, hold_started }>
 ```
 
+A record with a trial has two instants. The record's own `deadline` is the
+end of the hydration budget. A candidate that is not hydrated by then is
+dropped. A down-trial records `Insufficient` for it, and an up-trial records
+nothing. The trial's `deadline` is the end of the hydration budget plus the
+hold, and it is the latest instant at which the candidate can exist.
+
+`hold_started` is written when the candidate is hydrated and the hold begins.
 The per-sample lag of the candidate and current replicas during a hold is
-kept in memory. If `environmentd` restarts during a hold, the hold starts
-over. A trial whose deadline passes without a verdict is dropped without
-recording evidence.
+kept in memory. If `environmentd` restarts during a hold, the samples are
+gone, so the hold starts over and `hold_started` is rewritten. A hold that
+cannot finish before the trial's deadline is not started again. The trial is
+dropped at the deadline without recording evidence, because no verdict was
+reached.
+
+The last status is kept in memory. The first evaluation after a restart of
+`environmentd` sets it without writing a status change to the audit log.
 
 ### Observability
 
