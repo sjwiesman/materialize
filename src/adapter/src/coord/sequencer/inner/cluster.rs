@@ -114,6 +114,9 @@ impl Coordinator {
         session: &Session,
         plan: plan::AlterClusterPlan,
     ) -> Result<ClusterStage, AdapterError> {
+        if let AlterOptionParameter::Set(strategy) = &plan.options.auto_scaling_strategy {
+            reject_on_load(strategy.as_ref())?;
+        }
         let validity = PlanValidity::new(
             self.catalog(),
             BTreeSet::new(),
@@ -826,6 +829,9 @@ impl Coordinator {
         }: CreateClusterPlan,
     ) -> Result<ExecuteResponse, AdapterError> {
         tracing::debug!("sequence_create_cluster");
+        if let CreateClusterVariant::Managed(plan) = &variant {
+            reject_on_load(plan.auto_scaling_strategy.as_ref())?;
+        }
 
         let id_ts = self.get_catalog_write_ts().await;
         let id = self.catalog().allocate_user_cluster_id(id_ts).await?;
@@ -1977,6 +1983,15 @@ fn fold_reconfiguration_target(
             new_target.arrangement_compression
         },
     }
+}
+
+/// Rejects an `ON LOAD` auto-scaling policy. The durable catalog has no field
+/// for one, so accepting it would drop the policy silently.
+fn reject_on_load(strategy: Option<&plan::AutoScalingStrategy>) -> Result<(), AdapterError> {
+    if strategy.is_some_and(|strategy| strategy.on_load.is_some()) {
+        return Err(AdapterError::Unsupported("ON LOAD auto scaling strategies"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -164,7 +164,10 @@ fn burst_record(record: &BurstState) -> BurstRecord {
 }
 
 fn auto_scaling_policy(strategy: &mz_sql::plan::AutoScalingStrategy) -> AutoScalingPolicy {
-    let mz_sql::plan::AutoScalingStrategy { on_hydration } = strategy;
+    let mz_sql::plan::AutoScalingStrategy {
+        on_hydration,
+        on_load: _,
+    } = strategy;
     AutoScalingPolicy {
         on_hydration: on_hydration.as_ref().map(|on_hydration| {
             let mz_sql::plan::OnHydration {

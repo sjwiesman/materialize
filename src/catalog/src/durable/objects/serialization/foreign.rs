@@ -712,6 +712,7 @@ impl RustType<proto::AutoScalingStrategy> for AutoScalingStrategy {
     fn from_proto(proto: proto::AutoScalingStrategy) -> Result<Self, TryFromProtoError> {
         Ok(Self {
             on_hydration: proto.on_hydration.into_rust()?,
+            on_load: None,
         })
     }
 }

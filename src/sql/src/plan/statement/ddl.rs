@@ -79,14 +79,14 @@ use mz_sql_parser::ast::{
     LoadGeneratorOption, LoadGeneratorOptionName, MaterializedViewOption,
     MaterializedViewOptionName, MySqlConfigOption, MySqlConfigOptionName, NetworkPolicyOption,
     NetworkPolicyOptionName, NetworkPolicyRuleDefinition, NetworkPolicyRuleOption,
-    NetworkPolicyRuleOptionName, OnHydrationOptionValue, PgConfigOption, PgConfigOptionName,
-    ProtobufSchema, QualifiedReplica, RefreshAtOptionValue, RefreshEveryOptionValue,
-    RefreshOptionValue, ReplicaDefinition, ReplicaOption, ReplicaOptionName, RoleAttribute,
-    SetRoleVar, SourceErrorPolicy, SourceIncludeMetadata, SqlServerConfigOption,
-    SqlServerConfigOptionName, Statement, TableConstraint, TableFromSourceColumns,
-    TableFromSourceOption, TableFromSourceOptionName, TableOption, TableOptionName,
-    UnresolvedDatabaseName, UnresolvedItemName, UnresolvedObjectName, UnresolvedSchemaName, Value,
-    ViewDefinition, WithOptionValue,
+    NetworkPolicyRuleOptionName, OnHydrationOptionValue, OnLoadOptionValue, PgConfigOption,
+    PgConfigOptionName, ProtobufSchema, QualifiedReplica, RefreshAtOptionValue,
+    RefreshEveryOptionValue, RefreshOptionValue, ReplicaDefinition, ReplicaOption,
+    ReplicaOptionName, RoleAttribute, SetRoleVar, SourceErrorPolicy, SourceIncludeMetadata,
+    SqlServerConfigOption, SqlServerConfigOptionName, Statement, TableConstraint,
+    TableFromSourceColumns, TableFromSourceOption, TableFromSourceOptionName, TableOption,
+    TableOptionName, UnresolvedDatabaseName, UnresolvedItemName, UnresolvedObjectName,
+    UnresolvedSchemaName, Value, ViewDefinition, WithOptionValue,
 };
 use mz_sql_parser::ast::{
     AlterQueryPolicyStatement, CreateQueryPolicyStatement, QueryPolicyOption,
@@ -170,10 +170,11 @@ use crate::plan::{
     CreateRolePlan, CreateSchemaPlan, CreateSecretPlan, CreateSinkPlan, CreateSourcePlan,
     CreateTablePlan, CreateTypePlan, CreateViewPlan, DataSourceDesc, DropObjectsPlan,
     DropOwnedPlan, HirRelationExpr, Index, MaterializedView, MetricSink, NetworkPolicyRule,
-    NetworkPolicyRuleAction, NetworkPolicyRuleDirection, OnHydration, Plan, PlanClusterOption,
-    PlanNotice, PolicyAddress, QueryContext, ReplicaConfig, Secret, Sink, Source, Table,
-    TableDataSource, Type, VariableValue, View, WebhookBodyFormat, WebhookHeaderFilters,
-    WebhookHeaders, WebhookValidation, literal, plan_utils, query, transform_ast,
+    NetworkPolicyRuleAction, NetworkPolicyRuleDirection, OnHydration, OnLoad, Plan,
+    PlanClusterOption, PlanNotice, PolicyAddress, QueryContext, ReplicaConfig, Secret, Sink,
+    Source, Table, TableDataSource, Type, VariableValue, View, WebhookBodyFormat,
+    WebhookHeaderFilters, WebhookHeaders, WebhookValidation, literal, plan_utils, query,
+    transform_ast,
 };
 use crate::session::vars::{
     self, ENABLE_AUTO_SCALING_STRATEGY, ENABLE_CLUSTER_SCHEDULE_REFRESH,
@@ -5841,24 +5842,46 @@ fn unplan_cluster_schedule(schedule: ClusterSchedule) -> ClusterScheduleOptionVa
 fn plan_auto_scaling_strategy(
     value: ClusterAutoScalingStrategyOptionValue,
 ) -> Result<Option<AutoScalingStrategy>, PlanError> {
-    let ClusterAutoScalingStrategyOptionValue { on_hydration } = value;
-    let Some(on_hydration) = on_hydration else {
+    let ClusterAutoScalingStrategyOptionValue {
+        on_hydration,
+        on_load,
+    } = value;
+    if on_hydration.is_none() && on_load.is_none() {
         // An empty block disables autoscaling.
         return Ok(None);
-    };
+    }
 
-    let hydration_size = String::try_from_value(on_hydration.hydration_size)?;
+    let on_hydration = on_hydration
+        .map(|on_hydration| {
+            let OnHydrationOptionValue {
+                hydration_size,
+                linger_duration,
+            } = on_hydration;
+            Ok::<_, PlanError>(OnHydration {
+                hydration_size: String::try_from_value(hydration_size)?,
+                linger_duration: linger_duration.map(Duration::try_from_value).transpose()?,
+            })
+        })
+        .transpose()?;
 
-    let linger_duration = on_hydration
-        .linger_duration
-        .map(Duration::try_from_value)
+    let on_load = on_load
+        .map(|on_load| {
+            let OnLoadOptionValue {
+                min_size,
+                max_size,
+                scale_down_after,
+            } = on_load;
+            Ok::<_, PlanError>(OnLoad {
+                min_size: String::try_from_value(min_size)?,
+                max_size: String::try_from_value(max_size)?,
+                scale_down_after: scale_down_after.map(Duration::try_from_value).transpose()?,
+            })
+        })
         .transpose()?;
 
     Ok(Some(AutoScalingStrategy {
-        on_hydration: Some(OnHydration {
-            hydration_size,
-            linger_duration,
-        }),
+        on_hydration,
+        on_load,
     }))
 }
 
@@ -5888,6 +5911,40 @@ fn validate_auto_scaling_strategy(
     Ok(())
 }
 
+/// Rejects an `ON LOAD` policy on a cluster that hosts sources or sinks.
+///
+/// Their workers are not covered by the busy-time signal, so the policy would
+/// see such a cluster as idle and shrink it.
+fn ensure_cluster_hosts_no_sources_or_sinks(
+    scx: &StatementContext,
+    cluster: &dyn CatalogCluster,
+) -> Result<(), PlanError> {
+    let objects: Vec<_> = cluster
+        .bound_objects()
+        .iter()
+        .map(|item_id| scx.catalog.get_item(item_id))
+        .filter(|item| {
+            matches!(
+                item.item_type(),
+                CatalogItemType::Source | CatalogItemType::Sink
+            )
+        })
+        .map(|item| {
+            (
+                item.item_type().to_string(),
+                scx.catalog.resolve_full_name(item.name()).to_string(),
+            )
+        })
+        .collect();
+    if !objects.is_empty() {
+        return Err(PlanError::OnLoadClusterHostsSourcesOrSinks {
+            cluster_name: cluster.name().to_string(),
+            objects,
+        });
+    }
+    Ok(())
+}
+
 /// Convert an [`AutoScalingStrategy`] back into a
 /// [`ClusterAutoScalingStrategyOptionValue`] for `SHOW CREATE CLUSTER` rendering.
 ///
@@ -5895,18 +5952,27 @@ fn validate_auto_scaling_strategy(
 fn unplan_auto_scaling_strategy(
     strategy: &AutoScalingStrategy,
 ) -> ClusterAutoScalingStrategyOptionValue {
+    let unplan_duration = |d: Duration| {
+        let interval = Interval::from_duration(&d)
+            .expect("planning ensured this is convertible back to Interval");
+        Value::Interval(literal::unplan_interval(&interval))
+    };
+    let AutoScalingStrategy {
+        on_hydration,
+        on_load,
+    } = strategy;
     ClusterAutoScalingStrategyOptionValue {
-        on_hydration: strategy
-            .on_hydration
+        on_hydration: on_hydration
             .as_ref()
             .map(|on_hydration| OnHydrationOptionValue {
                 hydration_size: Value::String(on_hydration.hydration_size.clone()),
-                linger_duration: on_hydration.linger_duration.map(|d| {
-                    let interval = Interval::from_duration(&d)
-                        .expect("planning ensured this is convertible back to Interval");
-                    Value::Interval(literal::unplan_interval(&interval))
-                }),
+                linger_duration: on_hydration.linger_duration.map(unplan_duration),
             }),
+        on_load: on_load.as_ref().map(|on_load| OnLoadOptionValue {
+            min_size: Value::String(on_load.min_size.clone()),
+            max_size: Value::String(on_load.max_size.clone()),
+            scale_down_after: on_load.scale_down_after.map(unplan_duration),
+        }),
     }
 }
 
@@ -7006,6 +7072,9 @@ pub fn plan_alter_cluster(
                             effective_size,
                             schedule_non_manual,
                         )?;
+                        if effective_strategy.on_load.is_some() {
+                            ensure_cluster_hosts_no_sources_or_sinks(scx, cluster)?;
+                        }
                     }
                 }
                 false => {

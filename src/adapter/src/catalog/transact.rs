@@ -4284,6 +4284,7 @@ mod tests {
                 hydration_size: hydration_size.into(),
                 linger_duration: None,
             }),
+            on_load: None,
         };
         let record = || BurstState {
             burst_size: "large".into(),
@@ -4303,7 +4304,10 @@ mod tests {
         assert!(
             managed(
                 1,
-                Some(AutoScalingStrategy { on_hydration: None }),
+                Some(AutoScalingStrategy {
+                    on_hydration: None,
+                    on_load: None,
+                }),
                 Some(record())
             )
             .has_unwarranted_burst_record()

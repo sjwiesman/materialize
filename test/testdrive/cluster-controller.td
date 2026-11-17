@@ -1312,6 +1312,24 @@ contains:AUTO SCALING STRATEGY cannot be combined with a SCHEDULE other than MAN
 
 > DROP CLUSTER cc_burst_onref
 
+# An ON LOAD strategy is rejected at plan time on a cluster that hosts a sink.
+# The source case and the ON LOAD rejection itself are in
+# test/sqllogictest/managed_cluster.slt.
+> CREATE CONNECTION cc_onload_kafka_conn TO KAFKA (BROKER '${testdrive.kafka-addr}', SECURITY PROTOCOL PLAINTEXT)
+> CREATE TABLE cc_onload_t (id int)
+> CREATE CLUSTER cc_onload_sink (SIZE 'scale=1,workers=1')
+> CREATE SINK cc_onload_snk IN CLUSTER cc_onload_sink FROM cc_onload_t
+  INTO KAFKA CONNECTION cc_onload_kafka_conn (TOPIC 'testdrive-cc-onload-${testdrive.seed}')
+  FORMAT JSON
+  ENVELOPE DEBEZIUM
+
+! ALTER CLUSTER cc_onload_sink SET (AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=2')))
+contains:cluster "cc_onload_sink" cannot use an ON LOAD auto scaling strategy because it hosts sink "materialize.public.cc_onload_snk"
+
+> DROP CLUSTER cc_onload_sink CASCADE
+> DROP TABLE cc_onload_t
+> DROP CONNECTION cc_onload_kafka_conn
+
 # With SQL acceptance gated off, the option is rejected at plan time, at CREATE
 # and at ALTER SET. RESET stays available so a policy set while the flag was on
 # can always be shed, and the stored policy itself survives the rollback.

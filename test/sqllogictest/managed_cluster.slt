@@ -472,5 +472,39 @@ DROP CLUSTER ac_test
 statement error EXPERIMENTAL ARRANGEMENT COMPRESSION not supported for unmanaged clusters
 CREATE CLUSTER ac_unmanaged REPLICAS (), EXPERIMENTAL ARRANGEMENT COMPRESSION = true
 
+simple conn=mz_system,user=mz_system
+ALTER SYSTEM SET enable_auto_scaling_strategy = true
+----
+COMPLETE 0
+
+# An ON LOAD strategy is rejected at plan time on a cluster that hosts a source,
+# because the load signal does not cover its workers. The sink case is in
+# test/testdrive/cluster-controller.td.
+statement ok
+CREATE CLUSTER onload_src (SIZE 'scale=1,workers=1')
+
+statement ok
+CREATE SOURCE onload_counter IN CLUSTER onload_src FROM LOAD GENERATOR COUNTER
+
+statement error cluster "onload_src" cannot use an ON LOAD auto scaling strategy because it hosts source
+ALTER CLUSTER onload_src SET (AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=2')))
+
+statement ok
+DROP CLUSTER onload_src CASCADE
+
+# The catalog cannot store an ON LOAD strategy, so the adapter rejects it on a
+# cluster that passes planning.
+statement error ON LOAD auto scaling strategies are not supported
+CREATE CLUSTER onload (SIZE 'scale=1,workers=1', AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=2')))
+
+statement ok
+CREATE CLUSTER onload (SIZE 'scale=1,workers=1')
+
+statement error ON LOAD auto scaling strategies are not supported
+ALTER CLUSTER onload SET (AUTO SCALING STRATEGY = (ON LOAD (MIN SIZE = 'scale=1,workers=1', MAX SIZE = 'scale=1,workers=2', SCALE DOWN AFTER = '1h')))
+
+statement ok
+DROP CLUSTER onload
+
 # Restore pristine server state
 reset-server

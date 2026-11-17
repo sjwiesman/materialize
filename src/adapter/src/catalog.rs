@@ -2810,6 +2810,7 @@ mod tests {
                         hydration_size: hydration.clone(),
                         linger_duration: None,
                     }),
+                    on_load: None,
                 }),
                 reconfiguration: Some(ReconfigurationState {
                     target: ReconfigurationTarget {

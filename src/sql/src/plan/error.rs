@@ -60,6 +60,12 @@ pub enum PlanError {
     HydrationSizeEqualsClusterSize {
         size: String,
     },
+    /// An `ON LOAD` auto-scaling policy on a cluster that hosts sources or sinks.
+    OnLoadClusterHostsSourcesOrSinks {
+        cluster_name: String,
+        /// (object type, name)
+        objects: Vec<(String, String)>,
+    },
     /// This feature is not supported, and will likely never be supported.
     NeverSupported {
         feature: String,
@@ -423,6 +429,9 @@ impl PlanError {
                 Some("Use DROP MATERIALIZED VIEW to remove a materialized view.".into())
             }
             Self::DependentObjectsStillExist {..} => Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+            Self::OnLoadClusterHostsSourcesOrSinks { .. } => {
+                Some("Run sources and sinks on a cluster without an ON LOAD auto scaling strategy.".into())
+            }
             Self::AlterViewOnMaterializedView(_) => {
                 Some("Use ALTER MATERIALIZED VIEW to rename a materialized view.".into())
             }
@@ -550,6 +559,17 @@ impl fmt::Display for PlanError {
             }
             Self::HydrationSizeEqualsClusterSize { size } => {
                 write!(f, "HYDRATION SIZE must differ from the cluster SIZE ('{size}')")
+            }
+            Self::OnLoadClusterHostsSourcesOrSinks { cluster_name, objects } => {
+                let objects = objects
+                    .iter()
+                    .map(|(object_type, name)| format!("{object_type} {}", name.quoted()))
+                    .join(", ");
+                write!(
+                    f,
+                    "cluster {} cannot use an ON LOAD auto scaling strategy because it hosts {objects}",
+                    cluster_name.quoted(),
+                )
             }
             Self::NeverSupported { feature, documentation_link: documentation_path,.. } => {
                 write!(f, "{feature} is not supported",)?;
