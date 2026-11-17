@@ -37,9 +37,9 @@ use mz_catalog::memory::objects::{ClusterConfig, ClusterVariant};
 use mz_cluster_controller::ClusterController;
 use mz_cluster_controller::ctx::{
     ApplyOutcome, AvailabilityZones, ClusterControllerCtx, ClusterState, CreateReason, Decision,
-    ExpectedClusterState, ObservedReplica, OnTimeout, ReconfigurationRecord, ReconfigurationStatus,
-    ReconfigurationTarget, RefreshMvInfo, RefreshWindowClusterInputs, RefreshWindowInputsBatch,
-    ReplicaShape, StateWrite,
+    ExpectedClusterState, ObservedReplica, OnTimeout, ReconfigurationOrigin, ReconfigurationRecord,
+    ReconfigurationStatus, ReconfigurationTarget, ReconfigurationTrial, RefreshMvInfo,
+    RefreshWindowClusterInputs, RefreshWindowInputsBatch, ReplicaShape, StateWrite, TrialKind,
 };
 use mz_cluster_controller::strategy::duration_to_ts;
 use mz_compute_types::config::ComputeReplicaConfig;
@@ -450,6 +450,7 @@ impl Coordinator {
             auto_scaling_policy: expected.auto_scaling_policy,
             reconfiguration: expected.reconfiguration,
             burst: expected.burst,
+            load: expected.load,
             replicas,
         })
     }
@@ -1064,6 +1065,8 @@ fn memory_reconfiguration(
         deadline,
         on_timeout,
         status,
+        origin,
+        trial,
     } = record;
     let ReconfigurationTarget {
         size,
@@ -1083,6 +1086,29 @@ fn memory_reconfiguration(
         deadline: *deadline,
         on_timeout: on_timeout_from_controller(*on_timeout),
         status: status_from_controller(*status),
+        origin: match origin {
+            ReconfigurationOrigin::User => mz_catalog::memory::objects::ReconfigurationOrigin::User,
+            ReconfigurationOrigin::LoadAutoscaling => {
+                mz_catalog::memory::objects::ReconfigurationOrigin::LoadAutoscaling
+            }
+        },
+        trial: trial.as_ref().map(|trial| {
+            let ReconfigurationTrial {
+                kind,
+                hold_for,
+                deadline,
+                hold_started,
+            } = trial;
+            mz_catalog::memory::objects::ReconfigurationTrial {
+                kind: match kind {
+                    TrialKind::Up => mz_catalog::memory::objects::TrialKind::Up,
+                    TrialKind::Down => mz_catalog::memory::objects::TrialKind::Down,
+                },
+                hold_for: *hold_for,
+                deadline: *deadline,
+                hold_started: *hold_started,
+            }
+        }),
     }
 }
 

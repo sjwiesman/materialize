@@ -31,8 +31,10 @@ use crate::durable::objects::{
     SystemPrivilegesValue, TxnWalShardValue, UnfinalizedShardKey,
 };
 use crate::durable::{
-    BurstState, ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
-    ReconfigurationStatus, ReconfigurationTarget, ReplicaConfig, ReplicaLocation,
+    BurstState, ClusterConfig, ClusterVariant, ClusterVariantManaged, LoadAttempt, LoadCutover,
+    LoadCutoverReason, LoadEvidence, LoadFloor, LoadState, LoadVerdict, ReconfigurationOrigin,
+    ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget, ReconfigurationTrial,
+    ReplicaConfig, ReplicaLocation, TrialKind,
 };
 
 use super::{RoleAuthKey, RoleAuthValue};
@@ -93,6 +95,7 @@ impl RustType<proto::ClusterVariant> for ClusterVariant {
                 auto_scaling_strategy,
                 reconfiguration,
                 burst,
+                load,
             }) => proto::ClusterVariant::Managed(proto::ManagedCluster {
                 size: size.to_string(),
                 availability_zones: availability_zones.clone(),
@@ -104,6 +107,7 @@ impl RustType<proto::ClusterVariant> for ClusterVariant {
                 auto_scaling_strategy: auto_scaling_strategy.into_proto(),
                 reconfiguration: reconfiguration.into_proto(),
                 burst: burst.into_proto(),
+                load: load.into_proto(),
             }),
             ClusterVariant::Unmanaged => proto::ClusterVariant::Unmanaged,
         }
@@ -123,6 +127,7 @@ impl RustType<proto::ClusterVariant> for ClusterVariant {
                 auto_scaling_strategy: managed.auto_scaling_strategy.into_rust()?,
                 reconfiguration: managed.reconfiguration.into_rust()?,
                 burst: managed.burst.into_rust()?,
+                load: managed.load.into_rust()?,
             })),
         }
     }
@@ -135,6 +140,8 @@ impl RustType<proto::ReconfigurationState> for ReconfigurationState {
             deadline: self.deadline.into(),
             on_timeout: self.on_timeout.into_proto(),
             status: self.status.into_proto(),
+            origin: self.origin.into_proto(),
+            trial: self.trial.into_proto(),
         }
     }
 
@@ -144,6 +151,8 @@ impl RustType<proto::ReconfigurationState> for ReconfigurationState {
             deadline: mz_repr::Timestamp::new(proto.deadline),
             on_timeout: proto.on_timeout.into_rust()?,
             status: proto.status.into_rust()?,
+            origin: proto.origin.into_rust()?,
+            trial: proto.trial.into_rust()?,
         })
     }
 }
@@ -210,6 +219,192 @@ impl RustType<proto::BurstState> for BurstState {
             burst_size: proto.burst_size,
             linger_duration: proto.linger_duration.into_rust()?,
             steady_ready_at: proto.steady_ready_at.map(mz_repr::Timestamp::new),
+        })
+    }
+}
+
+impl RustType<proto::ReconfigurationOrigin> for ReconfigurationOrigin {
+    fn into_proto(&self) -> proto::ReconfigurationOrigin {
+        match self {
+            ReconfigurationOrigin::User => proto::ReconfigurationOrigin::User,
+            ReconfigurationOrigin::LoadAutoscaling => proto::ReconfigurationOrigin::LoadAutoscaling,
+        }
+    }
+
+    fn from_proto(proto: proto::ReconfigurationOrigin) -> Result<Self, TryFromProtoError> {
+        Ok(match proto {
+            proto::ReconfigurationOrigin::User => ReconfigurationOrigin::User,
+            proto::ReconfigurationOrigin::LoadAutoscaling => ReconfigurationOrigin::LoadAutoscaling,
+        })
+    }
+}
+
+impl RustType<proto::ReconfigurationTrial> for ReconfigurationTrial {
+    fn into_proto(&self) -> proto::ReconfigurationTrial {
+        proto::ReconfigurationTrial {
+            kind: self.kind.into_proto(),
+            hold_for: self.hold_for.into_proto(),
+            deadline: self.deadline.into(),
+            hold_started: self.hold_started.map(Into::into),
+        }
+    }
+
+    fn from_proto(proto: proto::ReconfigurationTrial) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            kind: proto.kind.into_rust()?,
+            hold_for: proto.hold_for.into_rust()?,
+            deadline: mz_repr::Timestamp::new(proto.deadline),
+            hold_started: proto.hold_started.map(mz_repr::Timestamp::new),
+        })
+    }
+}
+
+impl RustType<proto::TrialKind> for TrialKind {
+    fn into_proto(&self) -> proto::TrialKind {
+        match self {
+            TrialKind::Up => proto::TrialKind::Up,
+            TrialKind::Down => proto::TrialKind::Down,
+        }
+    }
+
+    fn from_proto(proto: proto::TrialKind) -> Result<Self, TryFromProtoError> {
+        Ok(match proto {
+            proto::TrialKind::Up => TrialKind::Up,
+            proto::TrialKind::Down => TrialKind::Down,
+        })
+    }
+}
+
+impl RustType<proto::LoadState> for LoadState {
+    fn into_proto(&self) -> proto::LoadState {
+        proto::LoadState {
+            fingerprint: self.fingerprint,
+            attempt: self.attempt.into_proto(),
+            last_cutover: self.last_cutover.into_proto(),
+            evidence: self.evidence.into_proto(),
+            floors: self.floors.into_proto(),
+            hydration_peak_ratio: self.hydration_peak_ratio,
+        }
+    }
+
+    fn from_proto(proto: proto::LoadState) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            fingerprint: proto.fingerprint,
+            attempt: proto.attempt.into_rust()?,
+            last_cutover: proto.last_cutover.into_rust()?,
+            evidence: proto.evidence.into_rust()?,
+            floors: proto.floors.into_rust()?,
+            hydration_peak_ratio: proto.hydration_peak_ratio,
+        })
+    }
+}
+
+impl RustType<proto::LoadAttempt> for LoadAttempt {
+    fn into_proto(&self) -> proto::LoadAttempt {
+        proto::LoadAttempt {
+            from_size: self.from_size.clone(),
+            target_size: self.target_size.clone(),
+            behind: self.behind.into_proto(),
+        }
+    }
+
+    fn from_proto(proto: proto::LoadAttempt) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            from_size: proto.from_size,
+            target_size: proto.target_size,
+            behind: proto.behind.into_rust()?,
+        })
+    }
+}
+
+impl RustType<proto::LoadCutover> for LoadCutover {
+    fn into_proto(&self) -> proto::LoadCutover {
+        proto::LoadCutover {
+            at: self.at.into(),
+            from_size: self.from_size.clone(),
+            reason: self.reason.into_proto(),
+        }
+    }
+
+    fn from_proto(proto: proto::LoadCutover) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            at: mz_repr::Timestamp::new(proto.at),
+            from_size: proto.from_size,
+            reason: proto.reason.into_rust()?,
+        })
+    }
+}
+
+impl RustType<proto::LoadCutoverReason> for LoadCutoverReason {
+    fn into_proto(&self) -> proto::LoadCutoverReason {
+        match self {
+            LoadCutoverReason::UpTrial => proto::LoadCutoverReason::UpTrial,
+            LoadCutoverReason::DownTrial => proto::LoadCutoverReason::DownTrial,
+            LoadCutoverReason::HighHeap => proto::LoadCutoverReason::HighHeap,
+            LoadCutoverReason::OutOfMemory => proto::LoadCutoverReason::OutOfMemory,
+            LoadCutoverReason::ProbationReturn => proto::LoadCutoverReason::ProbationReturn,
+        }
+    }
+
+    fn from_proto(proto: proto::LoadCutoverReason) -> Result<Self, TryFromProtoError> {
+        Ok(match proto {
+            proto::LoadCutoverReason::UpTrial => LoadCutoverReason::UpTrial,
+            proto::LoadCutoverReason::DownTrial => LoadCutoverReason::DownTrial,
+            proto::LoadCutoverReason::HighHeap => LoadCutoverReason::HighHeap,
+            proto::LoadCutoverReason::OutOfMemory => LoadCutoverReason::OutOfMemory,
+            proto::LoadCutoverReason::ProbationReturn => LoadCutoverReason::ProbationReturn,
+        })
+    }
+}
+
+impl RustType<proto::LoadEvidence> for LoadEvidence {
+    fn into_proto(&self) -> proto::LoadEvidence {
+        proto::LoadEvidence {
+            size: self.size.clone(),
+            verdict: self.verdict.into_proto(),
+            at: self.at.into(),
+            interval: self.interval.into_proto(),
+        }
+    }
+
+    fn from_proto(proto: proto::LoadEvidence) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            size: proto.size,
+            verdict: proto.verdict.into_rust()?,
+            at: mz_repr::Timestamp::new(proto.at),
+            interval: proto.interval.into_rust()?,
+        })
+    }
+}
+
+impl RustType<proto::LoadVerdict> for LoadVerdict {
+    fn into_proto(&self) -> proto::LoadVerdict {
+        match self {
+            LoadVerdict::Insufficient => proto::LoadVerdict::Insufficient,
+            LoadVerdict::NoGain => proto::LoadVerdict::NoGain,
+        }
+    }
+
+    fn from_proto(proto: proto::LoadVerdict) -> Result<Self, TryFromProtoError> {
+        Ok(match proto {
+            proto::LoadVerdict::Insufficient => LoadVerdict::Insufficient,
+            proto::LoadVerdict::NoGain => LoadVerdict::NoGain,
+        })
+    }
+}
+
+impl RustType<proto::LoadFloor> for LoadFloor {
+    fn into_proto(&self) -> proto::LoadFloor {
+        proto::LoadFloor {
+            dataflow: self.dataflow.into_proto(),
+            lag: self.lag.into_proto(),
+        }
+    }
+
+    fn from_proto(proto: proto::LoadFloor) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            dataflow: proto.dataflow.into_rust()?,
+            lag: proto.lag.into_rust()?,
         })
     }
 }

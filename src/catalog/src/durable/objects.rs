@@ -514,7 +514,8 @@ pub enum ClusterVariant {
 
 impl ClusterVariant {
     /// The replica sizes a managed cluster references: its size, its hydration
-    /// size, an in-progress reconfiguration's target size, and its burst size.
+    /// size, its `ON LOAD` bounds, an in-progress reconfiguration's target size,
+    /// and its burst size.
     pub fn sizes(&self) -> impl Iterator<Item = &str> {
         let managed = match self {
             ClusterVariant::Managed(managed) => Some(managed),
@@ -528,6 +529,16 @@ impl ClusterVariant {
                     .as_ref()
                     .and_then(|s| s.on_hydration.as_ref())
                     .map(|h| &h.hydration_size),
+                managed
+                    .auto_scaling_strategy
+                    .as_ref()
+                    .and_then(|s| s.on_load.as_ref())
+                    .map(|l| &l.min_size),
+                managed
+                    .auto_scaling_strategy
+                    .as_ref()
+                    .and_then(|s| s.on_load.as_ref())
+                    .map(|l| &l.max_size),
                 managed
                     .reconfiguration
                     .as_ref()
@@ -559,6 +570,8 @@ pub struct ClusterVariantManaged {
     pub reconfiguration: Option<ReconfigurationState>,
     /// In-flight hydration burst the controller is running.
     pub burst: Option<BurstState>,
+    /// Durable state of the `ON LOAD` autoscaling strategy.
+    pub load: Option<LoadState>,
 }
 
 /// The canonical name of the `index`-th (zero-based) replica of a managed
@@ -594,6 +607,44 @@ pub struct ReconfigurationState {
     /// regardless of this field.
     pub on_timeout: OnTimeoutAction,
     pub status: ReconfigurationStatus,
+    pub origin: ReconfigurationOrigin,
+    /// `None` for a reconfiguration that cuts over as soon as its target is
+    /// ready.
+    pub trial: Option<ReconfigurationTrial>,
+}
+
+/// Who wrote a reconfiguration record.
+#[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub enum ReconfigurationOrigin {
+    /// An `ALTER CLUSTER` statement.
+    User,
+    /// The `ON LOAD` autoscaling strategy.
+    LoadAutoscaling,
+}
+
+/// A reconfiguration whose target runs beside the current replicas until a
+/// verdict decides whether the cluster cuts over to it.
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub struct ReconfigurationTrial {
+    pub kind: TrialKind,
+    /// How long the target is compared with the current replicas once it is
+    /// hydrated.
+    pub hold_for: Duration,
+    /// When the trial is dropped without a verdict.
+    pub deadline: mz_repr::Timestamp,
+    /// When the hold began, or `None` while the target is hydrating.
+    pub hold_started: Option<mz_repr::Timestamp>,
+}
+
+#[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub enum TrialKind {
+    /// The target is larger than the realized size.
+    Up,
+    /// The target is smaller than the realized size.
+    Down,
 }
 
 /// The lifecycle status of the latest graceful reconfiguration.
@@ -637,6 +688,89 @@ pub struct BurstState {
     /// Start of the current observed readiness period for the steady set.
     /// Cleared after a failed readiness check.
     pub steady_ready_at: Option<mz_repr::Timestamp>,
+}
+
+/// Durable state of the `ON LOAD` autoscaling strategy.
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub struct LoadState {
+    /// Identifies the set of dataflows installed on the cluster that
+    /// `evidence` and `floors` describe.
+    pub fingerprint: u64,
+    /// The strategy's reconfiguration whose outcome is not yet recorded.
+    pub attempt: Option<LoadAttempt>,
+    /// The strategy's latest change of the cluster's size.
+    pub last_cutover: Option<LoadCutover>,
+    pub evidence: Vec<LoadEvidence>,
+    pub floors: Vec<LoadFloor>,
+    /// Hydration peak heap over steady-state heap, in permille, once observed.
+    pub hydration_peak_ratio: Option<u32>,
+}
+
+/// A reconfiguration the `ON LOAD` strategy wrote.
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub struct LoadAttempt {
+    pub from_size: String,
+    pub target_size: String,
+    /// The dataflows that were behind when the strategy wrote the
+    /// reconfiguration.
+    pub behind: Vec<GlobalId>,
+}
+
+/// A change of the cluster's size by the `ON LOAD` strategy.
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub struct LoadCutover {
+    pub at: mz_repr::Timestamp,
+    pub from_size: String,
+    pub reason: LoadCutoverReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub enum LoadCutoverReason {
+    /// An up-trial in which some behind dataflow gained.
+    UpTrial,
+    /// A down-trial that passed.
+    DownTrial,
+    /// The steady-state heap stayed above the heap maximum.
+    HighHeap,
+    /// A replica at the realized size was killed for memory.
+    OutOfMemory,
+    /// A dataflow went behind during probation after a descent.
+    ProbationReturn,
+}
+
+/// A verdict about `size` for the current fingerprint, which blocks the trials
+/// it concerns until `at + interval`.
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub struct LoadEvidence {
+    pub size: String,
+    pub verdict: LoadVerdict,
+    pub at: mz_repr::Timestamp,
+    pub interval: Duration,
+}
+
+#[derive(Clone, Copy, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub enum LoadVerdict {
+    /// The cluster did not keep up at the size, or did not fit. Blocks a
+    /// down-trial to the size or any smaller one.
+    Insufficient,
+    /// An up-trial from the size found nothing fresher on the larger size.
+    /// Blocks an up-trial from the size.
+    NoGain,
+}
+
+/// The lag a dataflow showed on a larger size during an up-trial that did not
+/// help it.
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord)]
+#[cfg_attr(test, derive(Arbitrary))]
+pub struct LoadFloor {
+    pub dataflow: GlobalId,
+    pub lag: Duration,
 }
 
 #[derive(Clone, Debug, Ord, PartialOrd, PartialEq, Eq)]
@@ -2098,11 +2232,33 @@ mod test {
     use proptest::prelude::*;
 
     use super::{
-        DatabaseKey, DatabaseValue, FenceToken, ItemKey, ItemValue, SchemaKey, SchemaValue,
+        DatabaseKey, DatabaseValue, FenceToken, ItemKey, ItemValue, LoadState,
+        ReconfigurationOrigin, ReconfigurationTrial, SchemaKey, SchemaValue,
     };
     use crate::durable::Epoch;
 
     proptest! {
+        #[mz_ore::test]
+        #[cfg_attr(miri, ignore)] // slow
+        fn proptest_load_state_roundtrip(value: LoadState) {
+            let proto = value.into_proto();
+            let round = proto.into_rust().expect("to roundtrip");
+
+            prop_assert_eq!(value, round);
+        }
+
+        #[mz_ore::test]
+        #[cfg_attr(miri, ignore)] // slow
+        fn proptest_reconfiguration_trial_roundtrip(
+            trial: ReconfigurationTrial,
+            origin: ReconfigurationOrigin,
+        ) {
+            let round: ReconfigurationTrial = trial.into_proto().into_rust().expect("to roundtrip");
+            prop_assert_eq!(trial, round);
+            let round: ReconfigurationOrigin = origin.into_proto().into_rust().expect("to roundtrip");
+            prop_assert_eq!(origin, round);
+        }
+
         #[mz_ore::test]
         #[cfg_attr(miri, ignore)] // slow
         fn proptest_database_key_roundtrip(key: DatabaseKey) {

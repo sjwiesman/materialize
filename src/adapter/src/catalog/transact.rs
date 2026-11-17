@@ -649,6 +649,8 @@ impl Catalog {
             deadline,
             on_timeout: _,
             status: _,
+            origin: _,
+            trial: _,
         } = record;
         let ReconfigurationTarget {
             size,
@@ -3991,8 +3993,8 @@ mod tests {
         use mz_adapter_types::cluster_state::ReconfigurationAudit;
         use mz_audit_log::ReconfigurationLifecycleV1;
         use mz_catalog::memory::objects::{
-            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
-            ReconfigurationStatus, ReconfigurationTarget,
+            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationOrigin,
+            ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
         };
         use mz_controller::clusters::ReplicaLogging;
         use mz_controller_types::ClusterId;
@@ -4016,6 +4018,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration,
                 burst: None,
+                load: None,
             }),
             workload_class: None,
             query_policy: None,
@@ -4034,6 +4037,8 @@ mod tests {
             deadline: Timestamp::from(400u64),
             on_timeout: mz_sql::plan::OnTimeoutAction::Rollback,
             status,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         };
 
         let details = Catalog::reconfiguration_audit_details(
@@ -4097,8 +4102,8 @@ mod tests {
         use std::time::Duration;
 
         use mz_catalog::memory::objects::{
-            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
-            ReconfigurationStatus, ReconfigurationTarget,
+            ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationOrigin,
+            ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
         };
         use mz_controller::clusters::ReplicaLogging;
         use mz_repr::Timestamp;
@@ -4119,6 +4124,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration,
                 burst: None,
+                load: None,
             }),
             workload_class: None,
             query_policy: None,
@@ -4142,6 +4148,8 @@ mod tests {
             deadline: Timestamp::from(400u64),
             on_timeout: mz_sql::plan::OnTimeoutAction::Rollback,
             status,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         };
 
         // Lifecycle movements: these writes must declare an audit intent.
@@ -4204,6 +4212,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration: None,
                 burst,
+                load: None,
             }),
             workload_class: None,
             query_policy: None,
@@ -4278,6 +4287,7 @@ mod tests {
             auto_scaling_strategy: strategy,
             reconfiguration: None,
             burst,
+            load: None,
         };
         let policy = |hydration_size: &str| AutoScalingStrategy {
             on_hydration: Some(OnHydration {
@@ -4381,6 +4391,7 @@ mod tests {
                 auto_scaling_strategy: None,
                 reconfiguration: None,
                 burst,
+                load: None,
             }),
             workload_class: None,
             query_policy: None,

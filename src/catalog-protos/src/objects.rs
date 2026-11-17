@@ -1150,6 +1150,8 @@ pub struct ManagedCluster {
     pub reconfiguration: Option<ReconfigurationState>,
     /// In-flight hydration burst the controller is running.
     pub burst: Option<BurstState>,
+    /// Durable state of the `ON LOAD` autoscaling strategy.
+    pub load: Option<LoadState>,
 }
 
 /// The user-configured autoscaling policy of a managed cluster.
@@ -1159,6 +1161,16 @@ pub struct ManagedCluster {
 #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
 pub struct AutoScalingStrategy {
     pub on_hydration: Option<OnHydration>,
+    pub on_load: Option<OnLoad>,
+}
+
+/// The `ON LOAD` autoscaling sub-policy.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct OnLoad {
+    pub min_size: String,
+    pub max_size: String,
+    pub scale_down_after: Option<Duration>,
 }
 
 /// The `ON HYDRATION` autoscaling sub-policy.
@@ -1180,6 +1192,56 @@ pub struct ReconfigurationState {
     /// What to do if the deadline passes before the target hydrates.
     pub on_timeout: OnTimeoutAction,
     pub status: ReconfigurationStatus,
+    pub origin: ReconfigurationOrigin,
+    pub trial: Option<ReconfigurationTrial>,
+}
+
+/// Who wrote a reconfiguration record.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize
+)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub enum ReconfigurationOrigin {
+    User,
+    LoadAutoscaling,
+}
+
+/// A reconfiguration whose target runs beside the current replicas until a
+/// verdict decides whether the cluster cuts over to it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct ReconfigurationTrial {
+    pub kind: TrialKind,
+    pub hold_for: Duration,
+    /// As an `mz_repr::Timestamp`.
+    pub deadline: u64,
+    /// When the hold began, as an `mz_repr::Timestamp`.
+    pub hold_started: Option<u64>,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize
+)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub enum TrialKind {
+    Up,
+    Down,
 }
 
 /// The lifecycle status of the latest graceful reconfiguration.
@@ -1253,6 +1315,90 @@ pub struct BurstState {
     /// Start of the current observed readiness period for the steady set, as an
     /// `mz_repr::Timestamp`. Cleared after a failed readiness check.
     pub steady_ready_at: Option<u64>,
+}
+
+/// Durable state of the `ON LOAD` autoscaling strategy.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct LoadState {
+    pub fingerprint: u64,
+    pub attempt: Option<LoadAttempt>,
+    pub last_cutover: Option<LoadCutover>,
+    pub evidence: Vec<LoadEvidence>,
+    pub floors: Vec<LoadFloor>,
+    /// In permille.
+    pub hydration_peak_ratio: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct LoadAttempt {
+    pub from_size: String,
+    pub target_size: String,
+    pub behind: Vec<GlobalId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct LoadCutover {
+    /// As an `mz_repr::Timestamp`.
+    pub at: u64,
+    pub from_size: String,
+    pub reason: LoadCutoverReason,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize
+)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub enum LoadCutoverReason {
+    UpTrial,
+    DownTrial,
+    HighHeap,
+    OutOfMemory,
+    ProbationReturn,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct LoadEvidence {
+    pub size: String,
+    pub verdict: LoadVerdict,
+    /// As an `mz_repr::Timestamp`.
+    pub at: u64,
+    pub interval: Duration,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize
+)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub enum LoadVerdict {
+    Insufficient,
+    NoGain,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+pub struct LoadFloor {
+    pub dataflow: GlobalId,
+    pub lag: Duration,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1679,6 +1825,170 @@ pub mod audit_log_event_v1 {
         pub enum Cause {
             LingerElapsed(Empty),
             NoLongerWarranted(Empty),
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct ClusterLoadTrialV1 {
+        pub cluster_id: String,
+        pub cluster_name: String,
+        pub transition: LoadTrialLifecycleV1,
+        pub kind: LoadTrialKindV1,
+        pub from_size: String,
+        pub candidate_size: String,
+        pub failure: Option<LoadTrialFailureV1>,
+        pub dataflows: Vec<LoadTrialDataflowV1>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadTrialDataflowV1 {
+        pub dataflow_id: String,
+        pub current_lag_ms: u64,
+        pub current_progress_permille: u32,
+        pub candidate_lag_ms: u64,
+        pub candidate_progress_permille: u32,
+        pub gain: Option<LoadTrialGainV1>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadTrialLifecycleV1 {
+        pub transition: load_trial_lifecycle_v1::Transition,
+    }
+
+    pub mod load_trial_lifecycle_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Transition {
+            Started(Empty),
+            Passed(Empty),
+            Failed(Empty),
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadTrialKindV1 {
+        pub kind: load_trial_kind_v1::Kind,
+    }
+
+    pub mod load_trial_kind_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Kind {
+            Up(Empty),
+            Down(Empty),
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadTrialFailureV1 {
+        pub failure: load_trial_failure_v1::Failure,
+    }
+
+    pub mod load_trial_failure_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Failure {
+            Lag(Empty),
+            LagLastThird(Empty),
+            Heap(Empty),
+            OutOfMemory(Empty),
+            NotHydrated(Empty),
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadTrialGainV1 {
+        pub gain: load_trial_gain_v1::Gain,
+    }
+
+    pub mod load_trial_gain_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Gain {
+            Fresh(Empty),
+            Faster(Empty),
+            Closer(Empty),
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct ClusterLoadEvidenceRecordedV1 {
+        pub cluster_id: String,
+        pub cluster_name: String,
+        pub size: String,
+        pub verdict: LoadVerdictV1,
+        pub interval_ms: u64,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadVerdictV1 {
+        pub verdict: load_verdict_v1::Verdict,
+    }
+
+    pub mod load_verdict_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Verdict {
+            Insufficient(Empty),
+            NoGain(Empty),
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct ClusterLoadEvidenceClearedV1 {
+        pub cluster_id: String,
+        pub cluster_name: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct ClusterLoadStatusV1 {
+        pub cluster_id: String,
+        pub cluster_name: String,
+        pub status: LoadStatusV1,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+    pub struct LoadStatusV1 {
+        pub status: load_status_v1::Status,
+    }
+
+    pub mod load_status_v1 {
+        use super::*;
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[cfg_attr(any(test, feature = "proptest"), derive(Arbitrary))]
+        pub enum Status {
+            Steady(Empty),
+            TrialUp(Empty),
+            TrialDown(Empty),
+            ScalingUp(Empty),
+            NotScalable(Empty),
+            Waiting(Empty),
+            AtMax(Empty),
+            AtMin(Empty),
+            OutOfMemoryAtMax(Empty),
+            WarmingUp(Empty),
         }
     }
 
@@ -2188,6 +2498,10 @@ pub mod audit_log_event_v1 {
         AlterSourceTimestampIntervalV1(AlterSourceTimestampIntervalV1),
         AlterClusterReconfigurationV1(AlterClusterReconfigurationV1),
         ClusterHydrationBurstV1(ClusterHydrationBurstV1),
+        ClusterLoadTrialV1(ClusterLoadTrialV1),
+        ClusterLoadEvidenceRecordedV1(ClusterLoadEvidenceRecordedV1),
+        ClusterLoadEvidenceClearedV1(ClusterLoadEvidenceClearedV1),
+        ClusterLoadStatusV1(ClusterLoadStatusV1),
     }
 }
 

@@ -2314,7 +2314,8 @@ fn get_encoding(
 ///
 /// If `in_cluster` is `None` we will update it to refer to the default cluster.
 /// Because of this, do not normalize/canonicalize the create SQL statement
-/// until after calling this function.
+/// until after calling this function. Fails if the cluster has an `ON LOAD`
+/// auto-scaling policy.
 fn source_sink_cluster_config<'a, 'ctx>(
     scx: &'a StatementContext<'ctx>,
     in_cluster: &mut Option<ResolvedClusterName>,
@@ -2330,6 +2331,17 @@ fn source_sink_cluster_config<'a, 'ctx>(
         }
         Some(in_cluster) => scx.catalog.get_cluster(in_cluster.id),
     };
+
+    // The reverse of `ensure_cluster_hosts_no_sources_or_sinks`, for the same
+    // reason.
+    if cluster
+        .auto_scaling_strategy()
+        .is_some_and(|strategy| strategy.on_load.is_some())
+    {
+        return Err(PlanError::SourceOrSinkOnOnLoadCluster {
+            cluster_name: cluster.name().to_string(),
+        });
+    }
 
     Ok(cluster)
 }

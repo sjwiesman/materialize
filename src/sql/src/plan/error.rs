@@ -66,6 +66,10 @@ pub enum PlanError {
         /// (object type, name)
         objects: Vec<(String, String)>,
     },
+    /// A source or sink on a cluster with an `ON LOAD` auto-scaling policy.
+    SourceOrSinkOnOnLoadCluster {
+        cluster_name: String,
+    },
     /// This feature is not supported, and will likely never be supported.
     NeverSupported {
         feature: String,
@@ -429,7 +433,8 @@ impl PlanError {
                 Some("Use DROP MATERIALIZED VIEW to remove a materialized view.".into())
             }
             Self::DependentObjectsStillExist {..} => Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
-            Self::OnLoadClusterHostsSourcesOrSinks { .. } => {
+            Self::OnLoadClusterHostsSourcesOrSinks { .. }
+            | Self::SourceOrSinkOnOnLoadCluster { .. } => {
                 Some("Run sources and sinks on a cluster without an ON LOAD auto scaling strategy.".into())
             }
             Self::AlterViewOnMaterializedView(_) => {
@@ -571,6 +576,11 @@ impl fmt::Display for PlanError {
                     cluster_name.quoted(),
                 )
             }
+            Self::SourceOrSinkOnOnLoadCluster { cluster_name } => write!(
+                f,
+                "cannot create a source or sink on cluster {} because it has an ON LOAD auto scaling strategy",
+                cluster_name.quoted(),
+            ),
             Self::NeverSupported { feature, documentation_link: documentation_path,.. } => {
                 write!(f, "{feature} is not supported",)?;
                 if let Some(documentation_path) = documentation_path {

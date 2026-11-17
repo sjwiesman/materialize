@@ -30,8 +30,8 @@ use mz_sql::names::{
 };
 use mz_sql::plan::{
     AutoScalingStrategy, ClusterSchedule, NetworkPolicyRule, NetworkPolicyRuleAction,
-    NetworkPolicyRuleDirection, OnHydration, OnTimeoutAction, PolicyAddress, QueryPlanFeature,
-    QueryPolicyMode, QueryPolicyRule,
+    NetworkPolicyRuleDirection, OnHydration, OnLoad, OnTimeoutAction, PolicyAddress,
+    QueryPlanFeature, QueryPolicyMode, QueryPolicyRule,
 };
 use mz_sql::session::vars::OwnedVarInput;
 use mz_storage_types::instances::StorageInstanceId;
@@ -706,13 +706,14 @@ impl RustType<proto::AutoScalingStrategy> for AutoScalingStrategy {
     fn into_proto(&self) -> proto::AutoScalingStrategy {
         proto::AutoScalingStrategy {
             on_hydration: self.on_hydration.into_proto(),
+            on_load: self.on_load.into_proto(),
         }
     }
 
     fn from_proto(proto: proto::AutoScalingStrategy) -> Result<Self, TryFromProtoError> {
         Ok(Self {
             on_hydration: proto.on_hydration.into_rust()?,
-            on_load: None,
+            on_load: proto.on_load.into_rust()?,
         })
     }
 }
@@ -729,6 +730,24 @@ impl RustType<proto::OnHydration> for OnHydration {
         Ok(Self {
             hydration_size: proto.hydration_size,
             linger_duration: proto.linger_duration.into_rust()?,
+        })
+    }
+}
+
+impl RustType<proto::OnLoad> for OnLoad {
+    fn into_proto(&self) -> proto::OnLoad {
+        proto::OnLoad {
+            min_size: self.min_size.clone(),
+            max_size: self.max_size.clone(),
+            scale_down_after: self.scale_down_after.into_proto(),
+        }
+    }
+
+    fn from_proto(proto: proto::OnLoad) -> Result<Self, TryFromProtoError> {
+        Ok(Self {
+            min_size: proto.min_size,
+            max_size: proto.max_size,
+            scale_down_after: proto.scale_down_after.into_rust()?,
         })
     }
 }

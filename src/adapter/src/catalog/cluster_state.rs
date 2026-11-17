@@ -17,11 +17,12 @@
 
 use mz_adapter_types::cluster_state::{
     AutoScalingPolicy, AvailabilityZones, BurstRecord, ClusterSchedule, ExpectedClusterState,
-    OnHydrationPolicy, OnTimeout, ReconfigurationRecord, ReconfigurationStatus,
-    ReconfigurationTarget,
+    LoadAttempt, LoadCutover, LoadCutoverReason, LoadEvidence, LoadFloor, LoadRecord, LoadVerdict,
+    OnHydrationPolicy, OnLoadPolicy, OnTimeout, ReconfigurationOrigin, ReconfigurationRecord,
+    ReconfigurationStatus, ReconfigurationTarget, ReconfigurationTrial, TrialKind,
 };
 use mz_catalog::memory::objects::{
-    BurstState, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
+    BurstState, ClusterVariant, ClusterVariantManaged, LoadState, ReconfigurationState,
 };
 use mz_controller_types::ClusterId;
 use mz_sql::plan::OnTimeoutAction;
@@ -44,6 +45,7 @@ pub(crate) fn project_expected(managed: &ClusterVariantManaged) -> ExpectedClust
         auto_scaling_strategy,
         reconfiguration,
         burst,
+        load,
     } = managed;
     ExpectedClusterState {
         size: size.clone(),
@@ -55,6 +57,7 @@ pub(crate) fn project_expected(managed: &ClusterVariantManaged) -> ExpectedClust
         auto_scaling_policy: auto_scaling_strategy.as_ref().map(auto_scaling_policy),
         reconfiguration: reconfiguration.as_ref().map(reconfiguration_record),
         burst: burst.as_ref().map(burst_record),
+        load: load.as_ref().map(load_record),
     }
 }
 
@@ -85,6 +88,8 @@ fn reconfiguration_record(record: &ReconfigurationState) -> ReconfigurationRecor
         deadline,
         on_timeout: on_timeout_action,
         status,
+        origin,
+        trial,
     } = record;
     let mz_catalog::memory::objects::ReconfigurationTarget {
         size,
@@ -104,6 +109,39 @@ fn reconfiguration_record(record: &ReconfigurationState) -> ReconfigurationRecor
         deadline: *deadline,
         on_timeout: on_timeout(*on_timeout_action),
         status: reconfiguration_status(*status),
+        origin: reconfiguration_origin(*origin),
+        trial: trial.as_ref().map(reconfiguration_trial),
+    }
+}
+
+fn reconfiguration_origin(
+    origin: mz_catalog::memory::objects::ReconfigurationOrigin,
+) -> ReconfigurationOrigin {
+    match origin {
+        mz_catalog::memory::objects::ReconfigurationOrigin::User => ReconfigurationOrigin::User,
+        mz_catalog::memory::objects::ReconfigurationOrigin::LoadAutoscaling => {
+            ReconfigurationOrigin::LoadAutoscaling
+        }
+    }
+}
+
+fn reconfiguration_trial(
+    trial: &mz_catalog::memory::objects::ReconfigurationTrial,
+) -> ReconfigurationTrial {
+    let mz_catalog::memory::objects::ReconfigurationTrial {
+        kind,
+        hold_for,
+        deadline,
+        hold_started,
+    } = trial;
+    ReconfigurationTrial {
+        kind: match kind {
+            mz_catalog::memory::objects::TrialKind::Up => TrialKind::Up,
+            mz_catalog::memory::objects::TrialKind::Down => TrialKind::Down,
+        },
+        hold_for: *hold_for,
+        deadline: *deadline,
+        hold_started: *hold_started,
     }
 }
 
@@ -163,10 +201,91 @@ fn burst_record(record: &BurstState) -> BurstRecord {
     }
 }
 
+fn load_record(record: &LoadState) -> LoadRecord {
+    // Exhaustive destructures (no `..`), like `project_expected`: a field added
+    // to a catalog type is a compile error here until the witness accounts for
+    // it.
+    let LoadState {
+        fingerprint,
+        attempt,
+        last_cutover,
+        evidence,
+        floors,
+        hydration_peak_ratio,
+    } = record;
+    LoadRecord {
+        fingerprint: *fingerprint,
+        attempt: attempt.as_ref().map(|attempt| {
+            let mz_catalog::memory::objects::LoadAttempt {
+                from_size,
+                target_size,
+                behind,
+            } = attempt;
+            LoadAttempt {
+                from_size: from_size.clone(),
+                target_size: target_size.clone(),
+                behind: behind.clone(),
+            }
+        }),
+        last_cutover: last_cutover.as_ref().map(|cutover| {
+            let mz_catalog::memory::objects::LoadCutover {
+                at,
+                from_size,
+                reason,
+            } = cutover;
+            use mz_catalog::memory::objects::LoadCutoverReason as Reason;
+            LoadCutover {
+                at: *at,
+                from_size: from_size.clone(),
+                reason: match reason {
+                    Reason::UpTrial => LoadCutoverReason::UpTrial,
+                    Reason::DownTrial => LoadCutoverReason::DownTrial,
+                    Reason::HighHeap => LoadCutoverReason::HighHeap,
+                    Reason::OutOfMemory => LoadCutoverReason::OutOfMemory,
+                    Reason::ProbationReturn => LoadCutoverReason::ProbationReturn,
+                },
+            }
+        }),
+        evidence: evidence
+            .iter()
+            .map(|evidence| {
+                let mz_catalog::memory::objects::LoadEvidence {
+                    size,
+                    verdict,
+                    at,
+                    interval,
+                } = evidence;
+                LoadEvidence {
+                    size: size.clone(),
+                    verdict: match verdict {
+                        mz_catalog::memory::objects::LoadVerdict::Insufficient => {
+                            LoadVerdict::Insufficient
+                        }
+                        mz_catalog::memory::objects::LoadVerdict::NoGain => LoadVerdict::NoGain,
+                    },
+                    at: *at,
+                    interval: *interval,
+                }
+            })
+            .collect(),
+        floors: floors
+            .iter()
+            .map(|floor| {
+                let mz_catalog::memory::objects::LoadFloor { dataflow, lag } = floor;
+                LoadFloor {
+                    dataflow: *dataflow,
+                    lag: *lag,
+                }
+            })
+            .collect(),
+        hydration_peak_ratio: *hydration_peak_ratio,
+    }
+}
+
 fn auto_scaling_policy(strategy: &mz_sql::plan::AutoScalingStrategy) -> AutoScalingPolicy {
     let mz_sql::plan::AutoScalingStrategy {
         on_hydration,
-        on_load: _,
+        on_load,
     } = strategy;
     AutoScalingPolicy {
         on_hydration: on_hydration.as_ref().map(|on_hydration| {
@@ -177,6 +296,18 @@ fn auto_scaling_policy(strategy: &mz_sql::plan::AutoScalingStrategy) -> AutoScal
             OnHydrationPolicy {
                 hydration_size: hydration_size.clone(),
                 linger_duration: *linger_duration,
+            }
+        }),
+        on_load: on_load.as_ref().map(|on_load| {
+            let mz_sql::plan::OnLoad {
+                min_size,
+                max_size,
+                scale_down_after,
+            } = on_load;
+            OnLoadPolicy {
+                min_size: min_size.clone(),
+                max_size: max_size.clone(),
+                scale_down_after: *scale_down_after,
             }
         }),
     }

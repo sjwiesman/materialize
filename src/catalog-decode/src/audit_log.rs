@@ -198,6 +198,73 @@ pub fn details(a: JsonbRef<'_>) -> Result<Jsonb, String> {
                 ("NoLongerWarranted", "no-longer-warranted"),
             ],
         ),
+        (
+            "ClusterLoadTrialV1",
+            "",
+            "transition",
+            WrapKind::Double,
+            &[
+                ("Started", "started"),
+                ("Passed", "passed"),
+                ("Failed", "failed"),
+            ],
+        ),
+        (
+            "ClusterLoadTrialV1",
+            "",
+            "kind",
+            WrapKind::Double,
+            &[("Up", "up"), ("Down", "down")],
+        ),
+        (
+            "ClusterLoadTrialV1",
+            "",
+            "failure",
+            WrapKind::Double,
+            &[
+                ("Lag", "lag"),
+                ("LagLastThird", "lag-last-third"),
+                ("Heap", "heap"),
+                ("OutOfMemory", "out-of-memory"),
+                ("NotHydrated", "not-hydrated"),
+            ],
+        ),
+        (
+            "ClusterLoadTrialV1",
+            "dataflows",
+            "gain",
+            WrapKind::Double,
+            &[
+                ("Fresh", "fresh"),
+                ("Faster", "faster"),
+                ("Closer", "closer"),
+            ],
+        ),
+        (
+            "ClusterLoadEvidenceRecordedV1",
+            "",
+            "verdict",
+            WrapKind::Double,
+            &[("Insufficient", "insufficient"), ("NoGain", "no-gain")],
+        ),
+        (
+            "ClusterLoadStatusV1",
+            "",
+            "status",
+            WrapKind::Double,
+            &[
+                ("Steady", "steady"),
+                ("TrialUp", "trial-up"),
+                ("TrialDown", "trial-down"),
+                ("ScalingUp", "scaling-up"),
+                ("NotScalable", "not-scalable"),
+                ("Waiting", "waiting"),
+                ("AtMax", "at-max"),
+                ("AtMin", "at-min"),
+                ("OutOfMemoryAtMax", "out-of-memory-at-max"),
+                ("WarmingUp", "warming-up"),
+            ],
+        ),
     ];
 
     /// `(variant, path, field, sub_variant)`: recurse with `sub_variant` as
@@ -911,6 +978,117 @@ mod tests {
                 "finish_cause": null,
                 "burst_size": "small"
             }"#,
+        );
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)] // error: unsupported operation: can't call foreign function `decContextDefault` on OS `linux`
+    fn enum_double_wrap_load_autoscaling() {
+        check(
+            r#"{"ClusterLoadTrialV1": {
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "transition": {"transition": {"Passed": {}}},
+                "kind": {"kind": {"Up": {}}},
+                "from_size": "small",
+                "candidate_size": "large",
+                "failure": null,
+                "dataflows": [
+                    {
+                        "dataflow_id": "u2",
+                        "current_lag_ms": 30000,
+                        "current_progress_permille": 1000,
+                        "candidate_lag_ms": 8000,
+                        "candidate_progress_permille": 1000,
+                        "gain": {"gain": {"Closer": {}}}
+                    },
+                    {
+                        "dataflow_id": "u3",
+                        "current_lag_ms": 5000,
+                        "current_progress_permille": 1000,
+                        "candidate_lag_ms": 5000,
+                        "candidate_progress_permille": 1000,
+                        "gain": null
+                    }
+                ]
+            }}"#,
+            r#"{
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "transition": "passed",
+                "kind": "up",
+                "from_size": "small",
+                "candidate_size": "large",
+                "failure": null,
+                "dataflows": [
+                    {
+                        "dataflow_id": "u2",
+                        "current_lag_ms": 30000,
+                        "current_progress_permille": 1000,
+                        "candidate_lag_ms": 8000,
+                        "candidate_progress_permille": 1000,
+                        "gain": "closer"
+                    },
+                    {
+                        "dataflow_id": "u3",
+                        "current_lag_ms": 5000,
+                        "current_progress_permille": 1000,
+                        "candidate_lag_ms": 5000,
+                        "candidate_progress_permille": 1000,
+                        "gain": null
+                    }
+                ]
+            }"#,
+        );
+        check(
+            r#"{"ClusterLoadTrialV1": {
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "transition": {"transition": {"Failed": {}}},
+                "kind": {"kind": {"Down": {}}},
+                "from_size": "large",
+                "candidate_size": "small",
+                "failure": {"failure": {"LagLastThird": {}}},
+                "dataflows": []
+            }}"#,
+            r#"{
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "transition": "failed",
+                "kind": "down",
+                "from_size": "large",
+                "candidate_size": "small",
+                "failure": "lag-last-third",
+                "dataflows": []
+            }"#,
+        );
+        check(
+            r#"{"ClusterLoadEvidenceRecordedV1": {
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "size": "small",
+                "verdict": {"verdict": {"NoGain": {}}},
+                "interval_ms": 86400000
+            }}"#,
+            r#"{
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "size": "small",
+                "verdict": "no-gain",
+                "interval_ms": 86400000
+            }"#,
+        );
+        check(
+            r#"{"ClusterLoadEvidenceClearedV1": {"cluster_id": "u1", "cluster_name": "c"}}"#,
+            r#"{"cluster_id": "u1", "cluster_name": "c"}"#,
+        );
+        check(
+            r#"{"ClusterLoadStatusV1": {
+                "cluster_id": "u1",
+                "cluster_name": "c",
+                "status": {"status": {"OutOfMemoryAtMax": {}}}
+            }}"#,
+            r#"{"cluster_id": "u1", "cluster_name": "c", "status": "out-of-memory-at-max"}"#,
         );
     }
 

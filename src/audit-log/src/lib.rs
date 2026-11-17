@@ -243,6 +243,10 @@ pub enum EventDetails {
     RenameClusterReplicaV1(RenameClusterReplicaV1),
     AlterClusterReconfigurationV1(AlterClusterReconfigurationV1),
     ClusterHydrationBurstV1(ClusterHydrationBurstV1),
+    ClusterLoadTrialV1(ClusterLoadTrialV1),
+    ClusterLoadEvidenceRecordedV1(ClusterLoadEvidenceRecordedV1),
+    ClusterLoadEvidenceClearedV1(ClusterLoadEvidenceClearedV1),
+    ClusterLoadStatusV1(ClusterLoadStatusV1),
     RenameItemV1(RenameItemV1),
     IdNameV1(IdNameV1),
     SchemaV1(SchemaV1),
@@ -548,6 +552,265 @@ pub struct ClusterHydrationBurstV1 {
     pub finish_cause: Option<BurstFinishCauseV1>,
     /// The size of the burst replica the record runs.
     pub burst_size: String,
+}
+
+/// A transition of a trial run by the `ON LOAD` autoscaling strategy: its
+/// start, or the verdict it reached.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct ClusterLoadTrialV1 {
+    pub cluster_id: String,
+    pub cluster_name: String,
+    pub transition: LoadTrialLifecycleV1,
+    pub kind: LoadTrialKindV1,
+    /// The size the cluster ran at when the trial started.
+    pub from_size: String,
+    /// The size the trial runs beside it.
+    pub candidate_size: String,
+    /// On a `failed` down-trial: the requirement the candidate did not meet.
+    /// `None` otherwise. A failed up-trial is one in which no dataflow gained.
+    pub failure: Option<LoadTrialFailureV1>,
+    /// On a verdict: the per-dataflow comparison over the hold. Empty on
+    /// `started`.
+    pub dataflows: Vec<LoadTrialDataflowV1>,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadTrialLifecycleV1 {
+    Started,
+    /// The cluster cuts over to the candidate.
+    Passed,
+    /// The candidate is dropped and the cluster keeps its size.
+    Failed,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadTrialKindV1 {
+    Up,
+    Down,
+}
+
+/// The requirement a down-trial candidate did not meet.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadTrialFailureV1 {
+    /// A dataflow's median lag over the hold exceeded its lag on the current
+    /// replicas by more than the tolerance.
+    Lag,
+    /// As `Lag`, over the last third of the hold.
+    LagLastThird,
+    /// The candidate's steady-state heap reached the heap maximum.
+    Heap,
+    /// A candidate replica was killed for memory.
+    OutOfMemory,
+    /// The candidate did not hydrate within its hydration budget.
+    NotHydrated,
+}
+
+/// One dataflow's medians over a trial's hold, on the current and the
+/// candidate replicas.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct LoadTrialDataflowV1 {
+    pub dataflow_id: String,
+    pub current_lag_ms: u64,
+    pub current_progress_permille: u32,
+    pub candidate_lag_ms: u64,
+    pub candidate_progress_permille: u32,
+    /// On an up-trial: the case by which the dataflow gained on the candidate,
+    /// or `None` when it did not.
+    pub gain: Option<LoadTrialGainV1>,
+}
+
+/// The case by which a dataflow gained on an up-trial's candidate.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadTrialGainV1 {
+    /// Within the tolerance and not falling behind on the candidate.
+    Fresh,
+    /// A higher progress ratio on the candidate.
+    Faster,
+    /// A steady lag at both sizes, at most half as large on the candidate.
+    Closer,
+}
+
+/// The `ON LOAD` autoscaling strategy recorded a verdict against `size`, which
+/// blocks the trials it concerns for `interval_ms` from the event's time.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct ClusterLoadEvidenceRecordedV1 {
+    pub cluster_id: String,
+    pub cluster_name: String,
+    pub size: String,
+    pub verdict: LoadVerdictV1,
+    pub interval_ms: u64,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadVerdictV1 {
+    /// The cluster did not keep up at the size, or did not fit.
+    Insufficient,
+    /// An up-trial from the size found nothing fresher on the larger size.
+    NoGain,
+}
+
+/// The `ON LOAD` autoscaling strategy cleared its evidence and lag floors.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct ClusterLoadEvidenceClearedV1 {
+    pub cluster_id: String,
+    pub cluster_name: String,
+}
+
+/// The status of the `ON LOAD` autoscaling strategy for a cluster changed.
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+pub struct ClusterLoadStatusV1 {
+    pub cluster_id: String,
+    pub cluster_name: String,
+    pub status: LoadStatusV1,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    PartialEq,
+    Eq,
+    Ord,
+    Hash,
+    Arbitrary
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadStatusV1 {
+    Steady,
+    TrialUp,
+    TrialDown,
+    /// Moving up without a trial, for memory or to return from probation.
+    ScalingUp,
+    NotScalable,
+    /// A descent is otherwise due and evidence blocks it.
+    Waiting,
+    AtMax,
+    AtMin,
+    OutOfMemoryAtMax,
+    WarmingUp,
 }
 
 #[derive(
@@ -1420,6 +1683,16 @@ impl EventDetails {
                 serde_json::to_value(v).expect("must serialize")
             }
             EventDetails::ClusterHydrationBurstV1(v) => {
+                serde_json::to_value(v).expect("must serialize")
+            }
+            EventDetails::ClusterLoadTrialV1(v) => serde_json::to_value(v).expect("must serialize"),
+            EventDetails::ClusterLoadEvidenceRecordedV1(v) => {
+                serde_json::to_value(v).expect("must serialize")
+            }
+            EventDetails::ClusterLoadEvidenceClearedV1(v) => {
+                serde_json::to_value(v).expect("must serialize")
+            }
+            EventDetails::ClusterLoadStatusV1(v) => {
                 serde_json::to_value(v).expect("must serialize")
             }
             EventDetails::RenameItemV1(v) => serde_json::to_value(v).expect("must serialize"),

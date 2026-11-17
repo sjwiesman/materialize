@@ -29,7 +29,7 @@ use crate::ClusterController;
 use crate::ctx::{
     ApplyOutcome, AutoScalingPolicy, AvailabilityZones, BurstAudit, ClusterControllerCtx,
     ClusterSchedule, ClusterState, CreateReason, Decision, ObservedReplica, ReconfigurationAudit,
-    ReconfigurationStatus, RefreshWindowClusterInputs, RefreshWindowInputs,
+    ReconfigurationOrigin, ReconfigurationStatus, RefreshWindowClusterInputs, RefreshWindowInputs,
     RefreshWindowInputsBatch, ReplicaShape, StateWrite,
 };
 use crate::strategy::{ConfigSignals, DesiredReplica, LiveSignals, Strategy};
@@ -111,6 +111,7 @@ fn state(
         reconfiguration: None,
         burst: None,
         replicas,
+        load: None,
     }
 }
 
@@ -874,6 +875,8 @@ async fn caa_conflict_is_rejected_and_recovered() {
                         deadline: now,
                         on_timeout: OnTimeout::Rollback,
                         status: ReconfigurationStatus::InProgress,
+                        origin: ReconfigurationOrigin::User,
+                        trial: None,
                     }),
                     audit: None,
                 }),
@@ -942,6 +945,7 @@ async fn caa_conflict_is_rejected_and_recovered() {
                 auto_scaling_policy: None,
                 reconfiguration: None,
                 burst: None,
+                load: None,
             }
         );
         if let Some(record) = write
@@ -1042,6 +1046,7 @@ async fn create_drop_is_caa_guarded_and_recovers() {
                 auto_scaling_policy: None,
                 reconfiguration: None,
                 burst: None,
+                load: None,
             }
         );
     } else {
@@ -1292,6 +1297,8 @@ fn record_on_timeout(
         deadline: Timestamp::from(deadline),
         on_timeout,
         status: ReconfigurationStatus::InProgress,
+        origin: ReconfigurationOrigin::User,
+        trial: None,
     }
 }
 
@@ -1322,6 +1329,7 @@ fn reconfiguring_state(
         reconfiguration: Some(rec),
         burst: None,
         replicas,
+        load: None,
     };
     let signals = LiveSignals {
         ready_replicas: BTreeMap::from([(
@@ -1900,6 +1908,8 @@ fn graceful_az_only_reconfiguration_is_a_shape_change() {
             deadline: Timestamp::from(5000u64),
             on_timeout: OnTimeout::Rollback,
             status: ReconfigurationStatus::InProgress,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         }),
         burst: None,
         replicas: vec![ObservedReplica {
@@ -1915,6 +1925,7 @@ fn graceful_az_only_reconfiguration_is_a_shape_change() {
             billed_as: false,
             pending: false,
         }],
+        load: None,
     };
     let mut signals = LiveSignals::default();
     let now = Timestamp::from(1000u64);
@@ -2434,6 +2445,7 @@ async fn forced_cutover_swap_preserves_the_burst_replica() {
             hydration_size: "400cc".to_string(),
             linger_duration: Some(Duration::from_secs(60)),
         }),
+        on_load: None,
     });
     state.burst = Some(BurstRecord {
         burst_size: "400cc".to_string(),
@@ -2488,6 +2500,7 @@ async fn resource_exhaustion_leaves_an_unaffordable_burst_armed() {
             hydration_size: "400cc".to_string(),
             linger_duration: Some(Duration::from_secs(60)),
         }),
+        on_load: None,
     });
     state.burst = Some(BurstRecord {
         burst_size: "400cc".to_string(),
@@ -2590,6 +2603,7 @@ fn scheduled_state(
         reconfiguration: None,
         burst: None,
         replicas,
+        load: None,
     };
     let signals = LiveSignals {
         refresh_window,
@@ -3243,6 +3257,7 @@ mod hydration_burst {
                 hydration_size: hydration_size.to_string(),
                 linger_duration: Some(linger),
             }),
+            on_load: None,
         });
         s.burst = burst;
         // Most burst cases have something to hydrate; tests for the object
@@ -3306,6 +3321,7 @@ mod hydration_burst {
                 hydration_size: "400cc".to_string(),
                 linger_duration: None,
             }),
+            on_load: None,
         });
         let config = ConfigSignals {
             default_burst_linger: Duration::from_secs(42),
@@ -3963,6 +3979,7 @@ mod hydration_burst {
                 hydration_size: "400cc".into(),
                 linger_duration: Some(Duration::from_millis(100)),
             }),
+            on_load: None,
         });
         let write = controller().merge_state_writes(
             &state,

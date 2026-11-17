@@ -1057,6 +1057,7 @@ fn add_new_remove_old_builtin_clusters_migration(
                         auto_scaling_strategy: None,
                         reconfiguration: None,
                         burst: None,
+                        load: None,
                     }),
                     workload_class: None,
                     query_policy: None,
@@ -1452,6 +1453,7 @@ fn managed_replica_config(managed: &ClusterVariantManaged) -> ReplicaConfig {
         auto_scaling_strategy: _,
         reconfiguration: _,
         burst: _,
+        load: _,
     } = managed;
     ReplicaConfig {
         location: ReplicaLocation::Managed {
@@ -1677,6 +1679,7 @@ mod tests {
             auto_scaling_strategy: None,
             reconfiguration: None,
             burst: None,
+            load: None,
         };
 
         let config = managed_replica_config(&managed);

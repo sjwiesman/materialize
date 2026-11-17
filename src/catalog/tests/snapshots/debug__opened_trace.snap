@@ -450,6 +450,7 @@ Trace {
                                     auto_scaling_strategy: None,
                                     reconfiguration: None,
                                     burst: None,
+                                    load: None,
                                 },
                             ),
                             query_policy: None,

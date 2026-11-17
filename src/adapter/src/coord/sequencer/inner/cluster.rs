@@ -17,7 +17,8 @@ use mz_catalog::durable::managed_cluster_replica_name;
 use mz_catalog::memory::error::ErrorKind;
 use mz_catalog::memory::objects::{
     Cluster, ClusterConfig, ClusterVariant, ClusterVariantManaged, DataSourceDesc,
-    ManagedReplicaConfigShape, ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
+    ManagedReplicaConfigShape, ReconfigurationOrigin, ReconfigurationState, ReconfigurationStatus,
+    ReconfigurationTarget,
 };
 use mz_compute_types::config::ComputeReplicaConfig;
 use mz_controller::clusters::{
@@ -176,6 +177,7 @@ impl Coordinator {
                     auto_scaling_strategy: None,
                     reconfiguration: None,
                     burst: None,
+                    load: None,
                 });
             }
         }
@@ -192,6 +194,7 @@ impl Coordinator {
                 auto_scaling_strategy,
                 reconfiguration: _,
                 burst: _,
+                load: _,
             }) => {
                 match &options.size {
                     Set(s) => size.clone_from(s),
@@ -706,6 +709,8 @@ impl Coordinator {
             deadline,
             on_timeout,
             status,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         };
 
         let mut realized = new_config.clone();
@@ -861,6 +866,7 @@ impl Coordinator {
                     auto_scaling_strategy: plan.auto_scaling_strategy.clone(),
                     reconfiguration: None,
                     burst: None,
+                    load: None,
                 })
             }
             CreateClusterVariant::Unmanaged(_) => ClusterVariant::Unmanaged,
@@ -1507,6 +1513,7 @@ impl Coordinator {
             auto_scaling_strategy,
             reconfiguration,
             burst: _,
+            load: _,
         }) = &cluster.config.variant
         else {
             panic!("expected existing managed cluster config");
@@ -1525,6 +1532,7 @@ impl Coordinator {
             auto_scaling_strategy: new_auto_scaling_strategy,
             reconfiguration: _,
             burst: _,
+            load: _,
         } = new_managed;
 
         let role_id = Some(session.role_metadata().current_role);
@@ -1647,6 +1655,7 @@ impl Coordinator {
             auto_scaling_strategy: _,
             reconfiguration: _,
             burst: _,
+            load: _,
         }) = &mut new_config.variant
         else {
             panic!("expected new managed cluster config");
@@ -2044,6 +2053,8 @@ mod tests {
             deadline: Timestamp::from(0),
             on_timeout: OnTimeoutAction::Rollback,
             status: ReconfigurationStatus::InProgress,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         };
 
         assert!(matches!(
@@ -2060,6 +2071,8 @@ mod tests {
             deadline: Timestamp::from(0),
             on_timeout: OnTimeoutAction::Rollback,
             status: ReconfigurationStatus::InProgress,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         };
 
         assert!(reconfiguration_wait_result(Some(&record), &awaited, false).is_none());
@@ -2085,6 +2098,8 @@ mod tests {
             deadline: Timestamp::from(0),
             on_timeout: OnTimeoutAction::Rollback,
             status: ReconfigurationStatus::InProgress,
+            origin: ReconfigurationOrigin::User,
+            trial: None,
         };
 
         assert!(matches!(

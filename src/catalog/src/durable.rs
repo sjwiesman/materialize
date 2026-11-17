@@ -35,11 +35,13 @@ pub use crate::durable::objects::{
     BurstState, Cluster, ClusterConfig, ClusterReplica, ClusterReplicaSize,
     ClusterSystemConfiguration, ClusterVariant, ClusterVariantManaged, Comment, Database,
     DefaultPrivilege, IndexColumn, IndexColumns, IntrospectionSourceIndex, Item, ItemColumn,
-    ItemColumns, ItemMetadata, NetworkPolicy, QueryPolicy, ReconfigurationState,
-    ReconfigurationStatus, ReconfigurationTarget, ReplicaConfig, ReplicaLocation,
-    ReplicaSystemConfiguration, Role, RoleAuth, Schema, SourceReference, SourceReferences,
-    StorageCollectionMetadata, SystemConfiguration, SystemObjectDescription, SystemObjectMapping,
-    UnfinalizedShard, managed_cluster_replica_name,
+    ItemColumns, ItemMetadata, LoadAttempt, LoadCutover, LoadCutoverReason, LoadEvidence,
+    LoadFloor, LoadState, LoadVerdict, NetworkPolicy, QueryPolicy, ReconfigurationOrigin,
+    ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget, ReconfigurationTrial,
+    ReplicaConfig, ReplicaLocation, ReplicaSystemConfiguration, Role, RoleAuth, Schema,
+    SourceReference, SourceReferences, StorageCollectionMetadata, SystemConfiguration,
+    SystemObjectDescription, SystemObjectMapping, TrialKind, UnfinalizedShard,
+    managed_cluster_replica_name,
 };
 pub use crate::durable::persist::shard_id;
 use crate::durable::persist::{Timestamp, UnopenedPersistCatalogState};

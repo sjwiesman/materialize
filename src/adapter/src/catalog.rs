@@ -2593,12 +2593,15 @@ mod try_cast_tests;
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
+    use std::time::Duration;
     use std::{env, iter};
 
     use itertools::Itertools;
     use mz_catalog::memory::objects::{
-        CatalogItem, ClusterConfig, ClusterVariant, ClusterVariantManaged, ReconfigurationState,
-        ReconfigurationStatus, ReconfigurationTarget,
+        CatalogItem, ClusterConfig, ClusterVariant, ClusterVariantManaged, LoadAttempt,
+        LoadCutover, LoadCutoverReason, LoadEvidence, LoadFloor, LoadState, LoadVerdict,
+        ReconfigurationOrigin, ReconfigurationState, ReconfigurationStatus, ReconfigurationTarget,
+        ReconfigurationTrial, TrialKind,
     };
     use mz_controller::clusters::ReplicaLogging;
     use mz_postgres_util::{query, sql};
@@ -2611,6 +2614,7 @@ mod tests {
     use mz_catalog::durable::{CatalogError, DurableCatalogError, FenceError, test_bootstrap_args};
     use mz_controller_types::{ClusterId, ReplicaId};
     use mz_expr::{Eval, MirScalarExpr};
+    use mz_ore::collections::CollectionExt;
     use mz_ore::now::to_datetime;
     use mz_ore::{assert_err, assert_ok, soft_assert_eq_or_log, task};
     use mz_persist_client::PersistClient;
@@ -2629,7 +2633,7 @@ mod tests {
     };
     use mz_sql::plan::{
         AutoScalingStrategy, CoercibleScalarExpr, ExprContext, HirScalarExpr, HirToMirConfig,
-        OnHydration, OnTimeoutAction, PlanContext, QueryContext, QueryLifetime, Scope,
+        OnHydration, OnLoad, OnTimeoutAction, PlanContext, QueryContext, QueryLifetime, Scope,
         StatementContext,
     };
     use mz_sql::session::user::MZ_SYSTEM_ROLE_ID;
@@ -2826,8 +2830,11 @@ mod tests {
                     deadline: Timestamp::MIN,
                     on_timeout: OnTimeoutAction::Rollback,
                     status: ReconfigurationStatus::TimedOut,
+                    origin: ReconfigurationOrigin::User,
+                    trial: None,
                 }),
                 burst: None,
+                load: None,
             }),
             workload_class: None,
             query_policy: None,
@@ -2887,6 +2894,153 @@ mod tests {
                 .await
                 .expect("unable to open read-only debug catalog");
         assert_eq!(catalog.cluster_replica_sizes().0, durable_sizes.0);
+        catalog.expire().await;
+    }
+
+    #[mz_ore::test(tokio::test)]
+    #[cfg_attr(miri, ignore)] // unsupported operation: can't call foreign function `TLS_client_method` on OS `linux`
+    async fn test_on_load_state_persists_and_rejects_sources() {
+        let persist_client = PersistClient::new_for_tests().await;
+        let organization_id = Uuid::new_v4();
+        let bootstrap_args = test_bootstrap_args();
+        let mut catalog =
+            Catalog::open_debug_catalog(persist_client.clone(), organization_id, &bootstrap_args)
+                .await
+                .expect("unable to open debug catalog");
+
+        let small = "scale=1,workers=1".to_string();
+        let large = "scale=1,workers=4".to_string();
+        let logging = ReplicaLogging {
+            log_logging: false,
+            interval: None,
+        };
+        // The adapter rejects `ON LOAD` statements, so the cluster is written
+        // through the catalog directly.
+        let managed = ClusterVariantManaged {
+            size: small.clone(),
+            availability_zones: Vec::new(),
+            logging: logging.clone(),
+            arrangement_compression: false,
+            replication_factor: 0,
+            optimizer_feature_overrides: Default::default(),
+            schedule: Default::default(),
+            auto_scaling_strategy: Some(AutoScalingStrategy {
+                on_hydration: None,
+                on_load: Some(OnLoad {
+                    min_size: small.clone(),
+                    max_size: large.clone(),
+                    scale_down_after: Some(Duration::from_secs(3600)),
+                }),
+            }),
+            reconfiguration: Some(ReconfigurationState {
+                target: ReconfigurationTarget {
+                    size: large.clone(),
+                    replication_factor: 0,
+                    availability_zones: Vec::new(),
+                    logging,
+                    arrangement_compression: false,
+                },
+                deadline: Timestamp::new(2_000),
+                on_timeout: OnTimeoutAction::Rollback,
+                status: ReconfigurationStatus::InProgress,
+                origin: ReconfigurationOrigin::LoadAutoscaling,
+                trial: Some(ReconfigurationTrial {
+                    kind: TrialKind::Up,
+                    hold_for: Duration::from_secs(300),
+                    deadline: Timestamp::new(2_000),
+                    hold_started: Some(Timestamp::new(1_000)),
+                }),
+            }),
+            burst: None,
+            load: Some(LoadState {
+                fingerprint: 7,
+                attempt: Some(LoadAttempt {
+                    from_size: small.clone(),
+                    target_size: large.clone(),
+                    behind: vec![GlobalId::User(1)],
+                }),
+                last_cutover: Some(LoadCutover {
+                    at: Timestamp::new(500),
+                    from_size: large.clone(),
+                    reason: LoadCutoverReason::DownTrial,
+                }),
+                evidence: vec![LoadEvidence {
+                    size: small.clone(),
+                    verdict: LoadVerdict::NoGain,
+                    at: Timestamp::new(100),
+                    interval: Duration::from_secs(86_400),
+                }],
+                floors: vec![LoadFloor {
+                    dataflow: GlobalId::User(2),
+                    lag: Duration::from_secs(5),
+                }],
+                hydration_peak_ratio: Some(2_000),
+            }),
+        };
+        let commit_ts = catalog.current_upper().await;
+        let cluster_id = catalog
+            .allocate_user_cluster_id(commit_ts)
+            .await
+            .expect("allocate cluster id");
+        let commit_ts = catalog.current_upper().await;
+        catalog
+            .transact(
+                None,
+                commit_ts,
+                None,
+                vec![Op::CreateCluster {
+                    id: cluster_id,
+                    name: "on_load".into(),
+                    introspection_sources: Vec::new(),
+                    owner_id: MZ_SYSTEM_ROLE_ID,
+                    config: ClusterConfig {
+                        variant: ClusterVariant::Managed(managed.clone()),
+                        workload_class: None,
+                        query_policy: None,
+                    },
+                }],
+            )
+            .await
+            .expect("create cluster");
+        catalog.expire().await;
+
+        let catalog = Catalog::open_debug_catalog(persist_client, organization_id, &bootstrap_args)
+            .await
+            .expect("unable to open debug catalog");
+        let cluster = catalog.get_cluster(cluster_id);
+        assert_eq!(
+            cluster.config.variant,
+            ClusterVariant::Managed(managed.clone())
+        );
+        assert_eq!(
+            mz_sql::catalog::CatalogCluster::auto_scaling_strategy(cluster),
+            managed.auto_scaling_strategy.as_ref(),
+        );
+
+        let conn_catalog = catalog.for_system_session();
+        let stmt = mz_sql::parse::parse(
+            "CREATE SOURCE materialize.public.hook IN CLUSTER on_load FROM WEBHOOK BODY FORMAT TEXT",
+        )
+        .expect("valid SQL")
+        .into_element()
+        .ast;
+        let (stmt, resolved_ids) = names::resolve(&conn_catalog, stmt).expect("resolvable");
+        let err = mz_sql::plan::plan(
+            None,
+            &conn_catalog,
+            stmt,
+            &mz_sql::plan::Params::empty(),
+            &resolved_ids,
+        )
+        .expect_err("a source on an ON LOAD cluster must not plan");
+        assert!(
+            matches!(
+                &err,
+                mz_sql::plan::PlanError::SourceOrSinkOnOnLoadCluster { cluster_name }
+                    if cluster_name == "on_load"
+            ),
+            "unexpected error: {err:?}",
+        );
         catalog.expire().await;
     }
 

@@ -24,7 +24,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use mz_compute_types::config::ComputeReplicaLogging;
-use mz_repr::Timestamp;
+use mz_repr::{GlobalId, Timestamp};
 
 /// The availability zones a managed cluster's replicas are provisioned across,
 /// in configured *provisioning order*.
@@ -98,6 +98,7 @@ pub struct ExpectedClusterState {
     pub auto_scaling_policy: Option<AutoScalingPolicy>,
     pub reconfiguration: Option<ReconfigurationRecord>,
     pub burst: Option<BurstRecord>,
+    pub load: Option<LoadRecord>,
 }
 
 /// The status of the latest graceful reconfiguration record.
@@ -123,6 +124,31 @@ pub struct ReconfigurationRecord {
     /// What to do once the deadline passes with the target not yet hydrated.
     pub on_timeout: OnTimeout,
     pub status: ReconfigurationStatus,
+    pub origin: ReconfigurationOrigin,
+    pub trial: Option<ReconfigurationTrial>,
+}
+
+/// Mirror of `mz_catalog::durable::ReconfigurationOrigin`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconfigurationOrigin {
+    User,
+    LoadAutoscaling,
+}
+
+/// Mirror of `mz_catalog::durable::ReconfigurationTrial`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReconfigurationTrial {
+    pub kind: TrialKind,
+    pub hold_for: Duration,
+    pub deadline: Timestamp,
+    pub hold_started: Option<Timestamp>,
+}
+
+/// Mirror of `mz_catalog::durable::TrialKind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrialKind {
+    Up,
+    Down,
 }
 
 impl ReconfigurationRecord {
@@ -254,11 +280,79 @@ pub enum ClusterSchedule {
 /// durable state. A plain-data mirror of `mz_sql::plan::AutoScalingStrategy`,
 /// free of a dependency on the SQL layer.
 ///
-/// Extensible: future strategies are additional optional sub-policies. v1 carries
-/// only the `ON HYDRATION` burst policy.
+/// Extensible: strategies are optional sub-policies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutoScalingPolicy {
     pub on_hydration: Option<OnHydrationPolicy>,
+    pub on_load: Option<OnLoadPolicy>,
+}
+
+/// The `ON LOAD` sub-policy. A plain-data mirror of `mz_sql::plan::OnLoad`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OnLoadPolicy {
+    pub min_size: String,
+    pub max_size: String,
+    pub scale_down_after: Option<Duration>,
+}
+
+/// Mirror of `mz_catalog::durable::LoadState`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadRecord {
+    pub fingerprint: u64,
+    pub attempt: Option<LoadAttempt>,
+    pub last_cutover: Option<LoadCutover>,
+    pub evidence: Vec<LoadEvidence>,
+    pub floors: Vec<LoadFloor>,
+    pub hydration_peak_ratio: Option<u32>,
+}
+
+/// Mirror of `mz_catalog::durable::LoadAttempt`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadAttempt {
+    pub from_size: String,
+    pub target_size: String,
+    pub behind: Vec<GlobalId>,
+}
+
+/// Mirror of `mz_catalog::durable::LoadCutover`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadCutover {
+    pub at: Timestamp,
+    pub from_size: String,
+    pub reason: LoadCutoverReason,
+}
+
+/// Mirror of `mz_catalog::durable::LoadCutoverReason`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadCutoverReason {
+    UpTrial,
+    DownTrial,
+    HighHeap,
+    OutOfMemory,
+    ProbationReturn,
+}
+
+/// Mirror of `mz_catalog::durable::LoadEvidence`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadEvidence {
+    pub size: String,
+    pub verdict: LoadVerdict,
+    pub at: Timestamp,
+    pub interval: Duration,
+}
+
+/// Mirror of `mz_catalog::durable::LoadVerdict`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadVerdict {
+    Insufficient,
+    NoGain,
+}
+
+/// Mirror of `mz_catalog::durable::LoadFloor`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoadFloor {
+    pub dataflow: GlobalId,
+    pub lag: Duration,
 }
 
 /// The `ON HYDRATION` burst sub-policy: while some object on the cluster is not

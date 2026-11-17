@@ -40,8 +40,9 @@ use timely::progress::Antichain;
 // ctx vocabulary, so re-export them here.
 pub use mz_adapter_types::cluster_state::{
     AutoScalingPolicy, AvailabilityZones, BurstAudit, BurstFinishCause, BurstRecord,
-    ClusterSchedule, ExpectedClusterState, OnHydrationPolicy, OnTimeout, ReconfigurationAudit,
-    ReconfigurationRecord, ReconfigurationStatus, ReconfigurationTarget, ReplicaShape,
+    ClusterSchedule, ExpectedClusterState, LoadRecord, OnHydrationPolicy, OnLoadPolicy, OnTimeout,
+    ReconfigurationAudit, ReconfigurationOrigin, ReconfigurationRecord, ReconfigurationStatus,
+    ReconfigurationTarget, ReconfigurationTrial, ReplicaShape, TrialKind,
 };
 
 /// A replica that actually exists on a cluster, as observed through the ctx.
@@ -240,6 +241,8 @@ pub struct ClusterState {
     pub reconfiguration: Option<ReconfigurationRecord>,
     /// In-flight hydration burst, if any.
     pub burst: Option<BurstRecord>,
+    /// Durable state of the `ON LOAD` autoscaling strategy, if any.
+    pub load: Option<LoadRecord>,
     /// The replicas that actually exist on the cluster, owned or not.
     pub replicas: Vec<ObservedReplica>,
 }
@@ -268,6 +271,7 @@ impl ClusterState {
             auto_scaling_policy: self.auto_scaling_policy.clone(),
             reconfiguration: self.reconfiguration.clone(),
             burst: self.burst.clone(),
+            load: self.load.clone(),
         }
     }
 }

@@ -14,17 +14,19 @@ use mz_audit_log::{
     AlterAddColumnV1, AlterApplyReplacementV1, AlterClusterReconfigurationV1,
     AlterDefaultPrivilegeV1, AlterRetainHistoryV1, AlterSetClusterV1, AlterSourceSinkV1,
     AlterSourceTimestampIntervalV1, BurstFinishCauseV1, ClusterHydrationBurstV1,
-    ClusterReplicaLoggingV1, CreateClusterReplicaV1, CreateClusterReplicaV2,
+    ClusterLoadEvidenceClearedV1, ClusterLoadEvidenceRecordedV1, ClusterLoadStatusV1,
+    ClusterLoadTrialV1, ClusterReplicaLoggingV1, CreateClusterReplicaV1, CreateClusterReplicaV2,
     CreateClusterReplicaV3, CreateClusterReplicaV4, CreateIndexV1, CreateMaterializedViewV1,
     CreateOrDropClusterReplicaReasonV1, CreateRoleV1, CreateSourceSinkV1, CreateSourceSinkV2,
     CreateSourceSinkV3, CreateSourceSinkV4, DropClusterReplicaV1, DropClusterReplicaV2,
     DropClusterReplicaV3, EventDetails, EventType, EventV1, FromPreviousIdV1, FullNameV1,
-    GrantRoleV1, GrantRoleV2, HydrationBurstLifecycleV1, IdFullNameV1, IdNameV1,
-    ReconfigurationLifecycleV1, RefreshDecisionWithReasonV1, RefreshDecisionWithReasonV2,
-    RenameClusterReplicaV1, RenameClusterV1, RenameItemV1, RenameSchemaV1, RevokeRoleV1,
-    RevokeRoleV2, RotateKeysV1, SchedulingDecisionV1, SchedulingDecisionsWithReasonsV1,
-    SchedulingDecisionsWithReasonsV2, SchemaV1, SchemaV2, SetV1, ToNewIdV1, UpdateItemV1,
-    UpdateOwnerV1, UpdatePrivilegeV1, VersionedEvent,
+    GrantRoleV1, GrantRoleV2, HydrationBurstLifecycleV1, IdFullNameV1, IdNameV1, LoadStatusV1,
+    LoadTrialDataflowV1, LoadTrialFailureV1, LoadTrialGainV1, LoadTrialKindV1,
+    LoadTrialLifecycleV1, LoadVerdictV1, ReconfigurationLifecycleV1, RefreshDecisionWithReasonV1,
+    RefreshDecisionWithReasonV2, RenameClusterReplicaV1, RenameClusterV1, RenameItemV1,
+    RenameSchemaV1, RevokeRoleV1, RevokeRoleV2, RotateKeysV1, SchedulingDecisionV1,
+    SchedulingDecisionsWithReasonsV1, SchedulingDecisionsWithReasonsV2, SchemaV1, SchemaV2, SetV1,
+    ToNewIdV1, UpdateItemV1, UpdateOwnerV1, UpdatePrivilegeV1, VersionedEvent,
 };
 use mz_proto::TryFromProtoError;
 
@@ -419,6 +421,287 @@ impl RustType<proto::audit_log_event_v1::ClusterHydrationBurstV1> for ClusterHyd
                 .map(|cause| cause.into_rust())
                 .transpose()?,
             burst_size: proto.burst_size,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadTrialLifecycleV1> for LoadTrialLifecycleV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadTrialLifecycleV1 {
+        use proto::audit_log_event_v1::load_trial_lifecycle_v1::Transition;
+        let transition = match self {
+            LoadTrialLifecycleV1::Started => Transition::Started(Empty {}),
+            LoadTrialLifecycleV1::Passed => Transition::Passed(Empty {}),
+            LoadTrialLifecycleV1::Failed => Transition::Failed(Empty {}),
+        };
+        proto::audit_log_event_v1::LoadTrialLifecycleV1 { transition }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadTrialLifecycleV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::load_trial_lifecycle_v1::Transition;
+        Ok(match proto.transition {
+            Transition::Started(_) => LoadTrialLifecycleV1::Started,
+            Transition::Passed(_) => LoadTrialLifecycleV1::Passed,
+            Transition::Failed(_) => LoadTrialLifecycleV1::Failed,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadTrialKindV1> for LoadTrialKindV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadTrialKindV1 {
+        use proto::audit_log_event_v1::load_trial_kind_v1::Kind;
+        let kind = match self {
+            LoadTrialKindV1::Up => Kind::Up(Empty {}),
+            LoadTrialKindV1::Down => Kind::Down(Empty {}),
+        };
+        proto::audit_log_event_v1::LoadTrialKindV1 { kind }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadTrialKindV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::load_trial_kind_v1::Kind;
+        Ok(match proto.kind {
+            Kind::Up(_) => LoadTrialKindV1::Up,
+            Kind::Down(_) => LoadTrialKindV1::Down,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadTrialFailureV1> for LoadTrialFailureV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadTrialFailureV1 {
+        use proto::audit_log_event_v1::load_trial_failure_v1::Failure;
+        let failure = match self {
+            LoadTrialFailureV1::Lag => Failure::Lag(Empty {}),
+            LoadTrialFailureV1::LagLastThird => Failure::LagLastThird(Empty {}),
+            LoadTrialFailureV1::Heap => Failure::Heap(Empty {}),
+            LoadTrialFailureV1::OutOfMemory => Failure::OutOfMemory(Empty {}),
+            LoadTrialFailureV1::NotHydrated => Failure::NotHydrated(Empty {}),
+        };
+        proto::audit_log_event_v1::LoadTrialFailureV1 { failure }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadTrialFailureV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::load_trial_failure_v1::Failure;
+        Ok(match proto.failure {
+            Failure::Lag(_) => LoadTrialFailureV1::Lag,
+            Failure::LagLastThird(_) => LoadTrialFailureV1::LagLastThird,
+            Failure::Heap(_) => LoadTrialFailureV1::Heap,
+            Failure::OutOfMemory(_) => LoadTrialFailureV1::OutOfMemory,
+            Failure::NotHydrated(_) => LoadTrialFailureV1::NotHydrated,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadTrialGainV1> for LoadTrialGainV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadTrialGainV1 {
+        use proto::audit_log_event_v1::load_trial_gain_v1::Gain;
+        let gain = match self {
+            LoadTrialGainV1::Fresh => Gain::Fresh(Empty {}),
+            LoadTrialGainV1::Faster => Gain::Faster(Empty {}),
+            LoadTrialGainV1::Closer => Gain::Closer(Empty {}),
+        };
+        proto::audit_log_event_v1::LoadTrialGainV1 { gain }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadTrialGainV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::load_trial_gain_v1::Gain;
+        Ok(match proto.gain {
+            Gain::Fresh(_) => LoadTrialGainV1::Fresh,
+            Gain::Faster(_) => LoadTrialGainV1::Faster,
+            Gain::Closer(_) => LoadTrialGainV1::Closer,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadVerdictV1> for LoadVerdictV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadVerdictV1 {
+        use proto::audit_log_event_v1::load_verdict_v1::Verdict;
+        let verdict = match self {
+            LoadVerdictV1::Insufficient => Verdict::Insufficient(Empty {}),
+            LoadVerdictV1::NoGain => Verdict::NoGain(Empty {}),
+        };
+        proto::audit_log_event_v1::LoadVerdictV1 { verdict }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadVerdictV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::load_verdict_v1::Verdict;
+        Ok(match proto.verdict {
+            Verdict::Insufficient(_) => LoadVerdictV1::Insufficient,
+            Verdict::NoGain(_) => LoadVerdictV1::NoGain,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadStatusV1> for LoadStatusV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadStatusV1 {
+        use proto::audit_log_event_v1::load_status_v1::Status;
+        let status = match self {
+            LoadStatusV1::Steady => Status::Steady(Empty {}),
+            LoadStatusV1::TrialUp => Status::TrialUp(Empty {}),
+            LoadStatusV1::TrialDown => Status::TrialDown(Empty {}),
+            LoadStatusV1::ScalingUp => Status::ScalingUp(Empty {}),
+            LoadStatusV1::NotScalable => Status::NotScalable(Empty {}),
+            LoadStatusV1::Waiting => Status::Waiting(Empty {}),
+            LoadStatusV1::AtMax => Status::AtMax(Empty {}),
+            LoadStatusV1::AtMin => Status::AtMin(Empty {}),
+            LoadStatusV1::OutOfMemoryAtMax => Status::OutOfMemoryAtMax(Empty {}),
+            LoadStatusV1::WarmingUp => Status::WarmingUp(Empty {}),
+        };
+        proto::audit_log_event_v1::LoadStatusV1 { status }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadStatusV1,
+    ) -> Result<Self, TryFromProtoError> {
+        use proto::audit_log_event_v1::load_status_v1::Status;
+        Ok(match proto.status {
+            Status::Steady(_) => LoadStatusV1::Steady,
+            Status::TrialUp(_) => LoadStatusV1::TrialUp,
+            Status::TrialDown(_) => LoadStatusV1::TrialDown,
+            Status::ScalingUp(_) => LoadStatusV1::ScalingUp,
+            Status::NotScalable(_) => LoadStatusV1::NotScalable,
+            Status::Waiting(_) => LoadStatusV1::Waiting,
+            Status::AtMax(_) => LoadStatusV1::AtMax,
+            Status::AtMin(_) => LoadStatusV1::AtMin,
+            Status::OutOfMemoryAtMax(_) => LoadStatusV1::OutOfMemoryAtMax,
+            Status::WarmingUp(_) => LoadStatusV1::WarmingUp,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::LoadTrialDataflowV1> for LoadTrialDataflowV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::LoadTrialDataflowV1 {
+        proto::audit_log_event_v1::LoadTrialDataflowV1 {
+            dataflow_id: self.dataflow_id.clone(),
+            current_lag_ms: self.current_lag_ms,
+            current_progress_permille: self.current_progress_permille,
+            candidate_lag_ms: self.candidate_lag_ms,
+            candidate_progress_permille: self.candidate_progress_permille,
+            gain: self.gain.map(|gain| gain.into_proto()),
+        }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::LoadTrialDataflowV1,
+    ) -> Result<Self, TryFromProtoError> {
+        Ok(LoadTrialDataflowV1 {
+            dataflow_id: proto.dataflow_id,
+            current_lag_ms: proto.current_lag_ms,
+            current_progress_permille: proto.current_progress_permille,
+            candidate_lag_ms: proto.candidate_lag_ms,
+            candidate_progress_permille: proto.candidate_progress_permille,
+            gain: proto.gain.map(|gain| gain.into_rust()).transpose()?,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::ClusterLoadTrialV1> for ClusterLoadTrialV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::ClusterLoadTrialV1 {
+        proto::audit_log_event_v1::ClusterLoadTrialV1 {
+            cluster_id: self.cluster_id.clone(),
+            cluster_name: self.cluster_name.clone(),
+            transition: self.transition.into_proto(),
+            kind: self.kind.into_proto(),
+            from_size: self.from_size.clone(),
+            candidate_size: self.candidate_size.clone(),
+            failure: self.failure.map(|failure| failure.into_proto()),
+            dataflows: self.dataflows.iter().map(RustType::into_proto).collect(),
+        }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::ClusterLoadTrialV1,
+    ) -> Result<Self, TryFromProtoError> {
+        Ok(ClusterLoadTrialV1 {
+            cluster_id: proto.cluster_id,
+            cluster_name: proto.cluster_name,
+            transition: proto.transition.into_rust()?,
+            kind: proto.kind.into_rust()?,
+            from_size: proto.from_size,
+            candidate_size: proto.candidate_size,
+            failure: proto
+                .failure
+                .map(|failure| failure.into_rust())
+                .transpose()?,
+            dataflows: proto
+                .dataflows
+                .into_iter()
+                .map(RustType::from_proto)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::ClusterLoadEvidenceRecordedV1>
+    for ClusterLoadEvidenceRecordedV1
+{
+    fn into_proto(&self) -> proto::audit_log_event_v1::ClusterLoadEvidenceRecordedV1 {
+        proto::audit_log_event_v1::ClusterLoadEvidenceRecordedV1 {
+            cluster_id: self.cluster_id.clone(),
+            cluster_name: self.cluster_name.clone(),
+            size: self.size.clone(),
+            verdict: self.verdict.into_proto(),
+            interval_ms: self.interval_ms,
+        }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::ClusterLoadEvidenceRecordedV1,
+    ) -> Result<Self, TryFromProtoError> {
+        Ok(ClusterLoadEvidenceRecordedV1 {
+            cluster_id: proto.cluster_id,
+            cluster_name: proto.cluster_name,
+            size: proto.size,
+            verdict: proto.verdict.into_rust()?,
+            interval_ms: proto.interval_ms,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::ClusterLoadEvidenceClearedV1>
+    for ClusterLoadEvidenceClearedV1
+{
+    fn into_proto(&self) -> proto::audit_log_event_v1::ClusterLoadEvidenceClearedV1 {
+        proto::audit_log_event_v1::ClusterLoadEvidenceClearedV1 {
+            cluster_id: self.cluster_id.clone(),
+            cluster_name: self.cluster_name.clone(),
+        }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::ClusterLoadEvidenceClearedV1,
+    ) -> Result<Self, TryFromProtoError> {
+        Ok(ClusterLoadEvidenceClearedV1 {
+            cluster_id: proto.cluster_id,
+            cluster_name: proto.cluster_name,
+        })
+    }
+}
+
+impl RustType<proto::audit_log_event_v1::ClusterLoadStatusV1> for ClusterLoadStatusV1 {
+    fn into_proto(&self) -> proto::audit_log_event_v1::ClusterLoadStatusV1 {
+        proto::audit_log_event_v1::ClusterLoadStatusV1 {
+            cluster_id: self.cluster_id.clone(),
+            cluster_name: self.cluster_name.clone(),
+            status: self.status.into_proto(),
+        }
+    }
+
+    fn from_proto(
+        proto: proto::audit_log_event_v1::ClusterLoadStatusV1,
+    ) -> Result<Self, TryFromProtoError> {
+        Ok(ClusterLoadStatusV1 {
+            cluster_id: proto.cluster_id,
+            cluster_name: proto.cluster_name,
+            status: proto.status.into_rust()?,
         })
     }
 }
@@ -1454,6 +1737,14 @@ impl RustType<proto::audit_log_event_v1::Details> for EventDetails {
             EventDetails::ClusterHydrationBurstV1(details) => {
                 ClusterHydrationBurstV1(details.into_proto())
             }
+            EventDetails::ClusterLoadTrialV1(details) => ClusterLoadTrialV1(details.into_proto()),
+            EventDetails::ClusterLoadEvidenceRecordedV1(details) => {
+                ClusterLoadEvidenceRecordedV1(details.into_proto())
+            }
+            EventDetails::ClusterLoadEvidenceClearedV1(details) => {
+                ClusterLoadEvidenceClearedV1(details.into_proto())
+            }
+            EventDetails::ClusterLoadStatusV1(details) => ClusterLoadStatusV1(details.into_proto()),
             EventDetails::ToNewIdV1(details) => ToNewIdV1(details.into_proto()),
             EventDetails::FromPreviousIdV1(details) => FromPreviousIdV1(details.into_proto()),
             EventDetails::SetV1(details) => SetV1(details.into_proto()),
@@ -1547,6 +1838,18 @@ impl RustType<proto::audit_log_event_v1::Details> for EventDetails {
             ),
             ClusterHydrationBurstV1(details) => {
                 Ok(EventDetails::ClusterHydrationBurstV1(details.into_rust()?))
+            }
+            ClusterLoadTrialV1(details) => {
+                Ok(EventDetails::ClusterLoadTrialV1(details.into_rust()?))
+            }
+            ClusterLoadEvidenceRecordedV1(details) => Ok(
+                EventDetails::ClusterLoadEvidenceRecordedV1(details.into_rust()?),
+            ),
+            ClusterLoadEvidenceClearedV1(details) => Ok(
+                EventDetails::ClusterLoadEvidenceClearedV1(details.into_rust()?),
+            ),
+            ClusterLoadStatusV1(details) => {
+                Ok(EventDetails::ClusterLoadStatusV1(details.into_rust()?))
             }
         }
     }
