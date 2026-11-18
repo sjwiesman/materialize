@@ -1555,6 +1555,7 @@ pub static BUILTINS_STATIC: LazyLock<Vec<Builtin<NameReference>>> = LazyLock::ne
         Builtin::Source(&MZ_CLUSTER_REPLICA_BUSY_HISTORY),
         Builtin::Source(&MZ_CLUSTER_LOAD_HISTORY),
         Builtin::Source(&MZ_CLUSTER_LOAD_DATAFLOW_HISTORY),
+        Builtin::Table(&MZ_CLUSTER_LOAD_RECOMMENDATIONS),
     ];
 
     builtin_items.extend(notice::builtins());

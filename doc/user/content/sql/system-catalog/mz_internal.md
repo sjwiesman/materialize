@@ -194,15 +194,15 @@ shape is in [`mz_clusters`](../mz_catalog/#mz_clusters).
 
 The `mz_cluster_auto_scaling_strategies` collection shows the configured
 `AUTO SCALING STRATEGY` of each managed cluster that has one, together with any
-in-flight autoscaling state. A row is present while a strategy is configured or
-an autoscaling action is running.
+autoscaling runtime state. A row is present while a strategy is configured or
+runtime state exists.
 
 <!-- RELATION_SPEC mz_internal.mz_cluster_auto_scaling_strategies -->
 | Field          | Type      | Meaning                                                        |
 |----------------|-----------|----------------------------------------------------------------|
 | `cluster_id`   | [`text`]  | The ID of the cluster. Corresponds to [`mz_clusters.id`](../mz_catalog/#mz_clusters). |
-| `strategy`     | [`jsonb`] | **Unstable** The configured autoscaling policy, as JSON. Currently an `on_hydration` sub-policy carrying its `hydration_size` and optional `linger_duration`. |
-| `state`        | [`jsonb`] | **Unstable** The in-flight autoscaling runtime state, as JSON keyed by strategy, or `NULL` when nothing is running. Currently a `burst` key carrying the active hydration burst: its `burst_size`, `linger_duration`, and `steady_ready_at`. |
+| `strategy`     | [`jsonb`] | **Unstable** The configured autoscaling policy, as JSON keyed by sub-policy: `on_hydration` carrying its `hydration_size` and optional `linger_duration`, and `on_load` carrying its `min_size`, `max_size`, and optional `scale_down_after`. An unset sub-policy is `null`. |
+| `state`        | [`jsonb`] | **Unstable** The autoscaling runtime state, as JSON keyed by strategy, or `NULL` when there is none. A `burst` key carries the active hydration burst: its `burst_size`, `linger_duration`, and `steady_ready_at`. A `load` key carries what the `ON LOAD` strategy learned: the `fingerprint` of the cluster's dataflows it applies to, the `attempt` whose outcome is not yet recorded with the dataflows `behind` at its trigger, the `last_cutover` with its `from_size` and `reason`, the `evidence` per size with its `verdict`, `at`, and `interval`, the lag `floors` per dataflow, and the `hydration_peak_ratio` in thousandths. |
 
 ## `mz_cluster_load_history`
 
@@ -233,6 +233,7 @@ Summaries are retained for 7 days.
 | `busiest_worker_utilization` | [`double precision`]         | The mean share of each busy-time window that the busiest worker was not parked, on the busiest replica. `NULL` when no busy-time window arrived. |
 | `killed`                     | [`boolean`]                  | Whether a replica at the cluster's size was killed for exceeding its memory within the window. |
 | `hydrating`                  | [`boolean`]                  | Whether no replica qualified for the window and a replica at the cluster's size was hydrating within it. Such a window has no heap, busy-time, or dataflow values. |
+| `hydration_time`             | [`interval`]                 | How long the replicas at the cluster's size most recently took to hydrate after their creation or restart, as known at the end of the window. `NULL` when no such hydration was observed. |
 
 ## `mz_cluster_load_dataflow_history`
 
@@ -251,6 +252,37 @@ each sample the cluster's lag is the smallest among its replicas.
 | `median_lag`     | [`interval`]                 | The median over the window of how far the dataflow's output trailed its inputs, on the freshest replica at each sample. |
 | `progress_ratio` | [`double precision`]         | How far the dataflow's output advanced over the window divided by how far its inputs advanced. `NULL` when the inputs did not advance. |
 | `behind`         | [`boolean`]                  | Whether the dataflow's median lag exceeded its threshold while it was not working off a backlog. |
+
+## `mz_cluster_load_recommendations`
+
+The `mz_cluster_load_recommendations` table shows, for each managed cluster,
+what the rules of the `ON LOAD` autoscaling strategy conclude from its latest
+load summaries and what they would do next. Every managed cluster has a row,
+with or without an `ON LOAD` policy, and whether or not the strategy acts on
+its decisions. A cluster without a policy is evaluated as if its policy
+allowed every size of its size family. The rows are recomputed at every load
+sample, by default every 10 seconds, and change when the conclusion changes.
+
+<!-- RELATION_SPEC mz_internal.mz_cluster_load_recommendations -->
+| Field                        | Type                         | Meaning                                                        |
+|------------------------------|------------------------------|----------------------------------------------------------------|
+| `cluster_id`                 | [`text`]                     | The ID of the cluster. Corresponds to [`mz_clusters.id`](../mz_catalog/#mz_clusters). |
+| `size`                       | [`text`]                     | The size of the cluster. |
+| `min_size`                   | [`text`]                     | The smallest size the rules consider: the `MIN SIZE` of the cluster's `ON LOAD` policy, or the smallest size of the cluster's size family when it has none. `NULL` when the rules cannot be evaluated. |
+| `max_size`                   | [`text`]                     | The largest size the rules consider: the `MAX SIZE` of the cluster's `ON LOAD` policy, or the largest size of the cluster's size family when it has none. `NULL` when the rules cannot be evaluated. |
+| `status`                     | [`text`]                     | What the rules conclude: `steady`, `trial-up`, `trial-down`, `scaling-up`, `not-scalable`, `waiting`, `at-max`, `at-min`, `out-of-memory-at-max`, or `warming-up`. `NULL` when the rules cannot be evaluated, because the cluster's size is not an enabled size of its family or the cluster has not been sampled yet. |
+| `window_end`                 | [`timestamp with time zone`] | The end of the latest evaluation window at the cluster's size with lag, which `behind`, `heap_bytes`, `heap_fraction`, `busy_millicores`, and `busiest_worker_utilization` are read from. Corresponds to [`mz_cluster_load_history.window_end`](#mz_cluster_load_history). `NULL` when there is no recent one. |
+| `behind`                     | [`jsonb`]                    | The dataflows behind in that window, as a JSON array of objects with the `dataflow_id`, the median lag in milliseconds `lag_ms`, the `progress_ratio`, and the lag floor in milliseconds `floor_ms`, `null` without a floor. |
+| `heap_bytes`                 | [`uint8`]                    | The median heap of the fullest process over that window, in bytes, on the replica with the largest heap. |
+| `heap_fraction`              | [`double precision`]         | That heap as a fraction of its heap limit. |
+| `busy_millicores`            | [`uint8`]                    | The mean time the workers were not parked over that window, in thousandths of a core, on the busiest replica. |
+| `busiest_worker_utilization` | [`double precision`]         | The mean share of each busy-time window that the busiest worker was not parked, on the busiest replica. |
+| `next_action`                | [`text`]                     | What the rules would do next: `up-trial` or `down-trial` to try a size beside the current one, `scale-up` to move up without a trial, `cut-over` or `drop` to end a trial. `NULL` when they would do nothing. |
+| `target_size`                | [`text`]                     | The size `next_action` moves the cluster to or tries. |
+| `action_reason`              | [`text`]                     | Why a `scale-up` moves the cluster: `high-heap`, `out-of-memory`, or `probation-return`. Why a `drop` ends a trial: `failed`, `killed`, `not-hydrated`, or `deadline`. |
+| `blocking_evidence`          | [`jsonb`]                    | For `waiting` and `not-scalable`, the verdict that blocks the trial, as a JSON object with the `size` it concerns, the `verdict` (`insufficient` or `no-gain`), and when it was `recorded_at` and `expires_at`. |
+| `descent_blocked_by`         | [`text`]                     | Why the rules do not try the next smaller size when they would otherwise do nothing: `not-observed` (the quiet window is not filled or not observed enough), `behind` (a dataflow was behind or a replica killed in it), `heap` (the heap would not fit the smaller size), `busy` (the busy time would not fit its cores, or is missing), or `evidence`. `NULL` at the smallest size and while something is in flight. |
+| `last_hydration`             | [`interval`]                 | How long the replicas at the cluster's size most recently took to hydrate after their creation or restart. `NULL` when no such hydration was observed. |
 
 ## `mz_cluster_replica_metrics`
 

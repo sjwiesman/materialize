@@ -223,12 +223,18 @@ pub struct BehindDataflow {
 /// The values a status rests on.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatusFacts {
+    /// The end of the latest summary with lag at the realized size, which the other facts are
+    /// read from. `None` when there is none.
+    pub summary_at: Option<Timestamp>,
     /// The dataflows behind in the latest summary at the realized size.
     pub behind: Vec<BehindDataflow>,
     pub heap: Option<HeapSummary>,
     pub busy: Option<BusySummary>,
     /// The evidence that blocks the trial the status names, for `waiting` and `not-scalable`.
     pub blocking: Option<LoadEvidence>,
+    /// Why no down-trial is proposed, when the decision has no action, nothing is in flight,
+    /// and the realized size is above `MIN SIZE`.
+    pub down_block: Option<DownBlock>,
 }
 
 /// A trial to start.
@@ -485,6 +491,17 @@ impl<'a> Rules<'a> {
         let facts = self.facts();
         let (status, action) = self.decide(&facts);
         let mut facts = facts;
+        let in_flight = self
+            .input
+            .reconfiguration
+            .is_some_and(|r| r.is_in_progress());
+        if action.is_none() && !in_flight {
+            facts.down_block = self.down_target().and_then(|target| {
+                self.down_conditions(target)
+                    .err()
+                    .or_else(|| self.blocking_down(target).map(|_| DownBlock::Evidence))
+            });
+        }
         if matches!(status, LoadStatus::Waiting | LoadStatus::NotScalable) {
             facts.blocking = match status {
                 LoadStatus::NotScalable => self.blocking_up().cloned(),
@@ -573,10 +590,12 @@ impl<'a> Rules<'a> {
     fn facts(&self) -> StatusFacts {
         let latest = self.latest();
         StatusFacts {
+            summary_at: latest.map(|s| s.at),
             behind: latest.map(|s| self.behind(s)).unwrap_or_default(),
             heap: latest.and_then(|s| s.heap),
             busy: latest.and_then(|s| s.busy),
             blocking: None,
+            down_block: None,
         }
     }
 
@@ -867,7 +886,7 @@ impl<'a> Rules<'a> {
     }
 
     /// Whether the quiet window shows that a down-trial to `target` is worth trying, apart from
-    /// evidence.
+    /// evidence. Never [`DownBlock::Evidence`].
     fn down_conditions(&self, target: usize) -> Result<(), DownBlock> {
         let length = self.scale_down_after.max(
             self.input
@@ -1078,9 +1097,9 @@ impl<'a> Rules<'a> {
     }
 }
 
-/// Why a down-trial is not proposed, apart from evidence.
+/// Why a down-trial to the next smaller size is not proposed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DownBlock {
+pub enum DownBlock {
     /// The quiet window did not fill, or has too few summaries.
     NotObserved,
     /// A dataflow was behind or a replica killed within it.
@@ -1089,6 +1108,20 @@ enum DownBlock {
     Heap,
     /// The busy time would not fit the candidate's cores, or is missing from a summary.
     Busy,
+    /// The quiet window shows the descent is worth trying, and evidence blocks it.
+    Evidence,
+}
+
+impl DownBlock {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DownBlock::NotObserved => "not-observed",
+            DownBlock::Behind => "behind",
+            DownBlock::Heap => "heap",
+            DownBlock::Busy => "busy",
+            DownBlock::Evidence => "evidence",
+        }
+    }
 }
 
 fn millis(duration: Duration) -> u64 {

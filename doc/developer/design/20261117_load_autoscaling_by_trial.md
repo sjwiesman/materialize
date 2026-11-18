@@ -228,7 +228,8 @@ dataflows export.
 Summaries are appended to two relations and read back at startup, so a
 restart of `environmentd` does not empty the quiet window.
 `mz_internal.mz_cluster_load_history` has one row per cluster per evaluation
-window, with the heap, busy, and kill fields.
+window, with the heap, busy, and kill fields, and the cluster's last hydration
+time at its size, so a restart does not lose it either.
 `mz_internal.mz_cluster_load_dataflow_history` has one row per dataflow per
 evaluation window, with its lag, progress ratio, and whether it was behind.
 Both are retained for the longest window any rule reads, 7 days.

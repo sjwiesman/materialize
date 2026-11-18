@@ -594,18 +594,22 @@ fn down_trial_after_a_quiet_window() {
 #[mz_ore::test]
 fn down_trial_blocked_by_each_condition() {
     let proposed = |case: &Case| matches!(case.eval().action, Some(LoadAction::StartTrial(_)));
+    let blocked = |case: &Case| case.eval().facts.down_block;
     let base = || Case::new("c8", quiet_history("c8", 2, 4.0, 0.5));
     assert!(proposed(&base()));
+    assert_eq!(blocked(&base()), None);
 
     // At the minimum.
     let case = Case::new("c1", quiet_history("c1", 2, 1.0, 0.1));
     assert!(!proposed(&case));
     assert_eq!(case.eval().status, LoadStatus::AtMin);
+    assert_eq!(blocked(&case), None);
 
     // A short history does not fill the quiet window.
     let mut case = base();
     case.summaries.truncate(5);
     assert!(!proposed(&case));
+    assert_eq!(blocked(&case), Some(DownBlock::NotObserved));
     // A long last hydration lengthens it.
     let mut case = base();
     case.last_hydration = Some(Duration::from_secs(70 * 60));
@@ -618,6 +622,7 @@ fn down_trial_blocked_by_each_condition() {
     let mut case = base();
     case.summaries[3] = behind("c8", NOW - 30 * MINUTE, 5.0, 1.0);
     assert!(!proposed(&case));
+    assert_eq!(blocked(&case), Some(DownBlock::Behind));
     // A kill.
     let mut case = base();
     case.summaries[3].killed = true;
@@ -625,6 +630,7 @@ fn down_trial_blocked_by_each_condition() {
     // Heap: 23 GiB is 72% of c4.
     let case = Case::new("c8", quiet_history("c8", 2, 23.0, 0.5));
     assert!(!proposed(&case));
+    assert_eq!(blocked(&case), Some(DownBlock::Heap));
     // Heap that fits steady, but not with the hydration peak.
     let mut case = Case::new("c8", quiet_history("c8", 2, 20.0, 0.5));
     assert!(proposed(&case));
@@ -646,6 +652,7 @@ fn down_trial_blocked_by_each_condition() {
     let mut case = base();
     case.summaries[4].busy = None;
     assert!(!proposed(&case));
+    assert_eq!(blocked(&case), Some(DownBlock::Busy));
     // Evidence against c4, or against c8 itself.
     for size in ["c4", "c8"] {
         let mut case = base();
@@ -661,6 +668,7 @@ fn down_trial_blocked_by_each_condition() {
         assert_eq!(decision.action, None);
         assert_eq!(decision.status, LoadStatus::Waiting);
         assert_eq!(decision.facts.blocking.unwrap().size, size);
+        assert_eq!(decision.facts.down_block, Some(DownBlock::Evidence));
     }
     // Evidence against a smaller size does not block.
     let mut case = base();

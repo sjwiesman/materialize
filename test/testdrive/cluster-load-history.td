@@ -29,6 +29,7 @@ busy_millicores            uint8
 busiest_worker_utilization "double precision"
 killed                     boolean
 hydrating                  boolean
+hydration_time             interval
 
 > SELECT c.name, c.type FROM mz_columns c JOIN mz_objects o ON c.id = o.id JOIN mz_schemas s ON o.schema_id = s.id WHERE s.name = 'mz_internal' AND o.name = 'mz_cluster_load_dataflow_history' ORDER BY c.position
 cluster_id     text
@@ -73,6 +74,20 @@ true
 > SELECT count(*) FROM mz_internal.mz_cluster_load_dataflow_history d JOIN mz_internal.mz_object_global_ids g ON g.global_id = d.dataflow_id JOIN mz_objects o ON o.id = g.id WHERE o.name = 'load_refresh_mv'
 0
 
+# The cluster was created after the sampler started, so its hydration time is
+# known and recorded with its summaries.
+> SELECT count(h.hydration_time) > 0 FROM mz_internal.mz_cluster_load_history h JOIN mz_clusters c ON h.cluster_id = c.id WHERE c.name = 'load_c'
+true
+
+# A managed cluster without a policy has a recommendation, evaluated against
+# its whole size family.
+> SELECT count(*), bool_and(r.size = 'scale=1,workers=1'), bool_and(r.status IN ('steady', 'at-min', 'at-max', 'trial-up', 'trial-down', 'warming-up')), bool_and(r.min_size IS NOT NULL AND r.max_size IS NOT NULL), bool_and(r.window_end IS NOT NULL), bool_and(r.last_hydration IS NOT NULL), bool_and(jsonb_typeof(r.behind) = 'array') FROM mz_internal.mz_cluster_load_recommendations r JOIN mz_clusters c ON r.cluster_id = c.id WHERE c.name = 'load_c'
+1 true true true true true true
+
+# Every managed cluster has a row.
+> SELECT count(*) FROM mz_clusters c LEFT JOIN mz_internal.mz_cluster_load_recommendations r ON r.cluster_id = c.id WHERE c.managed AND r.cluster_id IS NULL
+0
+
 # Dataflow rows belong to a summary.
 > SELECT count(*) FROM mz_internal.mz_cluster_load_dataflow_history d JOIN mz_clusters c ON d.cluster_id = c.id LEFT JOIN mz_internal.mz_cluster_load_history h ON d.cluster_id = h.cluster_id AND d.window_end = h.window_end WHERE c.name = 'load_c' AND h.cluster_id IS NULL
 0
@@ -85,6 +100,10 @@ SELECT id FROM mz_clusters WHERE name = 'load_c'
 
 > SELECT count(*) > 0 FROM mz_internal.mz_cluster_load_history WHERE cluster_id = '${cluster-id}'
 true
+
+# ... and removes its recommendation.
+> SELECT count(*) FROM mz_internal.mz_cluster_load_recommendations WHERE cluster_id = '${cluster-id}'
+0
 
 > DROP TABLE load_t
 

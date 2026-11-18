@@ -19,41 +19,58 @@
 //!
 //! Summaries are appended to `mz_internal.mz_cluster_load_history` and
 //! `mz_internal.mz_cluster_load_dataflow_history`, and read back from them at startup, so the
-//! in-memory history survives a restart of `environmentd`. Samples, busy windows, kills, and
-//! warm-up state are in memory only. After a restart, a replica's warm-up starts over and the
-//! window in progress yields no summary, since it lacks its early samples.
+//! in-memory history survives a restart of `environmentd`. Each summary row also carries the
+//! cluster's last hydration time at its size, which restores [`ClusterLoad::last_hydration`].
+//! Samples, busy windows, kills, and warm-up state are in memory only. After a restart, a
+//! replica's warm-up starts over and the window in progress yields no summary, since it lacks
+//! its early samples.
+//!
+//! After every sample, [`load_rules_inputs`] assembles what the `ON LOAD` rules read of each
+//! managed cluster, the rules are evaluated without applying the decision, and the rows of
+//! `mz_internal.mz_cluster_load_recommendations` that changed are rewritten.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use mz_adapter_types::cluster_state::{LoadCutoverReason, LoadVerdict};
 use mz_adapter_types::dyncfgs::{
     LOAD_AUTOSCALING_DRAINING_PROGRESS_RATIO, LOAD_AUTOSCALING_EVALUATION_WINDOW,
     LOAD_AUTOSCALING_FLOOR_FACTOR, LOAD_AUTOSCALING_LAG_SAMPLE_INTERVAL,
     LOAD_AUTOSCALING_LAG_TOLERANCE, LOAD_AUTOSCALING_WARM_UP,
 };
-use mz_catalog::builtin::{MZ_CLUSTER_LOAD_DATAFLOW_HISTORY, MZ_CLUSTER_LOAD_HISTORY};
-use mz_catalog::memory::objects::{CatalogItem, ClusterVariant};
+use mz_catalog::builtin::{
+    MZ_CLUSTER_LOAD_DATAFLOW_HISTORY, MZ_CLUSTER_LOAD_HISTORY, MZ_CLUSTER_LOAD_RECOMMENDATIONS,
+};
+use mz_catalog::config::ClusterReplicaSizeMap;
+use mz_catalog::memory::objects::{CatalogItem, ClusterVariant, ClusterVariantManaged};
 use mz_cluster_client::ReplicaId;
-use mz_cluster_controller::ctx::LoadRecord;
+use mz_cluster_controller::ctx::{LoadRecord, OnLoadPolicy, ReconfigurationRecord, TrialKind};
+use mz_cluster_controller::load::rules::{
+    DropReason, LoadAction, LoadDecision, RuleParams, RulesInput, SizeCapacity, TrialObservation,
+    evaluate,
+};
 use mz_cluster_controller::load::{
     BusySummary, BusyWindow, DataflowFrontiers, DataflowSummary, HeapSummary, LoadSample,
-    LoadSummary, MemoryKill, ProcessHeap, ReplicaSample, SummaryParams, summarize, window_start,
+    LoadSummary, MemoryKill, ProcessHeap, ReplicaSample, SummaryParams, fingerprint, summarize,
+    window_start,
 };
 use mz_compute_client::controller::LoadFrontiers;
-use mz_controller::clusters::{ReplicaAllocation, ReplicaLocation};
+use mz_controller::clusters::ReplicaLocation;
 use mz_controller_types::ClusterId;
 use mz_dyncfg::ConfigSet;
 use mz_orchestrator::ServiceProcessMetrics;
 use mz_ore::now::EpochMillis;
 use mz_ore::task;
 use mz_repr::adt::interval::Interval;
+use mz_repr::adt::jsonb::JsonbPacker;
 use mz_repr::{Datum, Diff, GlobalId, Row, Timestamp};
 use mz_storage_client::controller::IntrospectionType;
 use mz_storage_types::dyncfgs::CLUSTER_LOAD_HISTORY_RETENTION_INTERVAL;
 use timely::progress::Antichain;
 use tracing::warn;
 
-use crate::catalog::cluster_state::project_expected;
+use crate::catalog::BuiltinTableUpdate;
+use crate::catalog::cluster_state::{process_heap_limit, project_expected, size_ladder};
 use crate::coord::{Coordinator, Message};
 
 /// What the coordinator observed of one cluster at one sample.
@@ -86,6 +103,10 @@ struct ReplicaTracker {
     hydrated_once: bool,
     /// The largest heap seen before the replica first hydrated.
     hydration_peak: Option<ProcessHeap>,
+    /// The first sample of the replica since its creation or last restart. `None` when the
+    /// replica was already running at the first sample after a restart of `environmentd`, so
+    /// that its hydration started at an unknown time.
+    first_seen: Option<Timestamp>,
 }
 
 /// The in-memory state of the load signal.
@@ -98,32 +119,51 @@ pub(crate) struct ClusterLoad {
     busy: BTreeMap<ReplicaId, Vec<BusyWindow>>,
     /// Each cluster's memory kills after the last summarized evaluation window.
     kills: BTreeMap<ClusterId, Vec<MemoryKill>>,
-    /// Each cluster's summaries within the retention interval, by window end.
-    summaries: BTreeMap<ClusterId, BTreeMap<Timestamp, LoadSummary>>,
+    /// Each cluster's summaries within the retention interval, ordered by window end, with at
+    /// most one per window end.
+    summaries: BTreeMap<ClusterId, Vec<LoadSummary>>,
+    /// Per cluster and replica size, how long the replicas at that size most recently took to
+    /// hydrate.
+    hydrations: BTreeMap<ClusterId, BTreeMap<String, Duration>>,
     /// The time of the latest recorded sample.
     last_sample: Option<Timestamp>,
 }
 
 impl ClusterLoad {
     /// The load summaries of a cluster within the retention interval, oldest first.
-    // TODO: Read by the `ON LOAD` strategy and the recommendations.
-    #[allow(dead_code)]
-    pub(crate) fn summaries(
-        &self,
-        cluster_id: ClusterId,
-    ) -> impl DoubleEndedIterator<Item = &LoadSummary> {
+    pub(crate) fn summaries(&self, cluster_id: ClusterId) -> &[LoadSummary] {
         self.summaries
             .get(&cluster_id)
-            .into_iter()
-            .flat_map(|summaries| summaries.values())
+            .map_or(&[], |summaries| summaries.as_slice())
     }
 
-    /// The largest heap of a replica's fullest process seen between its creation, or its last
-    /// restart, and its first hydration. `None` before any heap was reported then.
-    // TODO: Read by the `ON LOAD` strategy.
-    #[allow(dead_code)]
-    pub(crate) fn hydration_peak(&self, replica_id: ReplicaId) -> Option<ProcessHeap> {
-        self.replicas.get(&replica_id)?.hydration_peak
+    /// The fingerprint of the dataflows on a cluster at its latest sample. `None` before the
+    /// cluster's first sample since `environmentd` started.
+    pub(crate) fn fingerprint(&self, cluster_id: ClusterId) -> Option<u64> {
+        let sample = self.samples.get(&cluster_id)?.last()?;
+        Some(fingerprint(&sample.exports))
+    }
+
+    /// How long the replicas of a cluster at `size` most recently took from their creation, or
+    /// their last restart, to hydrated. Measured to the sample interval, and restored from
+    /// `mz_cluster_load_history` after a restart of `environmentd`. `None` when no such
+    /// hydration was seen within the retention interval.
+    pub(crate) fn last_hydration(&self, cluster_id: ClusterId, size: &str) -> Option<Duration> {
+        self.hydrations.get(&cluster_id)?.get(size).copied()
+    }
+
+    /// The largest heap of the fullest process of a cluster's replicas at `size` in its latest
+    /// sample, between each replica's creation, or last restart, and its first hydration. `None`
+    /// when no such replica reported a heap then.
+    pub(crate) fn hydration_peak(&self, cluster_id: ClusterId, size: &str) -> Option<u64> {
+        let sample = self.samples.get(&cluster_id)?.last()?;
+        sample
+            .replicas
+            .iter()
+            .filter(|(_, replica)| replica.size == size)
+            .filter_map(|(id, _)| self.replicas.get(id)?.hydration_peak)
+            .map(|heap| heap.bytes)
+            .max()
     }
 
     /// Records the busy windows in a batch of the `ReplicaBusyHistory` introspection subscribe.
@@ -176,11 +216,12 @@ impl ClusterLoad {
         if self.last_sample.is_some_and(|last| at <= last) {
             return Vec::new();
         }
+        let first = self.last_sample.is_none();
         self.last_sample = Some(at);
         let current_window = window_start(at, params.window);
         let mut new = Vec::new();
         for (cluster_id, observation) in observations {
-            let sample = self.sample(at, observation.clone());
+            let sample = self.sample(cluster_id, at, observation.clone(), first);
             let samples = self.samples.entry(cluster_id).or_default();
             samples.push(sample);
 
@@ -234,16 +275,25 @@ impl ClusterLoad {
             windows.retain(|window| window.end > current_window);
         }
         for (cluster_id, summary) in &new {
-            self.summaries
-                .entry(*cluster_id)
-                .or_default()
-                .insert(summary.at, summary.clone());
+            insert_summary(
+                self.summaries.entry(*cluster_id).or_default(),
+                summary.clone(),
+                true,
+            );
         }
         new
     }
 
-    /// Builds the sample of one cluster, and updates the state of its replicas.
-    fn sample(&mut self, at: Timestamp, observation: ClusterObservation) -> LoadSample {
+    /// Builds the sample of one cluster, and updates the state of its replicas and its
+    /// hydration times. `first` is whether this is the first sample since `environmentd`
+    /// started.
+    fn sample(
+        &mut self,
+        cluster_id: ClusterId,
+        at: Timestamp,
+        observation: ClusterObservation,
+        first: bool,
+    ) -> LoadSample {
         let ClusterObservation {
             size,
             record: _,
@@ -253,7 +303,13 @@ impl ClusterLoad {
         let replicas = replicas
             .into_iter()
             .map(|(replica_id, replica)| {
-                let tracker = self.replicas.entry(replica_id).or_default();
+                let tracker = self
+                    .replicas
+                    .entry(replica_id)
+                    .or_insert_with(|| ReplicaTracker {
+                        first_seen: (!first).then_some(at),
+                        ..Default::default()
+                    });
                 if replica.size != size {
                     tracker.eligible_since = None;
                 } else if replica.hydrated && tracker.eligible_since.is_none() {
@@ -262,6 +318,15 @@ impl ClusterLoad {
                 if !tracker.hydrated_once {
                     if replica.hydrated {
                         tracker.hydrated_once = true;
+                        if let Some(first_seen) = tracker.first_seen {
+                            let took = Duration::from_millis(
+                                u64::from(at).saturating_sub(u64::from(first_seen)),
+                            );
+                            self.hydrations
+                                .entry(cluster_id)
+                                .or_default()
+                                .insert(replica.size.clone(), took);
+                        }
                     } else if let Some(heap) = replica.heap {
                         let peak = tracker.hydration_peak.get_or_insert(heap);
                         if heap.bytes > peak.bytes {
@@ -287,14 +352,36 @@ impl ClusterLoad {
         }
     }
 
-    /// Adds summaries read back from the history relations. A summary already in memory wins.
-    pub(crate) fn restore(&mut self, summaries: Vec<(ClusterId, LoadSummary)>) {
-        for (cluster_id, summary) in summaries {
-            self.summaries
+    /// Adds summaries read back from the history relations, each with the hydration time at its
+    /// size as of its window. A summary or a hydration time already in memory wins.
+    pub(crate) fn restore(&mut self, summaries: Vec<RestoredSummary>) {
+        let mut hydrations: BTreeMap<(ClusterId, String), (Timestamp, Duration)> = BTreeMap::new();
+        for RestoredSummary {
+            cluster_id,
+            summary,
+            hydration_time,
+        } in summaries
+        {
+            if let Some(took) = hydration_time {
+                let latest = hydrations
+                    .entry((cluster_id, summary.size.clone()))
+                    .or_insert((summary.at, took));
+                if summary.at >= latest.0 {
+                    *latest = (summary.at, took);
+                }
+            }
+            insert_summary(
+                self.summaries.entry(cluster_id).or_default(),
+                summary,
+                false,
+            );
+        }
+        for ((cluster_id, size), (_, took)) in hydrations {
+            self.hydrations
                 .entry(cluster_id)
                 .or_default()
-                .entry(summary.at)
-                .or_insert(summary);
+                .entry(size)
+                .or_insert(took);
         }
     }
 
@@ -310,10 +397,30 @@ impl ClusterLoad {
         self.busy.retain(|id, _| replicas.contains(id));
         self.samples.retain(|id, _| clusters.contains(id));
         self.kills.retain(|id, _| clusters.contains(id));
+        self.hydrations.retain(|id, _| clusters.contains(id));
         self.summaries.retain(|id, summaries| {
-            summaries.retain(|at, _| *at >= cutoff);
+            summaries.retain(|summary| summary.at >= cutoff);
             clusters.contains(id) && !summaries.is_empty()
         });
+    }
+}
+
+/// A summary read back from the history relations.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RestoredSummary {
+    pub cluster_id: ClusterId,
+    pub summary: LoadSummary,
+    /// See [`ClusterLoad::last_hydration`], at the summary's size as of its window.
+    pub hydration_time: Option<Duration>,
+}
+
+/// Inserts `summary` into `summaries`, which is ordered by window end. A summary with the same
+/// window end is replaced when `replace` is set, and kept otherwise.
+fn insert_summary(summaries: &mut Vec<LoadSummary>, summary: LoadSummary, replace: bool) {
+    match summaries.binary_search_by_key(&summary.at, |s| s.at) {
+        Ok(i) if replace => summaries[i] = summary,
+        Ok(_) => {}
+        Err(i) => summaries.insert(i, summary),
     }
 }
 
@@ -341,20 +448,6 @@ fn next_boundary(after: EpochMillis, interval: Duration) -> EpochMillis {
     (after / interval)
         .saturating_add(1)
         .saturating_mul(interval)
-}
-
-/// The heap limit of one process of a size: its memory limit plus its disk limit when the size
-/// spills to swap, the sum the controller passes to `clusterd` as `--heap-limit`. `None` when
-/// the size has no memory limit.
-fn process_heap_limit(allocation: &ReplicaAllocation) -> Option<u64> {
-    let memory = allocation.memory_limit?.0.as_u64();
-    // A disk limit of zero requests unlimited swap, and then `clusterd` gets no heap limit.
-    match allocation.disk_limit {
-        Some(disk) if allocation.swap_enabled && disk.0.as_u64() != 0 => {
-            Some(memory.saturating_add(disk.0.as_u64()))
-        }
-        _ => Some(memory),
-    }
 }
 
 /// The heap of a replica's fullest process, from the latest metrics of its processes. A
@@ -428,6 +521,24 @@ fn timestamptz(at: Timestamp) -> Datum<'static> {
     )
 }
 
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn rfc3339(at: Timestamp) -> String {
+    mz_ore::now::to_datetime(at.into()).to_rfc3339()
+}
+
+fn cutover_reason(reason: LoadCutoverReason) -> &'static str {
+    match reason {
+        LoadCutoverReason::UpTrial => "up-trial",
+        LoadCutoverReason::DownTrial => "down-trial",
+        LoadCutoverReason::HighHeap => "high-heap",
+        LoadCutoverReason::OutOfMemory => "out-of-memory",
+        LoadCutoverReason::ProbationReturn => "probation-return",
+    }
+}
+
 fn interval(duration: Duration) -> Interval {
     Interval::new(
         0,
@@ -436,8 +547,13 @@ fn interval(duration: Duration) -> Interval {
     )
 }
 
-/// The rows of `mz_cluster_load_history` and `mz_cluster_load_dataflow_history` for a summary.
-pub(crate) fn summary_rows(cluster_id: ClusterId, summary: &LoadSummary) -> (Row, Vec<Row>) {
+/// The rows of `mz_cluster_load_history` and `mz_cluster_load_dataflow_history` for a summary,
+/// with the cluster's hydration time at the summary's size as of its window.
+pub(crate) fn summary_rows(
+    cluster_id: ClusterId,
+    summary: &LoadSummary,
+    hydration_time: Option<Duration>,
+) -> (Row, Vec<Row>) {
     let cluster_id = cluster_id.to_string();
     let LoadSummary {
         start,
@@ -465,6 +581,7 @@ pub(crate) fn summary_rows(cluster_id: ClusterId, summary: &LoadSummary) -> (Row
         }),
         Datum::from(*killed),
         Datum::from(*hydrating),
+        hydration_time.map_or(Datum::Null, |took| Datum::Interval(interval(took))),
     ]);
     let dataflow_rows = dataflows
         .iter()
@@ -514,8 +631,9 @@ fn datum_u64(datum: Datum) -> Option<Option<u64>> {
 pub(crate) fn decode_summaries(
     cluster_rows: &[Row],
     dataflow_rows: &[Row],
-) -> Vec<(ClusterId, LoadSummary)> {
-    let mut summaries: BTreeMap<(ClusterId, Timestamp), LoadSummary> = BTreeMap::new();
+) -> Vec<RestoredSummary> {
+    let mut summaries: BTreeMap<(ClusterId, Timestamp), (LoadSummary, Option<Duration>)> =
+        BTreeMap::new();
     for row in cluster_rows {
         let decoded = (|| {
             let datums: Vec<_> = row.iter().collect();
@@ -531,11 +649,17 @@ pub(crate) fn decode_summaries(
                 busiest_worker_utilization,
                 killed,
                 hydrating,
+                hydration_time,
             ] = datums[..]
             else {
                 return None;
             };
             let cluster_id: ClusterId = cluster_id.parse().ok()?;
+            let hydration_time = match hydration_time {
+                Datum::Null => None,
+                Datum::Interval(took) => Some(took.duration().ok()?),
+                _ => return None,
+            };
             let at = datum_timestamp(at)?;
             let heap = datum_u64(heap_bytes)?.map(|bytes| -> Option<HeapSummary> {
                 Some(HeapSummary {
@@ -564,11 +688,11 @@ pub(crate) fn decode_summaries(
                 killed: killed == Datum::True,
                 hydrating: hydrating == Datum::True,
             };
-            Some(((cluster_id, at), summary))
+            Some(((cluster_id, at), (summary, hydration_time)))
         })();
         match decoded {
-            Some((key, summary)) => {
-                summaries.insert(key, summary);
+            Some((key, decoded)) => {
+                summaries.insert(key, decoded);
             }
             None => warn!(?row, "unexpected cluster load history row"),
         }
@@ -598,7 +722,7 @@ pub(crate) fn decode_summaries(
         })();
         match decoded {
             Some((key, id, dataflow)) => {
-                if let Some(summary) = summaries.get_mut(&key) {
+                if let Some((summary, _)) = summaries.get_mut(&key) {
                     summary.dataflows.insert(id, dataflow);
                 }
             }
@@ -607,8 +731,231 @@ pub(crate) fn decode_summaries(
     }
     summaries
         .into_iter()
-        .map(|((cluster_id, _), summary)| (cluster_id, summary))
+        .map(
+            |((cluster_id, _), (summary, hydration_time))| RestoredSummary {
+                cluster_id,
+                summary,
+                hydration_time,
+            },
+        )
         .collect()
+}
+
+/// What the `ON LOAD` rules read of one managed cluster, apart from a trial in flight and the
+/// time of the evaluation. See [`load_rules_inputs`].
+#[derive(Clone, Debug)]
+pub(crate) struct LoadRulesInputs<'a> {
+    /// The cluster's `ON LOAD` policy. For a cluster without one, a policy whose range spans its
+    /// whole size ladder, so that the rules consider every size of its family.
+    pub policy: OnLoadPolicy,
+    /// See [`size_ladder`].
+    pub ladder: Vec<SizeCapacity>,
+    /// The realized size.
+    pub size: String,
+    pub reconfiguration: Option<ReconfigurationRecord>,
+    pub record: Option<LoadRecord>,
+    /// See [`ClusterLoad::fingerprint`].
+    pub fingerprint: u64,
+    pub summaries: &'a [LoadSummary],
+    /// See [`ClusterLoad::last_hydration`].
+    pub last_hydration: Option<Duration>,
+    /// See [`ClusterLoad::hydration_peak`].
+    pub hydration_peak: Option<u64>,
+    pub params: RuleParams,
+}
+
+impl LoadRulesInputs<'_> {
+    pub(crate) fn rules_input<'b>(
+        &'b self,
+        trial: Option<&'b TrialObservation>,
+        now: Timestamp,
+    ) -> RulesInput<'b> {
+        RulesInput {
+            policy: &self.policy,
+            ladder: &self.ladder,
+            size: &self.size,
+            reconfiguration: self.reconfiguration.as_ref(),
+            record: self.record.as_ref(),
+            fingerprint: self.fingerprint,
+            summaries: self.summaries,
+            trial,
+            last_hydration: self.last_hydration,
+            hydration_peak: self.hydration_peak,
+            now,
+        }
+    }
+
+    /// Evaluates the rules. `None` when the realized size or a bound of the policy is not on
+    /// the ladder.
+    pub(crate) fn evaluate(
+        &self,
+        trial: Option<&TrialObservation>,
+        now: Timestamp,
+    ) -> Option<LoadDecision> {
+        evaluate(&self.rules_input(trial, now), &self.params)
+    }
+}
+
+/// Assembles what the `ON LOAD` rules read of a managed cluster from its catalog config, the
+/// replica sizes, the load signal, and the dyncfgs. `None` when the cluster's size is unknown,
+/// or when the cluster has not been sampled since `environmentd` started.
+pub(crate) fn load_rules_inputs<'a>(
+    cluster_id: ClusterId,
+    managed: &ClusterVariantManaged,
+    sizes: &ClusterReplicaSizeMap,
+    load: &'a ClusterLoad,
+    dyncfgs: &ConfigSet,
+) -> Option<LoadRulesInputs<'a>> {
+    let expected = project_expected(managed);
+    let ladder = size_ladder(sizes, &expected.size);
+    let policy = match expected
+        .auto_scaling_policy
+        .and_then(|policy| policy.on_load)
+    {
+        Some(policy) => policy,
+        None => OnLoadPolicy {
+            min_size: ladder.first()?.name.clone(),
+            max_size: ladder.last()?.name.clone(),
+            scale_down_after: None,
+        },
+    };
+    Some(LoadRulesInputs {
+        policy,
+        fingerprint: load.fingerprint(cluster_id)?,
+        last_hydration: load.last_hydration(cluster_id, &expected.size),
+        hydration_peak: load.hydration_peak(cluster_id, &expected.size),
+        summaries: load.summaries(cluster_id),
+        ladder,
+        size: expected.size,
+        reconfiguration: expected.reconfiguration,
+        record: expected.load,
+        params: RuleParams::from_config(dyncfgs),
+    })
+}
+
+/// The row of `mz_cluster_load_recommendations` for a cluster at `size`, from the inputs and
+/// the decision of the rules when they could be evaluated.
+pub(crate) fn recommendation_row(
+    cluster_id: ClusterId,
+    size: &str,
+    evaluated: Option<(&LoadRulesInputs, &LoadDecision)>,
+) -> Row {
+    let cluster_id = cluster_id.to_string();
+    let mut row = Row::default();
+    let mut packer = row.packer();
+    packer.push(Datum::String(&cluster_id));
+    packer.push(Datum::String(size));
+    let Some((inputs, decision)) = evaluated else {
+        // `min_size` to `window_end`, an empty `behind`, and `heap_bytes` to `last_hydration`.
+        packer.extend(std::iter::repeat_n(Datum::Null, 4));
+        JsonbPacker::new(&mut packer)
+            .pack_serde_json(serde_json::Value::Array(Vec::new()))
+            .expect("valid JSON");
+        packer.extend(std::iter::repeat_n(Datum::Null, 10));
+        return row;
+    };
+    let facts = &decision.facts;
+    packer.push(Datum::String(&inputs.policy.min_size));
+    packer.push(Datum::String(&inputs.policy.max_size));
+    packer.push(Datum::String(decision.status.as_str()));
+    packer.push(facts.summary_at.map_or(Datum::Null, timestamptz));
+    let behind: Vec<_> = facts
+        .behind
+        .iter()
+        .map(|dataflow| {
+            serde_json::json!({
+                "dataflow_id": dataflow.id.to_string(),
+                "lag_ms": millis(dataflow.median_lag),
+                "progress_ratio": dataflow.progress_ratio,
+                "floor_ms": dataflow.floor.map(millis),
+            })
+        })
+        .collect();
+    JsonbPacker::new(&mut packer)
+        .pack_serde_json(serde_json::Value::Array(behind))
+        .expect("valid JSON");
+    packer.push(
+        facts
+            .heap
+            .map_or(Datum::Null, |heap| Datum::UInt64(heap.bytes)),
+    );
+    packer.push(
+        facts
+            .heap
+            .and_then(|heap| heap.fraction)
+            .map_or(Datum::Null, |fraction| Datum::Float64(fraction.into())),
+    );
+    packer.push(
+        facts
+            .busy
+            .map_or(Datum::Null, |busy| Datum::UInt64(busy.mean_millicores)),
+    );
+    packer.push(facts.busy.map_or(Datum::Null, |busy| {
+        Datum::Float64(busy.busiest_worker_utilization.into())
+    }));
+    let in_flight_target = inputs
+        .reconfiguration
+        .as_ref()
+        .map(|reconfiguration| reconfiguration.target.size.as_str());
+    let (action, target, reason) = match &decision.action {
+        None => (None, None, None),
+        Some(LoadAction::StartTrial(start)) => {
+            let action = match start.kind {
+                TrialKind::Up => "up-trial",
+                TrialKind::Down => "down-trial",
+            };
+            (Some(action), Some(start.target.as_str()), None)
+        }
+        Some(LoadAction::Reconfigure { target, reason, .. }) => (
+            Some("scale-up"),
+            Some(target.as_str()),
+            Some(cutover_reason(*reason)),
+        ),
+        Some(LoadAction::CutOver(_)) => (Some("cut-over"), in_flight_target, None),
+        Some(LoadAction::Drop(reason)) => {
+            let reason = match reason {
+                DropReason::Failed(_) => "failed",
+                DropReason::Killed => "killed",
+                DropReason::NotHydrated => "not-hydrated",
+                DropReason::Deadline => "deadline",
+            };
+            (Some("drop"), in_flight_target, Some(reason))
+        }
+    };
+    for value in [action, target, reason] {
+        packer.push(value.map_or(Datum::Null, Datum::String));
+    }
+    match &facts.blocking {
+        Some(evidence) => {
+            let verdict = match evidence.verdict {
+                LoadVerdict::Insufficient => "insufficient",
+                LoadVerdict::NoGain => "no-gain",
+            };
+            let expires_at =
+                Timestamp::new(u64::from(evidence.at).saturating_add(millis(evidence.interval)));
+            let evidence = serde_json::json!({
+                "size": evidence.size,
+                "verdict": verdict,
+                "recorded_at": rfc3339(evidence.at),
+                "expires_at": rfc3339(expires_at),
+            });
+            JsonbPacker::new(&mut packer)
+                .pack_serde_json(evidence)
+                .expect("valid JSON");
+        }
+        None => packer.push(Datum::Null),
+    }
+    packer.push(
+        facts
+            .down_block
+            .map_or(Datum::Null, |block| Datum::String(block.as_str())),
+    );
+    packer.push(
+        inputs
+            .last_hydration
+            .map_or(Datum::Null, |took| Datum::Interval(interval(took))),
+    );
+    row
 }
 
 impl Coordinator {
@@ -684,6 +1031,7 @@ impl Coordinator {
             u64::from(at).saturating_sub(u64::try_from(retention.as_millis()).unwrap_or(u64::MAX)),
         );
         self.cluster_load.retain(&clusters, &replicas, cutoff);
+        self.update_cluster_load_recommendations(at);
 
         if new.is_empty() || self.controller.read_only() {
             return;
@@ -691,7 +1039,8 @@ impl Coordinator {
         let mut cluster_updates = Vec::new();
         let mut dataflow_updates = Vec::new();
         for (cluster_id, summary) in &new {
-            let (cluster_row, dataflow_rows) = summary_rows(*cluster_id, summary);
+            let hydration_time = self.cluster_load.last_hydration(*cluster_id, &summary.size);
+            let (cluster_row, dataflow_rows) = summary_rows(*cluster_id, summary, hydration_time);
             cluster_updates.push((cluster_row, Diff::ONE));
             dataflow_updates.extend(dataflow_rows.into_iter().map(|row| (row, Diff::ONE)));
         }
@@ -703,6 +1052,56 @@ impl Coordinator {
                 IntrospectionType::ClusterLoadDataflowHistory,
                 dataflow_updates,
             );
+        }
+    }
+
+    /// What the `ON LOAD` rules read of a managed cluster. See [`load_rules_inputs`].
+    pub(crate) fn load_rules_inputs(&self, cluster_id: ClusterId) -> Option<LoadRulesInputs<'_>> {
+        let catalog = self.catalog();
+        let cluster = catalog.try_get_cluster(cluster_id)?;
+        let ClusterVariant::Managed(managed) = &cluster.config.variant else {
+            return None;
+        };
+        load_rules_inputs(
+            cluster_id,
+            managed,
+            catalog.cluster_replica_sizes(),
+            &self.cluster_load,
+            catalog.system_config().dyncfgs(),
+        )
+    }
+
+    /// Evaluates the rules for every managed cluster at `at`, without applying the decisions,
+    /// and writes the rows of `mz_cluster_load_recommendations` that changed.
+    fn update_cluster_load_recommendations(&mut self, at: Timestamp) {
+        let mut rows = BTreeMap::new();
+        for cluster in self.catalog().clusters() {
+            let ClusterVariant::Managed(managed) = &cluster.config.variant else {
+                continue;
+            };
+            let inputs = self.load_rules_inputs(cluster.id);
+            let decision = inputs.as_ref().and_then(|inputs| inputs.evaluate(None, at));
+            let evaluated = inputs.as_ref().zip(decision.as_ref());
+            let row = recommendation_row(cluster.id, &managed.size, evaluated);
+            rows.insert(cluster.id, row);
+        }
+        let item_id = self
+            .catalog()
+            .resolve_builtin_table(&MZ_CLUSTER_LOAD_RECOMMENDATIONS);
+        let previous = std::mem::replace(&mut self.cluster_load_recommendations, rows);
+        let current = &self.cluster_load_recommendations;
+        let retractions = previous
+            .iter()
+            .filter(|(id, row)| current.get(id) != Some(row))
+            .map(|(_, row)| BuiltinTableUpdate::row(item_id, row.clone(), Diff::MINUS_ONE));
+        let additions = current
+            .iter()
+            .filter(|(id, row)| previous.get(id) != Some(row))
+            .map(|(_, row)| BuiltinTableUpdate::row(item_id, row.clone(), Diff::ONE));
+        let updates: Vec<_> = retractions.chain(additions).collect();
+        if !updates.is_empty() {
+            // The rows are advisory, so they ride along with the next group commit.
+            drop(self.builtin_table_update().background(updates));
         }
     }
 
@@ -815,7 +1214,7 @@ impl Coordinator {
             };
             let summaries = decode_summaries(&cluster_rows, &dataflow_rows)
                 .into_iter()
-                .filter(|(_, summary)| summary.at >= cutoff)
+                .filter(|restored| restored.summary.at >= cutoff)
                 .collect();
             let _ = internal_cmd_tx.send(Message::ClusterLoadHistoryRestored(summaries));
         });

@@ -142,7 +142,7 @@ use mz_repr::global_id::TransientIdGen;
 use mz_repr::optimize::{OptimizerFeatureOverrides, OptimizerFeatures, OverrideFrom};
 use mz_repr::role_id::RoleId;
 use mz_repr::{
-    CatalogItemId, Diff, GlobalId, RelationDesc, RelationVersion, SqlRelationType, Timestamp,
+    CatalogItemId, Diff, GlobalId, RelationDesc, RelationVersion, Row, SqlRelationType, Timestamp,
 };
 use mz_secrets::cache::CachingSecretsReader;
 use mz_secrets::{SecretsController, SecretsReader};
@@ -418,7 +418,7 @@ pub enum Message {
         frontiers: BTreeMap<ClusterId, mz_compute_client::controller::LoadFrontiers>,
     },
     /// The load summaries read back from the history relations at startup.
-    ClusterLoadHistoryRestored(Vec<(ClusterId, mz_cluster_controller::load::LoadSummary)>),
+    ClusterLoadHistoryRestored(Vec<cluster_load::RestoredSummary>),
     CaughtUpCheck(caught_up::CaughtUpCheckRequest),
     /// Performs any cleanup and logging actions necessary for
     /// finalizing a statement execution.
@@ -1870,6 +1870,8 @@ pub struct Coordinator {
     introspection_subscribes: BTreeMap<GlobalId, IntrospectionSubscribe>,
     /// The load signal of every managed cluster.
     cluster_load: cluster_load::ClusterLoad,
+    /// The row of each managed cluster in `mz_cluster_load_recommendations`.
+    cluster_load_recommendations: BTreeMap<ClusterId, Row>,
     /// The last replica visited by the sequential hydration-history sweep.
     hydration_history_replica_cursor: Option<ReplicaId>,
     /// Hydration-history sweep owned by the coordinator while one is in flight.
@@ -5096,6 +5098,7 @@ pub fn serve(
                     connection_cancel_watches: BTreeMap::new(),
                     introspection_subscribes: BTreeMap::new(),
                     cluster_load: Default::default(),
+                    cluster_load_recommendations: BTreeMap::new(),
                     hydration_history_replica_cursor: None,
                     hydration_history_sweep: None,
                     metric_sinks: BTreeMap::new(),

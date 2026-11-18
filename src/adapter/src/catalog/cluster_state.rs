@@ -14,17 +14,25 @@
 //! [`project_expected`] is the one projection from catalog config to the
 //! witness. Building the witness the same way wherever a write is conditioned
 //! and wherever it is checked keeps the compared fields from drifting apart.
+//!
+//! [`size_ladder`] is the one ordering of replica sizes the `ON LOAD` strategy
+//! moves a cluster along.
 
+use dec::OrderedDecimal;
 use mz_adapter_types::cluster_state::{
     AutoScalingPolicy, AvailabilityZones, BurstRecord, ClusterSchedule, ExpectedClusterState,
     LoadAttempt, LoadCutover, LoadCutoverReason, LoadEvidence, LoadFloor, LoadRecord, LoadVerdict,
     OnHydrationPolicy, OnLoadPolicy, OnTimeout, ReconfigurationOrigin, ReconfigurationRecord,
     ReconfigurationStatus, ReconfigurationTarget, ReconfigurationTrial, TrialKind,
 };
+use mz_catalog::config::ClusterReplicaSizeMap;
 use mz_catalog::memory::objects::{
     BurstState, ClusterVariant, ClusterVariantManaged, LoadState, ReconfigurationState,
 };
+use mz_cluster_controller::load::rules::SizeCapacity;
+use mz_controller::clusters::ReplicaAllocation;
 use mz_controller_types::ClusterId;
+use mz_ore::cast::CastLossy;
 use mz_sql::plan::OnTimeoutAction;
 
 use crate::catalog::CatalogState;
@@ -310,5 +318,154 @@ fn auto_scaling_policy(strategy: &mz_sql::plan::AutoScalingStrategy) -> AutoScal
                 scale_down_after: *scale_down_after,
             }
         }),
+    }
+}
+
+/// The sizes of the family of `size`, cheapest first. Empty when `size` is
+/// unknown.
+///
+/// The ladder is every enabled size of the same [`ReplicaAllocation::family`]
+/// as `size`. A disabled `size` selects its family and is not on the ladder.
+/// Sizes are ordered by credits per hour, then cores, then heap limit, then
+/// name, so sizes of equal cost have a stable order.
+pub(crate) fn size_ladder(sizes: &ClusterReplicaSizeMap, size: &str) -> Vec<SizeCapacity> {
+    let Some(allocation) = sizes.0.get(size) else {
+        return Vec::new();
+    };
+    let family = allocation.family();
+    let mut ladder: Vec<_> = sizes
+        .enabled_allocations()
+        .filter(|(_, allocation)| allocation.family() == family)
+        .map(|(name, allocation)| {
+            let credits = OrderedDecimal(allocation.credits_per_hour);
+            (credits, size_capacity(name, allocation))
+        })
+        .collect();
+    ladder.sort_by(|(a_credits, a), (b_credits, b)| {
+        a_credits
+            .cmp(b_credits)
+            .then_with(|| a.cores.total_cmp(&b.cores))
+            .then_with(|| a.heap_limit.cmp(&b.heap_limit))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    ladder.into_iter().map(|(_, capacity)| capacity).collect()
+}
+
+/// The capacity of a replica of a size.
+///
+/// `cores` and `memory_bytes` are per replica, summed over its processes. A
+/// size without a CPU limit counts one core per worker, and one without a
+/// memory limit counts `u64::MAX` bytes. `heap_limit` is per process, see
+/// [`process_heap_limit`], since heap is measured on a replica's fullest
+/// process.
+pub(crate) fn size_capacity(name: &str, allocation: &ReplicaAllocation) -> SizeCapacity {
+    let processes = u64::from(allocation.scale.get());
+    let cores_per_process = match allocation.cpu_limit {
+        Some(limit) => f64::cast_lossy(limit.as_millicpus()) / 1000.0,
+        None => f64::cast_lossy(allocation.workers.get()),
+    };
+    let memory_bytes = allocation.memory_limit.map_or(u64::MAX, |memory| {
+        memory.0.as_u64().saturating_mul(processes)
+    });
+    SizeCapacity {
+        name: name.to_string(),
+        cores: cores_per_process * f64::cast_lossy(processes),
+        memory_bytes,
+        heap_limit: process_heap_limit(allocation).unwrap_or(u64::MAX),
+    }
+}
+
+/// The heap limit of one process of a size: its memory limit plus its disk
+/// limit when the size spills to swap, the sum the controller passes to
+/// `clusterd` as `--heap-limit`. `None` when the size has no memory limit.
+pub(crate) fn process_heap_limit(allocation: &ReplicaAllocation) -> Option<u64> {
+    let memory = allocation.memory_limit?.0.as_u64();
+    // A disk limit of zero requests unlimited swap, and then `clusterd` gets no heap limit.
+    match allocation.disk_limit {
+        Some(disk) if allocation.swap_enabled && disk.0.as_u64() != 0 => {
+            Some(memory.saturating_add(disk.0.as_u64()))
+        }
+        _ => Some(memory),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    fn sizes() -> ClusterReplicaSizeMap {
+        let allocation = |scale: u16,
+                          workers: u64,
+                          cpu: Option<f64>,
+                          memory: Option<&str>,
+                          credits: &str,
+                          family: Option<&str>,
+                          disabled: bool| {
+            serde_json::json!({
+                "scale": scale,
+                "workers": workers,
+                "cpu_limit": cpu,
+                "memory_limit": memory,
+                "credits_per_hour": credits,
+                "family": family,
+                "disabled": disabled,
+            })
+        };
+        let mut swapping = allocation(2, 2, Some(2.0), Some("8GiB"), "2", None, false);
+        swapping["disk_limit"] = "8GiB".into();
+        swapping["swap_enabled"] = true.into();
+        let mut unlimited_swap = allocation(1, 8, Some(8.0), Some("32GiB"), "4", None, false);
+        unlimited_swap["disk_limit"] = "0".into();
+        unlimited_swap["swap_enabled"] = true.into();
+        let map = serde_json::json!({
+            "50cc": allocation(1, 1, Some(0.5), Some("4GiB"), "0.5", None, false),
+            "100cc": allocation(1, 2, Some(2.0), Some("8GiB"), "1", None, false),
+            "200cc": swapping,
+            "400cc": unlimited_swap,
+            "old": allocation(1, 4, Some(4.0), Some("16GiB"), "1.5", None, true),
+            "M.1-small": allocation(1, 2, None, None, "1", Some("M"), false),
+            "M.1-large": allocation(1, 4, None, Some("32GiB"), "1", Some("M"), false),
+        });
+        ClusterReplicaSizeMap::parse_from_str(&map.to_string(), false).expect("valid size map")
+    }
+
+    fn capacity(name: &str, cores: f64, memory_bytes: u64, heap_limit: u64) -> SizeCapacity {
+        SizeCapacity {
+            name: name.into(),
+            cores,
+            memory_bytes,
+            heap_limit,
+        }
+    }
+
+    #[mz_ore::test]
+    fn size_ladder_is_the_enabled_family_by_credits() {
+        let sizes = sizes();
+        let cc = vec![
+            capacity("50cc", 0.5, 4 * GIB, 4 * GIB),
+            capacity("100cc", 2.0, 8 * GIB, 8 * GIB),
+            // Two processes, each with 8 GiB of memory and 8 GiB of swap.
+            capacity("200cc", 4.0, 16 * GIB, 16 * GIB),
+            // A disk limit of zero is unlimited swap, which leaves the memory as the limit.
+            capacity("400cc", 8.0, 32 * GIB, 32 * GIB),
+        ];
+        assert_eq!(size_ladder(&sizes, "100cc"), cc);
+        assert_eq!(
+            size_ladder(&sizes, "old"),
+            cc,
+            "a disabled size selects its family"
+        );
+        assert_eq!(
+            size_ladder(&sizes, "M.1-large"),
+            vec![
+                // Equal credits order by cores. No CPU limit is a core per worker, and no
+                // memory limit is unbounded.
+                capacity("M.1-small", 2.0, u64::MAX, u64::MAX),
+                capacity("M.1-large", 4.0, 32 * GIB, 32 * GIB),
+            ]
+        );
+        assert_eq!(size_ladder(&sizes, "unknown"), Vec::new());
     }
 }

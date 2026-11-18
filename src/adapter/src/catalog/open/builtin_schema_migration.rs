@@ -599,6 +599,16 @@ static MIGRATIONS: LazyLock<Vec<MigrationStep>> = LazyLock::new(|| {
             MZ_INTERNAL_SCHEMA,
             "mz_comments",
         ),
+        // mz_cluster_auto_scaling_strategies shows the `ON LOAD` strategy's
+        // state under a `load` key, which changes its SQL fingerprint. See the
+        // NOTE above: this version must stay at the workspace's current dev
+        // version until the change ships.
+        MigrationStep::replacement(
+            "26.52.0-dev.0",
+            CatalogItemType::MaterializedView,
+            MZ_INTERNAL_SCHEMA,
+            "mz_cluster_auto_scaling_strategies",
+        ),
     ]
 });
 

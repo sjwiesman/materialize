@@ -1148,18 +1148,18 @@ pub static MZ_CLUSTER_AUTO_SCALING_STRATEGIES: LazyLock<BuiltinMaterializedView>
                 ),
                 (
                     "strategy",
-                    "**Unstable** The configured autoscaling policy, as JSON. Currently an `on_hydration` sub-policy carrying its `hydration_size` and optional `linger_duration`.",
+                    "**Unstable** The configured autoscaling policy, as JSON keyed by sub-policy: `on_hydration` carrying its `hydration_size` and optional `linger_duration`, and `on_load` carrying its `min_size`, `max_size`, and optional `scale_down_after`. An unset sub-policy is `null`.",
                 ),
                 (
                     "state",
-                    "**Unstable** The in-flight autoscaling runtime state, as JSON keyed by strategy, or `NULL` when nothing is running. Currently a `burst` key carrying the active hydration burst: its `burst_size`, `linger_duration`, and `steady_ready_at`.",
+                    "**Unstable** The autoscaling runtime state, as JSON keyed by strategy, or `NULL` when there is none. A `burst` key carries the active hydration burst: its `burst_size`, `linger_duration`, and `steady_ready_at`. A `load` key carries what the `ON LOAD` strategy learned: the `fingerprint` of the cluster's dataflows it applies to, the `attempt` whose outcome is not yet recorded with the dataflows `behind` at its trigger, the `last_cutover` with its `from_size` and `reason`, the `evidence` per size with its `verdict`, `at`, and `interval`, the lag `floors` per dataflow, and the `hydration_peak_ratio` in thousandths.",
                 ),
             ]),
-            // One row per managed cluster with a strategy configured or a burst
-            // running (a burst can briefly outlive a just-removed policy).
-            // Absent fields serialize as JSON `null`. `state` is keyed by
-            // strategy so a future strategy's state is another key, not a
-            // schema change.
+            // One row per managed cluster with a strategy configured or runtime
+            // state present (a burst can briefly outlive a just-removed
+            // policy). Absent fields serialize as JSON `null`. `state` is keyed
+            // by strategy, and a strategy without state has no key, so readers
+            // test for a key and not for a non-NULL `state`.
             sql: "
 IN CLUSTER mz_catalog_server
 WITH (
@@ -1171,7 +1171,8 @@ WITH
         SELECT
             mz_internal.parse_catalog_id(data->'key'->'id') AS cluster_id,
             data->'value'->'config'->'variant'->'Managed'->'auto_scaling_strategy' AS strategy,
-            data->'value'->'config'->'variant'->'Managed'->'burst' AS burst
+            data->'value'->'config'->'variant'->'Managed'->'burst' AS burst,
+            data->'value'->'config'->'variant'->'Managed'->'load' AS load
         FROM mz_internal.mz_catalog_raw
         WHERE
             data->>'kind' = 'Cluster' AND
@@ -1180,9 +1181,12 @@ WITH
 SELECT
     m.cluster_id,
     COALESCE(m.strategy, 'null'::jsonb) AS strategy,
-    CASE WHEN m.burst != 'null' THEN jsonb_build_object('burst', m.burst) END AS state
+    CASE WHEN m.burst != 'null' OR m.load != 'null' THEN
+        CASE WHEN m.burst != 'null' THEN jsonb_build_object('burst', m.burst) ELSE '{}'::jsonb END ||
+        CASE WHEN m.load != 'null' THEN jsonb_build_object('load', m.load) ELSE '{}'::jsonb END
+    END AS state
 FROM managed m
-WHERE m.strategy != 'null' OR m.burst != 'null'",
+WHERE m.strategy != 'null' OR m.burst != 'null' OR m.load != 'null'",
             is_retained_metrics_object: false,
             access: vec![PUBLIC_SELECT],
             ontology: Some(Ontology {
@@ -5509,6 +5513,12 @@ pub static MZ_CLUSTER_LOAD_HISTORY: LazyLock<BuiltinSource> = LazyLock::new(|| B
             "Whether no replica qualified for the window and a replica at the cluster's size was \
              hydrating within it. Such a window has no heap, busy-time, or dataflow values.",
         ),
+        (
+            "hydration_time",
+            "How long the replicas at the cluster's size most recently took to hydrate after \
+             their creation or restart, as known at the end of the window. `NULL` when no such \
+             hydration was observed.",
+        ),
     ]),
     is_retained_metrics_object: false,
     access: vec![PUBLIC_SELECT],
@@ -5550,6 +5560,137 @@ pub static MZ_CLUSTER_LOAD_DATAFLOW_HISTORY: LazyLock<BuiltinSource> =
                 "behind",
                 "Whether the dataflow's median lag exceeded its threshold while it was not working \
                  off a backlog.",
+            ),
+        ]),
+        is_retained_metrics_object: false,
+        access: vec![PUBLIC_SELECT],
+        ontology: None,
+    });
+
+pub static MZ_CLUSTER_LOAD_RECOMMENDATIONS: LazyLock<BuiltinTable> =
+    LazyLock::new(|| BuiltinTable {
+        name: "mz_cluster_load_recommendations",
+        schema: MZ_INTERNAL_SCHEMA,
+        oid: oid::TABLE_MZ_CLUSTER_LOAD_RECOMMENDATIONS_OID,
+        desc: RelationDesc::builder()
+            .with_column("cluster_id", SqlScalarType::String.nullable(false))
+            .with_column("size", SqlScalarType::String.nullable(false))
+            .with_column("min_size", SqlScalarType::String.nullable(true))
+            .with_column("max_size", SqlScalarType::String.nullable(true))
+            .with_column("status", SqlScalarType::String.nullable(true))
+            .with_column(
+                "window_end",
+                SqlScalarType::TimestampTz { precision: None }.nullable(true),
+            )
+            .with_column("behind", SqlScalarType::Jsonb.nullable(false))
+            .with_column("heap_bytes", SqlScalarType::UInt64.nullable(true))
+            .with_column("heap_fraction", SqlScalarType::Float64.nullable(true))
+            .with_column("busy_millicores", SqlScalarType::UInt64.nullable(true))
+            .with_column(
+                "busiest_worker_utilization",
+                SqlScalarType::Float64.nullable(true),
+            )
+            .with_column("next_action", SqlScalarType::String.nullable(true))
+            .with_column("target_size", SqlScalarType::String.nullable(true))
+            .with_column("action_reason", SqlScalarType::String.nullable(true))
+            .with_column("blocking_evidence", SqlScalarType::Jsonb.nullable(true))
+            .with_column("descent_blocked_by", SqlScalarType::String.nullable(true))
+            .with_column("last_hydration", SqlScalarType::Interval.nullable(true))
+            .with_key(vec![0])
+            .finish(),
+        column_comments: BTreeMap::from_iter([
+            (
+                "cluster_id",
+                "The ID of the cluster. Corresponds to `mz_clusters.id`.",
+            ),
+            ("size", "The size of the cluster."),
+            (
+                "min_size",
+                "The smallest size the rules consider: the `MIN SIZE` of the cluster's `ON LOAD` \
+                 policy, or the smallest size of the cluster's size family when it has none. \
+                 `NULL` when the rules cannot be evaluated.",
+            ),
+            (
+                "max_size",
+                "The largest size the rules consider: the `MAX SIZE` of the cluster's `ON LOAD` \
+                 policy, or the largest size of the cluster's size family when it has none. \
+                 `NULL` when the rules cannot be evaluated.",
+            ),
+            (
+                "status",
+                "What the rules conclude: `steady`, `trial-up`, `trial-down`, `scaling-up`, \
+                 `not-scalable`, `waiting`, `at-max`, `at-min`, `out-of-memory-at-max`, or \
+                 `warming-up`. `NULL` when the rules cannot be evaluated, because the cluster's \
+                 size is not an enabled size of its family or the cluster has not been sampled \
+                 yet.",
+            ),
+            (
+                "window_end",
+                "The end of the latest evaluation window at the cluster's size with lag, which \
+                 `behind`, `heap_bytes`, `heap_fraction`, `busy_millicores`, and \
+                 `busiest_worker_utilization` are read from. Corresponds to \
+                 `mz_cluster_load_history.window_end`. `NULL` when there is no recent one.",
+            ),
+            (
+                "behind",
+                "The dataflows behind in that window, as a JSON array of objects with the \
+                 `dataflow_id`, the median lag in milliseconds `lag_ms`, the `progress_ratio`, \
+                 and the lag floor in milliseconds `floor_ms`, `null` without a floor.",
+            ),
+            (
+                "heap_bytes",
+                "The median heap of the fullest process over that window, in bytes, on the \
+                 replica with the largest heap.",
+            ),
+            (
+                "heap_fraction",
+                "That heap as a fraction of its heap limit.",
+            ),
+            (
+                "busy_millicores",
+                "The mean time the workers were not parked over that window, in thousandths of a \
+                 core, on the busiest replica.",
+            ),
+            (
+                "busiest_worker_utilization",
+                "The mean share of each busy-time window that the busiest worker was not parked, \
+                 on the busiest replica.",
+            ),
+            (
+                "next_action",
+                "What the rules would do next: `up-trial` or `down-trial` to try a size beside the \
+                 current one, `scale-up` to move up without a trial, `cut-over` or `drop` to end a \
+                 trial. `NULL` when they would do nothing.",
+            ),
+            (
+                "target_size",
+                "The size `next_action` moves the cluster to or tries.",
+            ),
+            (
+                "action_reason",
+                "Why a `scale-up` moves the cluster: `high-heap`, `out-of-memory`, or \
+                 `probation-return`. Why a `drop` ends a trial: `failed`, `killed`, \
+                 `not-hydrated`, or `deadline`.",
+            ),
+            (
+                "blocking_evidence",
+                "For `waiting` and `not-scalable`, the verdict that blocks the trial, as a JSON \
+                 object with the `size` it concerns, the `verdict` (`insufficient` or \
+                 `no-gain`), and when it was `recorded_at` and `expires_at`.",
+            ),
+            (
+                "descent_blocked_by",
+                "Why the rules do not try the next smaller size when they would otherwise do \
+                 nothing: `not-observed` (the quiet window is not filled or not observed \
+                 enough), `behind` (a dataflow was behind or a replica killed in it), `heap` \
+                 (the heap would not fit the smaller size), `busy` (the busy time would not fit \
+                 its cores, or is missing), or `evidence`. `NULL` at the smallest size and while \
+                 something is in flight.",
+            ),
+            (
+                "last_hydration",
+                "How long the replicas at the cluster's size most recently took to hydrate after \
+                 their creation or restart. `NULL` when no such hydration was observed.",
             ),
         ]),
         is_retained_metrics_object: false,
@@ -6559,12 +6700,12 @@ pub static MZ_SHOW_CLUSTERS: LazyLock<BuiltinView> = LazyLock::new(|| {
         name,
         replicas,
         CASE
-            WHEN recon.summary IS NOT NULL AND scaling.state IS NOT NULL
+            WHEN recon.summary IS NOT NULL AND scaling.state->'burst' IS NOT NULL
                 THEN recon.summary
                      || '; hydration burst at ' || (scaling.state->'burst'->>'burst_size')
             WHEN recon.summary IS NOT NULL
                 THEN recon.summary
-            WHEN scaling.state IS NOT NULL
+            WHEN scaling.state->'burst' IS NOT NULL
                 THEN 'hydration burst at ' || (scaling.state->'burst'->>'burst_size')
             ELSE NULL
         END AS activity,

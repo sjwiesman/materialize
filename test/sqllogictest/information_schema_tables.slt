@@ -341,6 +341,10 @@ mz_cluster_load_history
 SOURCE
 materialize
 mz_internal
+mz_cluster_load_recommendations
+BASE TABLE
+materialize
+mz_internal
 mz_cluster_reconfigurations
 MATERIALIZED VIEW
 materialize
