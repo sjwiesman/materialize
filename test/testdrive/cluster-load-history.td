@@ -28,6 +28,7 @@ heap_fraction              "double precision"
 busy_millicores            uint8
 busiest_worker_utilization "double precision"
 killed                     boolean
+hydrating                  boolean
 
 > SELECT c.name, c.type FROM mz_columns c JOIN mz_objects o ON c.id = o.id JOIN mz_schemas s ON o.schema_id = s.id WHERE s.name = 'mz_internal' AND o.name = 'mz_cluster_load_dataflow_history' ORDER BY c.position
 cluster_id     text
@@ -57,6 +58,21 @@ true true
 load_i true true
 load_mv true true
 
+# A materialized view with a refresh schedule is not summarized.
+$ postgres-execute connection=postgres://mz_system@${testdrive.materialize-internal-sql-addr}/materialize
+ALTER SYSTEM SET enable_refresh_every_mvs = true
+
+$ set-from-sql var=refresh-mv-summarized-after
+SELECT (max(h.window_end) + INTERVAL '20s')::text FROM mz_internal.mz_cluster_load_history h JOIN mz_clusters c ON h.cluster_id = c.id WHERE c.name = 'load_c'
+
+> CREATE MATERIALIZED VIEW load_refresh_mv IN CLUSTER load_c WITH (REFRESH EVERY '1 day') AS SELECT count(*) FROM load_t
+
+> SELECT count(*) > 0 FROM mz_internal.mz_cluster_load_dataflow_history d JOIN mz_clusters c ON d.cluster_id = c.id WHERE c.name = 'load_c' AND d.window_end > '${refresh-mv-summarized-after}'::timestamptz
+true
+
+> SELECT count(*) FROM mz_internal.mz_cluster_load_dataflow_history d JOIN mz_internal.mz_object_global_ids g ON g.global_id = d.dataflow_id JOIN mz_objects o ON o.id = g.id WHERE o.name = 'load_refresh_mv'
+0
+
 # Dataflow rows belong to a summary.
 > SELECT count(*) FROM mz_internal.mz_cluster_load_dataflow_history d JOIN mz_clusters c ON d.cluster_id = c.id LEFT JOIN mz_internal.mz_cluster_load_history h ON d.cluster_id = h.cluster_id AND d.window_end = h.window_end WHERE c.name = 'load_c' AND h.cluster_id IS NULL
 0
@@ -77,3 +93,4 @@ ALTER SYSTEM RESET load_autoscaling_lag_sample_interval
 ALTER SYSTEM RESET load_autoscaling_evaluation_window
 ALTER SYSTEM RESET load_autoscaling_warm_up
 ALTER SYSTEM RESET compute_worker_busy_window
+ALTER SYSTEM RESET enable_refresh_every_mvs

@@ -152,6 +152,7 @@ heap_fraction  double␠precision  The␠median␠heap␠of␠the␠fullest␠pr
 busy_millicores  uint8  The␠mean␠time␠the␠workers␠were␠not␠parked␠over␠the␠window,␠in␠thousandths␠of␠a␠core,␠on␠the␠busiest␠replica.␠`NULL`␠when␠no␠busy-time␠window␠arrived.
 busiest_worker_utilization  double␠precision  The␠mean␠share␠of␠each␠busy-time␠window␠that␠the␠busiest␠worker␠was␠not␠parked,␠on␠the␠busiest␠replica.␠`NULL`␠when␠no␠busy-time␠window␠arrived.
 killed  boolean  Whether␠a␠replica␠at␠the␠cluster's␠size␠was␠killed␠for␠exceeding␠its␠memory␠within␠the␠window.
+hydrating  boolean  Whether␠no␠replica␠qualified␠for␠the␠window␠and␠a␠replica␠at␠the␠cluster's␠size␠was␠hydrating␠within␠it.␠Such␠a␠window␠has␠no␠heap,␠busy-time,␠or␠dataflow␠values.
 
 query TTT
 SELECT name, type, comment FROM objects WHERE schema = 'mz_internal' AND object = 'mz_cluster_load_dataflow_history' ORDER BY position

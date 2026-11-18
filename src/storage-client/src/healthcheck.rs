@@ -216,6 +216,7 @@ pub static CLUSTER_LOAD_HISTORY_DESC: LazyLock<RelationDesc> = LazyLock::new(|| 
             SqlScalarType::Float64.nullable(true),
         )
         .with_column("killed", SqlScalarType::Bool.nullable(false))
+        .with_column("hydrating", SqlScalarType::Bool.nullable(false))
         .finish()
 });
 

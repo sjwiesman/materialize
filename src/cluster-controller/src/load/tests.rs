@@ -158,7 +158,11 @@ fn hydrating_replica_contributes_nothing() {
     // The only replica has another dataflow hydrating at one sample in the window.
     let mut samples = series(|at| (at, at - 1_000));
     samples[30].replicas.get_mut(&R1).unwrap().hydrated = false;
-    assert_eq!(summarize_window(&samples), None);
+    let summary = summarize_window(&samples).expect("a hydrating window");
+    assert!(summary.hydrating);
+    assert!(!summary.killed);
+    assert!(summary.dataflows.is_empty());
+    assert_eq!((summary.heap, summary.busy), (None, None));
 
     // With a second replica that stays hydrated, the summary comes from it alone.
     let mut samples: Vec<_> = (START..END)
@@ -176,6 +180,35 @@ fn hydrating_replica_contributes_nothing() {
     samples[30].replicas.get_mut(&R1).unwrap().hydrated = false;
     let summary = summarize_window(&samples).expect("summary");
     assert_eq!(summary.dataflows[&D1].median_lag, Duration::from_secs(20));
+    assert!(
+        !summary.hydrating,
+        "a qualifying replica makes it an ordinary summary"
+    );
+}
+
+#[mz_ore::test]
+fn hydrating_window_needs_a_replica_at_the_realized_size_and_enough_samples() {
+    // A candidate at another size hydrating beside a replica in warm-up does not make the
+    // window a hydrating window.
+    let mut samples = series(|at| (at, at - 1_000));
+    for sample in &mut samples {
+        let r1 = sample.replicas.get_mut(&R1).unwrap();
+        r1.eligible_since = Some(ts(END));
+        let mut candidate = r1.clone();
+        candidate.size = "200cc".into();
+        candidate.hydrated = false;
+        candidate.eligible_since = None;
+        sample.replicas.insert(R2, candidate);
+    }
+    assert_eq!(summarize_window(&samples), None);
+
+    // A hydrating window with too few samples is no summary.
+    let mut samples = series(|at| (at, at - 1_000));
+    for sample in &mut samples {
+        sample.replicas.get_mut(&R1).unwrap().hydrated = false;
+    }
+    assert_eq!(summarize_window(&samples[..20]), None);
+    assert!(summarize_window(&samples).unwrap().hydrating);
 }
 
 #[mz_ore::test]
@@ -320,11 +353,16 @@ fn memory_kill_yields_a_summary_without_a_qualifying_replica() {
     )
     .expect("a kill is summarized");
     assert!(summary.killed);
+    assert!(summary.hydrating, "the killed replica was hydrating");
     assert!(summary.dataflows.is_empty());
     assert_eq!(summary.heap, None);
     assert_eq!(summary.busy, None);
 
     // A kill of a replica at another size, or outside the window, is not.
+    let mut samples = series(|at| (at, at));
+    for sample in &mut samples {
+        sample.replicas.get_mut(&R1).unwrap().eligible_since = Some(ts(END));
+    }
     for kill in [
         MemoryKill {
             size: "200cc".into(),
@@ -338,6 +376,20 @@ fn memory_kill_yields_a_summary_without_a_qualifying_replica() {
         let summary = summarize(ts(START), ts(END), &samples, &[], &[kill], None, &params());
         assert_eq!(summary, None);
     }
+
+    // With too few samples the kill is still recorded.
+    let summary = summarize(
+        ts(START),
+        ts(END),
+        &samples[..5],
+        &[],
+        std::slice::from_ref(&kill),
+        None,
+        &params(),
+    )
+    .expect("a kill is summarized");
+    assert!(summary.killed);
+    assert!(!summary.hydrating);
 
     // With a qualifying replica the kill is recorded beside the lag.
     let samples = series(|at| (at, at));
@@ -457,28 +509,94 @@ fn window_start_aligns_to_multiples_of_the_window() {
     assert_eq!(window_start(ts(1_234_567), window), ts(1_200_000));
 }
 
-#[mz_ore::test]
-fn coverage_counts_window_ends_in_the_interval() {
-    let window = Duration::from_secs(600);
-    let summary = |at: u64| LoadSummary {
-        start: ts(at - 600_000),
-        at: ts(at),
+/// A summary of the 10 minute window ending at `minute`, hydrating when `hydrating`.
+fn window_summary(minute: u64, hydrating: bool) -> LoadSummary {
+    LoadSummary {
+        start: ts((minute - 10) * 60_000),
+        at: ts(minute * 60_000),
         size: SIZE.into(),
         fingerprint: 0,
         dataflows: BTreeMap::new(),
         heap: None,
         busy: None,
         killed: false,
-    };
-    // Windows end at 1.2M, 1.8M, 2.4M, and 3.0M within (0.6M, 3.0M].
-    let summaries = [
-        summary(600_000),
-        summary(1_200_000),
-        summary(1_800_000),
-        summary(3_000_000),
-    ];
-    let c = coverage(&summaries, ts(600_000), ts(3_000_000), window);
-    assert!((c - 0.75).abs() < 1e-9, "coverage {c}");
-    assert_eq!(coverage(&summaries, ts(600_000), ts(600_001), window), 1.0);
-    assert_eq!(coverage(&[], ts(0), ts(1_200_000), window), 0.0);
+        hydrating,
+    }
+}
+
+fn ends(quiet: &QuietWindow) -> Vec<u64> {
+    quiet
+        .summaries
+        .iter()
+        .map(|summary| u64::from(summary.at) / 60_000)
+        .collect()
+}
+
+const TEN_MINUTES: Duration = Duration::from_secs(600);
+const HOUR: Duration = Duration::from_secs(3600);
+
+#[mz_ore::test]
+fn quiet_window_without_hydration_is_the_last_length() {
+    let summaries: Vec<_> = (1..=12).map(|i| window_summary(i * 10, false)).collect();
+    // Five minutes into the window that ends at 130: it is not part of the quiet window.
+    let quiet = quiet_window(&summaries, ts(125 * 60_000), HOUR, TEN_MINUTES);
+    assert!(quiet.filled);
+    assert_eq!(quiet.windows, 6);
+    assert_eq!(ends(&quiet), vec![120, 110, 100, 90, 80, 70]);
+    assert_eq!(quiet.coverage(), 1.0);
+}
+
+#[mz_ore::test]
+fn quiet_window_skips_a_hydrating_window_by_reaching_further_back() {
+    let summaries: Vec<_> = (1..=12).map(|i| window_summary(i * 10, i == 10)).collect();
+    let quiet = quiet_window(&summaries, ts(120 * 60_000), HOUR, TEN_MINUTES);
+    assert!(quiet.filled);
+    assert_eq!(quiet.windows, 6);
+    assert_eq!(ends(&quiet), vec![120, 110, 90, 80, 70, 60]);
+    assert_eq!(quiet.coverage(), 1.0);
+
+    // A hydrating window with a memory kill is part of the quiet window.
+    let mut summaries = summaries;
+    summaries[9].killed = true;
+    let quiet = quiet_window(&summaries, ts(120 * 60_000), HOUR, TEN_MINUTES);
+    assert_eq!(ends(&quiet), vec![120, 110, 100, 90, 80, 70]);
+}
+
+#[mz_ore::test]
+fn quiet_window_never_fills_when_hydrating_more_than_half_the_time() {
+    // Hydrating in two windows of every three.
+    let summaries: Vec<_> = (1..=30)
+        .map(|i| window_summary(i * 10, i % 3 != 0))
+        .collect();
+    for now in 150..=300 {
+        let quiet = quiet_window(&summaries, ts(now * 60_000), HOUR, TEN_MINUTES);
+        assert!(!quiet.filled, "filled at minute {now}: {quiet:?}");
+        assert!(quiet.windows <= 4);
+    }
+    // Exactly half the time still fills, at the reach of twice the length.
+    let summaries: Vec<_> = (1..=30)
+        .map(|i| window_summary(i * 10, i % 2 == 0))
+        .collect();
+    let quiet = quiet_window(&summaries, ts(300 * 60_000), HOUR, TEN_MINUTES);
+    assert!(quiet.filled);
+    assert_eq!(ends(&quiet), vec![290, 270, 250, 230, 210, 190]);
+}
+
+#[mz_ore::test]
+fn quiet_window_coverage_counts_missing_summaries() {
+    // The window ending at 100 has no summary.
+    let summaries: Vec<_> = (1..=12)
+        .filter(|i| *i != 10)
+        .map(|i| window_summary(i * 10, false))
+        .collect();
+    let quiet = quiet_window(&summaries, ts(120 * 60_000), HOUR, TEN_MINUTES);
+    assert!(quiet.filled);
+    assert_eq!(quiet.windows, 6);
+    assert_eq!(ends(&quiet), vec![120, 110, 90, 80, 70]);
+    assert!(quiet.coverage() < 0.9, "coverage {}", quiet.coverage());
+
+    // A history shorter than the length does not fill.
+    let quiet = quiet_window(&summaries[..3], ts(30 * 60_000), HOUR, TEN_MINUTES);
+    assert!(!quiet.filled);
+    assert_eq!(quiet.windows, 3);
 }

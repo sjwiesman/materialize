@@ -31,7 +31,7 @@ use mz_adapter_types::dyncfgs::{
     LOAD_AUTOSCALING_LAG_SAMPLE_INTERVAL, LOAD_AUTOSCALING_LAG_TOLERANCE, LOAD_AUTOSCALING_WARM_UP,
 };
 use mz_catalog::builtin::{MZ_CLUSTER_LOAD_DATAFLOW_HISTORY, MZ_CLUSTER_LOAD_HISTORY};
-use mz_catalog::memory::objects::ClusterVariant;
+use mz_catalog::memory::objects::{CatalogItem, ClusterVariant};
 use mz_cluster_client::ReplicaId;
 use mz_cluster_controller::ctx::LoadRecord;
 use mz_cluster_controller::load::{
@@ -446,6 +446,7 @@ pub(crate) fn summary_rows(cluster_id: ClusterId, summary: &LoadSummary) -> (Row
         heap,
         busy,
         killed,
+        hydrating,
     } = summary;
     let cluster_row = Row::pack_slice(&[
         Datum::String(&cluster_id),
@@ -461,6 +462,7 @@ pub(crate) fn summary_rows(cluster_id: ClusterId, summary: &LoadSummary) -> (Row
             Datum::Float64(busy.busiest_worker_utilization.into())
         }),
         Datum::from(*killed),
+        Datum::from(*hydrating),
     ]);
     let dataflow_rows = dataflows
         .iter()
@@ -526,6 +528,7 @@ pub(crate) fn decode_summaries(
                 busy_millicores,
                 busiest_worker_utilization,
                 killed,
+                hydrating,
             ] = datums[..]
             else {
                 return None;
@@ -557,6 +560,7 @@ pub(crate) fn decode_summaries(
                 heap: heap.flatten(),
                 busy,
                 killed: killed == Datum::True,
+                hydrating: hydrating == Datum::True,
             };
             Some(((cluster_id, at), summary))
         })();
@@ -715,6 +719,18 @@ impl Coordinator {
             exports,
             replicas: mut replica_frontiers,
         } = frontiers;
+        // A materialized view with a refresh schedule advances its output only at its refreshes,
+        // so its lag says nothing about the cluster. It stays in `exports`, the fingerprint.
+        let scheduled: BTreeSet<GlobalId> = cluster
+            .bound_objects
+            .iter()
+            .filter_map(|id| match self.catalog().get_entry(id).item() {
+                CatalogItem::MaterializedView(mv) if mv.refresh_schedule.is_some() => {
+                    Some(mv.global_id_writes())
+                }
+                _ => None,
+            })
+            .collect();
         let replicas = cluster
             .replicas()
             .filter_map(|replica| {
@@ -728,10 +744,12 @@ impl Coordinator {
                     .and_then(|metrics| {
                         fullest_process(metrics, process_heap_limit(&location.allocation))
                     });
+                let mut dataflows = dataflow_frontiers(&frontiers.dataflows);
+                dataflows.retain(|id, _| !scheduled.contains(id));
                 let observation = ReplicaObservation {
                     size: location.size.clone(),
                     hydrated: frontiers.hydrated,
-                    dataflows: dataflow_frontiers(&frontiers.dataflows),
+                    dataflows,
                     heap,
                 };
                 Some((replica.replica_id, observation))

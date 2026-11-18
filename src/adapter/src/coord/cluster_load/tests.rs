@@ -100,17 +100,24 @@ fn record_summarizes_each_window_after_warm_up() {
 }
 
 #[mz_ore::test]
-fn hydrating_replica_yields_no_summary_for_its_window() {
+fn hydrating_replica_yields_a_hydrating_window() {
     let mut load = ClusterLoad::default();
     let summaries = run(&mut load, 0, 245_000, |at| {
         // A new dataflow hydrates during [130s, 140s) on the running replica.
         let hydrated = !(130_000..140_000).contains(&at);
         observation(at, SIZE, hydrated, 1_000)
     });
-    let ends: Vec<_> = summaries.iter().map(|(_, s)| u64::from(s.at)).collect();
-    // The first window is in warm-up. A rehydration does not restart the warm-up, so the window
-    // after the hydration is summarized.
-    assert_eq!(ends, vec![120_000, 240_000]);
+    let ends: Vec<_> = summaries
+        .iter()
+        .map(|(_, s)| (u64::from(s.at), s.hydrating))
+        .collect();
+    // The first window is in warm-up, which is not hydration. A rehydration does not restart the
+    // warm-up, so the window after the hydration is summarized.
+    assert_eq!(
+        ends,
+        vec![(120_000, false), (180_000, true), (240_000, false)]
+    );
+    assert!(summaries[1].1.dataflows.is_empty());
 }
 
 #[mz_ore::test]
@@ -294,6 +301,7 @@ fn rows_round_trip() {
             busiest_worker_utilization: 0.25,
         }),
         killed: false,
+        hydrating: false,
     };
     let empty = LoadSummary {
         start: Timestamp::new(1_200_000),
@@ -305,6 +313,7 @@ fn rows_round_trip() {
         }),
         busy: None,
         killed: true,
+        hydrating: true,
         ..full.clone()
     };
     let mut cluster_rows = Vec::new();

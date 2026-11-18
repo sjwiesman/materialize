@@ -140,7 +140,7 @@ pub struct LoadSummary {
     /// See [`fingerprint`].
     pub fingerprint: u64,
     /// Per dataflow with lag samples on the replicas that contributed. Empty when no replica
-    /// qualified and the summary records only a memory kill.
+    /// qualified.
     pub dataflows: BTreeMap<GlobalId, DataflowSummary>,
     /// The largest steady-state heap among the replicas that contributed. `None` when none
     /// reported a heap, or none qualified.
@@ -150,6 +150,10 @@ pub struct LoadSummary {
     pub busy: Option<BusySummary>,
     /// Whether a replica at the realized size was killed for memory within the window.
     pub killed: bool,
+    /// Whether this is a hydrating window: no replica qualified, and a replica at the realized
+    /// size was hydrating within the window. A hydrating window carries no lag, heap, or busy
+    /// fields.
+    pub hydrating: bool,
 }
 
 /// One dataflow in a [`LoadSummary`].
@@ -253,27 +257,69 @@ pub fn is_behind(stats: &DataflowStats, threshold: Duration) -> bool {
     stats.median_lag > threshold && !is_draining(stats)
 }
 
-/// The share of the evaluation windows of length `window` that end in `(from, to]` for which
-/// `summaries` hold a summary. 1 when no window ends in the interval.
-pub fn coverage<'a>(
-    summaries: impl IntoIterator<Item = &'a LoadSummary>,
-    from: Timestamp,
-    to: Timestamp,
-    window: Duration,
-) -> f64 {
-    let length = u64::try_from(window.as_millis()).unwrap_or(u64::MAX).max(1);
-    let (from, to) = (u64::from(from), u64::from(to));
-    let expected = (to / length).saturating_sub(from / length);
-    if expected == 0 {
-        return 1.0;
+/// The evaluation windows a down-trial proposal reads, see [`quiet_window`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuietWindow<'a> {
+    /// The summaries of the windows the quiet window is made of, newest first.
+    pub summaries: Vec<&'a LoadSummary>,
+    /// How many evaluation windows the quiet window is made of, with or without a summary.
+    pub windows: usize,
+    /// Whether those windows add up to the quiet window's length.
+    pub filled: bool,
+}
+
+impl QuietWindow<'_> {
+    /// The share of the quiet window's evaluation windows that have a summary. 1 when it is made
+    /// of no windows.
+    pub fn coverage(&self) -> f64 {
+        if self.windows == 0 {
+            return 1.0;
+        }
+        f64::cast_lossy(self.summaries.len()) / f64::cast_lossy(self.windows)
     }
-    let observed: BTreeSet<u64> = summaries
+}
+
+/// The quiet window of length `length` before `now`, over evaluation windows of length
+/// `window`.
+///
+/// It is made of the most recent evaluation windows that ended by `now` and are not hydrating
+/// windows, taken back until they add up to `length`, and reaching back at most `2 * length`
+/// from `now`. A window without a summary is part of it. A hydrating window in which a replica
+/// was also killed for memory is part of it too, so that the kill is seen.
+pub fn quiet_window<'a>(
+    summaries: impl IntoIterator<Item = &'a LoadSummary>,
+    now: Timestamp,
+    length: Duration,
+    window: Duration,
+) -> QuietWindow<'a> {
+    let by_end: BTreeMap<u64, &LoadSummary> = summaries
         .into_iter()
-        .map(|summary| u64::from(summary.at))
-        .filter(|at| *at > from && *at <= to)
+        .map(|summary| (u64::from(summary.at), summary))
         .collect();
-    let share = f64::cast_lossy(observed.len()) / f64::cast_lossy(expected);
-    share.min(1.0)
+    let window = u64::try_from(window.as_millis()).unwrap_or(u64::MAX).max(1);
+    let length = u64::try_from(length.as_millis()).unwrap_or(u64::MAX);
+    let now = u64::from(now);
+    let reach = now.saturating_sub(length.saturating_mul(2));
+
+    let mut quiet = QuietWindow {
+        summaries: Vec::new(),
+        windows: 0,
+        filled: false,
+    };
+    let mut covered = 0u64;
+    let mut end = now - now % window;
+    while covered < length && end >= window && end - window >= reach {
+        let summary = by_end.get(&end).copied();
+        let skipped = summary.is_some_and(|summary| summary.hydrating && !summary.killed);
+        if !skipped {
+            quiet.windows += 1;
+            covered = covered.saturating_add(window);
+            quiet.summaries.extend(summary);
+        }
+        end -= window;
+    }
+    quiet.filled = covered >= length;
+    quiet
 }
 
 /// The lag statistics of every dataflow over the samples in `[start, end)`, on the `replicas`
@@ -361,8 +407,10 @@ pub fn dataflow_stats(
 /// A replica contributes when it qualifies at every sample of the window: it is at the realized
 /// size, hydrated, and past its warm-up. A window yields no summary when it has fewer than half
 /// the samples its length calls for, none in its first or last third, or no contributing
-/// replica, unless a replica at the realized size was killed for memory within it. That window
-/// yields a summary with only `killed` set, so the kill is not lost to the restart it causes.
+/// replica, with two exceptions that carry no lag, heap, or busy fields. A window with enough
+/// samples in which a replica at the realized size was hydrating is a hydrating window. A
+/// window in which a replica at the realized size was killed for memory has `killed` set,
+/// whatever else it carries, so the kill is not lost to the restart it causes.
 ///
 /// `record` provides the lag floors. They apply only when its fingerprint is the summary's.
 pub fn summarize(
@@ -385,8 +433,8 @@ pub fn summarize(
     let killed = kills
         .iter()
         .any(|kill| kill.at >= start && kill.at < end && kill.size == size);
-    let kill_only = || {
-        killed.then(|| LoadSummary {
+    let without_contributors = |hydrating: bool| {
+        (killed || hydrating).then(|| LoadSummary {
             start,
             at: end,
             size: size.clone(),
@@ -395,15 +443,22 @@ pub fn summarize(
             heap: None,
             busy: None,
             killed,
+            hydrating,
         })
     };
 
     if !enough_samples(&window, start, end, params) {
-        return kill_only();
+        return without_contributors(false);
     }
     let contributing = contributing_replicas(&window, &size, params.warm_up);
     if contributing.is_empty() {
-        return kill_only();
+        let hydrating = window.iter().any(|sample| {
+            sample
+                .replicas
+                .values()
+                .any(|replica| replica.size == sample.size && !replica.hydrated)
+        });
+        return without_contributors(hydrating);
     }
 
     let floors: BTreeMap<GlobalId, Duration> = record
@@ -442,6 +497,7 @@ pub fn summarize(
         heap: steady_state_heap(&window, &contributing),
         busy: busy_summary(busy, &contributing, start, end),
         killed,
+        hydrating: false,
     })
 }
 

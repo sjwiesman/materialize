@@ -5504,6 +5504,11 @@ pub static MZ_CLUSTER_LOAD_HISTORY: LazyLock<BuiltinSource> = LazyLock::new(|| B
             "Whether a replica at the cluster's size was killed for exceeding its memory within \
              the window.",
         ),
+        (
+            "hydrating",
+            "Whether no replica qualified for the window and a replica at the cluster's size was \
+             hydrating within it. Such a window has no heap, busy-time, or dataflow values.",
+        ),
     ]),
     is_retained_metrics_object: false,
     access: vec![PUBLIC_SELECT],

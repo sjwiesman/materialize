@@ -210,8 +210,12 @@ The `mz_cluster_load_history` table records one load summary per managed
 cluster per evaluation window, by default 10 minutes. A summary reduces the
 samples of the replicas that ran at the cluster's size, hydrated and past
 their warm-up, for the whole window. A window in which no replica qualified
-has no summary, unless a replica at the cluster's size was killed for
-exceeding its memory within it. The per-dataflow part of each summary is in
+has no summary, with two exceptions. A window in which a replica at the
+cluster's size was hydrating is recorded as a hydrating window, without heap,
+busy-time, or dataflow values. A window in which a replica at the cluster's
+size was killed for exceeding its memory is recorded with `killed` set.
+Dataflows of materialized views with a refresh schedule are not summarized.
+The per-dataflow part of each summary is in
 [`mz_cluster_load_dataflow_history`](#mz_cluster_load_dataflow_history).
 Summaries are retained for 7 days.
 
@@ -228,6 +232,7 @@ Summaries are retained for 7 days.
 | `busy_millicores`            | [`uint8`]                    | The mean time the workers were not parked over the window, in thousandths of a core, on the busiest replica. `NULL` when no busy-time window arrived. |
 | `busiest_worker_utilization` | [`double precision`]         | The mean share of each busy-time window that the busiest worker was not parked, on the busiest replica. `NULL` when no busy-time window arrived. |
 | `killed`                     | [`boolean`]                  | Whether a replica at the cluster's size was killed for exceeding its memory within the window. |
+| `hydrating`                  | [`boolean`]                  | Whether no replica qualified for the window and a replica at the cluster's size was hydrating within it. Such a window has no heap, busy-time, or dataflow values. |
 
 ## `mz_cluster_load_dataflow_history`
 
