@@ -193,8 +193,25 @@ Hydration is a state of the whole replica. A replica on which any dataflow
 is hydrating is hydrating, and contributes nothing to a summary: its workers
 are busy and its other dataflows may lag, and both are expected. This holds
 for a new replica and for a running one on which an object was just created.
-A window in which no replica qualifies for its whole length produces no
-summary.
+A replica qualifies for a window when it qualifies at every sample taken in
+it. A window in which no replica qualifies produces no summary, with two
+exceptions that are recorded so that later rules can read them:
+
+- A window in which a replica at the realized size was hydrating is recorded
+  as a **hydrating window**. It carries no lag, heap, or busy fields.
+- A window in which a replica at the realized size was killed for memory is
+  recorded with `killed` set, whatever else it carries.
+
+A window needs samples for at least half of its sample intervals, with at
+least one in its first third and one in its last third. With fewer it
+produces no summary.
+
+Heap and busy time are taken from the replica with the largest steady-state
+heap and from the busiest replica, since every replica has to fit.
+
+A materialized view with a refresh schedule advances its output only at its
+refreshes, so its lag says nothing about the cluster. Its dataflow is left
+out of the summaries. It still counts toward the fingerprint.
 
 The cluster's lag for a dataflow is the smallest among its replicas, since
 replicas do the same work and the freshest one answers.
@@ -331,10 +348,18 @@ it also answers queries, so users see the improvement during the hold.
 ### Scale down: the down-trial
 
 A down-trial to the next smaller size `S` is **proposed** when all of these
-held over the quiet window, which is `W` or twice the cluster's last
-hydration time if that is longer. The window must be observed: summaries
-exist for at least 90% of its evaluation windows. A cluster that spent much
-of the window hydrating has not shown that it keeps up.
+held over the quiet window. Its length is `W`, or twice the cluster's last
+hydration time if that is longer.
+
+Hydrating windows do not count toward the quiet window. It is made of the
+most recent evaluation windows that are not hydrating windows, taken back
+from now until they add up to its length, and reaching back at most twice
+its length. A hydration therefore delays a descent and does not void the
+observation before it. A cluster that hydrates for more than half of the
+time never fills a quiet window, and has not shown that it keeps up.
+
+The quiet window must be observed: summaries exist for at least 90% of the
+evaluation windows it is made of.
 
 1. No dataflow was behind in any summary, and no replica was killed for
    memory. A dataflow at its lag floor is not behind, so a cluster that is
@@ -524,6 +549,7 @@ The last status is kept in memory. The first evaluation after a restart of
 | `load_autoscaling_no_gain_interval` | 24h | base interval of `NoGain` |
 | `load_autoscaling_max_evidence_interval` | 7d | cap on an evidence interval |
 | `load_autoscaling_warm_up` | 5min | samples ignored after a size change |
+| `cluster_load_history_retention_interval` | 7d | how long summaries are retained |
 
 ### Rollout
 
@@ -611,7 +637,7 @@ Each case runs from every starting size in range unless it says otherwise.
 | 29 | A user alters the size during a trial | The trial is abandoned without evidence. The user's size holds. |
 | 30 | Two replicas, one persistently slower | The freshest speaks for the cluster. No up-trial while it is fresh. |
 | 31 | An object is created on a settled cluster and takes 30 minutes to hydrate, with workers saturated and other dataflows lagging meanwhile | No summaries during the hydration, so no trial and no size change because of it. The backlog afterwards drains and does not count as behind. |
-| 32 | An idle, oversized cluster on which an object is created every hour and hydrates for 10 minutes, `W = 1h` | Summaries cover under 90% of every quiet window, so no descent is proposed. With hydrations of 5 minutes the window is observed and the cluster descends. |
+| 32 | An idle, oversized cluster on which an object is created every hour and hydrates for 10 minutes, `W = 1h` | The hydrating windows are skipped, the quiet window fills from the windows around them, and the cluster descends, later than it would without the hydrations. With an object created every 15 minutes the quiet window never fills and no descent is proposed. |
 
 Cases 3, 5, 11, and 17 fail against a policy that scales up on a progress
 ratio alone, tracks only the slowest dataflow, lets a trial restart its
@@ -691,5 +717,8 @@ hydration of a scale-up, which nothing reactive can.
    query doubles the cluster, and the descent then takes a quiet window per
    size. Attributing a kill to a peek would need a signal that does not
    exist.
-8. **Up-trial hold.** 5 minutes is short enough to act and may be too short
+8. **Summaries in memory.** The coordinator holds 7 days of summaries per
+   cluster, each with a row per dataflow. Whether that needs a bound in
+   environments with many dataflows is a question for the shadow phase.
+9. **Up-trial hold.** 5 minutes is short enough to act and may be too short
    to tell *closer* from noise. The simulator's sawtooth cases bound it.
