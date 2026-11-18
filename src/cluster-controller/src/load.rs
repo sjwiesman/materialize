@@ -31,6 +31,10 @@ use mz_controller_types::ReplicaId;
 use mz_ore::cast::CastLossy;
 use mz_repr::{GlobalId, Timestamp};
 
+pub mod rules;
+#[cfg(test)]
+mod sim;
+
 /// The frontiers of one dataflow on one replica at one sample.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DataflowFrontiers {
@@ -556,8 +560,12 @@ fn contributing_replicas(
     contributing
 }
 
-/// The largest steady-state heap among `replicas`, by fraction of the limit, then by bytes.
-fn steady_state_heap(window: &[LoadSample], replicas: &BTreeSet<ReplicaId>) -> Option<HeapSummary> {
+/// The largest steady-state heap among `replicas` over `window`, by fraction of the limit, then
+/// by bytes.
+pub fn steady_state_heap(
+    window: &[LoadSample],
+    replicas: &BTreeSet<ReplicaId>,
+) -> Option<HeapSummary> {
     replicas
         .iter()
         .filter_map(|replica_id| {

@@ -596,6 +596,100 @@ pub const LOAD_AUTOSCALING_WARM_UP: Config<Duration> = Config::new(
     ParameterScope::Environment,
 );
 
+/// The floor on the lowest progress ratio among the behind dataflows when the `ON LOAD`
+/// strategy sizes an up-trial's candidate.
+pub const LOAD_AUTOSCALING_MIN_PROGRESS_RATIO: Config<f64> = Config::new(
+    "load_autoscaling_min_progress_ratio",
+    0.25,
+    "The floor on the lowest progress ratio among the behind dataflows when sizing an up-trial.",
+    ParameterScope::Environment,
+);
+
+/// How long an up-trial's candidate is held beside the current replicas once hydrated.
+pub const LOAD_AUTOSCALING_UP_TRIAL_DURATION: Config<Duration> = Config::new(
+    "load_autoscaling_up_trial_duration",
+    Duration::from_secs(5 * 60),
+    "How long an up-trial's candidate is held beside the current replicas once hydrated.",
+    ParameterScope::Environment,
+);
+
+/// How long a down-trial's candidate is held beside the current replicas once hydrated.
+pub const LOAD_AUTOSCALING_DOWN_TRIAL_DURATION: Config<Duration> = Config::new(
+    "load_autoscaling_down_trial_duration",
+    Duration::from_secs(15 * 60),
+    "How long a down-trial's candidate is held beside the current replicas once hydrated.",
+    ParameterScope::Environment,
+);
+
+/// The heap, as a fraction of its limit, that a size selected by the `ON LOAD` strategy may
+/// not exceed.
+pub const LOAD_AUTOSCALING_HEAP_MAX: Config<f64> = Config::new(
+    "load_autoscaling_heap_max",
+    0.8,
+    "The heap, as a fraction of its limit, that a size selected by load autoscaling may not exceed.",
+    ParameterScope::Environment,
+);
+
+/// The projected heap, as a fraction of its limit, at or below which the `ON LOAD` strategy
+/// proposes a size.
+pub const LOAD_AUTOSCALING_HEAP_PROPOSAL_MAX: Config<f64> = Config::new(
+    "load_autoscaling_heap_proposal_max",
+    0.7,
+    "The projected heap, as a fraction of its limit, at or below which load autoscaling proposes a size.",
+    ParameterScope::Environment,
+);
+
+/// How long the steady-state heap must stay above `load_autoscaling_heap_max` before the
+/// `ON LOAD` strategy moves the cluster up.
+pub const LOAD_AUTOSCALING_HEAP_HIGH_DURATION: Config<Duration> = Config::new(
+    "load_autoscaling_heap_high_duration",
+    Duration::from_secs(20 * 60),
+    "How long the steady-state heap must stay above load_autoscaling_heap_max before load autoscaling moves the cluster up.",
+    ParameterScope::Environment,
+);
+
+/// The share of a down-trial candidate's cores that the busy time may use for the trial to be
+/// proposed.
+pub const LOAD_AUTOSCALING_CPU_MARGIN: Config<f64> = Config::new(
+    "load_autoscaling_cpu_margin",
+    0.8,
+    "The share of a down-trial candidate's cores that busy time may use for the trial to be proposed.",
+    ParameterScope::Environment,
+);
+
+/// `SCALE DOWN AFTER` for an `ON LOAD` policy that omits it.
+pub const LOAD_AUTOSCALING_DEFAULT_SCALE_DOWN_AFTER: Config<Duration> = Config::new(
+    "load_autoscaling_default_scale_down_after",
+    Duration::from_secs(60 * 60),
+    "SCALE DOWN AFTER for an ON LOAD policy that omits it.",
+    ParameterScope::Environment,
+);
+
+/// The share of the quiet window's evaluation windows that must have a load summary for a
+/// down-trial to be proposed.
+pub const LOAD_AUTOSCALING_QUIET_WINDOW_COVERAGE: Config<f64> = Config::new(
+    "load_autoscaling_quiet_window_coverage",
+    0.9,
+    "The share of the quiet window's evaluation windows that must have a load summary for a down-trial to be proposed.",
+    ParameterScope::Environment,
+);
+
+/// How long a first `NoGain` verdict blocks an up-trial from its size.
+pub const LOAD_AUTOSCALING_NO_GAIN_INTERVAL: Config<Duration> = Config::new(
+    "load_autoscaling_no_gain_interval",
+    Duration::from_secs(24 * 60 * 60),
+    "How long a first NoGain verdict blocks an up-trial from its size.",
+    ParameterScope::Environment,
+);
+
+/// The longest a verdict of the `ON LOAD` strategy can block a trial.
+pub const LOAD_AUTOSCALING_MAX_EVIDENCE_INTERVAL: Config<Duration> = Config::new(
+    "load_autoscaling_max_evidence_interval",
+    Duration::from_secs(7 * 24 * 60 * 60),
+    "The longest a verdict of load autoscaling can block a trial.",
+    ParameterScope::Environment,
+);
+
 /// Adds the full set of all adapter `Config`s.
 pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
     configs
@@ -612,6 +706,17 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&LOAD_AUTOSCALING_LAG_TOLERANCE)
         .add(&LOAD_AUTOSCALING_FLOOR_FACTOR)
         .add(&LOAD_AUTOSCALING_WARM_UP)
+        .add(&LOAD_AUTOSCALING_MIN_PROGRESS_RATIO)
+        .add(&LOAD_AUTOSCALING_UP_TRIAL_DURATION)
+        .add(&LOAD_AUTOSCALING_DOWN_TRIAL_DURATION)
+        .add(&LOAD_AUTOSCALING_HEAP_MAX)
+        .add(&LOAD_AUTOSCALING_HEAP_PROPOSAL_MAX)
+        .add(&LOAD_AUTOSCALING_HEAP_HIGH_DURATION)
+        .add(&LOAD_AUTOSCALING_CPU_MARGIN)
+        .add(&LOAD_AUTOSCALING_DEFAULT_SCALE_DOWN_AFTER)
+        .add(&LOAD_AUTOSCALING_QUIET_WINDOW_COVERAGE)
+        .add(&LOAD_AUTOSCALING_NO_GAIN_INTERVAL)
+        .add(&LOAD_AUTOSCALING_MAX_EVIDENCE_INTERVAL)
         .add(&WITH_0DT_DEPLOYMENT_MAX_WAIT)
         .add(&WITH_0DT_DEPLOYMENT_DDL_CHECK_INTERVAL)
         .add(&ENABLE_0DT_DEPLOYMENT_PANIC_AFTER_TIMEOUT)
