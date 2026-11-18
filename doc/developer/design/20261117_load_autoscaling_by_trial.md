@@ -241,8 +241,10 @@ A dataflow is **behind** in a summary when all of these hold:
    tolerance `τ` (default 2s), or 1.5 times the dataflow's lag floor when it
    has one and that is larger.
 2. It is not draining. A dataflow drains when the median lag of the last
-   third of the window is below half that of the first third. A dataflow
-   working off a backlog needs time and not hardware.
+   third of the window is below half that of the first third, or when its
+   progress ratio over the window is at least 1.1. The second test covers a
+   backlog too large to halve within one window. A dataflow working off a
+   backlog needs time and not hardware.
 
 The median over ten minutes of 10 second samples is what makes this robust.
 A dataflow whose frontier advances in steps, or that pauses for a merge, has
@@ -383,7 +385,7 @@ sizes down that fails costs the same hydration and teaches less.
 **Procedure.** The candidate replicas are created beside the current ones.
 The trial has a deadline that is set when it starts: a hydration budget of 4
 times the cluster's last hydration time, at least 30 minutes, plus the hold
-(default 15 minutes). The hold begins when the candidate is hydrated. At its
+(default 15 minutes). An up-trial uses the same budget with its own hold. The hold begins when the candidate is hydrated. At its
 end the trial reaches a verdict, once.
 
 **Verdict.** The candidate **passes** when all of these hold over the hold:
@@ -621,7 +623,7 @@ Each case runs from every starting size in range unless it says otherwise.
 | 13 | Step up in demand to 3 times, held | Up within one evaluation window plus hydration plus the hold. No descent afterwards. |
 | 14 | Step down in demand to a third, held | One size down per quiet window until the smallest fit. |
 | 15 | Lag sawtooth of 1s to 6s around a median of 1.5s, fresh in the median | No up-trial. Descent is not blocked. |
-| 16 | Lag sawtooth around a median of 6s | Behind in every summary whatever the phase of the sawtooth against the sampling. |
+| 16 | Lag sawtooth around a median of 6s, with a period between 4 sample intervals and one evaluation window | Behind in every summary whatever the phase of the sawtooth against the sampling. |
 | 17 | Half the busy windows never arrive, and none arrive while a dataflow is behind | Lag decisions are unchanged from the same run with all windows. Descent proposals wait for busy data and no descent happens without it. |
 | 18 | Heap fixed at 60% of the next smaller size, CPU idle | Descends. Heap fixed at 75% of the next smaller size: does not descend. |
 | 19 | Heap growing 5% an hour | Moves up by the high-heap rule before any kill, to a size at or below 70%. Never proposed back down while growth continues. |
@@ -643,6 +645,13 @@ Cases 3, 5, 11, and 17 fail against a policy that scales up on a progress
 ratio alone, tracks only the slowest dataflow, lets a trial restart its
 hold, or ties lag to the delivery of busy windows. They are the regression
 tests for those four mistakes.
+
+Two sawtooth periods fall outside case 16 and are known limits of the
+signal. At a period of exactly twice the sample interval the samples can
+land on the same two points of every cycle, and the median reads low. At a
+period longer than the evaluation window, a window that contains the reset
+reads as draining. In both, the dataflow is behind in some summaries and not
+in others.
 
 ### Beyond the simulator
 
