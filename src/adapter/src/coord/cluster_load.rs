@@ -27,8 +27,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use mz_adapter_types::dyncfgs::{
-    LOAD_AUTOSCALING_EVALUATION_WINDOW, LOAD_AUTOSCALING_FLOOR_FACTOR,
-    LOAD_AUTOSCALING_LAG_SAMPLE_INTERVAL, LOAD_AUTOSCALING_LAG_TOLERANCE, LOAD_AUTOSCALING_WARM_UP,
+    LOAD_AUTOSCALING_DRAINING_PROGRESS_RATIO, LOAD_AUTOSCALING_EVALUATION_WINDOW,
+    LOAD_AUTOSCALING_FLOOR_FACTOR, LOAD_AUTOSCALING_LAG_SAMPLE_INTERVAL,
+    LOAD_AUTOSCALING_LAG_TOLERANCE, LOAD_AUTOSCALING_WARM_UP,
 };
 use mz_catalog::builtin::{MZ_CLUSTER_LOAD_DATAFLOW_HISTORY, MZ_CLUSTER_LOAD_HISTORY};
 use mz_catalog::memory::objects::{CatalogItem, ClusterVariant};
@@ -328,6 +329,7 @@ fn summary_params(dyncfgs: &ConfigSet) -> SummaryParams {
         warm_up: LOAD_AUTOSCALING_WARM_UP.get(dyncfgs),
         lag_tolerance: LOAD_AUTOSCALING_LAG_TOLERANCE.get(dyncfgs),
         floor_factor: LOAD_AUTOSCALING_FLOOR_FACTOR.get(dyncfgs),
+        draining_progress_ratio: LOAD_AUTOSCALING_DRAINING_PROGRESS_RATIO.get(dyncfgs),
     }
 }
 

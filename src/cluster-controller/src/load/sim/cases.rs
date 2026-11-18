@@ -60,46 +60,60 @@ fn case_15_sawtooth_fresh_in_the_median_does_not_scale_up_and_descends() {
     }
 }
 
-/// Runs a sawtooth of 1s to 11s around a median of 6s at each phase, with the size pinned so
-/// that no trial or floor changes what the summaries say.
-fn check_case_16(periods: &[f64]) {
-    for period in periods {
-        for phase in [0.0, 3.0, 7.0, 13.0, 29.0] {
-            let workload = idle_with_noise(sawtooth(1.0, 11.0, 6.0, *period, phase));
+/// Whether `GlobalId::User(1)` is behind in each summary with lag of a sawtooth of 1s to 11s
+/// around a median of 6s, per phase, with the size pinned so that no trial or floor changes
+/// what the summaries say.
+fn sawtooth_behind(period: f64) -> Vec<(f64, Vec<bool>)> {
+    [0.0, 3.0, 7.0, 13.0, 29.0]
+        .into_iter()
+        .map(|phase| {
+            let workload = idle_with_noise(sawtooth(1.0, 11.0, 6.0, period, phase));
             let mut scenario = Scenario::new(workload, "c4", 4.0);
             scenario.min = "c4";
             scenario.max = "c4";
             let run = run(scenario);
-            let lag: Vec<_> = run.summaries.iter().filter(|s| !s.hydrating).collect();
-            assert!(lag.len() >= 20, "period {period}");
-            for summary in lag {
-                assert!(
-                    summary.dataflows[&GlobalId::User(1)].behind,
-                    "period {period}, phase {phase}: {summary:?}"
-                );
-            }
-        }
-    }
+            let behind: Vec<_> = run
+                .summaries
+                .iter()
+                .filter(|s| !s.hydrating)
+                .map(|s| s.dataflows[&GlobalId::User(1)].behind)
+                .collect();
+            assert!(behind.len() >= 20, "period {period}, phase {phase}");
+            (phase, behind)
+        })
+        .collect()
 }
 
 #[mz_ore::test]
 #[cfg_attr(miri, ignore)] // too slow
 fn case_16_sawtooth_behind_in_the_median_is_behind_in_every_summary() {
-    check_case_16(&[37.0, 60.0, 95.0, 150.0, 200.0, 300.0, 450.0, 600.0]);
+    // From 4 sample intervals to one evaluation window.
+    for period in [40.0, 60.0, 95.0, 150.0, 200.0, 300.0, 450.0, 600.0] {
+        for (phase, behind) in sawtooth_behind(period) {
+            assert!(
+                behind.iter().all(|b| *b),
+                "period {period}, phase {phase}: {behind:?}"
+            );
+        }
+    }
 }
 
+/// The two periods the design names as known limits of the signal: the dataflow is behind in
+/// some summaries and not in others.
 #[mz_ore::test]
 #[cfg_attr(miri, ignore)] // too slow
-#[ignore = "a period of twice the sample interval aliases: at phase 0 every sample is 1s or 6s"]
-fn case_16_sawtooth_at_twice_the_sample_interval() {
-    check_case_16(&[20.0]);
-}
-
-#[mz_ore::test]
-#[cfg_attr(miri, ignore)] // too slow
-#[ignore = "a sawtooth longer than the window that resets within it reads as draining"]
-fn case_16_sawtooth_longer_than_the_evaluation_window() {
-    check_case_16(&[900.0]);
+fn case_16_sawtooth_outside_the_period_range_is_a_known_limit() {
+    // Twice the sample interval, where the samples can land on the same two points of every
+    // cycle, and longer than the evaluation window, where a window with the reset reads as
+    // draining.
+    for period in [20.0, 900.0] {
+        let behind: Vec<bool> = sawtooth_behind(period)
+            .into_iter()
+            .flat_map(|(_, behind)| behind)
+            .collect();
+        assert!(behind.iter().any(|b| *b), "period {period}: {behind:?}");
+        assert!(behind.iter().any(|b| !*b), "period {period}: {behind:?}");
+    }
 }
 
 /// Overloaded at c2 for three hours, then nearly idle.
@@ -357,7 +371,6 @@ fn check_case_31(run: &Run) {
 
 #[mz_ore::test]
 #[cfg_attr(miri, ignore)] // too slow
-#[ignore = "the doc's draining test does not see a 30 minute backlog drain at 1s per second"]
 fn case_31_hydration_of_a_new_object_is_not_load() {
     let mut scenario = Scenario::new(late_object_workload(1.0), "c4", 10.0);
     scenario.min = "c4";

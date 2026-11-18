@@ -33,6 +33,7 @@ fn params() -> SummaryParams {
         warm_up: Duration::from_secs(30),
         lag_tolerance: Duration::from_secs(2),
         floor_factor: 1.5,
+        draining_progress_ratio: 1.1,
     }
 }
 
@@ -132,6 +133,39 @@ fn draining_backlog_has_ratio_above_one_and_is_not_behind() {
     assert!(ratio(&summary, D1) > 1.0);
     assert!(d1.median_lag > Duration::from_secs(2));
     assert!(!d1.behind, "a draining dataflow is not behind");
+}
+
+#[mz_ore::test]
+fn backlog_too_large_to_halve_drains_by_its_progress_ratio() {
+    // A backlog of 30 minutes worked off at 1.5 seconds per second: the lag falls from 1800s to
+    // 1770s over the window, far from halving.
+    let samples = series(|at| {
+        let elapsed = at - START;
+        (at + 1_800_000, at + elapsed / 2)
+    });
+    let summary = summarize_window(&samples).expect("summary");
+    let d1 = summary.dataflows[&D1];
+    assert!((ratio(&summary, D1) - 1.5).abs() < 0.01);
+    assert!(!d1.behind, "a ratio of at least 1.1 is draining");
+}
+
+#[mz_ore::test]
+fn is_draining_by_halving_or_by_ratio() {
+    let stats = |first: u64, last: u64, ratio: Option<f64>| DataflowStats {
+        median_lag: Duration::from_secs(first.max(last)),
+        first_third_median_lag: Some(Duration::from_secs(first)),
+        last_third_median_lag: Some(Duration::from_secs(last)),
+        progress_ratio: ratio,
+    };
+    assert!(is_draining(&stats(40, 10, Some(1.0)), 1.1));
+    assert!(is_draining(&stats(40, 39, Some(1.1)), 1.1));
+    assert!(!is_draining(&stats(40, 39, Some(1.09)), 1.1));
+    assert!(!is_draining(&stats(40, 39, None), 1.1));
+    assert!(!is_draining(&stats(40, 39, Some(1.5)), 2.0));
+
+    let threshold = Duration::from_secs(2);
+    assert!(is_behind(&stats(40, 39, Some(1.0)), threshold, 1.1));
+    assert!(!is_behind(&stats(40, 39, Some(1.2)), threshold, 1.1));
 }
 
 #[mz_ore::test]

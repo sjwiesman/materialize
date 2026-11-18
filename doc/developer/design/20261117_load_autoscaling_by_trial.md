@@ -539,6 +539,7 @@ The last status is kept in memory. The first evaluation after a restart of
 | `load_autoscaling_evaluation_window` | 10min | span of one summary |
 | `load_autoscaling_lag_tolerance` | 2s | `τ` |
 | `load_autoscaling_floor_factor` | 1.5 | multiple of its floor above which a dataflow is behind |
+| `load_autoscaling_draining_progress_ratio` | 1.1 | progress ratio over a window at or above which a dataflow is draining |
 | `load_autoscaling_min_progress_ratio` | 0.25 | floor on `ρ` when sizing an up-trial |
 | `load_autoscaling_up_trial_duration` | 5min | hold of an up-trial |
 | `load_autoscaling_down_trial_duration` | 15min | hold of a down-trial |

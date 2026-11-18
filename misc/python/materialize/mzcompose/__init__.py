@@ -919,6 +919,7 @@ UNINTERESTING_SYSTEM_PARAMETERS = [
     "load_autoscaling_evaluation_window",
     "load_autoscaling_lag_tolerance",
     "load_autoscaling_floor_factor",
+    "load_autoscaling_draining_progress_ratio",
     "load_autoscaling_warm_up",
     "load_autoscaling_min_progress_ratio",
     "load_autoscaling_up_trial_duration",

@@ -41,6 +41,7 @@ fn params() -> SummaryParams {
         warm_up: Duration::from_secs(30),
         lag_tolerance: Duration::from_secs(2),
         floor_factor: 1.5,
+        draining_progress_ratio: 1.1,
     }
 }
 

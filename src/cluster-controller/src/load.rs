@@ -130,6 +130,8 @@ pub struct SummaryParams {
     pub lag_tolerance: Duration,
     /// The multiple of its floor above which a dataflow with a floor is behind.
     pub floor_factor: f64,
+    /// The progress ratio over a window at or above which a dataflow is draining.
+    pub draining_progress_ratio: f64,
 }
 
 /// The load of a cluster over one evaluation window.
@@ -247,18 +249,25 @@ pub fn behind_threshold(
 }
 
 /// Whether a dataflow is working off a backlog: the median lag of the last third of the
-/// interval is below half that of the first third. `false` when either third has no samples.
-pub fn is_draining(stats: &DataflowStats) -> bool {
-    match (stats.first_third_median_lag, stats.last_third_median_lag) {
+/// interval is below half that of the first third, or its progress ratio over the interval is
+/// at least `progress_ratio`. The halving test is `false` when either third has no samples.
+pub fn is_draining(stats: &DataflowStats, progress_ratio: f64) -> bool {
+    // NOTE: A backlog larger than what the dataflow can work off within one interval does not
+    // halve its lag, so only the ratio sees it drain.
+    let halving = match (stats.first_third_median_lag, stats.last_third_median_lag) {
         (Some(first), Some(last)) => last < first / 2,
         _ => false,
-    }
+    };
+    halving
+        || stats
+            .progress_ratio
+            .is_some_and(|ratio| ratio >= progress_ratio)
 }
 
 /// Whether a dataflow is behind: its median lag exceeds `threshold`, see [`behind_threshold`],
 /// and it is not draining, see [`is_draining`].
-pub fn is_behind(stats: &DataflowStats, threshold: Duration) -> bool {
-    stats.median_lag > threshold && !is_draining(stats)
+pub fn is_behind(stats: &DataflowStats, threshold: Duration, draining_progress_ratio: f64) -> bool {
+    stats.median_lag > threshold && !is_draining(stats, draining_progress_ratio)
 }
 
 /// The evaluation windows a down-trial proposal reads, see [`quiet_window`].
@@ -486,7 +495,7 @@ pub fn summarize(
             let summary = DataflowSummary {
                 median_lag: stats.median_lag,
                 progress_ratio: stats.progress_ratio,
-                behind: is_behind(&stats, threshold),
+                behind: is_behind(&stats, threshold, params.draining_progress_ratio),
             };
             (id, summary)
         })

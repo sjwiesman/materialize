@@ -2237,6 +2237,15 @@
       "dyncfg": true
     },
     {
+      "name": "load_autoscaling_draining_progress_ratio",
+      "typeName": "double-precision floating-point number",
+      "default": "1.1",
+      "description": "The progress ratio over an evaluation window at or above which a dataflow is draining, and so not behind.",
+      "scope": "environment",
+      "userVisible": false,
+      "dyncfg": true
+    },
+    {
       "name": "load_autoscaling_evaluation_window",
       "typeName": "duration",
       "default": "10 min",

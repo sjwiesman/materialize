@@ -587,6 +587,15 @@ pub const LOAD_AUTOSCALING_FLOOR_FACTOR: Config<f64> = Config::new(
     ParameterScope::Environment,
 );
 
+/// The progress ratio over an evaluation window at or above which a dataflow is draining, and
+/// so not behind.
+pub const LOAD_AUTOSCALING_DRAINING_PROGRESS_RATIO: Config<f64> = Config::new(
+    "load_autoscaling_draining_progress_ratio",
+    1.1,
+    "The progress ratio over an evaluation window at or above which a dataflow is draining, and so not behind.",
+    ParameterScope::Environment,
+);
+
 /// How long after a replica first runs at the cluster's size and is hydrated its samples are
 /// ignored by the load summaries.
 pub const LOAD_AUTOSCALING_WARM_UP: Config<Duration> = Config::new(
@@ -705,6 +714,7 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&LOAD_AUTOSCALING_EVALUATION_WINDOW)
         .add(&LOAD_AUTOSCALING_LAG_TOLERANCE)
         .add(&LOAD_AUTOSCALING_FLOOR_FACTOR)
+        .add(&LOAD_AUTOSCALING_DRAINING_PROGRESS_RATIO)
         .add(&LOAD_AUTOSCALING_WARM_UP)
         .add(&LOAD_AUTOSCALING_MIN_PROGRESS_RATIO)
         .add(&LOAD_AUTOSCALING_UP_TRIAL_DURATION)
