@@ -24,6 +24,7 @@ use mz_sql::session::user::{MZ_ANALYTICS_ROLE_ID, MZ_SYSTEM_ROLE_ID};
 use mz_sql::session::vars::METRICS_RETENTION;
 use mz_storage_client::controller::IntrospectionType;
 use mz_storage_client::healthcheck::{
+    CLUSTER_LOAD_DATAFLOW_HISTORY_DESC, CLUSTER_LOAD_HISTORY_DESC,
     MZ_AWS_PRIVATELINK_CONNECTION_STATUS_HISTORY_DESC, MZ_PREPARED_STATEMENT_HISTORY_DESC,
     MZ_SESSION_HISTORY_DESC, MZ_SINK_STATUS_HISTORY_DESC, MZ_SOURCE_STATUS_HISTORY_DESC,
     MZ_SQL_TEXT_DESC, MZ_STATEMENT_EXECUTION_HISTORY_DESC, REPLICA_BUSY_HISTORY_DESC,
@@ -5452,6 +5453,98 @@ pub static MZ_CLUSTER_REPLICA_BUSY_HISTORY: LazyLock<BuiltinSource> =
                 "max_worker_busy_ns",
                 "The longest time any one worker spent not parked within the window, in \
                  nanoseconds.",
+            ),
+        ]),
+        is_retained_metrics_object: false,
+        access: vec![PUBLIC_SELECT],
+        ontology: None,
+    });
+
+pub static MZ_CLUSTER_LOAD_HISTORY: LazyLock<BuiltinSource> = LazyLock::new(|| BuiltinSource {
+    name: "mz_cluster_load_history",
+    schema: MZ_INTERNAL_SCHEMA,
+    oid: oid::SOURCE_MZ_CLUSTER_LOAD_HISTORY_OID,
+    desc: CLUSTER_LOAD_HISTORY_DESC.clone(),
+    data_source: IntrospectionType::ClusterLoadHistory.into(),
+    column_comments: BTreeMap::from_iter([
+        (
+            "cluster_id",
+            "The ID of the cluster. Corresponds to `mz_clusters.id`.",
+        ),
+        ("window_start", "The start of the evaluation window."),
+        ("window_end", "The end of the evaluation window."),
+        ("size", "The size of the cluster during the window."),
+        (
+            "fingerprint",
+            "A hash of the IDs of the collections the cluster's dataflows exported at the end of \
+             the window.",
+        ),
+        (
+            "heap_bytes",
+            "The median heap (memory plus swap) of the fullest process over the window, in bytes, \
+             on the replica with the largest heap.",
+        ),
+        (
+            "heap_fraction",
+            "The median heap of the fullest process over the window as a fraction of its heap \
+             limit, on the replica with the largest heap.",
+        ),
+        (
+            "busy_millicores",
+            "The mean time the workers were not parked over the window, in thousandths of a \
+             core, on the busiest replica. `NULL` when no busy-time window arrived.",
+        ),
+        (
+            "busiest_worker_utilization",
+            "The mean share of each busy-time window that the busiest worker was not parked, on \
+             the busiest replica. `NULL` when no busy-time window arrived.",
+        ),
+        (
+            "killed",
+            "Whether a replica at the cluster's size was killed for exceeding its memory within \
+             the window.",
+        ),
+    ]),
+    is_retained_metrics_object: false,
+    access: vec![PUBLIC_SELECT],
+    ontology: None,
+});
+
+pub static MZ_CLUSTER_LOAD_DATAFLOW_HISTORY: LazyLock<BuiltinSource> =
+    LazyLock::new(|| BuiltinSource {
+        name: "mz_cluster_load_dataflow_history",
+        schema: MZ_INTERNAL_SCHEMA,
+        oid: oid::SOURCE_MZ_CLUSTER_LOAD_DATAFLOW_HISTORY_OID,
+        desc: CLUSTER_LOAD_DATAFLOW_HISTORY_DESC.clone(),
+        data_source: IntrospectionType::ClusterLoadDataflowHistory.into(),
+        column_comments: BTreeMap::from_iter([
+            (
+                "cluster_id",
+                "The ID of the cluster. Corresponds to `mz_clusters.id`.",
+            ),
+            (
+                "window_end",
+                "The end of the evaluation window. Corresponds to \
+                 `mz_cluster_load_history.window_end`.",
+            ),
+            (
+                "dataflow_id",
+                "The ID of the collection the dataflow exports.",
+            ),
+            (
+                "median_lag",
+                "The median over the window of how far the dataflow's output trailed its inputs, \
+                 on the freshest replica at each sample.",
+            ),
+            (
+                "progress_ratio",
+                "How far the dataflow's output advanced over the window divided by how far its \
+                 inputs advanced. `NULL` when the inputs did not advance.",
+            ),
+            (
+                "behind",
+                "Whether the dataflow's median lag exceeded its threshold while it was not working \
+                 off a backlog.",
             ),
         ]),
         is_retained_metrics_object: false,

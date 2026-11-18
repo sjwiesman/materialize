@@ -19,7 +19,8 @@ use maplit::btreemap;
 use mz_audit_log::VersionedStorageUsage;
 use mz_catalog::memory::objects::ClusterReplicaProcessStatus;
 use mz_controller::ControllerResponse;
-use mz_controller::clusters::{ClusterEvent, ClusterStatus};
+use mz_controller::clusters::{ClusterEvent, ClusterStatus, ReplicaLocation};
+use mz_orchestrator::OfflineReason;
 use mz_ore::cast::CastFrom;
 use mz_ore::instrument;
 use mz_ore::now::EpochMillis;
@@ -189,6 +190,15 @@ impl Coordinator {
             }
             Message::HydrationHistoryRun => {
                 self.run_hydration_history_collection();
+            }
+            Message::ClusterLoadSample => {
+                self.cluster_load_sample();
+            }
+            Message::ClusterLoadFrontiers { at, frontiers } => {
+                self.cluster_load_record(at, frontiers);
+            }
+            Message::ClusterLoadHistoryRestored(summaries) => {
+                self.cluster_load.restore(summaries);
             }
             Message::CaughtUpCheck(request) => {
                 self.handle_caught_up_check_request(request);
@@ -994,6 +1004,26 @@ impl Coordinator {
         // arrangement sizes history don't record that data as current.
         if !matches!(event.status, ClusterStatus::Online) || restart_count_changed {
             self.invalidate_introspection_freshness(event.replica_id);
+            self.cluster_load.note_restarted(event.replica_id);
+        }
+        if status_changed && event.status == ClusterStatus::Offline(Some(OfflineReason::OomKilled))
+        {
+            let size = self
+                .catalog()
+                .try_get_cluster_replica(event.cluster_id, event.replica_id)
+                .and_then(|replica| match &replica.config.location {
+                    ReplicaLocation::Managed(location) => Some(location.size.clone()),
+                    ReplicaLocation::Unmanaged(_) => None,
+                });
+            if let Some(size) = size {
+                let at = u64::try_from(event.time.timestamp_millis()).unwrap_or_default();
+                self.cluster_load.note_memory_kill(
+                    event.cluster_id,
+                    event.replica_id,
+                    size,
+                    Timestamp::new(at),
+                );
+            }
         }
 
         if let Some(old_replica_status) = old_replica_status {

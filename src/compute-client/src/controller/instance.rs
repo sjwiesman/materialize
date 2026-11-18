@@ -55,8 +55,8 @@ use crate::controller::instance_client::PeekError;
 use crate::controller::peek_lifecycle::PeekLifecycle;
 use crate::controller::replica::{ReplicaClient, ReplicaConfig};
 use crate::controller::{
-    CollectionReadiness, ComputeControllerResponse, IntrospectionUpdates, PeekNotification,
-    ReplicaId, StorageCollections,
+    CollectionReadiness, ComputeControllerResponse, DataflowFrontiers, IntrospectionUpdates,
+    LoadFrontiers, PeekNotification, ReplicaId, ReplicaLoadFrontiers, StorageCollections,
 };
 use crate::logging::LogVariant;
 use crate::metrics::IntCounter;
@@ -927,6 +927,51 @@ impl Instance {
             "copy_tos": copy_tos,
             "wallclock_lag_last_recorded": wallclock_lag_last_recorded,
         }))
+    }
+
+    /// Reports the frontiers and hydration state of the instance's dataflows on each replica.
+    pub(super) fn load_frontiers(&self) -> LoadFrontiers {
+        let mut frontiers = LoadFrontiers::default();
+        for replica in self.replicas.values() {
+            frontiers.replicas.insert(
+                replica.id,
+                ReplicaLoadFrontiers {
+                    hydrated: true,
+                    dataflows: BTreeMap::new(),
+                },
+            );
+        }
+        for (id, collection) in self.collections_iter() {
+            if id.is_transient() || matches!(id, GlobalId::IntrospectionSourceIndex(_)) {
+                continue;
+            }
+            frontiers.exports.insert(id);
+            let input = self.dependency_write_frontiers(collection).reduce(|a, b| {
+                if PartialOrder::less_equal(&a, &b) {
+                    a
+                } else {
+                    b
+                }
+            });
+            for replica in self.replicas_hosting(id).expect("collection must exist") {
+                let replica_collection = replica.expect_collection(id);
+                let entry = frontiers
+                    .replicas
+                    .get_mut(&replica.id)
+                    .expect("inserted above");
+                entry.hydrated &= replica_collection.hydrated();
+                if let Some(input) = &input {
+                    entry.dataflows.insert(
+                        id,
+                        DataflowFrontiers {
+                            input: input.clone(),
+                            output: replica_collection.output_frontier.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        frontiers
     }
 
     /// Reports the current write frontier for the identified compute collection.
@@ -4191,6 +4236,93 @@ pub(super) mod tests {
                 );
             }
         }
+    }
+
+    #[mz_ore::test(tokio::test)]
+    async fn load_frontiers_reports_dataflows_per_replica() {
+        let (mut instance, _coordinator) = peek_test_instance();
+        let (r1, r2) = (ReplicaId::User(1), ReplicaId::User(2));
+        for replica in [r1, r2] {
+            instance
+                .add_replica(
+                    replica,
+                    super::ReplicaConfig {
+                        location: mz_cluster_client::client::ClusterReplicaLocation {
+                            ctl_addrs: Vec::new(),
+                        },
+                        logging: Default::default(),
+                        grpc_client: Default::default(),
+                        expiration_offset: None,
+                        arrangement_dictionary_compression: false,
+                    },
+                    None,
+                    Default::default(),
+                )
+                .unwrap();
+        }
+        let add = |instance: &mut Instance, id: GlobalId, deps: BTreeMap<GlobalId, ReadHold>| {
+            instance.add_collection(
+                id,
+                ac(10),
+                super::SharedCollectionState::new(ac(10)),
+                BTreeMap::new(),
+                deps,
+                Vec::new(),
+                false,
+                false,
+                None,
+                None,
+                None,
+            );
+        };
+        let (input, index, log) = (
+            GlobalId::User(1),
+            GlobalId::User(2),
+            GlobalId::IntrospectionSourceIndex(1),
+        );
+        add(&mut instance, input, BTreeMap::new());
+        let hold = instance.acquire_read_hold(input).unwrap();
+        add(&mut instance, index, BTreeMap::from([(input, hold)]));
+        add(&mut instance, log, BTreeMap::new());
+        add(&mut instance, GlobalId::Transient(1), BTreeMap::new());
+
+        instance
+            .expect_collection(input)
+            .shared
+            .lock_write_frontier(|frontier| *frontier = ac(100));
+        for (replica, output) in [(r1, 40), (r2, 90)] {
+            let state = instance.replicas.get_mut(&replica).unwrap();
+            for id in [input, index] {
+                let collection = state.collections.get_mut(&id).unwrap();
+                collection.update_output_frontier(ac(output));
+            }
+        }
+        // `r1` has not hydrated the input.
+        instance
+            .replicas
+            .get_mut(&r1)
+            .unwrap()
+            .collections
+            .get_mut(&input)
+            .unwrap()
+            .output_frontier = ac(10);
+
+        let frontiers = instance.load_frontiers();
+        assert_eq!(frontiers.exports, BTreeSet::from([input, index]));
+        let replica = |id| &frontiers.replicas[&id];
+        assert!(!replica(r1).hydrated);
+        assert!(replica(r2).hydrated);
+        let expected = |output| {
+            BTreeMap::from([(
+                index,
+                crate::controller::DataflowFrontiers {
+                    input: ac(100),
+                    output: ac(output),
+                },
+            )])
+        };
+        assert_eq!(replica(r1).dataflows, expected(40));
+        assert_eq!(replica(r2).dataflows, expected(90));
     }
 
     #[mz_ore::test(tokio::test)]

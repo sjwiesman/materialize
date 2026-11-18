@@ -204,6 +204,49 @@ an autoscaling action is running.
 | `strategy`     | [`jsonb`] | **Unstable** The configured autoscaling policy, as JSON. Currently an `on_hydration` sub-policy carrying its `hydration_size` and optional `linger_duration`. |
 | `state`        | [`jsonb`] | **Unstable** The in-flight autoscaling runtime state, as JSON keyed by strategy, or `NULL` when nothing is running. Currently a `burst` key carrying the active hydration burst: its `burst_size`, `linger_duration`, and `steady_ready_at`. |
 
+## `mz_cluster_load_history`
+
+The `mz_cluster_load_history` table records one load summary per managed
+cluster per evaluation window, by default 10 minutes. A summary reduces the
+samples of the replicas that ran at the cluster's size, hydrated and past
+their warm-up, for the whole window. A window in which no replica qualified
+has no summary, unless a replica at the cluster's size was killed for
+exceeding its memory within it. The per-dataflow part of each summary is in
+[`mz_cluster_load_dataflow_history`](#mz_cluster_load_dataflow_history).
+Summaries are retained for 7 days.
+
+<!-- RELATION_SPEC mz_internal.mz_cluster_load_history -->
+| Field                        | Type                         | Meaning                                                        |
+|------------------------------|------------------------------|----------------------------------------------------------------|
+| `cluster_id`                 | [`text`]                     | The ID of the cluster. Corresponds to [`mz_clusters.id`](../mz_catalog/#mz_clusters). |
+| `window_start`               | [`timestamp with time zone`] | The start of the evaluation window. |
+| `window_end`                 | [`timestamp with time zone`] | The end of the evaluation window. |
+| `size`                       | [`text`]                     | The size of the cluster during the window. |
+| `fingerprint`                | [`uint8`]                    | A hash of the IDs of the collections the cluster's dataflows exported at the end of the window. |
+| `heap_bytes`                 | [`uint8`]                    | The median heap (memory plus swap) of the fullest process over the window, in bytes, on the replica with the largest heap. |
+| `heap_fraction`              | [`double precision`]         | The median heap of the fullest process over the window as a fraction of its heap limit, on the replica with the largest heap. |
+| `busy_millicores`            | [`uint8`]                    | The mean time the workers were not parked over the window, in thousandths of a core, on the busiest replica. `NULL` when no busy-time window arrived. |
+| `busiest_worker_utilization` | [`double precision`]         | The mean share of each busy-time window that the busiest worker was not parked, on the busiest replica. `NULL` when no busy-time window arrived. |
+| `killed`                     | [`boolean`]                  | Whether a replica at the cluster's size was killed for exceeding its memory within the window. |
+
+## `mz_cluster_load_dataflow_history`
+
+The `mz_cluster_load_dataflow_history` table records, for each load summary in
+[`mz_cluster_load_history`](#mz_cluster_load_history), one row per dataflow on
+the cluster. A dataflow's lag is how far its output trails the least write
+frontier of its direct inputs, sampled every 10 seconds on each replica. At
+each sample the cluster's lag is the smallest among its replicas.
+
+<!-- RELATION_SPEC mz_internal.mz_cluster_load_dataflow_history -->
+| Field            | Type                         | Meaning                                                        |
+|------------------|------------------------------|----------------------------------------------------------------|
+| `cluster_id`     | [`text`]                     | The ID of the cluster. Corresponds to [`mz_clusters.id`](../mz_catalog/#mz_clusters). |
+| `window_end`     | [`timestamp with time zone`] | The end of the evaluation window. Corresponds to [`mz_cluster_load_history.window_end`](#mz_cluster_load_history). |
+| `dataflow_id`    | [`text`]                     | The ID of the collection the dataflow exports. |
+| `median_lag`     | [`interval`]                 | The median over the window of how far the dataflow's output trailed its inputs, on the freshest replica at each sample. |
+| `progress_ratio` | [`double precision`]         | How far the dataflow's output advanced over the window divided by how far its inputs advanced. `NULL` when the inputs did not advance. |
+| `behind`         | [`boolean`]                  | Whether the dataflow's median lag exceeded its threshold while it was not working off a backlog. |
+
 ## `mz_cluster_replica_metrics`
 
 The `mz_cluster_replica_metrics` view gives the last known CPU and RAM utilization statistics

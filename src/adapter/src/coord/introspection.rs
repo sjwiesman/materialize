@@ -497,6 +497,11 @@ impl Coordinator {
 
         subscribe.first_data_at.get_or_insert_with(Instant::now);
 
+        if subscribe.spec.introspection_type == IntrospectionType::ReplicaBusyHistory {
+            self.cluster_load
+                .observe_busy_rows(subscribe.replica_id, &new_updates);
+        }
+
         if subscribe.spec.is_history() {
             new_updates.retain(|(_row, diff)| diff.is_positive());
             self.controller

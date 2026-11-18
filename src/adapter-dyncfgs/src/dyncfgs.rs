@@ -554,6 +554,48 @@ pub const DEFAULT_HYDRATION_BURST_LINGER: Config<Duration> = Config::new(
     ParameterScope::Environment,
 );
 
+/// How often the coordinator samples the lag of every dataflow on every replica of a managed
+/// cluster, for the load summaries of the `ON LOAD` strategy.
+pub const LOAD_AUTOSCALING_LAG_SAMPLE_INTERVAL: Config<Duration> = Config::new(
+    "load_autoscaling_lag_sample_interval",
+    Duration::from_secs(10),
+    "How often the lag of every dataflow on every replica of a managed cluster is sampled.",
+    ParameterScope::Environment,
+);
+
+/// The span of one load summary. Windows end at multiples of this length since the Unix epoch.
+pub const LOAD_AUTOSCALING_EVALUATION_WINDOW: Config<Duration> = Config::new(
+    "load_autoscaling_evaluation_window",
+    Duration::from_secs(10 * 60),
+    "The span of one cluster load summary.",
+    ParameterScope::Environment,
+);
+
+/// The median lag within which a dataflow without a lag floor is not behind.
+pub const LOAD_AUTOSCALING_LAG_TOLERANCE: Config<Duration> = Config::new(
+    "load_autoscaling_lag_tolerance",
+    Duration::from_secs(2),
+    "The median lag within which a dataflow without a lag floor is not behind.",
+    ParameterScope::Environment,
+);
+
+/// The multiple of its lag floor above which a dataflow with a floor is behind.
+pub const LOAD_AUTOSCALING_FLOOR_FACTOR: Config<f64> = Config::new(
+    "load_autoscaling_floor_factor",
+    1.5,
+    "The multiple of its lag floor above which a dataflow with a floor is behind.",
+    ParameterScope::Environment,
+);
+
+/// How long after a replica first runs at the cluster's size and is hydrated its samples are
+/// ignored by the load summaries.
+pub const LOAD_AUTOSCALING_WARM_UP: Config<Duration> = Config::new(
+    "load_autoscaling_warm_up",
+    Duration::from_secs(5 * 60),
+    "How long after a replica first runs at the cluster's size and is hydrated its samples are ignored by the load summaries.",
+    ParameterScope::Environment,
+);
+
 /// Adds the full set of all adapter `Config`s.
 pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
     configs
@@ -565,6 +607,11 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&DEFAULT_CLUSTER_RECONFIGURATION_TIMEOUT)
         .add(&ENABLE_HYDRATION_BURST)
         .add(&DEFAULT_HYDRATION_BURST_LINGER)
+        .add(&LOAD_AUTOSCALING_LAG_SAMPLE_INTERVAL)
+        .add(&LOAD_AUTOSCALING_EVALUATION_WINDOW)
+        .add(&LOAD_AUTOSCALING_LAG_TOLERANCE)
+        .add(&LOAD_AUTOSCALING_FLOOR_FACTOR)
+        .add(&LOAD_AUTOSCALING_WARM_UP)
         .add(&WITH_0DT_DEPLOYMENT_MAX_WAIT)
         .add(&WITH_0DT_DEPLOYMENT_DDL_CHECK_INTERVAL)
         .add(&ENABLE_0DT_DEPLOYMENT_PANIC_AFTER_TIMEOUT)

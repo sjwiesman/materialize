@@ -477,6 +477,21 @@ impl ComputeController {
         Ok(rx)
     }
 
+    /// Requests the frontiers and hydration state of the instance's dataflows on each of its
+    /// replicas. A dropped response means the instance shut down before answering. This method
+    /// sends one request and does not wait for it.
+    pub fn load_frontiers(
+        &self,
+        instance_id: ComputeInstanceId,
+    ) -> Result<oneshot::Receiver<LoadFrontiers>, InstanceMissing> {
+        let instance = self.instance(instance_id)?;
+        let (tx, rx) = oneshot::channel();
+        instance.call(move |i| {
+            let _ = tx.send(i.load_frontiers());
+        });
+        Ok(rx)
+    }
+
     /// Returns `true` if all non-transient, non-excluded collections are ready on any of the
     /// provided replicas: hydrated, and, when `allowed_lag` is `Some`, no further than that
     /// behind the furthest output frontier any of the `reference_replicas` reports for the
@@ -1451,6 +1466,34 @@ impl Collection {
             write_frontier,
         }
     }
+}
+
+/// The frontiers of an instance's dataflows, from [`ComputeController::load_frontiers`].
+#[derive(Clone, Debug, Default)]
+pub struct LoadFrontiers {
+    /// The instance's non-transient collections, other than introspection source indexes.
+    pub exports: BTreeSet<GlobalId>,
+    /// Per replica of the instance.
+    pub replicas: BTreeMap<ReplicaId, ReplicaLoadFrontiers>,
+}
+
+/// One replica's part of [`LoadFrontiers`].
+#[derive(Clone, Debug, Default)]
+pub struct ReplicaLoadFrontiers {
+    /// Whether the replica has hydrated every non-transient collection it hosts.
+    pub hydrated: bool,
+    /// Per hosted non-transient collection that has inputs, its frontiers on the replica.
+    pub dataflows: BTreeMap<GlobalId, DataflowFrontiers>,
+}
+
+/// The frontiers of one dataflow on one replica.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataflowFrontiers {
+    /// The least write frontier of the dataflow's direct inputs.
+    pub input: Antichain<Timestamp>,
+    /// The replica's output frontier of the dataflow. The replica's write frontier would not do,
+    /// because it can reflect another replica's writes to a shared shard.
+    pub output: Antichain<Timestamp>,
 }
 
 /// The frontiers of a compute collection.

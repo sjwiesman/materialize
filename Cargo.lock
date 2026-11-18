@@ -6834,6 +6834,7 @@ dependencies = [
  "mz-dyncfg",
  "mz-ore",
  "mz-repr",
+ "seahash",
  "timely",
  "tokio",
  "tracing",

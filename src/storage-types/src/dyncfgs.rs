@@ -77,6 +77,14 @@ pub const REPLICA_BUSY_HISTORY_RETENTION_INTERVAL: Config<Duration> = Config::ne
     ParameterScope::Environment,
 );
 
+/// The interval of time to keep when truncating the cluster load histories.
+pub const CLUSTER_LOAD_HISTORY_RETENTION_INTERVAL: Config<Duration> = Config::new(
+    "cluster_load_history_retention_interval",
+    Duration::from_secs(60 * 60 * 24 * 7), // 7 days
+    "The interval of time to keep when truncating the cluster load histories.",
+    ParameterScope::Environment,
+);
+
 /// The interval of time to keep when truncating the wallclock lag history.
 pub const WALLCLOCK_LAG_HISTORY_RETENTION_INTERVAL: Config<Duration> = Config::new(
     "wallclock_lag_history_retention_interval",
@@ -606,6 +614,7 @@ pub fn all_dyncfgs(configs: ConfigSet) -> ConfigSet {
         .add(&PG_SOURCE_VALIDATE_TIMELINE)
         .add(&REPLICA_METRICS_HISTORY_RETENTION_INTERVAL)
         .add(&REPLICA_BUSY_HISTORY_RETENTION_INTERVAL)
+        .add(&CLUSTER_LOAD_HISTORY_RETENTION_INTERVAL)
         .add(&SINK_ENSURE_TOPIC_CONFIG)
         .add(&SINK_PROGRESS_SEARCH)
         .add(&SQL_SERVER_SOURCE_VALIDATE_RESTORE_HISTORY)

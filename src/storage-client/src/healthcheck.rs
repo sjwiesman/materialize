@@ -195,6 +195,44 @@ pub static REPLICA_BUSY_HISTORY_DESC: LazyLock<RelationDesc> = LazyLock::new(|| 
         .finish()
 });
 
+pub static CLUSTER_LOAD_HISTORY_DESC: LazyLock<RelationDesc> = LazyLock::new(|| {
+    RelationDesc::builder()
+        .with_column("cluster_id", SqlScalarType::String.nullable(false))
+        .with_column(
+            "window_start",
+            SqlScalarType::TimestampTz { precision: None }.nullable(false),
+        )
+        .with_column(
+            "window_end",
+            SqlScalarType::TimestampTz { precision: None }.nullable(false),
+        )
+        .with_column("size", SqlScalarType::String.nullable(false))
+        .with_column("fingerprint", SqlScalarType::UInt64.nullable(false))
+        .with_column("heap_bytes", SqlScalarType::UInt64.nullable(true))
+        .with_column("heap_fraction", SqlScalarType::Float64.nullable(true))
+        .with_column("busy_millicores", SqlScalarType::UInt64.nullable(true))
+        .with_column(
+            "busiest_worker_utilization",
+            SqlScalarType::Float64.nullable(true),
+        )
+        .with_column("killed", SqlScalarType::Bool.nullable(false))
+        .finish()
+});
+
+pub static CLUSTER_LOAD_DATAFLOW_HISTORY_DESC: LazyLock<RelationDesc> = LazyLock::new(|| {
+    RelationDesc::builder()
+        .with_column("cluster_id", SqlScalarType::String.nullable(false))
+        .with_column(
+            "window_end",
+            SqlScalarType::TimestampTz { precision: None }.nullable(false),
+        )
+        .with_column("dataflow_id", SqlScalarType::String.nullable(false))
+        .with_column("median_lag", SqlScalarType::Interval.nullable(false))
+        .with_column("progress_ratio", SqlScalarType::Float64.nullable(true))
+        .with_column("behind", SqlScalarType::Bool.nullable(false))
+        .finish()
+});
+
 pub static WALLCLOCK_LAG_HISTORY_DESC: LazyLock<RelationDesc> = LazyLock::new(|| {
     RelationDesc::builder()
         .with_column("object_id", SqlScalarType::String.nullable(false))

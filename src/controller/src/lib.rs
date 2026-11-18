@@ -171,6 +171,8 @@ pub struct Controller {
     metrics_tx: mpsc::UnboundedSender<(ReplicaId, Vec<ServiceProcessMetrics>)>,
     /// Receiver for the channel over which replica metrics are sent.
     metrics_rx: mpsc::UnboundedReceiver<(ReplicaId, Vec<ServiceProcessMetrics>)>,
+    /// The most recent metrics received for each replica, one entry per process.
+    replica_metrics: BTreeMap<ReplicaId, Vec<ServiceProcessMetrics>>,
     /// A function providing the current wallclock time.
     now: NowFn,
 
@@ -294,6 +296,7 @@ impl Controller {
             metrics_tasks: _,
             metrics_tx: _,
             metrics_rx: _,
+            replica_metrics: _,
             now: _,
             persist_pubsub_url: _,
             secrets_args: _,
@@ -610,7 +613,20 @@ impl Controller {
         metrics: Vec<ServiceProcessMetrics>,
     ) -> Result<Option<ControllerResponse>, anyhow::Error> {
         self.record_replica_metrics(id, &metrics);
+        // A metrics task can deliver after its replica was dropped.
+        if self
+            .metrics_tasks
+            .keys()
+            .any(|(_, replica_id)| *replica_id == id)
+        {
+            self.replica_metrics.insert(id, metrics);
+        }
         Ok(None)
+    }
+
+    /// The most recent metrics received for a replica, one entry per process.
+    pub fn replica_metrics(&self, id: ReplicaId) -> Option<&[ServiceProcessMetrics]> {
+        self.replica_metrics.get(&id).map(Vec::as_slice)
     }
 
     fn record_replica_metrics(&mut self, replica_id: ReplicaId, metrics: &[ServiceProcessMetrics]) {
@@ -747,6 +763,7 @@ impl Controller {
             metrics_tasks: BTreeMap::new(),
             metrics_tx,
             metrics_rx,
+            replica_metrics: BTreeMap::new(),
             now: config.now,
             persist_pubsub_url: config.persist_pubsub_url,
             secrets_args: config.secrets_args,

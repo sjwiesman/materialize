@@ -34,6 +34,7 @@
 //! [`ClusterControllerCtx`]: crate::ctx::ClusterControllerCtx
 
 pub mod ctx;
+pub mod load;
 pub mod strategy;
 
 use std::collections::{BTreeMap, BTreeSet};

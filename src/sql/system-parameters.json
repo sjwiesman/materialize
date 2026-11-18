@@ -110,6 +110,15 @@
       "dyncfg": false
     },
     {
+      "name": "cluster_load_history_retention_interval",
+      "typeName": "duration",
+      "default": "7 d",
+      "description": "The interval of time to keep when truncating the cluster load histories.",
+      "scope": "environment",
+      "userVisible": false,
+      "dyncfg": true
+    },
+    {
       "name": "cluster_multi_process_replica_az_affinity_weight",
       "typeName": "optional integer",
       "default": "100",
@@ -2197,6 +2206,51 @@
       "default": "work:1000000,time:100",
       "description": "The yielding behavior compute rendering should apply for linear join operators. Either 'work:<amount>' or 'time:<milliseconds>' or 'work:<amount>,time:<milliseconds>'. Note that omitting one of 'work' or 'time' will entirely disable join yielding by time or work, respectively, rather than falling back to some default.",
       "scope": "replica",
+      "userVisible": false,
+      "dyncfg": true
+    },
+    {
+      "name": "load_autoscaling_evaluation_window",
+      "typeName": "duration",
+      "default": "10 min",
+      "description": "The span of one cluster load summary.",
+      "scope": "environment",
+      "userVisible": false,
+      "dyncfg": true
+    },
+    {
+      "name": "load_autoscaling_floor_factor",
+      "typeName": "double-precision floating-point number",
+      "default": "1.5",
+      "description": "The multiple of its lag floor above which a dataflow with a floor is behind.",
+      "scope": "environment",
+      "userVisible": false,
+      "dyncfg": true
+    },
+    {
+      "name": "load_autoscaling_lag_sample_interval",
+      "typeName": "duration",
+      "default": "10 s",
+      "description": "How often the lag of every dataflow on every replica of a managed cluster is sampled.",
+      "scope": "environment",
+      "userVisible": false,
+      "dyncfg": true
+    },
+    {
+      "name": "load_autoscaling_lag_tolerance",
+      "typeName": "duration",
+      "default": "2 s",
+      "description": "The median lag within which a dataflow without a lag floor is not behind.",
+      "scope": "environment",
+      "userVisible": false,
+      "dyncfg": true
+    },
+    {
+      "name": "load_autoscaling_warm_up",
+      "typeName": "duration",
+      "default": "5 min",
+      "description": "How long after a replica first runs at the cluster's size and is hydrated its samples are ignored by the load summaries.",
+      "scope": "environment",
       "userVisible": false,
       "dyncfg": true
     },

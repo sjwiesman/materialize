@@ -1553,6 +1553,8 @@ pub static BUILTINS_STATIC: LazyLock<Vec<Builtin<NameReference>>> = LazyLock::ne
         Builtin::Table(&MZ_REPLICA_HYDRATION_HISTORY),
         Builtin::Log(&MZ_SCHEDULING_BUSY_PER_WORKER),
         Builtin::Source(&MZ_CLUSTER_REPLICA_BUSY_HISTORY),
+        Builtin::Source(&MZ_CLUSTER_LOAD_HISTORY),
+        Builtin::Source(&MZ_CLUSTER_LOAD_DATAFLOW_HISTORY),
     ];
 
     builtin_items.extend(notice::builtins());

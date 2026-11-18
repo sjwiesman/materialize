@@ -1273,3 +1273,5 @@ SELECT oid, name FROM mz_objects WHERE id LIKE 's%' AND oid < 20000 ORDER BY oid
 17144  mz_query_policy_attachments
 17145  mz_scheduling_busy_per_worker
 17146  mz_cluster_replica_busy_history
+17147  mz_cluster_load_history
+17148  mz_cluster_load_dataflow_history
