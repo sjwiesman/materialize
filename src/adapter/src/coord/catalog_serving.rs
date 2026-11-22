@@ -252,7 +252,7 @@ pub fn check_cluster_restrictions(
         // cluster. COPY ... TO STDOUT is planned as `Plan::Select` and is
         // covered above.
         Plan::CopyTo(plan) => Box::new(plan.select_plan.source.depends_on().into_iter()),
-        Plan::DuckDbSelect(plan) => Box::new(plan.inputs.iter().map(|(id, _)| *id)),
+        Plan::DuckDbSelect(plan) => Box::new(plan.inputs.iter().map(|input| input.id)),
         _ => return Ok(()),
     };
 

@@ -49,6 +49,7 @@ use uuid::Uuid;
 use crate::command_channel::{self, StorageLaneInput, UnifiedCommand};
 use crate::compute_state::{
     ActiveComputeState, ComputeState, PeekPermits, PendingPeek, ReportedFrontier,
+    duckdb_peek::DuckDbGathers,
 };
 use crate::metrics::{ComputeMetrics, WorkerMetrics};
 
@@ -152,6 +153,8 @@ struct Config {
     /// NOTE: per compute runtime, not global. A process running a maintenance and an interactive
     /// runtime calls `serve` twice and admits the bound once per call.
     pub peek_permits: Arc<PeekPermits>,
+    /// The index rows DuckDB peeks gather, shared by every worker this server runs.
+    pub duckdb_gathers: Arc<DuckDbGathers>,
     /// Configuration for hosting storage objects on this cluster, if enabled.
     pub storage_guest: Option<Arc<StorageGuestConfig>>,
 }
@@ -200,6 +203,7 @@ pub async fn serve(
         metrics_registry: metrics_registry.clone(),
         workers_per_process,
         peek_permits: Arc::new(PeekPermits::new(workers_per_process)),
+        duckdb_gathers: Default::default(),
         storage_guest: None,
     };
 
@@ -259,6 +263,7 @@ pub async fn serve_unified(
         metrics_registry: metrics_registry.clone(),
         workers_per_process,
         peek_permits: Arc::new(PeekPermits::new(workers_per_process)),
+        duckdb_gathers: Default::default(),
         storage_guest: Some(Arc::new(storage_guest)),
     };
 
@@ -449,6 +454,8 @@ struct Worker<'w> {
     /// Bounds how many offloaded peek walks run at once, shared by the workers of one `serve`
     /// call rather than by the process.
     peek_permits: Arc<PeekPermits>,
+    /// See [`Config::duckdb_gathers`].
+    duckdb_gathers: Arc<DuckDbGathers>,
     /// The hosted storage guest, if any.
     storage: Option<StorageGuest>,
 }
@@ -606,6 +613,7 @@ impl ClusterSpec for Config {
             metrics_registry: self.metrics_registry.clone(),
             workers_per_process: self.workers_per_process,
             peek_permits: Arc::clone(&self.peek_permits),
+            duckdb_gathers: Arc::clone(&self.duckdb_gathers),
             storage,
         }
         .run()
@@ -941,6 +949,7 @@ impl<'w> Worker<'w> {
                 self.metrics_registry.clone(),
                 self.workers_per_process,
                 Arc::clone(&self.peek_permits),
+                Arc::clone(&self.duckdb_gathers),
             ));
         }
         self.activate_compute().unwrap().handle_compute_command(cmd);

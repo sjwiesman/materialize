@@ -19,7 +19,7 @@ use differential_dataflow::lattice::Lattice;
 use differential_dataflow::trace::TraceReader;
 use mz_compute_client::logging::LoggingConfig;
 use mz_compute_client::protocol::command::{
-    ComputeCommand, ComputeParameters, DuckDbPeekInput, InstanceConfig, Peek, PeekTarget,
+    ComputeCommand, ComputeParameters, InstanceConfig, Peek, PeekTarget,
 };
 use mz_compute_client::protocol::history::ComputeCommandHistory;
 use mz_compute_client::protocol::response::{
@@ -65,6 +65,7 @@ use tracing::{Level, debug, error, info, span, trace, warn};
 use uuid::Uuid;
 
 use crate::arrangement::manager::{TraceBundle, TraceManager};
+use crate::compute_state::duckdb_peek::{DuckDbGathers, DuckDbPeek, DuckDbPeekContext};
 use crate::compute_state::peek_budget::InlineBudget;
 use crate::compute_state::peek_metrics::{IndexPeekMetrics, PeekWalkMetrics};
 pub(crate) use crate::compute_state::peek_offload::PeekPermits;
@@ -79,7 +80,7 @@ use crate::metrics::{CollectionMetrics, WorkerMetrics};
 use crate::render::{LinearJoinSpec, StartSignal};
 use crate::server::{ComputeInstanceContext, ResponseSender};
 
-mod duckdb_peek;
+pub(crate) mod duckdb_peek;
 mod error_scan;
 mod peek_budget;
 mod peek_metrics;
@@ -257,6 +258,10 @@ pub struct ComputeState {
     /// `serve` call. A process running two compute runtime roles has one of these per role.
     pub peek_permits: Arc<PeekPermits>,
 
+    /// The index rows DuckDB peeks gather, shared with the other workers of
+    /// the same `serve` call.
+    pub duckdb_gathers: Arc<DuckDbGathers>,
+
     /// The metrics an index peek walk reports, whichever driver runs it.
     ///
     /// Held here rather than assembled per peek, because an offload clones it into the task and
@@ -318,6 +323,7 @@ impl ComputeState {
         metrics_registry: MetricsRegistry,
         workers_per_process: usize,
         peek_permits: Arc<PeekPermits>,
+        duckdb_gathers: Arc<DuckDbGathers>,
     ) -> Self {
         let worker_config: Rc<ConfigSet> = mz_dyncfgs::all_dyncfgs().into();
         let traces = TraceManager::new(metrics.clone());
@@ -347,6 +353,7 @@ impl ComputeState {
             metrics_registry,
             workers_per_process,
             peek_permits,
+            duckdb_gathers,
             peek_walk_metrics,
             peek_budget,
             peek_passed_over: false,
@@ -933,17 +940,22 @@ impl<'a> ActiveComputeState<'a> {
                     PeekRowIterationConfig::new(&self.compute_state.worker_config),
                 )
             }
-            PeekTarget::DuckDb { sql, inputs } => {
-                let (sql, inputs) = (sql.clone(), inputs.clone());
-                PendingPeek::duckdb(
-                    peek,
-                    sql,
-                    inputs,
-                    Arc::clone(&self.compute_state.persist_clients),
-                    usize::cast_from(self.compute_state.max_result_size),
-                    self.timely_worker,
-                    PeekRowIterationConfig::new(&self.compute_state.worker_config),
-                )
+            PeekTarget::DuckDb { .. } => {
+                let traces = &self.compute_state.traces;
+                let cx = DuckDbPeekContext {
+                    persist_clients: Arc::clone(&self.compute_state.persist_clients),
+                    gathers: &self.compute_state.duckdb_gathers,
+                    max_result_size: usize::cast_from(self.compute_state.max_result_size),
+                    row_iteration_config: PeekRowIterationConfig::new(
+                        &self.compute_state.worker_config,
+                    ),
+                    worker_index: self.timely_worker.index(),
+                    peers: self.timely_worker.peers(),
+                    workers_per_process: self.compute_state.workers_per_process,
+                    activator: self.timely_worker.sync_activator_for([].into()),
+                    trace: &mut |id| traces.get(id).cloned(),
+                };
+                PendingPeek::DuckDb(DuckDbPeek::new(peek, cx))
             }
         };
 
@@ -959,6 +971,7 @@ impl<'a> ActiveComputeState<'a> {
     }
 
     fn handle_cancel_peek(&mut self, uuid: Uuid) {
+        self.compute_state.duckdb_gathers.remove(&uuid);
         let queued = &mut self.compute_state.queued_peeks;
         if let Some(index) = queued.iter().position(|peek| peek.peek.uuid == uuid) {
             let peek = queued.remove(index).expect("found above");
@@ -1348,6 +1361,20 @@ impl<'a> ActiveComputeState<'a> {
                     .observe(duration.as_secs_f64());
                 result
             }),
+            PendingPeek::DuckDb(peek) => {
+                let row_iteration_limit =
+                    peek_row_iteration_limit(&self.compute_state.worker_config);
+                peek.poll(self.compute_state.max_result_size, row_iteration_limit)
+                    .map(|(response, duration)| {
+                        if let Some(duration) = duration {
+                            self.compute_state
+                                .metrics
+                                .persist_peek_seconds
+                                .observe(duration.as_secs_f64());
+                        }
+                        response
+                    })
+            }
             PendingPeek::Offloaded(offloaded) => match offloaded.result.try_recv() {
                 Ok((response, duration)) => {
                     // Covers the writing to the peek stash too, because the walk that produces the
@@ -1577,8 +1604,10 @@ impl<'a> ActiveComputeState<'a> {
 pub enum PendingPeek {
     /// A peek against an index. (Possibly a temporary index created for the purpose.)
     Index(IndexPeek),
-    /// A peek served by an async task: a Persist peek or a DuckDB peek.
+    /// A peek against a Persist-backed collection.
     Persist(PersistPeek),
+    /// This worker's part in a DuckDB peek.
+    DuckDb(DuckDbPeek),
     /// A peek against an index whose walk was offloaded from the worker and is running as an async
     /// task.
     Offloaded(OffloadedPeek),
@@ -1604,21 +1633,7 @@ impl PendingPeek {
     }
 
     fn index(peek: Peek, mut trace_bundle: TraceBundle) -> Self {
-        let empty_frontier = Antichain::new();
-        let timestamp_frontier = Antichain::from_elem(peek.timestamp);
-        trace_bundle
-            .oks_mut()
-            .set_logical_compaction(timestamp_frontier.borrow());
-        trace_bundle
-            .errs_mut()
-            .set_logical_compaction(timestamp_frontier.borrow());
-        trace_bundle
-            .oks_mut()
-            .set_physical_compaction(empty_frontier.borrow());
-        trace_bundle
-            .errs_mut()
-            .set_physical_compaction(empty_frontier.borrow());
-
+        pin_trace_for_peek(&mut trace_bundle, peek.timestamp);
         PendingPeek::Index(IndexPeek {
             peek,
             trace_bundle,
@@ -1658,35 +1673,6 @@ impl PendingPeek {
                 mfp_plan,
                 max_result_size,
                 max_results_needed,
-                row_iteration_config,
-            )
-            .await
-        })
-    }
-
-    fn duckdb(
-        peek: Peek,
-        sql: String,
-        inputs: Vec<DuckDbPeekInput>,
-        persist_clients: Arc<PersistClientCache>,
-        max_result_size: usize,
-        timely_worker: &TimelyWorker,
-        row_iteration_config: PeekRowIterationConfig,
-    ) -> Self {
-        let timestamp = peek.timestamp;
-        let result_desc = peek.result_desc.clone();
-        // TODO: Make DuckDB's share of the replica's cores configurable. It runs
-        // beside the timely workers and competes with them for CPU.
-        let threads = timely_worker.peers();
-        Self::spawn_task_peek(peek, timely_worker, "duckdb::peek", async move {
-            duckdb_peek::do_peek(
-                &persist_clients,
-                sql,
-                inputs,
-                timestamp,
-                result_desc,
-                max_result_size,
-                threads,
                 row_iteration_config,
             )
             .await
@@ -1751,6 +1737,7 @@ impl PendingPeek {
         match self {
             PendingPeek::Index(p) => &p.span,
             PendingPeek::Persist(p) => &p.span,
+            PendingPeek::DuckDb(p) => &p.span,
             PendingPeek::Offloaded(p) => &p.span,
         }
     }
@@ -1759,12 +1746,32 @@ impl PendingPeek {
         match self {
             PendingPeek::Index(p) => &p.peek,
             PendingPeek::Persist(p) => &p.peek,
+            PendingPeek::DuckDb(p) => &p.peek,
             PendingPeek::Offloaded(p) => &p.peek,
         }
     }
 }
 
-/// An in-progress peek served by an async task, see [`PendingPeek::spawn_task_peek`].
+/// Keeps `trace_bundle` readable at `timestamp` for as long as the handle
+/// lives.
+fn pin_trace_for_peek(trace_bundle: &mut TraceBundle, timestamp: Timestamp) {
+    let empty_frontier = Antichain::new();
+    let timestamp_frontier = Antichain::from_elem(timestamp);
+    trace_bundle
+        .oks_mut()
+        .set_logical_compaction(timestamp_frontier.borrow());
+    trace_bundle
+        .errs_mut()
+        .set_logical_compaction(timestamp_frontier.borrow());
+    trace_bundle
+        .oks_mut()
+        .set_physical_compaction(empty_frontier.borrow());
+    trace_bundle
+        .errs_mut()
+        .set_physical_compaction(empty_frontier.borrow());
+}
+
+/// An in-progress Persist peek.
 ///
 /// Note that `PendingPeek` intentionally does not implement or derive `Clone`,
 /// as each `PendingPeek` is meant to be dropped after it's responded to.

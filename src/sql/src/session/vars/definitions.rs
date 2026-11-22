@@ -47,8 +47,7 @@ use crate::session::vars::errors::VarError;
 use crate::session::vars::polyfill::{LazyValueFn, lazy_value, value};
 use crate::session::vars::value::{
     ClientEncoding, ClientSeverity, DEFAULT_DATE_STYLE, Failpoints, IntervalStyle, IsolationLevel,
-    SqlDialect,
-    TimeZone, Value,
+    SqlDialect, TimeZone, Value,
 };
 use crate::session::vars::{FeatureFlag, Var, VarInput, VarParseError};
 use crate::{DEFAULT_SCHEMA, WEBHOOK_CONCURRENCY_LIMIT};

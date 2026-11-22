@@ -30,8 +30,7 @@ use mz_sql::catalog::CatalogCluster;
 use mz_sql::plan::Params;
 use mz_sql::plan::{
     self, DuckDbSelectPlan, Explainee, ExplaineeStatement, Plan, QueryWhen, SelectPlan,
-    SideEffectingFunc,
-    SubscribePlan,
+    SideEffectingFunc, SubscribePlan,
 };
 use mz_sql::rbac;
 use mz_sql::session::metadata::SessionMetadata;
@@ -59,7 +58,7 @@ use crate::explain::insights::PlanInsightsContext;
 use crate::explain::optimizer_trace::OptimizerTrace;
 use crate::optimize::Optimize;
 use crate::optimize::dataflows::{ComputeInstanceSnapshot, DataflowBuilder};
-use crate::peek_client::{ExecutionLogging, PeekResponseLimits, TakeOver};
+use crate::peek_client::{DuckDbInputSource, ExecutionLogging, PeekResponseLimits, TakeOver};
 use crate::session::{Session, TransactionOps, TransactionStatus};
 use crate::statement_logging::StatementLifecycleEvent;
 use crate::statement_logging::WatchSetCreation;
@@ -519,7 +518,7 @@ impl PeekClient {
             QueryPlan::Select(s) => s.source.depends_on(),
             QueryPlan::CopyTo(s, _) => s.source.depends_on(),
             QueryPlan::Subscribe(s) => s.from.depends_on(),
-            QueryPlan::DuckDb(s) => s.inputs.iter().map(|(id, _)| *id).collect(),
+            QueryPlan::DuckDb(s) => s.inputs.iter().map(|input| input.id).collect(),
         };
 
         let contains_temporal = match query_plan {
@@ -669,22 +668,50 @@ impl PeekClient {
 
         let dataflow_builder =
             DataflowBuilder::new(catalog.state(), compute_instance_snapshot.clone());
+        // Where a DuckDB query reads each input, in input order.
+        let mut duckdb_sources = Vec::new();
         let input_id_bundle = match query_plan {
-            // DuckDB reads its inputs from persist, never from indexes.
-            QueryPlan::DuckDb(_) => {
-                for id in &source_ids {
-                    if self.storage_collections.collection_metadata(*id).is_err() {
-                        let name = catalog
-                            .resolve_full_name(catalog.get_entry_by_global_id(id).name(), None);
-                        return Err(AdapterError::Unstructured(anyhow::anyhow!(
-                            "{name} is not stored in persist, so the duckdb dialect cannot read it"
-                        )));
-                    }
+            // An index on the target cluster is preferred, because it can serve
+            // equality filters on its key with a lookup. A collection without
+            // one is read from persist.
+            QueryPlan::DuckDb(duckdb_plan) => {
+                let mut bundle = CollectionIdBundle::default();
+                for input in &duckdb_plan.inputs {
+                    let source = match dataflow_builder.indexes_on(input.id).next() {
+                        Some((index_id, index)) => {
+                            bundle
+                                .compute_ids
+                                .entry(target_cluster_id)
+                                .or_default()
+                                .insert(index_id);
+                            DuckDbInputSource::Index {
+                                id: index_id,
+                                key: index.keys.to_vec(),
+                            }
+                        }
+                        None if self
+                            .storage_collections
+                            .collection_metadata(input.id)
+                            .is_ok() =>
+                        {
+                            bundle.storage_ids.insert(input.id);
+                            DuckDbInputSource::Persist
+                        }
+                        None => {
+                            let name = catalog.resolve_full_name(
+                                catalog.get_entry_by_global_id(&input.id).name(),
+                                None,
+                            );
+                            return Err(AdapterError::Unstructured(anyhow::anyhow!(
+                                "{name} has no index on cluster {target_cluster_name} and is not \
+                                 materialized, so the duckdb dialect cannot read it; create an \
+                                 index on it in that cluster"
+                            )));
+                        }
+                    };
+                    duckdb_sources.push(source);
                 }
-                CollectionIdBundle {
-                    storage_ids: source_ids.clone(),
-                    compute_ids: BTreeMap::new(),
-                }
+                bundle
             }
             _ => dataflow_builder.sufficient_collections(source_ids.clone()),
         };
@@ -921,6 +948,7 @@ impl PeekClient {
             let response = self
                 .implement_duckdb_peek(
                     duckdb_plan,
+                    duckdb_sources,
                     timestamp,
                     target_cluster_id,
                     target_replica,

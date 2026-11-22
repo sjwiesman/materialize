@@ -33,10 +33,7 @@ pub fn plan_duckdb(scx: &StatementContext, stmt: DuckDbStatement) -> Result<Plan
     Ok(Plan::DuckDbSelect(DuckDbSelectPlan { sql, inputs, desc }))
 }
 
-fn bind(
-    scx: &StatementContext,
-    stmt: &DuckDbStatement,
-) -> Result<BoundQuery<GlobalId>, PlanError> {
+fn bind(scx: &StatementContext, stmt: &DuckDbStatement) -> Result<BoundQuery<GlobalId>, PlanError> {
     scx.require_feature_flag(&ENABLE_DUCKDB_DIALECT)?;
     mz_duckdb_util::bind(&stmt.sql, |table| resolve(scx, table))
         .map_err(|e| PlanError::Unstructured(format!("{e:#}")))
@@ -65,11 +62,16 @@ fn resolve(
         .catalog
         .resolve_item(&name)
         .or_else(|_| scx.catalog.resolve_item(&lowered))?;
+    // Whether the relation can be read depends on the cluster the query runs
+    // on. A view needs an index there, which the adapter checks.
     match item.item_type() {
-        CatalogItemType::Table | CatalogItemType::Source | CatalogItemType::MaterializedView => {}
+        CatalogItemType::Table
+        | CatalogItemType::Source
+        | CatalogItemType::MaterializedView
+        | CatalogItemType::View => {}
         other => anyhow::bail!(
-            "{} is a {other}, but the duckdb dialect can only read tables, sources, and \
-             materialized views",
+            "{} is a {other}, but the duckdb dialect can only read tables, sources, views, \
+             and materialized views",
             scx.catalog.resolve_full_name(item.name())
         ),
     }

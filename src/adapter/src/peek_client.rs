@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 
 use differential_dataflow::consolidation::consolidate;
+use itertools::Itertools;
 use mz_compute_client::controller::error::{CollectionMissing, InstanceMissing};
 use mz_compute_client::controller::instance_client::InstanceClient;
 use mz_compute_client::controller::instance_client::{AcquireReadHoldsError, InstanceShutDown};
@@ -43,7 +44,7 @@ use uuid::Uuid;
 use crate::catalog::Catalog;
 use crate::command::{CatalogSnapshot, Command, ExecuteResponse};
 use crate::coord::appends::GroupCommitNotifier;
-use crate::coord::peek::FastPathPlan;
+use crate::coord::peek::{FastPathPlan, permute_oneshot_mfp_around_index};
 use crate::coord::timestamp_selection::TimestampDetermination;
 use crate::coord::{Coordinator, ExecuteContextExtra, ExecuteContextGuard, Message};
 use crate::metrics::Metrics;
@@ -55,6 +56,75 @@ use crate::statement_logging::{
 use crate::{
     AdapterError, AdapterNotice, Client, CollectionIdBundle, ReadHolds, metrics, statement_logging,
 };
+
+/// Where a DuckDB peek reads one of its inputs.
+pub(crate) enum DuckDbInputSource {
+    /// A snapshot of the collection in persist.
+    Persist,
+    /// An index on the collection, on the cluster the peek runs on.
+    Index {
+        id: GlobalId,
+        key: Vec<mz_expr::MirScalarExpr>,
+    },
+}
+
+/// Returns the predicates of a pushdown's `filters` on a relation `desc`.
+fn pushdown_predicates(
+    desc: &RelationDesc,
+    filters: &[mz_duckdb_util::ColumnFilter],
+) -> Vec<mz_expr::MirScalarExpr> {
+    use mz_duckdb_util::FilterOp;
+    use mz_expr::MirScalarExpr;
+    use mz_expr::func;
+
+    filters
+        .iter()
+        .map(|filter| {
+            let column = MirScalarExpr::column(filter.column);
+            let typ =
+                mz_repr::ReprScalarType::from(&desc.typ().column_types[filter.column].scalar_type);
+            let literal =
+                |value: &Row| MirScalarExpr::literal_ok(value.unpack_first(), typ.clone());
+            match &filter.op {
+                FilterOp::Eq(value) => column.call_binary(literal(value), func::Eq),
+                FilterOp::Lt(value) => column.call_binary(literal(value), func::Lt),
+                FilterOp::Lte(value) => column.call_binary(literal(value), func::Lte),
+                FilterOp::Gt(value) => column.call_binary(literal(value), func::Gt),
+                FilterOp::Gte(value) => column.call_binary(literal(value), func::Gte),
+                FilterOp::IsNull => column.call_is_null(),
+                FilterOp::IsNotNull => column.call_is_null().not(),
+            }
+        })
+        .collect()
+}
+
+/// Returns the key to look up in an index with `key`, if equality filters
+/// pin every key column.
+///
+/// Only keys of plain column references qualify, since filters are on
+/// columns.
+fn key_lookup(
+    key: &[mz_expr::MirScalarExpr],
+    filters: &[mz_duckdb_util::ColumnFilter],
+) -> Option<Vec<Row>> {
+    if key.is_empty() {
+        return None;
+    }
+    let mut lookup = Row::default();
+    let mut packer = lookup.packer();
+    for expr in key {
+        let mz_expr::MirScalarExpr::Column(column, _) = expr else {
+            return None;
+        };
+        let column = *column;
+        let value = filters.iter().find_map(|filter| match &filter.op {
+            mz_duckdb_util::FilterOp::Eq(value) if filter.column == column => Some(value),
+            _ => None,
+        })?;
+        packer.push(value.unpack_first());
+    }
+    Some(vec![lookup])
+}
 
 /// Bounds and settings for reading a peek's response.
 pub(crate) struct PeekResponseLimits {
@@ -558,10 +628,12 @@ impl PeekClient {
 
     /// Runs a DuckDB query on `compute_instance` at `timestamp`.
     ///
-    /// `input_read_holds` must hold every input of `plan` at `timestamp`.
+    /// `sources` says where each input of `plan` is read, in input order.
+    /// `input_read_holds` must hold each of them at `timestamp`.
     pub(crate) async fn implement_duckdb_peek(
         &mut self,
         plan: &DuckDbSelectPlan,
+        sources: Vec<DuckDbInputSource>,
         timestamp: Timestamp,
         compute_instance: ComputeInstanceId,
         target_replica: Option<mz_cluster_client::ReplicaId>,
@@ -579,27 +651,70 @@ impl PeekClient {
         }
         let mut inputs = Vec::with_capacity(plan.inputs.len());
         let mut read_holds = Vec::with_capacity(plan.inputs.len());
-        for (id, desc) in &plan.inputs {
-            let metadata = self
-                .storage_collections
-                .collection_metadata(*id)
-                .map_err(AdapterError::concurrent_dependency_drop_from_collection_missing)?
-                .clone();
-            // The replica loads the input with the shard's description, while
-            // the query was bound against the catalog's.
-            if !metadata.relation_desc.iter_types().eq(desc.iter_types()) {
-                return Err(AdapterError::Unstructured(anyhow::anyhow!(
-                    "the schema of {id} changed while the query was planned; retry the query"
-                )));
+        for (input, source) in plan.inputs.iter().zip_eq(sources) {
+            let pushdown = &input.pushdown;
+            let mfp = mz_expr::MapFilterProject::new(input.desc.arity())
+                .filter(pushdown_predicates(&input.desc, &pushdown.filters))
+                .project(pushdown.columns.iter().copied());
+            match source {
+                DuckDbInputSource::Persist => {
+                    let id = input.id;
+                    let metadata = self
+                        .storage_collections
+                        .collection_metadata(id)
+                        .map_err(AdapterError::concurrent_dependency_drop_from_collection_missing)?
+                        .clone();
+                    // The replica reads the shard with its own description,
+                    // while the query was bound against the catalog's.
+                    if !metadata
+                        .relation_desc
+                        .iter_types()
+                        .eq(input.desc.iter_types())
+                    {
+                        return Err(AdapterError::Unstructured(anyhow::anyhow!(
+                            "the schema of {id} changed while the query was planned; retry the \
+                             query"
+                        )));
+                    }
+                    let map_filter_project = mfp
+                        .into_plan()
+                        .map_err(AdapterError::Internal)?
+                        .into_nontemporal()
+                        .map_err(|e| AdapterError::Internal(format!("{e:?}")))?;
+                    inputs.push(DuckDbPeekInput::Persist {
+                        id,
+                        metadata,
+                        map_filter_project,
+                        columns: pushdown.columns.clone(),
+                    });
+                    read_holds.push(
+                        input_read_holds
+                            .storage_holds
+                            .get(&id)
+                            .expect("missing storage read hold on DuckDB peek input")
+                            .clone(),
+                    );
+                }
+                DuckDbInputSource::Index { id, key } => {
+                    let literal_constraints = key_lookup(&key, &pushdown.filters);
+                    let map_filter_project = permute_oneshot_mfp_around_index(mfp, &key)
+                        .map_err(|e| AdapterError::Internal(e.to_string()))?;
+                    inputs.push(DuckDbPeekInput::Index {
+                        id,
+                        desc: input.desc.clone(),
+                        map_filter_project,
+                        literal_constraints,
+                        columns: pushdown.columns.clone(),
+                    });
+                    read_holds.push(
+                        input_read_holds
+                            .compute_holds
+                            .get(&(compute_instance, id))
+                            .expect("missing compute read hold on DuckDB peek input")
+                            .clone(),
+                    );
+                }
             }
-            inputs.push(DuckDbPeekInput { id: *id, metadata });
-            read_holds.push(
-                input_read_holds
-                    .storage_holds
-                    .get(id)
-                    .expect("missing storage read hold on DuckDB peek input")
-                    .clone(),
-            );
         }
 
         // The replica appends each row's position in DuckDB's output, and the
@@ -607,7 +722,11 @@ impl PeekClient {
         // otherwise sorted by row, which would lose DuckDB's `ORDER BY`.
         let arity = plan.desc.arity();
         let result_desc = RelationDesc::builder()
-            .with_columns(plan.desc.iter().map(|(name, typ)| (name.clone(), typ.clone())))
+            .with_columns(
+                plan.desc
+                    .iter()
+                    .map(|(name, typ)| (name.clone(), typ.clone())),
+            )
             .with_column("mz_duckdb_position", SqlScalarType::Int64.nullable(false))
             .finish();
         let finishing = mz_expr::RowSetFinishing {

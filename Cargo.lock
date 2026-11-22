@@ -6327,6 +6327,7 @@ dependencies = [
  "mz-compute-types",
  "mz-controller",
  "mz-controller-types",
+ "mz-duckdb-util",
  "mz-dyncfg",
  "mz-dyncfg-launchdarkly",
  "mz-expr",

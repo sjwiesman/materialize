@@ -113,6 +113,7 @@ impl Harness {
             metrics_registry,
             1,
             Arc::new(PeekPermits::new(1)),
+            Default::default(),
         );
 
         // The worker applies these through `UpdateConfiguration`, which reaches the budget
@@ -181,6 +182,7 @@ impl Harness {
         Some(match peek {
             PendingPeek::Index(_) => "index",
             PendingPeek::Persist(_) => "persist",
+            PendingPeek::DuckDb(_) => "duckdb",
             PendingPeek::Offloaded(_) => "offloaded",
         })
     }

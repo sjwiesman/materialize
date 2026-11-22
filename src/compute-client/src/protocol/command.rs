@@ -423,7 +423,8 @@ pub enum PeekTarget {
         /// The identifying metadata of the Persist shard.
         metadata: CollectionMetadata,
     },
-    /// This peek runs a DuckDB query over snapshots of Persist collections.
+    /// This peek runs a DuckDB query over snapshots of Persist collections and
+    /// the contents of indexes.
     ///
     /// The peek's `result_desc` is the query's result description with one
     /// trailing `int8` column holding each row's position in DuckDB's output,
@@ -431,18 +432,56 @@ pub enum PeekTarget {
     DuckDb {
         /// The query, which reads input `i` as `mz_duckdb_util::input_name(i)`.
         sql: String,
-        /// The collections the query reads. Never empty.
+        /// The collections the query reads, in input order. Never empty.
         inputs: Vec<DuckDbPeekInput>,
     },
 }
 
-/// A Persist collection read by a [`PeekTarget::DuckDb`] peek.
+/// A collection read by a [`PeekTarget::DuckDb`] peek.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DuckDbPeekInput {
-    /// The id of the backing Persist collection.
-    pub id: GlobalId,
-    /// The identifying metadata of the Persist shard.
-    pub metadata: CollectionMetadata,
+pub enum DuckDbPeekInput {
+    /// A snapshot of a Persist collection.
+    Persist {
+        /// The id of the backing Persist collection.
+        id: GlobalId,
+        /// The identifying metadata of the Persist shard.
+        metadata: CollectionMetadata,
+        /// Filters the snapshot to the rows the query reads and projects it to
+        /// `columns`.
+        map_filter_project: mz_expr::SafeMfpPlan,
+        /// The columns of the collection the query reads, in ascending order.
+        /// DuckDB sees the others as NULL.
+        columns: Vec<usize>,
+    },
+    /// The contents of an index on the target cluster.
+    ///
+    /// Each worker holds a shard of the arrangement, so a peek with an index
+    /// input gathers every worker's shard to the one worker that runs DuckDB.
+    /// Replicas serve such peeks only when they run in a single process.
+    Index {
+        /// The id of the index.
+        id: GlobalId,
+        /// The description of the indexed relation, which is what DuckDB reads.
+        desc: RelationDesc,
+        /// Turns the arrangement's key and value into rows of `desc`, filtered
+        /// to the rows the query reads and projected to `columns`.
+        map_filter_project: mz_expr::SafeMfpPlan,
+        /// If `Some`, the keys to look up in the arrangement, which then hold
+        /// every row the query reads. Never empty.
+        literal_constraints: Option<Vec<Row>>,
+        /// The columns of `desc` the query reads, in ascending order. DuckDB
+        /// sees the others as NULL.
+        columns: Vec<usize>,
+    },
+}
+
+impl DuckDbPeekInput {
+    /// Returns the id of the collection this input reads.
+    pub fn id(&self) -> GlobalId {
+        match self {
+            Self::Persist { id, .. } | Self::Index { id, .. } => *id,
+        }
+    }
 }
 
 impl PeekTarget {
@@ -453,7 +492,7 @@ impl PeekTarget {
         match self {
             Self::Index { id } => *id,
             Self::Persist { id, .. } => *id,
-            Self::DuckDb { inputs, .. } => inputs.first().expect("never empty").id,
+            Self::DuckDb { inputs, .. } => inputs.first().expect("never empty").id(),
         }
     }
 
@@ -463,7 +502,7 @@ impl PeekTarget {
         match self {
             Self::Index { id } => BTreeSet::from([*id]),
             Self::Persist { id, .. } => BTreeSet::from([*id]),
-            Self::DuckDb { inputs, .. } => inputs.iter().map(|input| input.id).collect(),
+            Self::DuckDb { inputs, .. } => inputs.iter().map(DuckDbPeekInput::id).collect(),
         }
     }
 }

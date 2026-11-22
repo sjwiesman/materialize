@@ -970,7 +970,9 @@ fn generate_rbac_requirements(
             inputs,
             desc: _,
         }) => {
-            let items = inputs.iter().map(|(gid, _)| catalog.resolve_item_id(gid));
+            let items = inputs
+                .iter()
+                .map(|input| catalog.resolve_item_id(&input.id));
             let mut privileges = generate_read_privileges(catalog, items, role_id);
             if let Some(privilege) =
                 generate_cluster_usage_privileges(false, target_cluster_id, role_id)

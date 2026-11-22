@@ -21,12 +21,14 @@
 mod bind;
 mod connection;
 mod execute;
+mod pushdown;
 mod types;
 
-pub use bind::{BoundQuery, TableRef, bind};
-pub use duckdb::InterruptHandle;
+pub use bind::{BoundInput, BoundQuery, TableRef, bind};
 pub use connection::open_connection;
-pub use execute::execute;
+pub use duckdb::InterruptHandle;
+pub use execute::{ExecuteInput, execute};
+pub use pushdown::{ColumnFilter, FilterOp, InputPushdown};
 pub use types::{input_schema, result_desc};
 
 /// The name a query's `index`th input has after [`bind`] rewrites it.

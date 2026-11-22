@@ -13,8 +13,10 @@ use anyhow::{Context, anyhow, bail};
 use mz_repr::RelationDesc;
 use serde_json::Value;
 
+use crate::connection::open_binder_connection;
+use crate::pushdown::{self, InputPushdown};
 use crate::types::{input_schema, result_desc};
-use crate::{create_input_table, input_name, open_connection};
+use crate::{create_input_table, input_name};
 
 /// A relation reference in DuckDB SQL, as written by the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,10 +31,20 @@ pub struct TableRef {
 pub struct BoundQuery<T> {
     /// The query, with the relation `inputs[i]` renamed to `input_name(i)`.
     pub sql: String,
-    /// Each distinct relation the query reads, with its description.
-    pub inputs: Vec<(T, RelationDesc)>,
+    /// Each distinct relation the query reads.
+    pub inputs: Vec<BoundInput<T>>,
     /// The query's result description.
     pub desc: RelationDesc,
+}
+
+/// A relation a [`BoundQuery`] reads.
+#[derive(Debug, Clone)]
+pub struct BoundInput<T> {
+    /// The caller's identifier for the relation.
+    pub id: T,
+    pub desc: RelationDesc,
+    /// What the query reads of the relation.
+    pub pushdown: InputPushdown,
 }
 
 /// Binds the DuckDB query `sql`.
@@ -46,11 +58,12 @@ pub fn bind<T: PartialEq>(
     sql: &str,
     mut resolve: impl FnMut(&TableRef) -> Result<(T, RelationDesc), anyhow::Error>,
 ) -> Result<BoundQuery<T>, anyhow::Error> {
-    let conn = open_connection(1)?;
+    let conn = open_binder_connection()?;
 
-    let serialized: String = conn.query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |row| {
-        row.get(0)
-    })?;
+    let serialized: String =
+        conn.query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |row| {
+            row.get(0)
+        })?;
     let mut ast: Value = serde_json::from_str(&serialized).context("parsing DuckDB AST")?;
     if ast["error"] == Value::Bool(true) {
         // DuckDB only serializes SELECT statements, and reports anything else
@@ -60,7 +73,9 @@ pub fn bind<T: PartialEq>(
         }
         bail!(
             "{}",
-            ast["error_message"].as_str().unwrap_or("invalid DuckDB query")
+            ast["error_message"]
+                .as_str()
+                .unwrap_or("invalid DuckDB query")
         );
     }
     match ast["statements"].as_array().map(Vec::len) {
@@ -100,6 +115,15 @@ pub fn bind<T: PartialEq>(
     let mut stmt = conn.prepare(&rewritten)?;
     let arrow = stmt.query_arrow([])?;
     let desc = result_desc(&arrow.get_schema())?;
+    drop(stmt);
+
+    let descs: Vec<_> = inputs.iter().map(|(_, desc)| desc).collect();
+    let pushdowns = pushdown::derive(&conn, &rewritten, &descs)?;
+    let inputs = inputs
+        .into_iter()
+        .zip(pushdowns)
+        .map(|((id, desc), pushdown)| BoundInput { id, desc, pushdown })
+        .collect();
 
     Ok(BoundQuery {
         sql: rewritten,
@@ -226,20 +250,73 @@ mod tests {
             bound
                 .inputs
                 .iter()
-                .map(|(id, _)| id.as_str())
+                .map(|input| input.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["t", "u"],
         );
         assert!(bound.sql.contains("__mz_input_0 AS t2"), "{}", bound.sql);
         assert!(bound.sql.contains("__mz_input_1 AS u"), "{}", bound.sql);
         assert_eq!(
-            bound.desc.iter_names().map(|n| n.as_str()).collect::<Vec<_>>(),
+            bound
+                .desc
+                .iter_names()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>(),
             vec!["a", "b"]
         );
         assert_eq!(
-            bound.desc.iter_types().map(|t| &t.scalar_type).collect::<Vec<_>>(),
+            bound
+                .desc
+                .iter_types()
+                .map(|t| &t.scalar_type)
+                .collect::<Vec<_>>(),
             vec![&SqlScalarType::Int64, &SqlScalarType::String]
         );
+    }
+
+    #[mz_ore::test]
+    #[cfg_attr(miri, ignore)] // unsupported operation: FFI
+    fn derives_pushdown() {
+        use crate::{ColumnFilter, FilterOp};
+        use mz_repr::{Datum, Row};
+
+        let bound = bind(
+            "SELECT t.b FROM t JOIN u ON t.a = u.a \
+             WHERE t.a = 2 AND u.b = 'x''y' AND t.b > 'm'",
+            resolve,
+        )
+        .unwrap();
+        let [t, u] = &bound.inputs[..] else {
+            panic!("expected two inputs: {:?}", bound.inputs);
+        };
+        let a_is_2 = ColumnFilter {
+            column: 0,
+            op: FilterOp::Eq(Row::pack_slice(&[Datum::Int64(2)])),
+        };
+        assert_eq!(t.pushdown.columns, vec![0, 1]);
+        assert!(t.pushdown.filters.contains(&a_is_2), "{:?}", t.pushdown);
+        assert!(
+            t.pushdown.filters.contains(&ColumnFilter {
+                column: 1,
+                op: FilterOp::Gt(Row::pack_slice(&[Datum::String("m")])),
+            }),
+            "{:?}",
+            t.pushdown
+        );
+        // DuckDB derives `u.a = 2` from the join condition.
+        assert!(u.pushdown.filters.contains(&a_is_2), "{:?}", u.pushdown);
+        assert!(
+            u.pushdown.filters.contains(&ColumnFilter {
+                column: 1,
+                op: FilterOp::Eq(Row::pack_slice(&[Datum::String("x'y")])),
+            }),
+            "{:?}",
+            u.pushdown
+        );
+
+        // A column the query never reads is not loaded.
+        let bound = bind("SELECT count(*) FROM t WHERE a = 1", resolve).unwrap();
+        assert_eq!(bound.inputs[0].pushdown.columns, vec![0]);
     }
 
     #[mz_ore::test]
@@ -255,10 +332,7 @@ mod tests {
     #[cfg_attr(miri, ignore)] // unsupported operation: FFI
     fn rejects_external_access() {
         let err = bind("SELECT * FROM read_csv('/etc/passwd')", resolve).unwrap_err();
-        assert!(
-            err.to_string().to_lowercase().contains("disabled"),
-            "{err}"
-        );
+        assert!(err.to_string().to_lowercase().contains("disabled"), "{err}");
     }
 
     #[mz_ore::test]

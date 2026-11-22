@@ -457,7 +457,7 @@ fn mfp_to_safe_plan(
 }
 
 /// If it can't convert `mfp` into a `SafeMfpPlan`, this returns an _internal_ error.
-fn permute_oneshot_mfp_around_index(
+pub(crate) fn permute_oneshot_mfp_around_index(
     mfp: mz_expr::MapFilterProject,
     key: &[MirScalarExpr],
 ) -> Result<mz_expr::SafeMfpPlan, OptimizerError> {

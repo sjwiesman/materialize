@@ -17,7 +17,23 @@ use duckdb::{Config, Connection};
 /// host's files (`read_csv('/etc/...')`), make network requests (`httpfs`), or
 /// load extensions.
 pub fn open_connection(threads: usize) -> Result<Connection, anyhow::Error> {
-    let config = Config::default()
+    open(threads, Config::default())
+}
+
+/// Opens a connection like [`open_connection`] for binding queries.
+///
+/// The binder plans queries against empty tables. DuckDB's statistics
+/// propagation would see that they are empty and replace every scan, so it
+/// is disabled to keep the scans that pushdown reads.
+pub(crate) fn open_binder_connection() -> Result<Connection, anyhow::Error> {
+    open(
+        1,
+        Config::default().with("disabled_optimizers", "statistics_propagation")?,
+    )
+}
+
+fn open(threads: usize, config: Config) -> Result<Connection, anyhow::Error> {
+    let config = config
         // TODO: Spill to the replica's scratch directory. An empty directory
         // disables spilling, where the default would spill to `.tmp` under the
         // process's working directory.

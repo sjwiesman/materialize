@@ -46,7 +46,9 @@ pub fn input_schema(desc: &RelationDesc) -> Result<SchemaRef, anyhow::Error> {
         .fields()
         .iter()
         .map(|field| {
-            let field = field.as_ref().clone();
+            // Nullable whatever the column says, because columns a query does not
+            // read are loaded as NULL.
+            let field = field.as_ref().clone().with_nullable(true);
             if matches!(field.data_type(), DataType::FixedSizeBinary(16))
                 && is_mz_extension(&field, "uuid")
             {
@@ -76,9 +78,29 @@ fn is_mz_extension(field: &Field, typename: &str) -> bool {
 fn is_supported_input(typ: &SqlScalarType) -> bool {
     use SqlScalarType::*;
     match typ {
-        Bool | Int16 | Int32 | Int64 | UInt16 | UInt32 | UInt64 | Oid | Float32 | Float64
-        | Numeric { .. } | Date | Time | Timestamp { .. } | TimestampTz { .. } | Interval
-        | Bytes | String | Char { .. } | VarChar { .. } | Jsonb | Uuid | MzTimestamp => true,
+        Bool
+        | Int16
+        | Int32
+        | Int64
+        | UInt16
+        | UInt32
+        | UInt64
+        | Oid
+        | Float32
+        | Float64
+        | Numeric { .. }
+        | Date
+        | Time
+        | Timestamp { .. }
+        | TimestampTz { .. }
+        | Interval
+        | Bytes
+        | String
+        | Char { .. }
+        | VarChar { .. }
+        | Jsonb
+        | Uuid
+        | MzTimestamp => true,
         // TODO: Nested types (lists, maps, records, arrays). `mz_arrow_util`
         // supports them, but their DuckDB DDL and the round trip need testing.
         _ => false,
@@ -111,7 +133,10 @@ pub(crate) fn duckdb_type_name(field: &Field) -> Result<String, anyhow::Error> {
         DataType::Utf8 | DataType::LargeUtf8 => "VARCHAR".into(),
         DataType::Binary | DataType::LargeBinary => "BLOB".into(),
         DataType::FixedSizeBinary(16)
-            if field.metadata().get(ARROW_EXTENSION_NAME_KEY).map(std::string::String::as_str)
+            if field
+                .metadata()
+                .get(ARROW_EXTENSION_NAME_KEY)
+                .map(std::string::String::as_str)
                 == Some(ARROW_UUID_EXTENSION) =>
         {
             "UUID".into()
@@ -174,7 +199,10 @@ fn result_scalar_type(field: &Field) -> Option<SqlScalarType> {
         DataType::Interval(IntervalUnit::MonthDayNano) => Interval,
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => String,
         DataType::FixedSizeBinary(16)
-            if field.metadata().get(ARROW_EXTENSION_NAME_KEY).map(std::string::String::as_str)
+            if field
+                .metadata()
+                .get(ARROW_EXTENSION_NAME_KEY)
+                .map(std::string::String::as_str)
                 == Some(ARROW_UUID_EXTENSION) =>
         {
             Uuid

@@ -901,8 +901,9 @@ pub struct SetTransactionPlan {
 pub struct DuckDbSelectPlan {
     /// The query, with input `i` renamed to `mz_duckdb_util::input_name(i)`.
     pub sql: String,
-    /// The persist-backed collections the query reads, in input order.
-    pub inputs: Vec<(GlobalId, RelationDesc)>,
+    /// The collections the query reads, in input order, with what it reads of
+    /// each.
+    pub inputs: Vec<mz_duckdb_util::BoundInput<GlobalId>>,
     /// The query's result description.
     pub desc: RelationDesc,
 }

@@ -1061,8 +1061,7 @@ impl ComputeController {
 
         // Validation: the read holds must match the peeked collections and must hold their
         // `since` at `<= timestamp`.
-        instance::check_read_holds_match(&peek_target, &read_holds)
-            .map_err(ReadHoldIdMismatch)?;
+        instance::check_read_holds_match(&peek_target, &read_holds).map_err(ReadHoldIdMismatch)?;
         if let Some(read_hold) = read_holds
             .iter()
             .find(|read_hold| !read_hold.since().less_equal(&timestamp))

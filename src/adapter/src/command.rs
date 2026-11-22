@@ -1061,8 +1061,9 @@ impl ExecuteResponse {
             DropObjects => &[DroppedObject],
             DropOwned => &[DroppedOwned],
             PlanKind::EmptyQuery => &[ExecuteResponseKind::EmptyQuery],
-            ExplainPlan | ExplainPushdown | ExplainTimestamp | Select | DuckDbSelect | ShowAllVariables
-            | ShowCreate | ShowColumns | ShowVariable | InspectShard | ExplainSinkSchema => &[
+            ExplainPlan | ExplainPushdown | ExplainTimestamp | Select | DuckDbSelect
+            | ShowAllVariables | ShowCreate | ShowColumns | ShowVariable | InspectShard
+            | ExplainSinkSchema => &[
                 ExecuteResponseKind::CopyTo,
                 SendingRowsStreaming,
                 SendingRowsImmediate,

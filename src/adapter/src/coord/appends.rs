@@ -1202,7 +1202,7 @@ pub(crate) fn waiting_on_startup_appends(
     // mz_internal objects.
     let depends_on = match plan {
         Plan::Select(plan) => plan.source.depends_on(),
-        Plan::DuckDbSelect(plan) => plan.inputs.iter().map(|(id, _)| *id).collect(),
+        Plan::DuckDbSelect(plan) => plan.inputs.iter().map(|input| input.id).collect(),
         Plan::ReadThenWrite(plan) => plan.selection.depends_on(),
         Plan::ShowColumns(plan) => plan.select_plan.source.depends_on(),
         Plan::Subscribe(plan) => plan.from.depends_on(),

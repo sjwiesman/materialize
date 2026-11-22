@@ -11,7 +11,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use anyhow::bail;
-use arrow::array::{RecordBatch, StructArray};
+use arrow::array::{RecordBatch, StructArray, new_null_array};
 use arrow::datatypes::{Field, Schema};
 use duckdb::InterruptHandle;
 use mz_arrow_util::builder::ArrowBuilder;
@@ -24,18 +24,30 @@ use crate::{create_input_table, input_name, open_connection};
 /// The number of rows loaded into DuckDB per Arrow batch.
 const LOAD_BATCH_ROWS: usize = 1 << 16;
 
+/// A snapshot of one input of a query, for [`execute`].
+pub struct ExecuteInput {
+    /// The description of the whole relation.
+    pub desc: RelationDesc,
+    /// The columns of `desc` that `rows` hold, in ascending order. DuckDB sees
+    /// the other columns as NULL.
+    pub columns: Vec<usize>,
+    /// The relation's rows, projected to `columns`.
+    pub rows: Vec<(Row, NonZeroUsize)>,
+}
+
 /// Runs the bound query `sql` against snapshots of its inputs.
 ///
-/// `inputs[i]` holds the description and rows of the relation that `sql`
-/// calls `input_name(i)`. `desc` must be the result description `bind`
-/// returned for `sql`. Returns the result rows in DuckDB's output order.
+/// `inputs[i]` holds the relation that `sql` calls `input_name(i)`, which
+/// must hold at least the columns its pushdown lists. `desc` must be the
+/// result description `bind` returned for `sql`. Returns the result rows in
+/// DuckDB's output order.
 ///
 /// `on_start` receives a handle that interrupts the query when called from
 /// another thread. This call blocks for the whole execution, so a caller that
 /// wants to cancel must interrupt it through that handle.
 pub fn execute(
     sql: &str,
-    inputs: Vec<(RelationDesc, Vec<(Row, NonZeroUsize)>)>,
+    inputs: Vec<ExecuteInput>,
     desc: &RelationDesc,
     threads: usize,
     on_start: impl FnOnce(Arc<InterruptHandle>),
@@ -43,29 +55,37 @@ pub fn execute(
     let conn = open_connection(threads)?;
     on_start(conn.interrupt_handle());
 
-    for (index, (input_desc, rows)) in inputs.into_iter().enumerate() {
+    for (index, input) in inputs.into_iter().enumerate() {
         let name = input_name(index);
-        let schema = input_schema(&input_desc)?;
+        let schema = input_schema(&input.desc)?;
         create_input_table(&conn, &name, &schema)?;
+        let loaded_desc = RelationDesc::builder()
+            .with_columns(input.columns.iter().map(|c| {
+                let typ = input.desc.typ().column_types[*c].clone();
+                (input.desc.get_name(*c).clone(), typ)
+            }))
+            .finish();
         let mut appender = conn.appender(&name)?;
-        let mut builder = ArrowBuilder::new(&input_desc, LOAD_BATCH_ROWS, 0)?;
+        let mut builder = ArrowBuilder::new(&loaded_desc, LOAD_BATCH_ROWS, 0)?;
         let mut pending = 0;
-        for (row, count) in &rows {
+        for (row, count) in &input.rows {
             for _ in 0..count.get() {
                 builder.add_row(row)?;
                 pending += 1;
                 if pending == LOAD_BATCH_ROWS {
                     let full = std::mem::replace(
                         &mut builder,
-                        ArrowBuilder::new(&input_desc, LOAD_BATCH_ROWS, 0)?,
+                        ArrowBuilder::new(&loaded_desc, LOAD_BATCH_ROWS, 0)?,
                     );
-                    appender.append_record_batch(retag(full.to_record_batch()?, &schema)?)?;
+                    let batch = widen(full.to_record_batch()?, &input.columns, &schema)?;
+                    appender.append_record_batch(batch)?;
                     pending = 0;
                 }
             }
         }
         if pending > 0 {
-            appender.append_record_batch(retag(builder.to_record_batch()?, &schema)?)?;
+            let batch = widen(builder.to_record_batch()?, &input.columns, &schema)?;
+            appender.append_record_batch(batch)?;
         }
         appender.flush()?;
     }
@@ -91,13 +111,28 @@ pub fn execute(
     Ok(result)
 }
 
-/// Swaps the `ArrowBuilder` schema of `batch` for `schema`, which has the same
-/// types and differs only in extension metadata.
-fn retag(batch: RecordBatch, schema: &Arc<Schema>) -> Result<RecordBatch, anyhow::Error> {
-    Ok(RecordBatch::try_new(
-        Arc::clone(schema),
-        batch.columns().to_vec(),
-    )?)
+/// Builds a batch of `schema`, the whole input, from `batch`, which holds its
+/// `columns`. The other columns are NULL.
+///
+/// The arrays keep the types `ArrowBuilder` gave them. Those differ from
+/// `schema`'s only in extension metadata, which lives in the schema.
+fn widen(
+    batch: RecordBatch,
+    columns: &[usize],
+    schema: &Arc<Schema>,
+) -> Result<RecordBatch, anyhow::Error> {
+    let arrays = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(
+            |(index, field)| match columns.iter().position(|c| *c == index) {
+                Some(position) => Arc::clone(batch.column(position)),
+                None => new_null_array(field.data_type(), batch.num_rows()),
+            },
+        )
+        .collect();
+    Ok(RecordBatch::try_new(Arc::clone(schema), arrays)?)
 }
 
 /// DuckDB result columns may share a name, and `ArrowReader` matches columns
@@ -191,7 +226,12 @@ mod tests {
         )
         .unwrap();
         let mut interrupted = false;
-        let result = execute(&bound.sql, vec![(desc, rows)], &bound.desc, 1, |_| {
+        let input = ExecuteInput {
+            columns: (0..desc.arity()).collect(),
+            desc,
+            rows,
+        };
+        let result = execute(&bound.sql, vec![input], &bound.desc, 1, |_| {
             interrupted = true
         })
         .unwrap();
