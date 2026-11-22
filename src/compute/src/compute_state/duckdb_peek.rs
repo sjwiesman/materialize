@@ -17,7 +17,6 @@ use mz_compute_client::protocol::command::DuckDbPeekInput;
 use mz_compute_client::protocol::response::PeekError;
 use mz_duckdb_util::InterruptHandle;
 use mz_expr::MapFilterProject;
-use mz_ore::cast::CastFrom;
 use mz_persist_client::cache::PersistClientCache;
 use mz_repr::{Datum, RelationDesc, Row, Timestamp};
 
@@ -91,7 +90,8 @@ pub(super) async fn do_peek(
     for (position, row) in rows.into_iter().enumerate() {
         let mut packer = row_builder.packer();
         packer.extend(row.iter());
-        packer.push(Datum::Int64(i64::cast_from(position)));
+        let position = i64::try_from(position).expect("fewer than 2^63 rows");
+        packer.push(Datum::Int64(position));
         total_size = total_size.saturating_add(row_builder.byte_len());
         if total_size > max_result_size {
             return Err(PeekError::ResultExceedsMaxSize { max_result_size });
