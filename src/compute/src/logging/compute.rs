@@ -247,13 +247,15 @@ pub enum ComputeEvent {
     DataflowGlobal(DataflowGlobal),
 }
 
-/// A peek type distinguishing between index and persist peeks.
+/// A peek type distinguishing between index, persist, and DuckDB peeks.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug, Columnar)]
 pub enum PeekType {
     /// A peek against an index.
     Index,
     /// A peek against persist.
     Persist,
+    /// A DuckDB query over snapshots of persist collections.
+    DuckDb,
 }
 
 impl PeekType {
@@ -262,6 +264,7 @@ impl PeekType {
         match self {
             PeekType::Index => "index",
             PeekType::Persist => "persist",
+            PeekType::DuckDb => "duckdb",
         }
     }
 }

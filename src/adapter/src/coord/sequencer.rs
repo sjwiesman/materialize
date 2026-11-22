@@ -420,6 +420,7 @@ impl Coordinator {
                 // TODO(SQL-760): Drop the manual soft panic once internal errors soft-panic
                 // centrally.
                 plan @ (Plan::CopyTo(_)
+                | Plan::DuckDbSelect(_)
                 | Plan::Insert(_)
                 | Plan::ReadThenWrite(_)
                 | Plan::Select(_)

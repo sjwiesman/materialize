@@ -9,6 +9,7 @@
 
 //! Compute protocol commands.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use mz_cluster_client::client::TryIntoProtocolNonce;
@@ -422,14 +423,47 @@ pub enum PeekTarget {
         /// The identifying metadata of the Persist shard.
         metadata: CollectionMetadata,
     },
+    /// This peek runs a DuckDB query over snapshots of Persist collections.
+    ///
+    /// The peek's `result_desc` is the query's result description with one
+    /// trailing `int8` column holding each row's position in DuckDB's output,
+    /// so that `finishing` can restore DuckDB's order.
+    DuckDb {
+        /// The query, which reads input `i` as `mz_duckdb_util::input_name(i)`.
+        sql: String,
+        /// The collections the query reads. Never empty.
+        inputs: Vec<DuckDbPeekInput>,
+    },
+}
+
+/// A Persist collection read by a [`PeekTarget::DuckDb`] peek.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DuckDbPeekInput {
+    /// The id of the backing Persist collection.
+    pub id: GlobalId,
+    /// The identifying metadata of the Persist shard.
+    pub metadata: CollectionMetadata,
 }
 
 impl PeekTarget {
-    /// Returns the ID of the peeked collection.
+    /// Returns the ID of the collection the peek is logged against.
+    ///
+    /// For a [`PeekTarget::DuckDb`] peek, that is its first input.
     pub fn id(&self) -> GlobalId {
         match self {
             Self::Index { id } => *id,
             Self::Persist { id, .. } => *id,
+            Self::DuckDb { inputs, .. } => inputs.first().expect("never empty").id,
+        }
+    }
+
+    /// Returns the IDs of all collections the peek reads, each of which needs a
+    /// read hold for the duration of the peek.
+    pub fn ids(&self) -> BTreeSet<GlobalId> {
+        match self {
+            Self::Index { id } => BTreeSet::from([*id]),
+            Self::Persist { id, .. } => BTreeSet::from([*id]),
+            Self::DuckDb { inputs, .. } => inputs.iter().map(|input| input.id).collect(),
         }
     }
 }

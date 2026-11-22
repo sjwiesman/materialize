@@ -164,6 +164,7 @@ pub fn auto_run_on_catalog_server<'a, 's, 'p>(
         | Plan::AlterDefaultPrivileges(_)
         | Plan::ReassignOwned(_)
         | Plan::ValidateConnection(_)
+        | Plan::DuckDbSelect(_)
         | Plan::SideEffectingFunc(_) => return TargetCluster::Active,
     };
 
@@ -251,6 +252,7 @@ pub fn check_cluster_restrictions(
         // cluster. COPY ... TO STDOUT is planned as `Plan::Select` and is
         // covered above.
         Plan::CopyTo(plan) => Box::new(plan.select_plan.source.depends_on().into_iter()),
+        Plan::DuckDbSelect(plan) => Box::new(plan.inputs.iter().map(|(id, _)| *id)),
         _ => return Ok(()),
     };
 

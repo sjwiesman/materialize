@@ -1188,6 +1188,57 @@ impl Value for IntervalStyle {
     }
 }
 
+/// The SQL dialect a session's statements are written in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SqlDialect {
+    Materialize,
+    DuckDb,
+}
+
+impl SqlDialect {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SqlDialect::Materialize => "materialize",
+            SqlDialect::DuckDb => "duckdb",
+        }
+    }
+
+    fn valid_values() -> Vec<&'static str> {
+        vec![Self::Materialize.as_str(), Self::DuckDb.as_str()]
+    }
+}
+
+impl Value for SqlDialect {
+    fn type_name() -> Cow<'static, str>
+    where
+        Self: Sized,
+    {
+        "string".into()
+    }
+
+    fn parse(input: VarInput<'_>) -> Result<Self, VarParseError>
+    where
+        Self: Sized,
+    {
+        let s = UncasedStr::new(extract_single_value(input)?);
+        [Self::Materialize, Self::DuckDb]
+            .into_iter()
+            .find(|dialect| s == dialect.as_str())
+            .ok_or_else(|| VarParseError::ConstrainedParameter {
+                invalid_values: vec![s.to_string()],
+                valid_values: Some(Self::valid_values()),
+            })
+    }
+
+    fn box_clone(&self) -> Box<dyn Value> {
+        Box::new(*self)
+    }
+
+    fn format(&self) -> String {
+        self.as_str().to_string()
+    }
+}
+
 /// Macro to implement [`Value`] for simpler types, i.e. ones that already implement `FromStr` and
 /// `ToString`.
 ///

@@ -1,0 +1,26 @@
+[package]
+name = "mz-duckdb-util"
+description = "An embedded DuckDB used as a read-only query engine over Materialize collections."
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arrow.workspace = true
+duckdb = { workspace = true, features = ["appender-arrow"] }
+mz-arrow-util = { path = "../arrow-util" }
+mz-ore = { path = "../ore" }
+mz-repr = { path = "../repr" }
+serde_json.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+uuid.workspace = true
+
+[features]
+default = []

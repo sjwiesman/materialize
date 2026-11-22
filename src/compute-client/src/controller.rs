@@ -1030,9 +1030,9 @@ impl ComputeController {
 
     /// Initiate a peek request for the contents of the given collection at `timestamp`.
     ///
-    /// The caller supplies a `read_hold` for the peek target — via
+    /// The caller supplies one read hold per collection in `peek_target.ids()`, via
     /// [`ComputeController::acquire_read_hold`] for `PeekTarget::Index`, or via the storage
-    /// collections for `PeekTarget::Persist`. The hold keeps the collection's `since` at
+    /// collections for Persist-backed targets. The holds keep each collection's `since` at
     /// `<= timestamp` until the peek completes.
     pub fn peek(
         &self,
@@ -1044,7 +1044,7 @@ impl ComputeController {
         result_desc: RelationDesc,
         finishing: RowSetFinishing,
         map_filter_project: mz_expr::SafeMfpPlan,
-        read_hold: ReadHold,
+        read_holds: Vec<ReadHold>,
         target_replica: Option<ReplicaId>,
         peek_response_tx: oneshot::Sender<PeekResponse>,
     ) -> Result<(), PeekError> {
@@ -1059,13 +1059,15 @@ impl ComputeController {
             }
         }
 
-        // Validation: the read hold must target this collection and must hold its `since`
-        // at `<= timestamp`.
-        if read_hold.id() != peek_target.id() {
-            return Err(ReadHoldIdMismatch(read_hold.id()));
-        }
-        if !read_hold.since().less_equal(&timestamp) {
-            return Err(SinceViolation(peek_target.id()));
+        // Validation: the read holds must match the peeked collections and must hold their
+        // `since` at `<= timestamp`.
+        instance::check_read_holds_match(&peek_target, &read_holds)
+            .map_err(ReadHoldIdMismatch)?;
+        if let Some(read_hold) = read_holds
+            .iter()
+            .find(|read_hold| !read_hold.since().less_equal(&timestamp))
+        {
+            return Err(SinceViolation(read_hold.id()));
         }
 
         instance.call(move |i| {
@@ -1077,7 +1079,7 @@ impl ComputeController {
                 result_desc,
                 finishing,
                 map_filter_project,
-                read_hold,
+                read_holds,
                 target_replica,
                 peek_response_tx,
             )

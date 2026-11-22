@@ -171,6 +171,7 @@ pub enum Plan {
     CommitTransaction(CommitTransactionPlan),
     AbortTransaction(AbortTransactionPlan),
     Select(SelectPlan),
+    DuckDbSelect(DuckDbSelectPlan),
     Subscribe(SubscribePlan),
     CopyFrom(CopyFromPlan),
     CopyTo(CopyToPlan),
@@ -267,6 +268,7 @@ impl Plan {
             ],
             StatementKind::Close => &[PlanKind::Close],
             StatementKind::Comment => &[PlanKind::Comment],
+            StatementKind::DuckDb => &[PlanKind::DuckDbSelect],
             StatementKind::Commit => &[PlanKind::CommitTransaction],
             StatementKind::Copy => &[
                 PlanKind::CopyFrom,
@@ -394,6 +396,7 @@ impl Plan {
             Plan::CommitTransaction(_) => "commit",
             Plan::AbortTransaction(_) => "abort",
             Plan::Select(_) => "select",
+            Plan::DuckDbSelect(_) => "duckdb select",
             Plan::Subscribe(_) => "subscribe",
             Plan::CopyFrom(_) => "copy from",
             Plan::CopyTo(_) => "copy to",
@@ -502,6 +505,7 @@ impl Plan {
             Plan::CommitTransaction(_) => true,
             Plan::AbortTransaction(_) => true,
             Plan::Select(_) => true,
+            Plan::DuckDbSelect(_) => true,
             Plan::EmptyQuery => true,
             Plan::ShowAllVariables => true,
             Plan::ShowCreate(_) => true,
@@ -889,6 +893,18 @@ pub struct ResetVariablePlan {
 pub struct SetTransactionPlan {
     pub local: bool,
     pub modes: Vec<TransactionMode>,
+}
+
+/// A plan for a `SELECT` in the DuckDB dialect, executed by DuckDB on a
+/// cluster.
+#[derive(Clone, Debug)]
+pub struct DuckDbSelectPlan {
+    /// The query, with input `i` renamed to `mz_duckdb_util::input_name(i)`.
+    pub sql: String,
+    /// The persist-backed collections the query reads, in input order.
+    pub inputs: Vec<(GlobalId, RelationDesc)>,
+    /// The query's result description.
+    pub desc: RelationDesc,
 }
 
 /// A plan for select statements.

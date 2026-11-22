@@ -47,6 +47,7 @@ use crate::session::vars::errors::VarError;
 use crate::session::vars::polyfill::{LazyValueFn, lazy_value, value};
 use crate::session::vars::value::{
     ClientEncoding, ClientSeverity, DEFAULT_DATE_STYLE, Failpoints, IntervalStyle, IsolationLevel,
+    SqlDialect,
     TimeZone, Value,
 };
 use crate::session::vars::{FeatureFlag, Var, VarInput, VarParseError};
@@ -359,6 +360,13 @@ pub static INTEGER_DATETIMES: VarDefinition = VarDefinition::new(
     true,
 )
 .fixed();
+
+pub static SQL_DIALECT: VarDefinition = VarDefinition::new(
+    "sql_dialect",
+    value!(SqlDialect; SqlDialect::Materialize),
+    "Sets the SQL dialect of statements other than session and transaction control (Materialize).",
+    true,
+);
 
 pub static INTERVAL_STYLE: VarDefinition = VarDefinition::new(
     // IntervalStyle has nonstandard capitalization for historical reasons.
@@ -1891,6 +1899,12 @@ feature_flags!(
         desc: "the jq function",
         default: false,
         enable_for_item_parsing: true,
+    },
+    {
+        name: enable_duckdb_dialect,
+        desc: "running SELECT statements in the DuckDB SQL dialect",
+        default: false,
+        enable_for_item_parsing: false,
     },
     {
         name: enable_envelope_debezium_in_subscribe,

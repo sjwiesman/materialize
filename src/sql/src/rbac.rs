@@ -965,6 +965,23 @@ fn generate_rbac_requirements(
                 ..Default::default()
             }
         }
+        Plan::DuckDbSelect(plan::DuckDbSelectPlan {
+            sql: _,
+            inputs,
+            desc: _,
+        }) => {
+            let items = inputs.iter().map(|(gid, _)| catalog.resolve_item_id(gid));
+            let mut privileges = generate_read_privileges(catalog, items, role_id);
+            if let Some(privilege) =
+                generate_cluster_usage_privileges(false, target_cluster_id, role_id)
+            {
+                privileges.push(privilege);
+            }
+            RbacRequirements {
+                privileges,
+                ..Default::default()
+            }
+        }
         Plan::Subscribe(plan::SubscribePlan {
             from,
             with_snapshot: _,

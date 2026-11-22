@@ -29,7 +29,8 @@ use mz_sql::ast::Raw;
 use mz_sql::catalog::CatalogCluster;
 use mz_sql::plan::Params;
 use mz_sql::plan::{
-    self, Explainee, ExplaineeStatement, Plan, QueryWhen, SelectPlan, SideEffectingFunc,
+    self, DuckDbSelectPlan, Explainee, ExplaineeStatement, Plan, QueryWhen, SelectPlan,
+    SideEffectingFunc,
     SubscribePlan,
 };
 use mz_sql::rbac;
@@ -58,7 +59,7 @@ use crate::explain::insights::PlanInsightsContext;
 use crate::explain::optimizer_trace::OptimizerTrace;
 use crate::optimize::Optimize;
 use crate::optimize::dataflows::{ComputeInstanceSnapshot, DataflowBuilder};
-use crate::peek_client::{ExecutionLogging, TakeOver};
+use crate::peek_client::{ExecutionLogging, PeekResponseLimits, TakeOver};
 use crate::session::{Session, TransactionOps, TransactionStatus};
 use crate::statement_logging::StatementLifecycleEvent;
 use crate::statement_logging::WatchSetCreation;
@@ -122,6 +123,7 @@ impl PeekClient {
         if let Some(ref stmt) = stmt {
             match &**stmt {
                 Statement::Select(_)
+                | Statement::DuckDb(_)
                 | Statement::ExplainAnalyzeObject(_)
                 | Statement::ExplainAnalyzeCluster(_)
                 | Statement::Show(ShowStatement::ShowObjects(_))
@@ -342,6 +344,7 @@ impl PeekClient {
             Select(&'a SelectPlan),
             CopyTo(&'a SelectPlan, CopyToContext),
             Subscribe(&'a SubscribePlan),
+            DuckDb(&'a DuckDbSelectPlan),
         }
 
         let (query_plan, explain_ctx) = match &plan {
@@ -489,6 +492,7 @@ impl PeekClient {
                 return Ok(Some(response));
             }
             Plan::Subscribe(subscribe) => (QueryPlan::Subscribe(subscribe), ExplainContext::None),
+            Plan::DuckDbSelect(duckdb) => (QueryPlan::DuckDb(duckdb), ExplainContext::None),
             _ => {
                 // This shouldn't happen because we already checked for this at the AST
                 // level before calling `try_frontend_peek_inner`. The logging takeover has
@@ -508,18 +512,22 @@ impl PeekClient {
             QueryPlan::Select(s) => &s.when,
             QueryPlan::CopyTo(s, _) => &s.when,
             QueryPlan::Subscribe(s) => &s.when,
+            QueryPlan::DuckDb(_) => &QueryWhen::Immediately,
         };
 
         let depends_on = match query_plan {
             QueryPlan::Select(s) => s.source.depends_on(),
             QueryPlan::CopyTo(s, _) => s.source.depends_on(),
             QueryPlan::Subscribe(s) => s.from.depends_on(),
+            QueryPlan::DuckDb(s) => s.inputs.iter().map(|(id, _)| *id).collect(),
         };
 
         let contains_temporal = match query_plan {
             QueryPlan::Select(s) => s.source.contains_temporal(),
             QueryPlan::CopyTo(s, _) => s.source.contains_temporal(),
             QueryPlan::Subscribe(s) => s.from.contains_temporal(),
+            // DuckDB functions such as `now()` read the wall clock.
+            QueryPlan::DuckDb(_) => true,
         };
 
         // # From sequence_plan
@@ -661,7 +669,25 @@ impl PeekClient {
 
         let dataflow_builder =
             DataflowBuilder::new(catalog.state(), compute_instance_snapshot.clone());
-        let input_id_bundle = dataflow_builder.sufficient_collections(source_ids.clone());
+        let input_id_bundle = match query_plan {
+            // DuckDB reads its inputs from persist, never from indexes.
+            QueryPlan::DuckDb(_) => {
+                for id in &source_ids {
+                    if self.storage_collections.collection_metadata(*id).is_err() {
+                        let name = catalog
+                            .resolve_full_name(catalog.get_entry_by_global_id(id).name(), None);
+                        return Err(AdapterError::Unstructured(anyhow::anyhow!(
+                            "{name} is not stored in persist, so the duckdb dialect cannot read it"
+                        )));
+                    }
+                }
+                CollectionIdBundle {
+                    storage_ids: source_ids.clone(),
+                    compute_ids: BTreeMap::new(),
+                }
+            }
+            _ => dataflow_builder.sufficient_collections(source_ids.clone()),
+        };
 
         // ## From sequence_peek_timestamp
 
@@ -853,7 +879,7 @@ impl PeekClient {
                     session.add_transaction_ops(TransactionOps::Subscribe)?;
                 }
             }
-            QueryPlan::Select(..) | QueryPlan::CopyTo(..) => {
+            QueryPlan::Select(..) | QueryPlan::CopyTo(..) | QueryPlan::DuckDb(..) => {
                 if when.is_transactional() {
                     session.add_transaction_ops(TransactionOps::Peeks {
                         determination: transaction_determination,
@@ -870,6 +896,43 @@ impl PeekClient {
                     })?;
                 }
             }
+        }
+
+        if let QueryPlan::DuckDb(duckdb_plan) = query_plan {
+            let timestamp = determination.timestamp_context.timestamp_or_default();
+            if let Some(logging_id) = logging.id() {
+                self.log_set_timestamp(logging_id, timestamp);
+            }
+            let watch_set = logging.id().map(|logging_id| {
+                WatchSetCreation::new(logging_id, catalog.state(), &input_id_bundle, timestamp)
+            });
+            let dyncfgs = catalog.system_config().dyncfgs();
+            let limits = PeekResponseLimits {
+                max_result_size: catalog.system_config().max_result_size(),
+                max_returned_query_size: max_query_result_size,
+                row_set_finishing_seconds: session.metrics().row_set_finishing_seconds().clone(),
+                peek_stash_read_batch_size_bytes:
+                    mz_compute_types::dyncfgs::PEEK_RESPONSE_STASH_READ_BATCH_SIZE_BYTES
+                        .get(dyncfgs),
+                peek_stash_read_memory_budget_bytes:
+                    mz_compute_types::dyncfgs::PEEK_RESPONSE_STASH_READ_MEMORY_BUDGET_BYTES
+                        .get(dyncfgs),
+            };
+            let response = self
+                .implement_duckdb_peek(
+                    duckdb_plan,
+                    timestamp,
+                    target_cluster_id,
+                    target_replica,
+                    read_holds,
+                    limits,
+                    session.conn_id().clone(),
+                    source_ids,
+                    watch_set,
+                    logging,
+                )
+                .await?;
+            return Ok(Some(response));
         }
 
         let stats = statistics_oracle(
@@ -917,6 +980,7 @@ impl PeekClient {
         let source_ids_for_closure = source_ids.clone();
 
         let optimization_future: JoinHandle<Result<_, AdapterError>> = match query_plan {
+            QueryPlan::DuckDb(_) => unreachable!("returned above"),
             QueryPlan::CopyTo(select_plan, mut copy_to_ctx) => {
                 let raw_expr = select_plan.source.clone();
 

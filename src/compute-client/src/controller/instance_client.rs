@@ -53,7 +53,7 @@ pub enum PeekError {
     /// The replica that the peek was issued against does not exist.
     #[error("replica does not exist: {0}")]
     ReplicaMissing(ReplicaId),
-    /// The read hold that was passed in is against the wrong collection.
+    /// The read holds that were passed in do not match the peeked collections.
     #[error("read hold ID does not match peeked collection: {0}")]
     ReadHoldIdMismatch(GlobalId),
     /// The read hold that was passed in is for a later time than the peek's timestamp.
@@ -232,7 +232,7 @@ impl InstanceClient {
         result_desc: RelationDesc,
         finishing: RowSetFinishing,
         map_filter_project: mz_expr::SafeMfpPlan,
-        target_read_hold: ReadHold,
+        read_holds: Vec<ReadHold>,
         target_replica: Option<ReplicaId>,
         peek_response_tx: oneshot::Sender<PeekResponse>,
     ) -> Result<(), PeekError> {
@@ -245,7 +245,7 @@ impl InstanceClient {
                 result_desc,
                 finishing,
                 map_filter_project,
-                target_read_hold,
+                read_holds,
                 target_replica,
                 peek_response_tx,
             )

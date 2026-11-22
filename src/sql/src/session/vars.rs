@@ -450,6 +450,7 @@ impl SessionVars {
             &REAL_TIME_RECENCY,
             &EMIT_PLAN_INSIGHTS_NOTICE,
             &EMIT_EXECUTION_TIME_NOTICE,
+            &SQL_DIALECT,
             &EMIT_TIMESTAMP_NOTICE,
             &EMIT_TRACE_ID_NOTICE,
             &AUTO_ROUTE_CATALOG_QUERIES,
@@ -895,6 +896,11 @@ impl SessionVars {
     }
 
     /// Returns the value of `emit_plan_insights_notice` configuration parameter.
+    /// Returns the value of the `sql_dialect` configuration parameter.
+    pub fn sql_dialect(&self) -> SqlDialect {
+        *self.expect_value(&SQL_DIALECT)
+    }
+
     pub fn emit_plan_insights_notice(&self) -> bool {
         *self.expect_value(&EMIT_PLAN_INSIGHTS_NOTICE)
     }

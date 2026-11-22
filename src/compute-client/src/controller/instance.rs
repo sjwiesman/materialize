@@ -1772,21 +1772,20 @@ impl Instance {
         result_desc: RelationDesc,
         finishing: RowSetFinishing,
         map_filter_project: mz_expr::SafeMfpPlan,
-        mut read_hold: ReadHold,
+        mut read_holds: Vec<ReadHold>,
         target_replica: Option<ReplicaId>,
         peek_response_tx: oneshot::Sender<PeekResponse>,
     ) -> Result<(), PeekError> {
         use PeekError::*;
 
-        let target_id = peek_target.id();
-
-        // Downgrade the provided read hold to the peek time.
-        if read_hold.id() != target_id {
-            return Err(ReadHoldIdMismatch(read_hold.id()));
+        // Require exactly one read hold per collection the peek reads, and
+        // downgrade each to the peek time.
+        check_read_holds_match(&peek_target, &read_holds).map_err(ReadHoldIdMismatch)?;
+        for read_hold in &mut read_holds {
+            read_hold
+                .try_downgrade(Antichain::from_elem(timestamp.clone()))
+                .map_err(|_| ReadHoldInsufficient(read_hold.id()))?;
         }
-        read_hold
-            .try_downgrade(Antichain::from_elem(timestamp.clone()))
-            .map_err(|_| ReadHoldInsufficient(target_id))?;
 
         if let Some(target) = target_replica {
             if !self.replica_exists(target) {
@@ -1803,7 +1802,7 @@ impl Instance {
                 // TODO(guswynn): can we just hold the `tracing::Span` here instead?
                 otel_ctx: otel_ctx.clone(),
                 requested_at: Instant::now(),
-                read_hold,
+                read_holds,
                 peek_response_tx,
                 limit: finishing.limit.map(usize::cast_from),
                 offset: finishing.offset,
@@ -2030,7 +2029,7 @@ impl Instance {
         // (by dropping it), to avoid the edge case that caused database-issues#4812.
         self.send(ComputeCommand::CancelPeek { uuid });
 
-        drop(peek.read_hold);
+        drop(peek.read_holds);
     }
 
     /// Handles a response from a replica. Replica IDs are re-used across replica restarts, so we
@@ -3083,8 +3082,8 @@ struct PendingPeek {
     ///
     /// Used to track peek durations.
     requested_at: Instant,
-    /// The read hold installed to serve this peek.
-    read_hold: ReadHold,
+    /// The read holds installed to serve this peek, one per collection it reads.
+    read_holds: Vec<ReadHold>,
     /// The channel to send peek results.
     peek_response_tx: oneshot::Sender<PeekResponse>,
     /// An optional limit of the peek's result size.
@@ -3511,6 +3510,25 @@ where
     result
 }
 
+/// Checks that `read_holds` holds exactly the collections `target` reads, once
+/// each. On a mismatch, returns an ID that is missing or extra.
+pub(super) fn check_read_holds_match(
+    target: &PeekTarget,
+    read_holds: &[ReadHold],
+) -> Result<(), GlobalId> {
+    let target_ids = target.ids();
+    let mut held = BTreeSet::new();
+    for read_hold in read_holds {
+        if !target_ids.contains(&read_hold.id()) || !held.insert(read_hold.id()) {
+            return Err(read_hold.id());
+        }
+    }
+    match target_ids.difference(&held).next() {
+        Some(missing) => Err(*missing),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -3825,3 +3843,4 @@ mod tests {
         }
     }
 }
+

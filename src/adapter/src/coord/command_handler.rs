@@ -1383,6 +1383,7 @@ impl Coordinator {
                     | Statement::Deallocate(_)
                     | Statement::Declare(_)
                     | Statement::Discard(_)
+                    | Statement::DuckDb(_)
                     | Statement::Execute(_)
                     | Statement::ExplainPlan(_)
                     | Statement::ExplainPushdown(_)

@@ -44,9 +44,9 @@ use mz_sql::plan::{MutationKind, Plan, ReadThenWritePlan};
 use mz_sql::session::hint::ApplicationNameHint;
 use mz_sql::session::metadata::SessionMetadata;
 use mz_sql::session::user::SUPPORT_USER;
-use mz_sql::session::vars::{CLUSTER, OwnedVarInput, SystemVars, Var};
+use mz_sql::session::vars::{CLUSTER, OwnedVarInput, SqlDialect, SystemVars, Var};
 use mz_sql_parser::ast::display::AstDisplay;
-use mz_sql_parser::ast::{InsertStatement, StatementKind};
+use mz_sql_parser::ast::{DuckDbStatement, InsertStatement, ShowStatement, StatementKind};
 use mz_sql_parser::parser::{ParserStatementError, StatementParseResult};
 use prometheus::Histogram;
 use serde_json::json;
@@ -661,6 +661,10 @@ impl SessionClient {
         &self,
         sql: &'a str,
     ) -> Result<Result<Vec<StatementParseResult<'a>>, ParserStatementError>, String> {
+        let session = self.session.as_ref().expect("session invariant violated");
+        if session.vars().sql_dialect() == SqlDialect::DuckDb {
+            return parse_duckdb_dialect(sql);
+        }
         match mz_sql::parse::parse_with_limit(sql) {
             Ok(Err(e)) => {
                 self.track_statement_parse_failure(&e);
@@ -2026,6 +2030,46 @@ impl Drop for SessionClient {
             }
         }
     }
+}
+
+/// Parses `sql` for a session whose `sql_dialect` is `duckdb`.
+///
+/// Session and transaction control keep Materialize's syntax, which is also
+/// how a session switches back with `SET sql_dialect = materialize`. Any other
+/// text is passed through as a single DuckDB statement, which DuckDB parses
+/// when the statement is planned.
+// TODO: Split multi-statement text with DuckDB's own splitter.
+fn parse_duckdb_dialect(
+    sql: &str,
+) -> Result<Result<Vec<StatementParseResult<'_>>, ParserStatementError>, String> {
+    let parsed = mz_sql::parse::parse_with_limit(sql)?;
+    if let Ok(stmts) = &parsed {
+        if stmts.iter().all(|stmt| is_session_control(&stmt.ast)) {
+            return Ok(parsed);
+        }
+    }
+    let text = sql.trim().trim_end_matches(';').trim_end();
+    if text.is_empty() {
+        return Ok(Ok(vec![]));
+    }
+    let stmt = Statement::DuckDb(DuckDbStatement {
+        sql: text.to_string(),
+    });
+    Ok(Ok(vec![StatementParseResult::new(stmt, sql)]))
+}
+
+fn is_session_control(stmt: &Statement<Raw>) -> bool {
+    matches!(
+        stmt,
+        Statement::SetVariable(_)
+            | Statement::ResetVariable(_)
+            | Statement::Show(ShowStatement::ShowVariable(_))
+            | Statement::StartTransaction(_)
+            | Statement::SetTransaction(_)
+            | Statement::Commit(_)
+            | Statement::Rollback(_)
+            | Statement::Discard(_)
+    )
 }
 
 /// Renders SQL for statement arrival logging: parsed and displayed with its

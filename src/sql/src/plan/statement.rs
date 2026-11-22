@@ -44,6 +44,7 @@ use crate::session::vars::FeatureFlag;
 mod acl;
 pub(crate) mod ddl;
 mod dml;
+mod duckdb;
 mod raise;
 mod scl;
 pub(crate) mod show;
@@ -143,6 +144,7 @@ pub fn describe(
         Statement::AlterTableAddColumn(stmt) => ddl::describe_alter_table_add_column(&scx, stmt)?,
         Statement::AlterNetworkPolicy(stmt) => ddl::describe_alter_network_policy(&scx, stmt)?,
         Statement::Comment(stmt) => ddl::describe_comment(&scx, stmt)?,
+        Statement::DuckDb(stmt) => duckdb::describe_duckdb(&scx, stmt)?,
         Statement::CreateCluster(stmt) => ddl::describe_create_cluster(&scx, stmt)?,
         Statement::CreateClusterReplica(stmt) => ddl::describe_create_cluster_replica(&scx, stmt)?,
         Statement::CreateConnection(stmt) => ddl::describe_create_connection(&scx, stmt)?,
@@ -352,6 +354,7 @@ pub fn plan(
         Statement::AlterTableAddColumn(stmt) => ddl::plan_alter_table_add_column(scx, stmt),
         Statement::AlterNetworkPolicy(stmt) => ddl::plan_alter_network_policy(scx, stmt),
         Statement::Comment(stmt) => ddl::plan_comment(scx, stmt),
+        Statement::DuckDb(stmt) => duckdb::plan_duckdb(scx, stmt),
         Statement::CreateCluster(stmt) => ddl::plan_create_cluster(scx, stmt),
         Statement::CreateClusterReplica(stmt) => ddl::plan_create_cluster_replica(scx, stmt),
         Statement::CreateConnection(stmt) => ddl::plan_create_connection(scx, stmt),
@@ -1122,6 +1125,7 @@ impl<T: mz_sql_parser::ast::AstInfo> From<&Statement<T>> for StatementClassifica
             Statement::ExplainSinkSchema(_) => DML,
             Statement::Insert(_) => DML,
             Statement::Select(_) => DML,
+            Statement::DuckDb(_) => DML,
             Statement::Subscribe(_) => DML,
             Statement::Update(_) => DML,
 

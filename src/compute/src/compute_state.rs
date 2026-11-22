@@ -19,7 +19,7 @@ use differential_dataflow::lattice::Lattice;
 use differential_dataflow::trace::TraceReader;
 use mz_compute_client::logging::LoggingConfig;
 use mz_compute_client::protocol::command::{
-    ComputeCommand, ComputeParameters, InstanceConfig, Peek, PeekTarget,
+    ComputeCommand, ComputeParameters, DuckDbPeekInput, InstanceConfig, Peek, PeekTarget,
 };
 use mz_compute_client::protocol::history::ComputeCommandHistory;
 use mz_compute_client::protocol::response::{
@@ -79,6 +79,7 @@ use crate::metrics::{CollectionMetrics, WorkerMetrics};
 use crate::render::{LinearJoinSpec, StartSignal};
 use crate::server::{ComputeInstanceContext, ResponseSender};
 
+mod duckdb_peek;
 mod error_scan;
 mod peek_budget;
 mod peek_metrics;
@@ -932,6 +933,18 @@ impl<'a> ActiveComputeState<'a> {
                     PeekRowIterationConfig::new(&self.compute_state.worker_config),
                 )
             }
+            PeekTarget::DuckDb { sql, inputs } => {
+                let (sql, inputs) = (sql.clone(), inputs.clone());
+                PendingPeek::duckdb(
+                    peek,
+                    sql,
+                    inputs,
+                    Arc::clone(&self.compute_state.persist_clients),
+                    usize::cast_from(self.compute_state.max_result_size),
+                    self.timely_worker,
+                    PeekRowIterationConfig::new(&self.compute_state.worker_config),
+                )
+            }
         };
 
         // Log the receipt of the peek.
@@ -1564,7 +1577,7 @@ impl<'a> ActiveComputeState<'a> {
 pub enum PendingPeek {
     /// A peek against an index. (Possibly a temporary index created for the purpose.)
     Index(IndexPeek),
-    /// A peek against a Persist-backed collection.
+    /// A peek served by an async task: a Persist peek or a DuckDB peek.
     Persist(PersistPeek),
     /// A peek against an index whose walk was offloaded from the worker and is running as an async
     /// task.
@@ -1578,6 +1591,7 @@ impl PendingPeek {
         let (id, peek_type) = match &peek.target {
             PeekTarget::Index { id } => (*id, logging::compute::PeekType::Index),
             PeekTarget::Persist { id, .. } => (*id, logging::compute::PeekType::Persist),
+            PeekTarget::DuckDb { .. } => (peek.target.id(), logging::compute::PeekType::DuckDb),
         };
         let uuid = peek.uuid.into_bytes();
         ComputeEvent::Peek(PeekEvent {
@@ -1620,6 +1634,76 @@ impl PendingPeek {
         timely_worker: &TimelyWorker,
         row_iteration_config: PeekRowIterationConfig,
     ) -> Self {
+        let timestamp = peek.timestamp;
+        let mfp_plan = peek.map_filter_project.clone();
+        let max_results_needed = peek
+            .finishing
+            .limit
+            .map(|l| usize::cast_from(u64::from(l)))
+            .unwrap_or(usize::MAX)
+            + peek.finishing.offset;
+
+        // Persist peeks can include at most one literal constraint.
+        let literal_constraint = peek
+            .literal_constraints
+            .clone()
+            .map(|rows| rows.into_element());
+
+        Self::spawn_task_peek(peek, timely_worker, "persist::peek", async move {
+            PersistPeek::do_peek(
+                &persist_clients,
+                metadata,
+                timestamp,
+                literal_constraint,
+                mfp_plan,
+                max_result_size,
+                max_results_needed,
+                row_iteration_config,
+            )
+            .await
+        })
+    }
+
+    fn duckdb(
+        peek: Peek,
+        sql: String,
+        inputs: Vec<DuckDbPeekInput>,
+        persist_clients: Arc<PersistClientCache>,
+        max_result_size: usize,
+        timely_worker: &TimelyWorker,
+        row_iteration_config: PeekRowIterationConfig,
+    ) -> Self {
+        let timestamp = peek.timestamp;
+        let result_desc = peek.result_desc.clone();
+        // TODO: Make DuckDB's share of the replica's cores configurable. It runs
+        // beside the timely workers and competes with them for CPU.
+        let threads = timely_worker.peers();
+        Self::spawn_task_peek(peek, timely_worker, "duckdb::peek", async move {
+            duckdb_peek::do_peek(
+                &persist_clients,
+                sql,
+                inputs,
+                timestamp,
+                result_desc,
+                max_result_size,
+                threads,
+                row_iteration_config,
+            )
+            .await
+        })
+    }
+
+    /// Serves `peek` with `work`, run as an async task on one worker. The other
+    /// workers respond with no rows.
+    fn spawn_task_peek<F>(
+        peek: Peek,
+        timely_worker: &TimelyWorker,
+        name: &'static str,
+        work: F,
+    ) -> Self
+    where
+        F: Future<Output = Result<Vec<(Row, NonZeroUsize)>, PeekError>> + Send + 'static,
+    {
         let active_worker = {
             // Choose the worker that does the actual peek arbitrarily but consistently.
             let chosen_index = usize::cast_from(peek.uuid.hashed()) % timely_worker.peers();
@@ -1629,36 +1713,12 @@ impl PendingPeek {
         let peek_uuid = peek.uuid;
 
         let (result_tx, result_rx) = oneshot::channel();
-        let timestamp = peek.timestamp;
-        let mfp_plan = peek.map_filter_project.clone();
-        let max_results_needed = peek
-            .finishing
-            .limit
-            .map(|l| usize::cast_from(u64::from(l)))
-            .unwrap_or(usize::MAX)
-            + peek.finishing.offset;
         let order_by = peek.finishing.order_by.clone();
 
-        // Persist peeks can include at most one literal constraint.
-        let literal_constraint = peek
-            .literal_constraints
-            .clone()
-            .map(|rows| rows.into_element());
-
-        let task_handle = mz_ore::task::spawn(|| "persist::peek", async move {
+        let task_handle = mz_ore::task::spawn(|| name, async move {
             let start = Instant::now();
             let result = if active_worker {
-                PersistPeek::do_peek(
-                    &persist_clients,
-                    metadata,
-                    timestamp,
-                    literal_constraint,
-                    mfp_plan,
-                    max_result_size,
-                    max_results_needed,
-                    row_iteration_config,
-                )
-                .await
+                work.await
             } else {
                 Ok(vec![])
             };
@@ -1704,7 +1764,7 @@ impl PendingPeek {
     }
 }
 
-/// An in-progress Persist peek.
+/// An in-progress peek served by an async task, see [`PendingPeek::spawn_task_peek`].
 ///
 /// Note that `PendingPeek` intentionally does not implement or derive `Clone`,
 /// as each `PendingPeek` is meant to be dropped after it's responded to.

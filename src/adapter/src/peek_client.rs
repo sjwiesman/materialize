@@ -14,7 +14,7 @@ use differential_dataflow::consolidation::consolidate;
 use mz_compute_client::controller::error::{CollectionMissing, InstanceMissing};
 use mz_compute_client::controller::instance_client::InstanceClient;
 use mz_compute_client::controller::instance_client::{AcquireReadHoldsError, InstanceShutDown};
-use mz_compute_client::protocol::command::PeekTarget;
+use mz_compute_client::protocol::command::{DuckDbPeekInput, PeekTarget};
 use mz_compute_types::ComputeInstanceId;
 use mz_expr::row::RowCollection;
 use mz_ore::cast::CastFrom;
@@ -23,13 +23,14 @@ use mz_persist_client::PersistClient;
 use mz_repr::GlobalId;
 use mz_repr::Timestamp;
 use mz_repr::global_id::TransientIdGen;
-use mz_repr::{RelationDesc, Row};
+use mz_repr::{RelationDesc, Row, SqlScalarType};
 use mz_sql::ast::{Raw, Statement};
 use mz_sql::optimizer_metrics::OptimizerMetrics;
-use mz_sql::plan::Params;
+use mz_sql::plan::{DuckDbSelectPlan, Params};
 use mz_sql::session::hint::ApplicationNameHint;
 use mz_sql::session::metadata::SessionMetadata;
 use mz_sql_parser::ast::{CopyRelation, CopyStatement, SubscribeStatement};
+use mz_storage_types::read_holds::ReadHold;
 use mz_storage_types::sources::Timeline;
 use mz_timestamp_oracle::TimestampOracle;
 use prometheus::Histogram;
@@ -54,6 +55,15 @@ use crate::statement_logging::{
 use crate::{
     AdapterError, AdapterNotice, Client, CollectionIdBundle, ReadHolds, metrics, statement_logging,
 };
+
+/// Bounds and settings for reading a peek's response.
+pub(crate) struct PeekResponseLimits {
+    pub max_result_size: u64,
+    pub max_returned_query_size: Option<u64>,
+    pub row_set_finishing_seconds: Histogram,
+    pub peek_stash_read_batch_size_bytes: usize,
+    pub peek_stash_read_memory_budget_bytes: usize,
+}
 
 /// Storage collections trait alias we need to consult for since/frontiers.
 pub type StorageCollectionsHandle =
@@ -515,13 +525,160 @@ impl PeekClient {
             }
         };
 
-        let (rows_tx, rows_rx) = oneshot::channel();
-        let uuid = Uuid::new_v4();
-
         // At this stage we don't know column names for the result because we
         // only know the peek's result type as a bare SqlRelationType.
         let cols = (0..intermediate_result_type.arity()).map(|i| format!("peek_{i}"));
         let result_desc = RelationDesc::new(intermediate_result_type.clone(), cols);
+
+        self.issue_peek(
+            peek_target,
+            literal_constraints,
+            timestamp,
+            result_desc,
+            finishing,
+            mfp,
+            vec![target_read_hold],
+            compute_instance,
+            target_replica,
+            strategy,
+            PeekResponseLimits {
+                max_result_size,
+                max_returned_query_size,
+                row_set_finishing_seconds,
+                peek_stash_read_batch_size_bytes,
+                peek_stash_read_memory_budget_bytes,
+            },
+            conn_id,
+            depends_on,
+            watch_set,
+            logging,
+        )
+        .await
+    }
+
+    /// Runs a DuckDB query on `compute_instance` at `timestamp`.
+    ///
+    /// `input_read_holds` must hold every input of `plan` at `timestamp`.
+    pub(crate) async fn implement_duckdb_peek(
+        &mut self,
+        plan: &DuckDbSelectPlan,
+        timestamp: Timestamp,
+        compute_instance: ComputeInstanceId,
+        target_replica: Option<mz_cluster_client::ReplicaId>,
+        input_read_holds: ReadHolds,
+        limits: PeekResponseLimits,
+        conn_id: mz_adapter_types::connection::ConnectionId,
+        depends_on: std::collections::BTreeSet<mz_repr::GlobalId>,
+        watch_set: Option<WatchSetCreation>,
+        logging: &mut ExecutionLogging,
+    ) -> Result<crate::ExecuteResponse, AdapterError> {
+        if plan.inputs.is_empty() {
+            return Err(AdapterError::Unstructured(anyhow::anyhow!(
+                "the duckdb dialect cannot run queries that read no relations yet"
+            )));
+        }
+        let mut inputs = Vec::with_capacity(plan.inputs.len());
+        let mut read_holds = Vec::with_capacity(plan.inputs.len());
+        for (id, desc) in &plan.inputs {
+            let metadata = self
+                .storage_collections
+                .collection_metadata(*id)
+                .map_err(AdapterError::concurrent_dependency_drop_from_collection_missing)?
+                .clone();
+            // The replica loads the input with the shard's description, while
+            // the query was bound against the catalog's.
+            if !metadata.relation_desc.iter_types().eq(desc.iter_types()) {
+                return Err(AdapterError::Unstructured(anyhow::anyhow!(
+                    "the schema of {id} changed while the query was planned; retry the query"
+                )));
+            }
+            inputs.push(DuckDbPeekInput { id: *id, metadata });
+            read_holds.push(
+                input_read_holds
+                    .storage_holds
+                    .get(id)
+                    .expect("missing storage read hold on DuckDB peek input")
+                    .clone(),
+            );
+        }
+
+        // The replica appends each row's position in DuckDB's output, and the
+        // finishing sorts by it and projects it away. Peek responses are
+        // otherwise sorted by row, which would lose DuckDB's `ORDER BY`.
+        let arity = plan.desc.arity();
+        let result_desc = RelationDesc::builder()
+            .with_columns(plan.desc.iter().map(|(name, typ)| (name.clone(), typ.clone())))
+            .with_column("mz_duckdb_position", SqlScalarType::Int64.nullable(false))
+            .finish();
+        let finishing = mz_expr::RowSetFinishing {
+            order_by: vec![mz_expr::ColumnOrder {
+                column: arity,
+                desc: false,
+                nulls_last: false,
+            }],
+            limit: None,
+            offset: 0,
+            project: (0..arity).collect(),
+        };
+        // Unused by DuckDB peeks, but every peek carries one.
+        let mfp = mz_expr::MapFilterProject::new(arity + 1)
+            .into_plan()
+            .map_err(AdapterError::Internal)?
+            .into_nontemporal()
+            .map_err(|e| AdapterError::Internal(format!("{e:?}")))?;
+
+        self.issue_peek(
+            PeekTarget::DuckDb {
+                sql: plan.sql.clone(),
+                inputs,
+            },
+            None,
+            timestamp,
+            result_desc,
+            finishing,
+            mfp,
+            read_holds,
+            compute_instance,
+            target_replica,
+            statement_logging::StatementExecutionStrategy::DuckDb,
+            limits,
+            conn_id,
+            depends_on,
+            watch_set,
+            logging,
+        )
+        .await
+    }
+
+    /// Registers a peek with the coordinator, issues it to `compute_instance`,
+    /// and returns a response that streams its results.
+    async fn issue_peek(
+        &mut self,
+        peek_target: PeekTarget,
+        literal_constraints: Option<Vec<Row>>,
+        timestamp: Timestamp,
+        result_desc: RelationDesc,
+        finishing: mz_expr::RowSetFinishing,
+        mfp: mz_expr::SafeMfpPlan,
+        read_holds: Vec<ReadHold>,
+        compute_instance: ComputeInstanceId,
+        target_replica: Option<mz_cluster_client::ReplicaId>,
+        strategy: statement_logging::StatementExecutionStrategy,
+        limits: PeekResponseLimits,
+        conn_id: mz_adapter_types::connection::ConnectionId,
+        depends_on: std::collections::BTreeSet<mz_repr::GlobalId>,
+        watch_set: Option<WatchSetCreation>,
+        logging: &mut ExecutionLogging,
+    ) -> Result<crate::ExecuteResponse, AdapterError> {
+        let PeekResponseLimits {
+            max_result_size,
+            max_returned_query_size,
+            row_set_finishing_seconds,
+            peek_stash_read_batch_size_bytes,
+            peek_stash_read_memory_budget_bytes,
+        } = limits;
+        let (rows_tx, rows_rx) = oneshot::channel();
+        let uuid = Uuid::new_v4();
 
         let client = self
             .ensure_compute_instance_client(compute_instance)
@@ -571,7 +728,7 @@ impl PeekClient {
                 result_desc,
                 finishing_for_instance,
                 mfp,
-                target_read_hold,
+                read_holds,
                 target_replica,
                 rows_tx,
             )

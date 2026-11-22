@@ -116,6 +116,7 @@ pub enum Statement<T: AstInfo> {
     ReassignOwned(ReassignOwnedStatement<T>),
     ValidateConnection(ValidateConnectionStatement<T>),
     Comment(CommentStatement<T>),
+    DuckDb(DuckDbStatement),
 }
 
 impl<T: AstInfo> AstDisplay for Statement<T> {
@@ -164,6 +165,7 @@ impl<T: AstInfo> AstDisplay for Statement<T> {
             Statement::AlterTableAddColumn(stmt) => f.write_node(stmt),
             Statement::AlterMaterializedViewApplyReplacement(stmt) => f.write_node(stmt),
             Statement::Discard(stmt) => f.write_node(stmt),
+            Statement::DuckDb(stmt) => f.write_node(stmt),
             Statement::DropObjects(stmt) => f.write_node(stmt),
             Statement::DropOwned(stmt) => f.write_node(stmt),
             Statement::SetVariable(stmt) => f.write_node(stmt),
@@ -306,6 +308,7 @@ pub fn statement_kind_label_value(kind: StatementKind) -> &'static str {
         StatementKind::ReassignOwned => "reassign_owned",
         StatementKind::ValidateConnection => "validate_connection",
         StatementKind::Comment => "comment",
+        StatementKind::DuckDb => "duckdb",
     }
 }
 
@@ -3420,6 +3423,28 @@ impl AstDisplay for DiscardStatement {
     }
 }
 impl_display!(DiscardStatement);
+
+/// A statement in the DuckDB SQL dialect, passed through unparsed.
+///
+/// The Materialize parser never produces this. A session whose `sql_dialect`
+/// is `duckdb` wraps its statements in it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DuckDbStatement {
+    pub sql: String,
+}
+
+impl AstDisplay for DuckDbStatement {
+    fn fmt<W: fmt::Write>(&self, f: &mut AstFormatter<W>) {
+        // The text is opaque to us, so its literals cannot be redacted
+        // individually.
+        if f.redacted() {
+            f.write_str("<duckdb statement>");
+        } else {
+            f.write_str(&self.sql);
+        }
+    }
+}
+impl_display!(DuckDbStatement);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DiscardTarget {

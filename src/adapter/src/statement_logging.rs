@@ -92,6 +92,9 @@ pub enum StatementExecutionStrategy {
     /// Experimental: The statement was executed by reading from an existing
     /// persist collection.
     PersistFastPath,
+    /// The statement was executed by DuckDB on a cluster, over snapshots of
+    /// persist collections.
+    DuckDb,
     /// The statement was determined to be constant by
     /// environmentd, and not sent to a cluster.
     Constant,
@@ -103,6 +106,7 @@ impl StatementExecutionStrategy {
             Self::Standard => "standard",
             Self::FastPath => "fast-path",
             Self::PersistFastPath => "persist-fast-path",
+            Self::DuckDb => "duckdb",
             Self::Constant => "constant",
         }
     }

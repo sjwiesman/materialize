@@ -958,7 +958,7 @@ impl crate::coord::Coordinator {
                 peek_result_desc,
                 finishing.clone(),
                 map_filter_project,
-                read_hold,
+                vec![read_hold],
                 target_replica,
                 rows_tx,
             )

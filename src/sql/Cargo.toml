@@ -33,6 +33,7 @@ mz-ccsr = { path = "../ccsr" }
 mz-cloud-provider = { path = "../cloud-provider", default-features = false }
 mz-compute-types = { path = "../compute-types" }
 mz-controller-types = { path = "../controller-types" }
+mz-duckdb-util = { path = "../duckdb-util" }
 mz-dyncfg = { path = "../dyncfg" }
 mz-dyncfgs = { path = "../dyncfgs" }
 mz-expr = { path = "../expr" }
