@@ -48,7 +48,7 @@ pub fn bind<T: PartialEq>(
 ) -> Result<BoundQuery<T>, anyhow::Error> {
     let conn = open_connection(1)?;
 
-    let serialized: String = conn.query_row("SELECT json_serialize_sql(?)", [sql], |row| {
+    let serialized: String = conn.query_row("SELECT json_serialize_sql(?::VARCHAR)", [sql], |row| {
         row.get(0)
     })?;
     let mut ast: Value = serde_json::from_str(&serialized).context("parsing DuckDB AST")?;
@@ -87,13 +87,13 @@ pub fn bind<T: PartialEq>(
     }
 
     let rewritten: String = conn.query_row(
-        "SELECT json_deserialize_sql(?)",
+        "SELECT json_deserialize_sql(?::JSON)",
         [serde_json::to_string(&ast)?],
         |row| row.get(0),
     )?;
 
     for (index, (_, desc)) in inputs.iter().enumerate() {
-        create_input_table(&conn, &input_name(index), &input_schema(desc)?)?;
+        create_input_table(&conn, &input_name(index), &*input_schema(desc)?)?;
     }
     // Executing against empty tables is the cheapest way to learn the result
     // schema, which duckdb-rs only reports after execution.

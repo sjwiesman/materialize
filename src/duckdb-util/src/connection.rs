@@ -18,15 +18,17 @@ use duckdb::{Config, Connection};
 /// load extensions.
 pub fn open_connection(threads: usize) -> Result<Connection, anyhow::Error> {
     let config = Config::default()
+        // TODO: Spill to the replica's scratch directory. An empty directory
+        // disables spilling, where the default would spill to `.tmp` under the
+        // process's working directory.
+        // NOTE: Must precede disabling external access, which forbids changing
+        // the temp directory.
+        .with("temp_directory", "")?
         .enable_external_access(false)?
         .enable_autoload_extension(false)?
         .threads(i64::try_from(threads.max(1))?)?
         .with("autoinstall_known_extensions", "false")?
-        .with("allow_community_extensions", "false")?
-        // TODO: Spill to the replica's scratch directory. With external access
-        // disabled, the default `.tmp` directory relative to the process's
-        // working directory would be the only place to spill.
-        .with("temp_directory", "")?;
+        .with("allow_community_extensions", "false")?;
     let conn = Connection::open_in_memory_with_flags(config)?;
     // Must come last. It makes every setting above, and any later `SET` in a
     // user query, immutable.

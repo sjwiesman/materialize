@@ -3207,6 +3207,7 @@ dependencies = [
  "fallible-streaming-iterator",
  "hashlink 0.10.0",
  "libduckdb-sys",
+ "num",
  "num-integer",
  "strum",
 ]
@@ -6972,6 +6973,7 @@ dependencies = [
  "mz-cluster-client",
  "mz-compute-client",
  "mz-compute-types",
+ "mz-duckdb-util",
  "mz-dyncfg",
  "mz-dyncfgs",
  "mz-expr",
@@ -7194,6 +7196,21 @@ dependencies = [
  "toml",
  "tower-lsp",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "mz-duckdb-util"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "chrono",
+ "duckdb",
+ "mz-arrow-util",
+ "mz-ore",
+ "mz-repr",
+ "serde_json",
  "uuid",
 ]
 
@@ -8671,6 +8688,7 @@ dependencies = [
  "mz-cloud-provider",
  "mz-compute-types",
  "mz-controller-types",
+ "mz-duckdb-util",
  "mz-dyncfg",
  "mz-dyncfgs",
  "mz-expr",

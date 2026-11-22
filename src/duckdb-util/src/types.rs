@@ -111,7 +111,7 @@ pub(crate) fn duckdb_type_name(field: &Field) -> Result<String, anyhow::Error> {
         DataType::Utf8 | DataType::LargeUtf8 => "VARCHAR".into(),
         DataType::Binary | DataType::LargeBinary => "BLOB".into(),
         DataType::FixedSizeBinary(16)
-            if field.metadata().get(ARROW_EXTENSION_NAME_KEY).map(String::as_str)
+            if field.metadata().get(ARROW_EXTENSION_NAME_KEY).map(std::string::String::as_str)
                 == Some(ARROW_UUID_EXTENSION) =>
         {
             "UUID".into()
@@ -174,7 +174,7 @@ fn result_scalar_type(field: &Field) -> Option<SqlScalarType> {
         DataType::Interval(IntervalUnit::MonthDayNano) => Interval,
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => String,
         DataType::FixedSizeBinary(16)
-            if field.metadata().get(ARROW_EXTENSION_NAME_KEY).map(String::as_str)
+            if field.metadata().get(ARROW_EXTENSION_NAME_KEY).map(std::string::String::as_str)
                 == Some(ARROW_UUID_EXTENSION) =>
         {
             Uuid
