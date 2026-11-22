@@ -17,6 +17,7 @@ use mz_ore::assert_contains;
 use postgres::SimpleQueryMessage;
 
 /// Runs `sql` over the simple query protocol and returns its rows as text.
+#[allow(clippy::disallowed_methods)]
 fn simple_rows(client: &mut postgres::Client, sql: &str) -> Vec<Vec<Option<String>>> {
     client
         .simple_query(sql)
@@ -33,6 +34,24 @@ fn simple_rows(client: &mut postgres::Client, sql: &str) -> Vec<Vec<Option<Strin
         .collect()
 }
 
+/// Runs each of `statements` on its own, since DDL cannot share a batch.
+#[allow(clippy::disallowed_methods)]
+fn execute_each(client: &mut postgres::Client, statements: &[&str]) {
+    for statement in statements {
+        client.batch_execute(statement).unwrap();
+    }
+}
+
+/// Runs `sql`, which must fail, and returns the server's error message.
+#[allow(clippy::disallowed_methods)]
+fn error_message(client: &mut postgres::Client, sql: &str) -> String {
+    let err = client.simple_query(sql).unwrap_err();
+    match err.as_db_error() {
+        Some(db) => db.message().to_string(),
+        None => err.to_string(),
+    }
+}
+
 fn count(client: &mut postgres::Client) -> i64 {
     client
         .query_one("SELECT count(*) AS n FROM t", &[])
@@ -42,21 +61,23 @@ fn count(client: &mut postgres::Client) -> i64 {
 
 #[mz_ore::test]
 #[cfg_attr(miri, ignore)] // unsupported operation: FFI
+#[allow(clippy::disallowed_methods)]
 fn test_duckdb_dialect() {
     let server = test_util::TestHarness::default().start_blocking();
     server.enable_feature_flags(&["enable_duckdb_dialect"]);
 
     let mut writer = server.connect(postgres::NoTls).unwrap();
-    writer
-        .batch_execute(
-            "CREATE TABLE t (k int, v text);
-             INSERT INTO t VALUES (1, 'a'), (2, 'b'), (2, 'c');
-             CREATE MATERIALIZED VIEW mv AS SELECT k, count(*) AS c FROM t GROUP BY k;
-             CREATE VIEW v AS SELECT k FROM t;
-             CREATE VIEW iv AS SELECT k, upper(v) AS u FROM t;
-             CREATE INDEX iv_k ON iv (k);",
-        )
-        .unwrap();
+    execute_each(
+        &mut writer,
+        &[
+            "CREATE TABLE t (k int, v text)",
+            "INSERT INTO t VALUES (1, 'a'), (2, 'b'), (2, 'c')",
+            "CREATE MATERIALIZED VIEW mv AS SELECT k, count(*) AS c FROM t GROUP BY k",
+            "CREATE VIEW v AS SELECT k FROM t",
+            "CREATE VIEW iv AS SELECT k, upper(v) AS u FROM t",
+            "CREATE INDEX iv_k ON iv (k)",
+        ],
+    );
 
     let mut client = server.connect(postgres::NoTls).unwrap();
     client.batch_execute("SET sql_dialect = duckdb").unwrap();
@@ -128,8 +149,8 @@ fn test_duckdb_dialect() {
         ("SELECT * FROM v", "has no index on cluster"),
         ("SELECT * FROM nope", "unknown catalog item 'nope'"),
     ] {
-        let err = client.simple_query(sql).unwrap_err();
-        assert_contains!(err.to_string().to_lowercase(), expected.to_lowercase());
+        let message = error_message(&mut client, sql);
+        assert_contains!(message.to_lowercase(), expected.to_lowercase());
     }
 
     // Session control keeps Materialize syntax, so the session can switch back.
@@ -145,14 +166,18 @@ fn test_duckdb_dialect() {
 
 #[mz_ore::test]
 #[cfg_attr(miri, ignore)] // unsupported operation: FFI
+#[allow(clippy::disallowed_methods)]
 fn test_duckdb_dialect_requires_feature_flag() {
     let server = test_util::TestHarness::default().start_blocking();
     let mut client = server.connect(postgres::NoTls).unwrap();
-    client
-        .batch_execute("CREATE TABLE t (k int); SET sql_dialect = duckdb")
-        .unwrap();
-    let err = client.simple_query("SELECT * FROM t").unwrap_err();
-    assert_contains!(err.to_string(), "is not available");
+    execute_each(
+        &mut client,
+        &["CREATE TABLE t (k int)", "SET sql_dialect = duckdb"],
+    );
+    assert_contains!(
+        error_message(&mut client, "SELECT * FROM t"),
+        "is not available"
+    );
 }
 
 /// Filters and projections reach the source, so a query loads only what it
@@ -160,28 +185,32 @@ fn test_duckdb_dialect_requires_feature_flag() {
 /// every query below would without pushdown.
 #[mz_ore::test]
 #[cfg_attr(miri, ignore)] // unsupported operation: FFI
+#[allow(clippy::disallowed_methods)]
 fn test_duckdb_dialect_pushdown() {
     let server = test_util::TestHarness::default()
-        .with_system_parameter_default("max_result_size".to_string(), "256kB".to_string())
+        .with_system_parameter_default("max_result_size".to_string(), "1MB".to_string())
         .start_blocking();
     server.enable_feature_flags(&["enable_duckdb_dialect"]);
 
     let mut writer = server.connect(postgres::NoTls).unwrap();
-    writer
-        .batch_execute(
-            "CREATE TABLE big (k int, pad text);
-             INSERT INTO big SELECT g, repeat('x', 100) FROM generate_series(1, 5000) g;
-             CREATE VIEW big_v AS SELECT k, pad FROM big;
-             CREATE INDEX big_v_k ON big_v (k);",
-        )
-        .unwrap();
+    execute_each(
+        &mut writer,
+        &[
+            "CREATE TABLE big (k int, pad text)",
+            "INSERT INTO big SELECT g, repeat('x', 1000) FROM generate_series(1, 5000) g",
+            "CREATE VIEW big_v AS SELECT k, pad FROM big",
+            "CREATE INDEX big_v_k ON big_v (k)",
+        ],
+    );
 
     let mut client = server.connect(postgres::NoTls).unwrap();
     client.batch_execute("SET sql_dialect = duckdb").unwrap();
 
     // The whole table is far larger than the limit.
-    let err = client.simple_query("SELECT * FROM big").unwrap_err();
-    assert_contains!(err.to_string(), "result exceeds max size");
+    assert_contains!(
+        error_message(&mut client, "SELECT * FROM big"),
+        "result exceeds max size"
+    );
 
     for sql in [
         // Equality, from persist and as an index lookup.
@@ -192,12 +221,12 @@ fn test_duckdb_dialect_pushdown() {
     ] {
         assert_eq!(
             simple_rows(&mut client, sql),
-            vec![vec![Some("100".into())]],
+            vec![vec![Some("1000".into())]],
             "{sql}"
         );
     }
-    // Only `k` is read: about 100kB of integers, against more than 500kB for
-    // the whole table.
+    // Only `k` is read: about 100kB of integers, against about 5MB for the
+    // whole table.
     assert_eq!(
         simple_rows(&mut client, "SELECT max(k) FROM big"),
         vec![vec![Some("5000".into())]],

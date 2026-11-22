@@ -10,6 +10,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, anyhow, bail};
+use itertools::Itertools;
 use mz_repr::RelationDesc;
 use serde_json::Value;
 
@@ -121,7 +122,7 @@ pub fn bind<T: PartialEq>(
     let pushdowns = pushdown::derive(&conn, &rewritten, &descs)?;
     let inputs = inputs
         .into_iter()
-        .zip(pushdowns)
+        .zip_eq(pushdowns)
         .map(|((id, desc), pushdown)| BoundInput { id, desc, pushdown })
         .collect();
 

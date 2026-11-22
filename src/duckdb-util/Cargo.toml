@@ -13,6 +13,7 @@ workspace = true
 anyhow.workspace = true
 arrow.workspace = true
 duckdb = { workspace = true, features = ["appender-arrow"] }
+itertools.workspace = true
 mz-arrow-util = { path = "../arrow-util" }
 mz-ore = { path = "../ore" }
 mz-repr = { path = "../repr" }

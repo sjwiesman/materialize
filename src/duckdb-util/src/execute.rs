@@ -66,6 +66,18 @@ pub fn execute(
             }))
             .finish();
         let mut appender = conn.appender(&name)?;
+        if input.columns.is_empty() {
+            // Arrow has no batch of zero columns with rows, so a query that
+            // reads no column, like `count(*)`, gets all-NULL rows.
+            let mut remaining: usize = input.rows.iter().map(|(_, count)| count.get()).sum();
+            while remaining > 0 {
+                let len = remaining.min(LOAD_BATCH_ROWS);
+                appender.append_record_batch(nulls(&schema, len)?)?;
+                remaining -= len;
+            }
+            appender.flush()?;
+            continue;
+        }
         let mut builder = ArrowBuilder::new(&loaded_desc, LOAD_BATCH_ROWS, 0)?;
         let mut pending = 0;
         for (row, count) in &input.rows {
@@ -131,6 +143,16 @@ fn widen(
                 None => new_null_array(field.data_type(), batch.num_rows()),
             },
         )
+        .collect();
+    Ok(RecordBatch::try_new(Arc::clone(schema), arrays)?)
+}
+
+/// Builds a batch of `schema` with `len` rows of NULL.
+fn nulls(schema: &Arc<Schema>, len: usize) -> Result<RecordBatch, anyhow::Error> {
+    let arrays = schema
+        .fields()
+        .iter()
+        .map(|field| new_null_array(field.data_type(), len))
         .collect();
     Ok(RecordBatch::try_new(Arc::clone(schema), arrays)?)
 }

@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use differential_dataflow::Hashable;
 use differential_dataflow::trace::TraceReader;
+use itertools::Itertools;
 use mz_compute_client::protocol::command::{DuckDbPeekInput, Peek, PeekTarget};
 use mz_compute_client::protocol::response::{PeekError, PeekResponse};
 use mz_duckdb_util::{ExecuteInput, InterruptHandle};
@@ -109,7 +110,7 @@ impl DuckDbGather {
         let mut state = self.state.lock().expect("lock poisoned");
         match contribution {
             Ok(rows) => {
-                for (gathered, shard) in state.rows.iter_mut().zip(rows) {
+                for (gathered, shard) in state.rows.iter_mut().zip_eq(rows) {
                     gathered.extend(shard);
                 }
             }
@@ -509,7 +510,7 @@ async fn execute(
     }
     if let Some(gather) = gather {
         let index_rows = gather.wait().await?;
-        for (slot, rows) in index_slots.into_iter().zip(index_rows) {
+        for (slot, rows) in index_slots.into_iter().zip_eq(index_rows) {
             snapshots[slot].rows = rows;
         }
     }
@@ -563,7 +564,8 @@ struct InterruptOnDrop(Arc<Mutex<Option<Arc<InterruptHandle>>>>);
 
 impl Drop for InterruptOnDrop {
     fn drop(&mut self) {
-        if let Some(handle) = self.0.lock().expect("lock poisoned").take() {
+        let handle = self.0.lock().expect("lock poisoned").take();
+        if let Some(handle) = handle {
             handle.interrupt();
         }
     }

@@ -7208,6 +7208,7 @@ dependencies = [
  "arrow",
  "chrono",
  "duckdb",
+ "itertools 0.15.0",
  "mz-arrow-util",
  "mz-ore",
  "mz-repr",
