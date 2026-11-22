@@ -9,7 +9,7 @@
 
 # Pinned by rolling tag + multi-arch index digest so dependabot refreshes the
 # digest for security fixes.
-FROM python:3.14.8@sha256:455fc8bf2552c51738d27fde570c22bb0146d22f2e16e32a9baff8d2da94daf6
+FROM python:3.15.2@sha256:46837ed3105db0029b6d656816185c6258e3b39690532fb782428e0a5fd76182
 
 # The official image can lag Debian security updates by weeks, so a digest bump
 # alone does not pick them up. libbrotli is CVE-2026-111497.
